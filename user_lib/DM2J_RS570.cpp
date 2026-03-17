@@ -1,0 +1,701 @@
+﻿#include "DM2J_RS570.h"
+#include <iostream>
+#include <cstdio>
+#include <cstring>
+
+// ======================================================================
+// Constructor / Destructor
+// ======================================================================
+
+DM2J_RS570::DM2J_RS570()
+{
+	client = nullptr;
+	useExternalClient = false;
+	debugEnabled = false;
+	slaveID = 1;
+}
+
+DM2J_RS570::~DM2J_RS570()
+{
+	if (!useExternalClient && client)
+	{
+		client->close();
+		delete client;
+	}
+}
+
+// ======================================================================
+// Init
+// ======================================================================
+
+bool DM2J_RS570::init(const std::string& ip, int port, int ID, bool debug)
+{
+	debugEnabled = debug;
+	slaveID = ID;
+
+	client = new TCP_client();
+	if (!client->connectToServer(ip, port))
+		return false;
+
+	useExternalClient = false;
+	return true;
+}
+
+bool DM2J_RS570::init(TCP_client& extClient, int ID, bool debug)
+{
+	client = &extClient;
+	useExternalClient = true;
+	debugEnabled = debug;
+	slaveID = ID;
+	return true;
+}
+
+// ======================================================================
+// Speed Move
+// ======================================================================
+
+void DM2J_RS570::speed_move(int pr_num, int mode, int rpm, int pos)
+{
+	uint16_t pos_hi = (pos >> 16) & 0xFFFF;
+	uint16_t pos_lo = pos & 0xFFFF;
+
+	std::vector<uint16_t> block =
+	{
+		(uint16_t)mode,
+		(uint16_t)rpm,
+		pos_hi,
+		pos_lo,
+		(uint16_t)100,        // acc
+		(uint16_t)100         // dec
+	};
+
+	writeMulti(0x6200 + pr_num * 6, block);
+	writeSingle(0x6002, pr_num);
+}
+
+void DM2J_RS570::speed_move_stop()
+{
+	writeSingle(0x6002, 0x0040);
+}
+
+// ======================================================================
+// PR Move
+// ======================================================================
+
+void DM2J_RS570::PR_move_set(int pr_num, int mode, int rpm, int pos, int acc, int dec)
+{
+	uint16_t base = 0x6200 + (pr_num * 8);
+
+	uint16_t pos_hi = (uint16_t)(pos >> 16);
+	uint16_t pos_lo = (uint16_t)(pos & 0xFFFF);
+
+	std::vector<uint16_t> block =
+	{
+		(uint16_t)mode,   // PRx.00
+		pos_hi,           // PRx.01
+		pos_lo,           // PRx.02
+		(uint16_t)rpm,    // PRx.03
+		(uint16_t)acc,    // PRx.04
+		(uint16_t)dec     // PRx.05
+	};
+
+	writeMulti(base, block);
+}
+void DM2J_RS570::PR_trigger(int pr_num)
+{
+	uint16_t trig = 0x10 | (pr_num & 0x0F);
+	writeSingle(0x6002, trig);
+}
+void DM2J_RS570::PR_trigger_sync(int pr_num)
+{
+	uint16_t trig = 0x10 | (pr_num & 0x0F);
+	writeSingle_sync(0x6002, trig);
+}
+
+// ======================================================================
+// PR Move (cm)
+// ======================================================================
+
+bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec)
+{
+	uint16_t ppr = 10000;
+	//if (!read_pulse_per_rev(ppr) || ppr == 0)
+	//{
+	//	printf("Error: PPR read failed.\n");
+	//	return false;
+	//}
+	
+	int pos_pulse = (int)(pos_cm * ppr);
+
+	if (debugEnabled)
+		printf("[PR_move_cm] %.3f cm → %d pulses (PPR=%u)\n", pos_cm, pos_pulse, ppr);
+
+	PR_move_set(pr_num, mode, rpm, pos_pulse, acc, dec);
+	PR_trigger(pr_num);
+	
+	// ---------------------------------------------------------
+	// 等待 CMD_DONE + PATH_DONE
+	// ---------------------------------------------------------
+	const int timeout_ms = 10000;
+	int elapsed = 0;
+
+	while (elapsed < timeout_ms)
+	{
+		uint16_t st = 0;
+
+		if (!read_status(st))
+		{
+			printf("Read status failed!\n");
+			return false;
+		}
+
+		if (debugEnabled)
+		{
+			printf("[WAIT] Status = 0x%04X => ", st);
+			print_status(st);
+		}
+
+		bool cmd_done = st & 0x0010;
+		bool path_done = st & 0x0020;
+		bool fault = st & 0x0001;
+
+		if (fault)
+		{
+			printf("[PR] Fault detected.\n");
+			return false;
+		}
+
+		if (cmd_done && path_done)
+		{
+			if (debugEnabled)
+				printf("[PR] Motion Completed\n");
+			return true;
+		}
+
+		//Sleep(50);
+		usleep(50 * 1000);   // 延遲 50ms
+		elapsed += 50;
+
+	}
+
+	printf("[PR] Timeout waiting motion done.\n");
+	return false;
+}
+
+bool DM2J_RS570::PR_move_cm_nowait(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec)
+{
+	uint16_t ppr= 10000;
+	//if (!read_pulse_per_rev(ppr) || ppr == 0)
+	//{
+	//	printf("Error: PPR read failed.\n");
+	//	return false;
+	//}
+
+	int pos_pulse = (int)(pos_cm * ppr);
+
+	if (debugEnabled)
+		printf("[PR_move_cm_nowait] %.3f cm → %d pulses (PPR=%u)\n",
+			pos_cm, pos_pulse, ppr);
+
+	PR_move_set(pr_num, mode, rpm, pos_pulse, acc, dec);
+	PR_trigger(pr_num);
+	return true;
+}
+
+bool DM2J_RS570::PR_move_cm_set(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec)
+{
+	uint16_t ppr = 10000;
+	//if (!read_pulse_per_rev(ppr) || ppr == 0)
+	//{
+	//	printf("Error: PPR read failed.\n");
+	//	return false;
+	//}
+
+	int pos_pulse = (int)(pos_cm * ppr);
+
+	if (debugEnabled)
+		printf("[PR_move_cm_nowait] %.3f cm → %d pulses (PPR=%u)\n",
+			pos_cm, pos_pulse, ppr);
+
+	PR_move_set(pr_num, mode, rpm, pos_pulse, acc, dec);
+	return true;
+}
+
+bool DM2J_RS570::PR_move_cm_trigger_all(int pr_num)
+{
+	PR_trigger_sync(pr_num);
+
+	// ---------------------------------------------------------
+// 等待 CMD_DONE + PATH_DONE
+// ---------------------------------------------------------
+	const int timeout_ms = 10000;
+	int elapsed = 0;
+
+	while (elapsed < timeout_ms)
+	{
+		uint16_t st = 0;
+
+		if (!read_status(st))
+		{
+			printf("Read status failed!\n");
+			return false;
+		}
+
+		if (debugEnabled)
+		{
+			printf("[WAIT] Status = 0x%04X => ", st);
+			print_status(st);
+		}
+
+		bool cmd_done = st & 0x0010;
+		bool path_done = st & 0x0020;
+		bool fault = st & 0x0001;
+
+		if (fault)
+		{
+			printf("[PR] Fault detected.\n");
+			return false;
+		}
+
+		if (cmd_done && path_done)
+		{
+			if (debugEnabled)
+				printf("[PR] Motion Completed\n");
+			return true;
+		}
+
+		//Sleep(50);
+		usleep(50 * 1000);   // 延遲 50ms
+		elapsed += 50;
+
+	}
+
+	printf("[PR] Timeout waiting motion done.\n");
+	return true;
+}
+
+
+// ======================================================================
+// JOG
+// ======================================================================
+
+void DM2J_RS570::jog_forward()
+{
+	writeSingle(0x1801, 0x4001);
+}
+
+void DM2J_RS570::jog_reverse()
+{
+	writeSingle(0x1801, 0x4002);
+}
+
+void DM2J_RS570::jog_stop()
+{
+	writeSingle(0x1801, 0x0000);
+}
+
+void DM2J_RS570::set_jog_speed(int rpm)
+{
+	writeSingle(0x01E1, (uint16_t)rpm);
+}
+
+void DM2J_RS570::set_jog_acc(int acc_ms)
+{
+	writeSingle(0x01E7, (uint16_t)acc_ms);
+}
+
+void DM2J_RS570::set_jog_dec(int dec_ms)
+{
+	writeSingle(0x01E8, (uint16_t)dec_ms);   // 修正：dec 暫存器正確為 0x01E8
+}
+
+// ======================================================================
+// Homing
+// ======================================================================
+
+void DM2J_RS570::home_set_mode(uint16_t mode_bits)
+{
+	writeSingle(0x600A, mode_bits);
+}
+
+void DM2J_RS570::home_set_high_speed(uint16_t rpm)
+{
+	writeSingle(0x600F, rpm);
+}
+
+void DM2J_RS570::home_set_low_speed(uint16_t rpm)
+{
+	writeSingle(0x6010, rpm);
+}
+
+void DM2J_RS570::home_set_acc_time(uint16_t v)
+{
+	writeSingle(0x6011, v);
+}
+
+void DM2J_RS570::home_set_dec_time(uint16_t v)
+{
+	writeSingle(0x6012, v);
+}
+
+void DM2J_RS570::home_set_overrun(uint16_t v)
+{
+	writeSingle(0x6015, v);
+}
+
+void DM2J_RS570::home_start()
+{
+	writeSingle(0x6002, 0x0020);
+}
+
+void DM2J_RS570::home_set_current_pos_zero()
+{
+	writeSingle(0x6002, 0x0021);
+}
+
+// ======================================================================
+// Read Version
+// ======================================================================
+
+bool DM2J_RS570::read_version(uint16_t& ver1, uint16_t& ver2)
+{
+	uint8_t tx[8] =
+	{
+		(uint8_t)slaveID,
+		0x03,
+		0x80, 0x00,     // start reg
+		0x00, 0x02,     // read 2 registers
+		0, 0
+	};
+
+	uint16_t crc = crc16(tx, 6);
+	tx[6] = crc & 0xFF;
+	tx[7] = crc >> 8;
+
+	client->sendData((char*)tx, 8, 200);
+
+	uint8_t rx[32];
+	int len = client->receiveData((char*)rx, 32, 200);
+	if (len < 9) return false;
+
+	ver1 = (rx[3] << 8) | rx[4];
+	ver2 = (rx[5] << 8) | rx[6];
+	return true;
+}
+
+// ======================================================================
+// Read Status
+// ======================================================================
+
+bool DM2J_RS570::read_status(uint16_t& status)
+{
+	uint8_t tx[8];
+
+	tx[0] = slaveID;
+	tx[1] = 0x03;
+	tx[2] = 0x10;     // 0x1003
+	tx[3] = 0x03;
+	tx[4] = 0x00;
+	tx[5] = 0x01;
+
+	uint16_t crc = crc16(tx, 6);
+	tx[6] = crc & 0xFF;
+	tx[7] = crc >> 8;
+
+	if (debugEnabled)
+	{
+		printf("[TX] ");
+		for (int i = 0; i < 8; i++) printf("%02X ", tx[i]);
+		printf("\n");
+	}
+
+	client->sendData((char*)tx, 8, 200);
+	usleep(100 * 1000);   // 延遲 100ms
+	uint8_t rx[32] = { 0 };
+	int len = client->receiveData((char*)rx, 32, 200);
+
+	if (len < 7) return false;
+
+	if (debugEnabled)
+	{
+		printf("[RX] ");
+		for (int i = 0; i < len; i++) printf("%02X ", rx[i]);
+		printf("\n");
+	}
+
+	status = (rx[3] << 8) | rx[4];
+	return true;
+}
+
+void DM2J_RS570::print_status(uint16_t status)
+{
+	printf("Status 0x%04X => ", status);
+
+	if (status & 0x0001) printf("[FAULT] ");
+	if (status & 0x0002) printf("[ENABLE] ");
+	if (status & 0x0004) printf("[RUN] ");
+	if (status & 0x0010) printf("[CMD_DONE] ");
+	if (status & 0x0020) printf("[PATH_DONE] ");
+	if (status & 0x0040) printf("[HOME_DONE] ");
+
+	printf("\n");
+}
+
+// ======================================================================
+// Read Motor Position (PR8.44 / 8.45)
+// ======================================================================
+
+bool DM2J_RS570::read_motor_position(int32_t& pos)
+{
+	uint8_t tx[8];
+
+	tx[0] = slaveID;
+	tx[1] = 0x03;
+	tx[2] = 0x60;     // PR8.44 高位
+	tx[3] = 0x2C;     //     低位
+	tx[4] = 0x00;
+	tx[5] = 0x02;     // read 2 register
+
+	uint16_t crc = crc16(tx, 6);
+	tx[6] = crc & 0xFF;
+	tx[7] = crc >> 8;
+
+	if (debugEnabled)
+	{
+		printf("[TX] ");
+		for (int i = 0; i < 8; i++) printf("%02X ", tx[i]);
+		printf("\n");
+	}
+
+	client->sendData((char*)tx, 8, 200);
+
+	uint8_t rx[32];
+	int len = client->receiveData((char*)rx, 32, 200);
+	if (len < 9) return false;
+
+	if (debugEnabled)
+	{
+		printf("[RX] ");
+		for (int i = 0; i < len; i++) printf("%02X ", rx[i]);
+		printf("\n");
+	}
+
+	uint16_t hi = (rx[3] << 8) | rx[4];
+	uint16_t lo = (rx[5] << 8) | rx[6];
+
+	pos = (int32_t)((hi << 16) | lo);
+	return true;
+}
+
+// ======================================================================
+// Read PPR (PR0.00)
+// ======================================================================
+
+bool DM2J_RS570::read_pulse_per_rev(uint16_t& ppr)
+{
+	uint8_t tx[8];
+
+	tx[0] = slaveID;
+	tx[1] = 0x03;
+	tx[2] = 0x00;
+	tx[3] = 0x01;   // PR0.00
+	tx[4] = 0x00;
+	tx[5] = 0x01;
+
+	uint16_t crc = crc16(tx, 6);
+	tx[6] = crc & 0xFF;
+	tx[7] = crc >> 8;
+
+	if (debugEnabled)
+	{
+		printf("[TX] ");
+		for (int i = 0; i < 8; i++) printf("%02X ", tx[i]);
+		printf("\n");
+	}
+
+	client->sendData((char*)tx, 8, 200);
+	usleep(200 * 1000);   // 延遲 200ms
+	uint8_t rx[32];
+	int len = client->receiveData((char*)rx, 32, 200);
+	usleep(200 * 1000);   // 延遲 200ms
+	if (len < 7) return false;
+
+	if (debugEnabled)
+	{
+		printf("[RX] ");
+		for (int i = 0; i < len; i++) printf("%02X ", rx[i]);
+		printf("\n");
+	}
+
+	ppr = (rx[3] << 8) | rx[4];
+	return true;
+}
+
+// ======================================================================
+// Convert motor position to cm
+// ======================================================================
+
+bool DM2J_RS570::read_position_cm(double& cm)
+{
+	int32_t pos = 0;
+	uint16_t ppr = 0;
+
+	if (!read_motor_position(pos)) return false;
+	if (!read_pulse_per_rev(ppr) || ppr == 0) return false;
+
+	cm = (double)pos / (double)ppr;
+	return true;
+}
+
+// ======================================================================
+// Write Single Holding Register
+// ======================================================================
+
+bool DM2J_RS570::writeSingle(uint16_t reg, uint16_t value)
+{
+	uint8_t frame[8];
+
+	frame[0] = slaveID;
+	frame[1] = 0x06;           // Write Single Register
+	frame[2] = reg >> 8;
+	frame[3] = reg & 0xFF;
+	frame[4] = value >> 8;
+	frame[5] = value & 0xFF;
+
+	uint16_t c = crc16(frame, 6);
+	frame[6] = c & 0xFF;
+	frame[7] = c >> 8;
+
+	if (debugEnabled)
+	{
+		printf("[TX] ");
+		for (int i = 0; i < 8; i++) printf("%02X ", frame[i]);
+		printf("\n");
+	}
+
+	std::vector<uint8_t> tx(frame, frame + 8);
+	std::vector<uint8_t> rx;
+	int err = sendRecv(tx, rx);
+	return err;
+}
+bool DM2J_RS570::writeSingle_sync(uint16_t reg, uint16_t value)
+{
+	uint8_t frame[8];
+
+	frame[0] = 0x00;
+	frame[1] = 0x06;           // Write Single Register
+	frame[2] = reg >> 8;
+	frame[3] = reg & 0xFF;
+	frame[4] = value >> 8;
+	frame[5] = value & 0xFF;
+
+	uint16_t c = crc16(frame, 6);
+	frame[6] = c & 0xFF;
+	frame[7] = c >> 8;
+
+	if (debugEnabled)
+	{
+		printf("[TX] ");
+		for (int i = 0; i < 8; i++) printf("%02X ", frame[i]);
+		printf("\n");
+	}
+
+	std::vector<uint8_t> tx(frame, frame + 8);
+	std::vector<uint8_t> rx;
+	int err = sendRecv(tx, rx);
+	return err;
+}
+
+// ======================================================================
+// Write Multiple Registers
+// ======================================================================
+
+bool DM2J_RS570::writeMulti(uint16_t startReg, const std::vector<uint16_t>& data)
+{
+	int count = data.size();
+	std::vector<uint8_t> tx(9 + count * 2);
+
+	tx[0] = slaveID;
+	tx[1] = 0x10;                 // Write Multiple Register
+	tx[2] = startReg >> 8;
+	tx[3] = startReg & 0xFF;
+	tx[4] = 0x00;
+	tx[5] = count;
+	tx[6] = count * 2;
+
+	int idx = 7;
+	for (auto v : data)
+	{
+		tx[idx++] = v >> 8;
+		tx[idx++] = v & 0xFF;
+	}
+
+	uint16_t c = crc16(tx.data(), idx);
+	tx[idx++] = c & 0xFF;
+	tx[idx++] = c >> 8;
+
+	// --- 新增 TX Debug Log ---
+	if (debugEnabled)
+	{
+		printf("[TX Multi] ");
+		for (int i = 0; i < tx.size(); i++) printf("%02X ", tx[i]);
+		printf("\n");
+	}
+
+	std::vector<uint8_t> rx;
+	bool success = sendRecv(tx, rx);
+
+	// --- 新增 RX Debug Log ---
+	if (debugEnabled && success)
+	{
+		printf("[RX Multi] ");
+		for (int i = 0; i < rx.size(); i++) printf("%02X ", rx[i]);
+		printf("\n");
+	}
+	else if (debugEnabled && !success)
+	{
+		printf("[RX Multi] Failed to receive response.\n");
+	}
+	return success;
+}
+
+// ======================================================================
+// Send / Receive
+// ======================================================================
+
+bool DM2J_RS570::sendRecv(const std::vector<uint8_t>& tx, std::vector<uint8_t>& rx)
+{
+	if (!client) return false;
+
+	if (!client->sendData((const char*)tx.data(), tx.size(), 50))
+		return false;
+
+	uint8_t buf[256] = { 0 };
+	int r = client->receiveData((char*)buf, sizeof(buf), 50);
+	if (r <= 0) return false;
+
+	rx.assign(buf, buf + r);
+	return true;
+}
+
+// ======================================================================
+// CRC16 (Modbus)
+// ======================================================================
+
+uint16_t DM2J_RS570::crc16(const uint8_t* buf, int len)
+{
+	uint16_t crc = 0xFFFF;
+
+	for (int i = 0; i < len; i++)
+	{
+		crc ^= buf[i];
+		for (int j = 0; j < 8; j++)
+		{
+			if (crc & 1)
+				crc = (crc >> 1) ^ 0xA001;
+			else
+				crc >>= 1;
+		}
+	}
+	return crc;
+}
