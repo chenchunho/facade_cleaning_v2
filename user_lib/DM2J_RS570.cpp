@@ -2,6 +2,8 @@
 #include <iostream>
 #include <cstdio>
 #include <cstring>
+#include <thread> // 新增：用於跨平台延遲
+#include <chrono> // 新增：用於時間單位
 
 // ======================================================================
 // Constructor / Destructor
@@ -172,8 +174,7 @@ bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int ac
 			return true;
 		}
 
-		//Sleep(50);
-		usleep(50 * 1000);   // 延遲 50ms
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
 		elapsed += 50;
 
 	}
@@ -264,8 +265,7 @@ bool DM2J_RS570::PR_move_cm_trigger_all(int pr_num)
 			return true;
 		}
 
-		//Sleep(50);
-		usleep(50 * 1000);   // 延遲 50ms
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
 		elapsed += 50;
 
 	}
@@ -410,7 +410,7 @@ bool DM2J_RS570::read_status(uint16_t& status)
 	}
 
 	client->sendData((char*)tx, 8, 200);
-	usleep(100 * 1000);   // 延遲 100ms
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));
 	uint8_t rx[32] = { 0 };
 	int len = client->receiveData((char*)rx, 32, 200);
 
@@ -514,10 +514,10 @@ bool DM2J_RS570::read_pulse_per_rev(uint16_t& ppr)
 	}
 
 	client->sendData((char*)tx, 8, 200);
-	usleep(200 * 1000);   // 延遲 200ms
+	std::this_thread::sleep_for(std::chrono::milliseconds(200));
 	uint8_t rx[32];
 	int len = client->receiveData((char*)rx, 32, 200);
-	usleep(200 * 1000);   // 延遲 200ms
+	std::this_thread::sleep_for(std::chrono::milliseconds(200));
 	if (len < 7) return false;
 
 	if (debugEnabled)
