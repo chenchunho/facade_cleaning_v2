@@ -54,6 +54,8 @@ public:
 	// 初始化（外部傳入 TCP_client）
 	bool init(TCP_client& extClient, int ID, bool debug = false);
 
+	~DY_500_weight_sensor();
+
 	// 設定通訊參數（ID / Baud / Format）
 	void set_communication_parm(int ID, int baud, int format);
 
@@ -83,6 +85,9 @@ private:
 
 	int32_t parse_long(uint8_t* buf, int index);
 
+	// 寫入 LONG 值到寄存器 (FC10, 2 registers, 4 bytes)
+	bool modbus_write_long(uint16_t addr, int32_t value);
+
 	// 單點寄存器讀取（含延遲 + 重試）
 	bool read_reg_long(uint16_t addr, int32_t& out);
 
@@ -91,9 +96,16 @@ private:
 	/***********************
 	 * 通訊物件
 	 ***********************/
-	TCP_client* client;   // 可由外部傳入，也可由本類自行連線
+	TCP_client  ownedClient;  // 由本類建立連線時使用
+	TCP_client* client;       // 指向 ownedClient 或外部傳入的物件
 	bool debugMode;
 	uint8_t slaveID;
+
+	/***********************
+	 * get_weight_float 狀態
+	 ***********************/
+	float lastValidWeight;
+	int   weightErrorCount;
 
 public:
 
