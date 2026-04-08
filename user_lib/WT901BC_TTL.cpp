@@ -46,6 +46,7 @@ void WT901BC_TTL::update() {
 			if (_serial && _serial->reconnect()) {
 				if (_debug) std::cout << "[WT901BC] Reconnected successfully!" << std::endl;
 				read_error = false;
+				_buf_count = 0;
 			}
 			else {
 				// Wait longer between reconnection attempts to avoid pegging the CPU
@@ -81,18 +82,15 @@ void WT901BC_TTL::update() {
 				_buf_count = 0;
 			}
 		}
-		// --- 新增：1 秒超時檢查邏輯 ---
+		// 超時檢查：超過 500ms 未收到有效封包
 		auto now = std::chrono::steady_clock::now();
 		auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - _last_update_time).count();
 
-		if (duration > 500) { // 超過 1000ms (1秒)
-			if (!read_error) { // 避免重複累加 error_count，僅在狀態切換時處理
+		if (duration > 500) {
+			if (!read_error) {
 				read_error = true;
 				if (error_count < 9999) error_count++;
 			}
-		}
-		else if (duration < 1000 && !_serial->is_connected() == false) {
-			// 如果在 1 秒內且連線正常，且沒有校驗錯誤，read_error 會在 parsePacket 或此處被維護
 		}
 		// Small sleep to prevent 100% CPU usage if no data is coming in
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -123,6 +121,7 @@ void WT901BC_TTL::parsePacket(uint8_t* buf) {
 	short d2 = (short)((buf[5] << 8) | buf[4]);
 	short d3 = (short)((buf[7] << 8) | buf[6]);
 
+	std::lock_guard<std::mutex> lock(_data_mutex);
 	switch (type) {
 	case 0x51:
 		ax = (double)d1 / 32768.0 * 16.0;
@@ -141,11 +140,11 @@ void WT901BC_TTL::parsePacket(uint8_t* buf) {
 		break;
 	case 0x56: // 氣壓封包
 	{
-		// 1. 合併 4 bytes 取得原始氣壓值 (Pa)
-		long p_raw = (long)((buf[5] << 24) | (buf[4] << 16) | (buf[3] << 8) | buf[2]);
+		// 合併 4 bytes 取得原始氣壓值 (Pa)，使用 uint32_t 避免位移溢位
+		uint32_t p_raw = ((uint32_t)buf[5] << 24) | ((uint32_t)buf[4] << 16) | ((uint32_t)buf[3] << 8) | buf[2];
 
-		// 2. 換算成 hPa (除以 100.0)
-		pressure = (double)p_raw / 100.0;
+		// 換算成 hPa (除以 100.0)
+		pressure = (double)(int32_t)p_raw / 100.0;
 
 		calculateAltitude();
 		break;
