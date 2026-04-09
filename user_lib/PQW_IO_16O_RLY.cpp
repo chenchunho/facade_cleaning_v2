@@ -176,7 +176,7 @@ std::vector<bool> PQW_IO_16O_RLY::parseReadResponse(const std::vector<uint8_t>& 
 --------------------------------------------------------------*/
 bool PQW_IO_16O_RLY::controlRelay(int id, bool status)
 {
-	if (id < 1 || id > relay_count) {
+	if (id < 1 || id > 16){//relay_count) {
 		std::cout << "[ERROR] Relay ID out of range.\n";
 		return false;
 	}

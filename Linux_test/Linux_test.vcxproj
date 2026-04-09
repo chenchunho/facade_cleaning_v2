@@ -74,19 +74,50 @@
   <ImportGroup Label="Shared" />
   <ImportGroup Label="PropertySheets" />
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
+    <IncludePath>$(IncludePath)</IncludePath>
+    <LibraryPath>$(LibraryPath)</LibraryPath>
+  </PropertyGroup>
   <ItemGroup>
+    <ClCompile Include="..\user_lib\DIHOOL_control.cpp" />
+    <ClCompile Include="..\user_lib\DM2J_RS570.cpp" />
+    <ClCompile Include="..\user_lib\DY_500_weight_sensor.cpp" />
+    <ClCompile Include="..\user_lib\JC_100_METER.cpp" />
+    <ClCompile Include="..\user_lib\PQW_IO_16O_RLY.cpp" />
+    <ClCompile Include="..\user_lib\QX_DO24.cpp" />
+    <ClCompile Include="..\user_lib\SD76_length_meters.cpp" />
     <ClCompile Include="..\user_lib\Serial_port.cpp" />
+    <ClCompile Include="..\user_lib\TCP_client.cpp" />
+    <ClCompile Include="..\user_lib\TCP_server.cpp" />
     <ClCompile Include="..\user_lib\WT901BC_TTL.cpp" />
+    <ClCompile Include="..\user_lib\ZDT_motor_control.cpp" />
+    <ClCompile Include="..\user_lib\ZS_DIO_R_RLY.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\user_lib\DIHOOL_control.h" />
+    <ClInclude Include="..\user_lib\DM2J_RS570.h" />
+    <ClInclude Include="..\user_lib\DY_500_weight_sensor.h" />
+    <ClInclude Include="..\user_lib\JC_100_METER.h" />
+    <ClInclude Include="..\user_lib\PQW_IO_16O_RLY.h" />
+    <ClInclude Include="..\user_lib\QX_DO24.h" />
+    <ClInclude Include="..\user_lib\SD76_length_meters.h" />
     <ClInclude Include="..\user_lib\Serial_port.h" />
+    <ClInclude Include="..\user_lib\TCP_client.h" />
+    <ClInclude Include="..\user_lib\TCP_server.h" />
     <ClInclude Include="..\user_lib\WT901BC_TTL.h" />
+    <ClInclude Include="..\user_lib\ZDT_motor_control.h" />
+    <ClInclude Include="..\user_lib\ZS_DIO_R_RLY.h" />
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>C:\Users\Administrator\source\repos\washrobot_new_PI\user_lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>D:\washrobot_new_PI\user_lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>-I$(RemoteRootDir)/../user_lib %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
+    <Link>
+      <AdditionalDependencies>%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

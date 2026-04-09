@@ -121,11 +121,11 @@ void DM2J_RS570::PR_trigger_sync(int pr_num)
 bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec)
 {
 	uint16_t ppr = 10000;
-	//if (!read_pulse_per_rev(ppr) || ppr == 0)
-	//{
-	//	printf("Error: PPR read failed.\n");
-	//	return false;
-	//}
+	if (!read_pulse_per_rev(ppr) || ppr == 0)
+	{
+		printf("Error: PPR read failed.\n");
+		return false;
+	}
 	
 	int pos_pulse = (int)(pos_cm * ppr);
 
@@ -145,11 +145,11 @@ bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int ac
 	{
 		uint16_t st = 0;
 
-		if (!read_status(st))
-		{
-			printf("Read status failed!\n");
-			return false;
-		}
+		//if (!read_status(st))
+		//{
+		//	printf("Read status failed!\n");
+		//	return false;
+		//}
 
 		if (debugEnabled)
 		{
