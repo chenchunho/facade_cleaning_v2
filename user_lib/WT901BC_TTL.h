@@ -5,6 +5,7 @@
 #include <iostream>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include <chrono>
 
 /**
@@ -40,9 +41,9 @@ public:
 	double pressure;
 	double altitude;
 
-	// 新增錯誤追蹤變數
-	bool read_error;      // 封包解析是否有誤
-	int error_count;      // 錯誤累計次數
+	// 錯誤追蹤變數 (atomic，執行緒安全)
+	std::atomic<bool> read_error;      // 封包解析是否有誤
+	std::atomic<int> error_count;      // 錯誤累計次數
 
 	WT901BC_TTL();
 	~WT901BC_TTL();
@@ -58,6 +59,7 @@ private:
 
 	std::thread _worker_thread;
 	std::atomic<bool> _running;
+	std::mutex _data_mutex;
 	std::chrono::steady_clock::time_point _last_update_time;
 
 

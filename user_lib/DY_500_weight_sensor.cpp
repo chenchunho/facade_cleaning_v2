@@ -26,7 +26,12 @@ static std::string to_hex(int32_t v)
 }
 
 DY_500_weight_sensor::DY_500_weight_sensor()
-	: debugMode(false), slaveID(1)
+	: client(nullptr), debugMode(false), slaveID(1),
+	  lastValidWeight(0.0f), weightErrorCount(0)
+{
+}
+
+DY_500_weight_sensor::~DY_500_weight_sensor()
 {
 }
 
@@ -37,6 +42,7 @@ bool DY_500_weight_sensor::init(const std::string& ip, int port, int ID, bool de
 {
 	slaveID = (uint8_t)ID;
 	debugMode = debug;
+	client = &ownedClient;
 	return client->connectToServer(ip, port);
 }
 
@@ -157,15 +163,27 @@ bool DY_500_weight_sensor::modbus_read(uint16_t addr, uint16_t quantity,
 
 /**************************************************
  * Modbus Write Single Register (Function 10)
+ * DY-500 每個參數佔 2 寄存器 (LONG = 4 bytes)
+ * 封包: ID 10 AddrH AddrL 00 02 04 D0 D1 D2 D3 CRC_L CRC_H
  **************************************************/
 bool DY_500_weight_sensor::modbus_write_single(uint16_t addr, uint16_t value)
+{
+	return modbus_write_long(addr, (int32_t)value);
+}
+
+/**************************************************
+ * Modbus Write LONG (Function 10, 2 registers)
+ **************************************************/
+bool DY_500_weight_sensor::modbus_write_long(uint16_t addr, int32_t value)
 {
 	uint8_t req[13] = {
 		slaveID, 0x10,
 		(uint8_t)(addr >> 8), (uint8_t)(addr & 0xFF),
-		0x00, 0x01,
-		0x02,
-		(uint8_t)(value >> 8),
+		0x00, 0x02,       // 寫 2 個寄存器
+		0x04,              // 4 bytes 資料
+		(uint8_t)((value >> 24) & 0xFF),
+		(uint8_t)((value >> 16) & 0xFF),
+		(uint8_t)((value >> 8) & 0xFF),
 		(uint8_t)(value & 0xFF)
 	};
 
@@ -175,7 +193,7 @@ bool DY_500_weight_sensor::modbus_write_single(uint16_t addr, uint16_t value)
 
 	if (debugMode) {
 		printf("TX: ");
-		for (int i = 0; i < sizeof(req); i++)
+		for (int i = 0; i < (int)sizeof(req); i++)
 			printf("%02X ", req[i]);
 		printf("\n");
 	}
@@ -194,10 +212,10 @@ bool DY_500_weight_sensor::modbus_write_single(uint16_t addr, uint16_t value)
 int32_t DY_500_weight_sensor::parse_long(uint8_t* buf, int index)
 {
 	uint32_t raw =
-		(buf[index] << 24) |
-		(buf[index + 1] << 16) |
-		(buf[index + 2] << 8) |
-		buf[index + 3];
+		((uint32_t)buf[index] << 24) |
+		((uint32_t)buf[index + 1] << 16) |
+		((uint32_t)buf[index + 2] << 8) |
+		(uint32_t)buf[index + 3];
 
 	return (int32_t)raw;
 }
@@ -238,8 +256,6 @@ bool DY_500_weight_sensor::get_weight_long(int32_t& outValue)
  **************************************************/
 bool DY_500_weight_sensor::get_weight_float(float& outValue)
 {
-	static float lastValidValue = 0.0f;     // 上一筆有效重量
-	static int errorCount = 0;               // 連續錯誤次數
 	constexpr int ERROR_THRESHOLD = 10;      // 連續錯誤門檻
 
 	uint8_t buf[64];
@@ -247,7 +263,7 @@ bool DY_500_weight_sensor::get_weight_float(float& outValue)
 
 	bool hasError = false;
 
-	// 1. 讀取資料
+	// 1. 讀取資料 (FLOAT 地址 0x9CA4, 2 registers)
 	if (!modbus_read(0x9CA4, 2, buf, len) || len < 7)
 	{
 		hasError = true;
@@ -255,10 +271,10 @@ bool DY_500_weight_sensor::get_weight_float(float& outValue)
 	else
 	{
 		uint32_t raw =
-			(buf[3] << 24) |
-			(buf[4] << 16) |
-			(buf[5] << 8) |
-			buf[6];
+			((uint32_t)buf[3] << 24) |
+			((uint32_t)buf[4] << 16) |
+			((uint32_t)buf[5] << 8) |
+			(uint32_t)buf[6];
 
 		float fValue = 0.0f;
 		memcpy(&fValue, &raw, sizeof(float));
@@ -275,27 +291,27 @@ bool DY_500_weight_sensor::get_weight_float(float& outValue)
 		}
 		else
 		{
-			// ✅ 成功讀到有效資料
-			lastValidValue = fValue;
+			// 成功讀到有效資料
+			lastValidWeight = fValue;
 			outValue = fValue;
-			errorCount = 0;            // ★ 成功就清零
-			return false;              // 沒問題
+			weightErrorCount = 0;
+			return true;               // 成功
 		}
 	}
 
 	// --- 有錯誤才會跑到這裡 ---
 
-	errorCount++;
+	weightErrorCount++;
 
 	// 使用上一筆有效值
-	outValue = lastValidValue;
+	outValue = lastValidWeight;
 
-	// 只有連續錯誤 >= 10 次，才回傳 true
-	if (errorCount >= ERROR_THRESHOLD) {
-		return true;                   // ❌ 確認為異常
+	// 連續錯誤未達門檻，仍回傳 true（使用上次有效值）
+	if (weightErrorCount < ERROR_THRESHOLD) {
+		return true;
 	}
 
-	return false;                      // ❌ 但尚未達門檻
+	return false;                      // 連續錯誤 >= 門檻，確認異常
 }
 
 
@@ -305,13 +321,11 @@ bool DY_500_weight_sensor::get_weight_float(float& outValue)
  **************************************************/
 bool DY_500_weight_sensor::get_decimal_point(int& dp)
 {
-	uint8_t buf[64];
-	int len;
-
-	if (!modbus_read(0x9C64, 1, buf, len))
+	int32_t val;
+	if (!read_reg_long(0x9C64, val))
 		return false;
 
-	dp = buf[3];
+	dp = (int)val;
 	return true;
 }
 

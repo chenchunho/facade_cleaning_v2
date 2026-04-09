@@ -63,16 +63,17 @@ void DM2J_RS570::speed_move(int pr_num, int mode, int rpm, int pos)
 
 	std::vector<uint16_t> block =
 	{
-		(uint16_t)mode,
-		(uint16_t)rpm,
-		pos_hi,
-		pos_lo,
-		(uint16_t)100,        // acc
-		(uint16_t)100         // dec
+		(uint16_t)mode,       // PRx.00
+		pos_hi,               // PRx.01
+		pos_lo,               // PRx.02
+		(uint16_t)rpm,        // PRx.03
+		(uint16_t)100,        // PRx.04 acc
+		(uint16_t)100         // PRx.05 dec
 	};
 
-	writeMulti(0x6200 + pr_num * 6, block);
-	writeSingle(0x6002, pr_num);
+	writeMulti(0x6200 + pr_num * 8, block);
+	uint16_t trig = 0x10 | (pr_num & 0x0F);
+	writeSingle(0x6002, trig);
 }
 
 void DM2J_RS570::speed_move_stop()
@@ -271,7 +272,7 @@ bool DM2J_RS570::PR_move_cm_trigger_all(int pr_num)
 	}
 
 	printf("[PR] Timeout waiting motion done.\n");
-	return true;
+	return false;
 }
 
 
@@ -291,7 +292,7 @@ void DM2J_RS570::jog_reverse()
 
 void DM2J_RS570::jog_stop()
 {
-	writeSingle(0x1801, 0x0000);
+	writeSingle(0x6002, 0x0040);
 }
 
 void DM2J_RS570::set_jog_speed(int rpm)
@@ -306,7 +307,7 @@ void DM2J_RS570::set_jog_acc(int acc_ms)
 
 void DM2J_RS570::set_jog_dec(int dec_ms)
 {
-	writeSingle(0x01E8, (uint16_t)dec_ms);   // 修正：dec 暫存器正確為 0x01E8
+	writeSingle(0x01E7, (uint16_t)dec_ms);   // RS485 JOG 加減速共用 Pr6.03 (0x01E7)
 }
 
 // ======================================================================

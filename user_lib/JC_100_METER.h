@@ -1,12 +1,42 @@
-﻿#ifndef JC_100_METER_H
+#ifndef JC_100_METER_H
 #define JC_100_METER_H
 
 #include "TCP_client.h"
 #include <string>
 #include <vector>
 #include <cstdint>
-#include <thread> // 跨平台延遲
-#include <chrono> // 跨平台時間單位
+#include <thread>
+#include <chrono>
+
+/******************************************************
+ *  JC_100_METER 使用說明 (JC-100-RS485 壓力傳感器)
+ *
+ *  一、初始化方式（任選一種）
+ *  --------------------------------------------------
+ *  方式 1：由本類別內部建立 TCP 連線
+ *
+ *      JC_100_METER meter;
+ *      meter.init("192.168.1.21", 4001, 1, true);
+ *
+ *  方式 2：外部已有 TCP_client（已 connect）
+ *
+ *      TCP_client cli;
+ *      cli.connectToServer("192.168.1.21", 4001);
+ *
+ *      JC_100_METER meter;
+ *      meter.init(cli, 1, true);
+ *
+ *
+ *  二、基本使用方法
+ *  --------------------------------------------------
+ *      int val = meter.read_pressure();
+ *      double kPa = val / 10.0;
+ *
+ *      meter.get_output_mode();
+ *      meter.set_setpoint(500);
+ *      meter.zero_calibration();
+ *
+ ******************************************************/
 
 class JC_100_METER {
 public:
@@ -17,116 +47,57 @@ public:
 	bool init(const std::string& ip, int port, int ID, bool debug = false);
 	bool init(TCP_client& extClient, int ID, bool debug = false);
 
-	// --- 核心數據 (保留成功時回傳新值，失敗時回傳舊值邏輯) ---
-	int  read_pressure(void);
+	// === 即時數據 (0x0001) ===
+	int  read_pressure();              // 當前氣壓值 (R)
 
-	// --- 參數讀取 (Getter) 全部保留 ---
-	int  get_response_time();
-	int  get_pressure_unit();
-	int  get_output_mode();
-	int  get_output_logic();
-	int  get_slave_address();
-	int  get_baud_rate();
-	int  get_hysteresis();
-	int  get_setpoint_1();
-	int  get_setpoint_2();
-	int  get_display_color();
+	// === OUT1 設定 (0x0010~0x0012) ===
+	int  get_setpoint();               // OUT1 目標值 (R/W)
+	bool set_setpoint(int value);
+	int  get_upper_limit();            // OUT1 目標上限值 (R/W)
+	bool set_upper_limit(int value);
+	int  get_lower_limit();            // OUT1 目標下限值 (R/W)
+	bool set_lower_limit(int value);
 
-	// --- 參數設定 (Setter) 全部保留 ---
-	bool set_response_time(int value);
-	bool set_pressure_unit(int value);
+	// === 輸出設定 (0x0013, 0x0016) ===
+	int  get_output_mode();            // 0:EASY, 1:HYS, 2:WCMP (R/W)
 	bool set_output_mode(int value);
-	bool set_output_logic(int value);
-	bool set_slave_address(int newID);
-	bool set_baud_rate(int value);
-	bool set_hysteresis(int value);
-	bool set_setpoint_1(int value);
-	bool set_setpoint_2(int value);
-	bool set_display_color(int value);
+	int  get_no_nc();                  // 0:NO, 1:NC (R/W)
+	bool set_no_nc(int value);
 
-	// --- 命令 ---
-	bool zero_calibration();
+	// === 顯示設定 (0x0014, 0x0015) ===
+	int  get_display_color();          // 0:R_ON, 1:G_ON, 2:RED, 3:GREEN (R/W)
+	bool set_display_color(int value);
+	int  get_pressure_unit();          // 0:MPa, 1:kPa, 2:kgf/cm², 3:bar, 4:psi, 5:mmHg (R/W)
+	bool set_pressure_unit(int value);
+
+	// === 控制參數 (0x0017~0x0019) ===
+	int  get_response_time();          // 0~A 對應 2.5ms~5000ms (R/W)
+	bool set_response_time(int value);
+	int  get_hysteresis();             // 1~8 級 (R/W)
+	bool set_hysteresis(int value);
+	int  get_eco_mode();               // 0:OFF, 1:Std, 2:FULL (R/W)
+	bool set_eco_mode(int value);
+
+	// === 狀態讀取 (0x001A) ===
+	int  get_switch_output_status();   // 開關量輸出狀態 0:OFF, 1:ON (R only)
+
+	// === 命令 (0x0020) ===
+	bool zero_calibration();           // 校零 (W only)
 
 	// --- 工具 ---
 	uint16_t modbusCRC(const uint8_t* data, int len);
 
-	int error_flag; // 0: 正常, 1: 異常
+	int error_flag;  // 0: 正常, 1: 異常
 
 private:
 	TCP_client* client = nullptr;
-	int _slaveID;
+	int  _slaveID;
 	bool _debug;
 	bool _isExternalClient;
-	int _last_pressure = 0;
+	int  _last_pressure = 0;
+
 	bool send_command(uint8_t func, uint16_t reg, uint16_t data, std::vector<uint8_t>& res);
 	void log_hex(const std::string& prefix, const uint8_t* data, int len);
 };
 
 #endif
-
-//#include "TCP_client.h"
-//#include "JC_100_METER.h"
-//#include <iostream>
-//#include <iomanip>
-//#include <chrono>
-//#include <thread>
-//
-//#ifdef _WIN32
-//#include <conio.h>
-//#else
-//#include <stdio.h>
-//#include <termios.h>
-//#include <unistd.h>
-//#include <fcntl.h>
-//// Linux 下模擬 kbhit 的簡易實作
-//int _kbhit(void) {
-//	struct termios oldt, newt;
-//	int ch, oldf;
-//	tcgetattr(STDIN_FILENO, &oldt);
-//	newt = oldt;
-//	newt.c_lflag &= ~(ICANON | ECHO);
-//	tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-//	oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
-//	fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
-//	ch = getchar();
-//	tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-//	fcntl(STDIN_FILENO, F_SETFL, oldf);
-//	if (ch != EOF) { ungetc(ch, stdin); return 1; }
-//	return 0;
-//}
-//#endif
-//
-//int main() {
-//	TCP_client cli_21;
-//	JC_100_METER meter;
-//
-//	if (!cli_21.connectToServer("192.168.1.21", 4001, false)) {
-//		return 1;
-//	}
-//	meter.init(cli_21, 1, false);
-//
-//	std::cout << "--- JC-100 壓力監控 (按任意鍵停止) ---" << std::endl;
-//
-//	auto interval = std::chrono::milliseconds(100);
-//	auto next_run = std::chrono::steady_clock::now();
-//
-//	while (!_kbhit()) {
-//		int val = meter.read_pressure();
-//		double pressure = val / 10.0;
-//
-//		std::cout << "\r壓力: " << std::fixed << std::setprecision(1) << std::setw(6) << pressure << " kPa";
-//
-//		if (meter.error_flag == 1) {
-//			std::cout << " [狀態: 通訊中斷!!]" << std::flush;
-//		}
-//		else {
-//			std::cout << " [狀態: 正常]     " << std::flush;
-//		}
-//
-//		next_run += interval;
-//		std::this_thread::sleep_until(next_run);
-//	}
-//
-//	cli_21.close();
-//	return 0;
-//}

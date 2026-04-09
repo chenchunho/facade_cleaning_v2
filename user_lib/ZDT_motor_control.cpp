@@ -79,8 +79,11 @@ bool ZDT_motor_control::motion_control_driver_EN(bool status) {
 }
 
 bool ZDT_motor_control::get_system_status() {
-	// TX: 01 04 00 43 00 10 00 12 (根據您的 Log)
-	std::vector<uint8_t> cmd = { slave_id, 0x04, 0x00, 0x43, 0x00, 0x10, 0x00, 0x12 };
+	// 3.7.2 讀取系統狀��參數（Emm）: Func 0x04, Reg 0x0043, Qty 0x0010
+	std::vector<uint8_t> cmd = { slave_id, 0x04, 0x00, 0x43, 0x00, 0x10 };
+	uint16_t crc = modbusCRC(cmd.data(), (int)cmd.size());
+	cmd.push_back((uint8_t)(crc & 0xFF));
+	cmd.push_back((uint8_t)(crc >> 8));
 
 	if (debug_mode) printHex(cmd, "[TX get_status]");
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
@@ -88,73 +91,79 @@ bool ZDT_motor_control::get_system_status() {
 	auto resp = readEcho(300);
 	if (debug_mode) printHex(resp, "[RX get_status]");
 
-	// 必須符合 37 bytes: 01 04 20 (3) + Data (32) + CRC (2)
+	// Emm 回應: Addr(1) + Func(1) + ByteCount(1) + Data(32) + CRC(2) = 37 bytes
 	if (resp.size() < 37) return false;
 
-	int p = 3; // 跳過 Addr, Func, Len
-	auto get_u8 = [&](int& pos) { return resp[pos++]; };
-	auto get_u16 = [&](int& pos) { uint16_t v = (resp[pos] << 8) | resp[pos + 1]; pos += 2; return v; };
+	int p = 3; // 跳過 Addr, Func, ByteCount
+	auto get_u16 = [&](int& pos) {
+		uint16_t v = ((uint16_t)resp[pos] << 8) | resp[pos + 1]; pos += 2; return v;
+	};
 	auto get_u32 = [&](int& pos) {
-		uint32_t v = (uint32_t)((resp[pos] << 24) | (resp[pos + 1] << 16) | (resp[pos + 2] << 8) | resp[pos + 3]);
+		uint32_t v = ((uint32_t)resp[pos] << 24) | ((uint32_t)resp[pos + 1] << 16)
+		           | ((uint32_t)resp[pos + 2] << 8) | resp[pos + 3];
 		pos += 4; return v;
 	};
 
-	const double TO_DEG = 360.0 / 65536.0;
+	const double EMM_TO_DEG = 360.0 / 65536.0;
 
-	// --- 數據區開始 ---
-	get_u8(p); // 23
-	get_u8(p); // 09
-	this->status.bus_voltage = get_u16(p); // 5E 49
-	this->status.bus_current = get_u16(p); // 00 04
-	this->status.encoder_linear = get_u16(p); // 4F 85
+	// Reg 1: [總字節數, 參數個數] — 跳過
+	get_u16(p);
 
-	// 目標位置 (符號2 + 數值4)
+	// Reg 2: 總線電壓 (mV)
+	this->status.bus_voltage = get_u16(p);
+
+	// Reg 3: 相電流 (mA) — Emm 批量讀取無總線電流欄位
+	this->status.phase_current = get_u16(p);
+	this->status.bus_current = 0;
+
+	// Reg 4: 線性化編碼器值 — Emm 批量讀取無原始編碼器值
+	this->status.encoder_linear = get_u16(p);
+	this->status.encoder_raw = 0;
+
+	// Reg 5-7: 目標位置 (符號 u16 + 數值 u32)
 	uint16_t t_sign = get_u16(p);
-	uint32_t t_pulse = get_u32(p);
-	this->status.target_pos = (t_sign == 1 ? -1.0 : 1.0) * t_pulse * TO_DEG;
+	uint32_t t_val  = get_u32(p);
+	this->status.target_pos = (t_sign == 1 ? -1.0 : 1.0) * t_val * EMM_TO_DEG;
 
-	// 實時轉速 (符號2 + 數值2)
+	// Reg 8-9: 實時轉速 (符號 u16 + 數值 u16, Emm 單位為 RPM)
 	uint16_t s_sign = get_u16(p);
-	uint16_t s_val = get_u16(p);
+	uint16_t s_val  = get_u16(p);
 	this->status.real_speed = (s_sign == 1 ? -1.0 : 1.0) * s_val;
 
-	// 實時位置 (符號2 + 數值4)
+	// Reg 10-12: 實時位置 (符號 u16 + 數值 u32)
 	uint16_t r_sign = get_u16(p);
-	uint32_t r_pulse = get_u32(p);
-	this->status.real_pos = (r_sign == 1 ? -1.0 : 1.0) * r_pulse * TO_DEG;
+	uint32_t r_val  = get_u32(p);
+	this->status.real_pos = (r_sign == 1 ? -1.0 : 1.0) * r_val * EMM_TO_DEG;
 
-	// 位置誤差 (符號2 + 數值4)
+	// Reg 13-15: 位置誤差 (符號 u16 + 數值 u32)
 	uint16_t e_sign = get_u16(p);
-	uint32_t e_pulse = get_u32(p);
-	this->status.pos_error = (e_sign == 1 ? -1.0 : 1.0) * e_pulse * TO_DEG;
+	uint32_t e_val  = get_u32(p);
+	this->status.pos_error = (e_sign == 1 ? -1.0 : 1.0) * e_val * EMM_TO_DEG;
 
-	// --- 狀態位元精確修正 ---
-	// 根據您的 Log: ... 00 05 03 8F 18 12
-	// 00 05 是最後一個 u16 (可能是誤差的一部分或保留位)
-	// 03 8F 是我們要的狀態位元
+	// Reg 16: [回零狀態標誌(H), 電機狀態標誌(L)]
+	uint16_t state_reg = get_u16(p);
+	uint8_t home_flags  = (uint8_t)(state_reg >> 8);
+	uint8_t motor_flags = (uint8_t)(state_reg & 0xFF);
 
-	p = 33; // 強制將指針移向最後 4 byte 前 (Data 區的最後兩個暫存器)
-	uint16_t state_reg = get_u16(p); // 讀到 03 8F
+	// 回零狀態標誌 (3.3.4)
+	this->status.encoder_ready     = (home_flags >> 0) & 0x01;
+	this->status.calibration_ready = (home_flags >> 1) & 0x01;
+	this->status.is_homing         = (home_flags >> 2) & 0x01;
+	this->status.home_failed       = (home_flags >> 3) & 0x01;
+	this->status.over_temp_flag    = (home_flags >> 4) & 0x01;
+	this->status.over_current_flag = (home_flags >> 5) & 0x01;
 
-	uint8_t hB = (uint8_t)(state_reg >> 8);   // High Byte = 03
-	uint8_t mB = (uint8_t)(state_reg & 0xFF); // Low Byte  = 8F
+	// 電機狀態標誌 (3.4.14)
+	this->status.is_enabled       = (motor_flags >> 0) & 0x01;
+	this->status.pos_reached      = (motor_flags >> 1) & 0x01;
+	this->status.stall_flag       = (motor_flags >> 2) & 0x01;
+	this->status.stall_protection = (motor_flags >> 3) & 0x01;
+	this->status.left_limit       = (motor_flags >> 4) & 0x01;
+	this->status.right_limit      = (motor_flags >> 5) & 0x01;
+	this->status.power_loss_flag  = (motor_flags >> 7) & 0x01;
 
-	// --- 回零狀態 (hB = 03 -> 0000 0011) ---
-	this->status.encoder_ready = (hB >> 0) & 0x01; // bit 0: 1
-	this->status.calibration_ready = (hB >> 1) & 0x01; // bit 1: 1
-	this->status.is_homing = (hB >> 2) & 0x01; // bit 2: 0
-	this->status.home_failed = (hB >> 3) & 0x01; // bit 3: 0
-	this->status.over_temp_flag = (hB >> 4) & 0x01; // bit 4: 0
-	this->status.over_current_flag = (hB >> 5) & 0x01; // bit 5: 0
-
-	// --- 電機狀態 (mB = 8F -> 1000 1111) ---
-	this->status.is_enabled = (mB >> 0) & 0x01; // bit 0: 1 (使能)
-	this->status.pos_reached = (mB >> 1) & 0x01; // bit 1: 1 (到位)
-	this->status.stall_flag = (mB >> 2) & 0x01; // bit 2: 1 (堵轉)
-	this->status.stall_protection = (mB >> 3) & 0x01; // bit 3: 1 (堵保)
-	this->status.left_limit = (mB >> 4) & 0x01; // bit 4: 0
-	this->status.right_limit = (mB >> 5) & 0x01; // bit 5: 0
-	this->status.power_loss_flag = (mB >> 7) & 0x01; // bit 7: 1 (掉電)
+	// Emm 批量讀取不包含溫度
+	this->status.temperature = 0;
 
 	return true;
 }
@@ -176,42 +185,30 @@ bool ZDT_motor_control::release_stall_flag() {
 }
 
 bool ZDT_motor_control::emergency_stop(bool sync) {
-	// 根據您的 TX 範例：Addr 01, Func 10, Reg 00FE, Qty 0001, Len 02, Data 98XX
-	std::vector<uint8_t> cmd = {
-		slave_id,
-		0x10,           // 功能碼 10 (寫入多個暫存器)
-		0x00, 0xFE,     // 暫存器地址 0x00FE
-		0x00, 0x01,     // 暫存器數量 0x0001
-		0x02,           // 數據長度 2 Bytes
-		0x98,           // 數據高位固定為 0x98
-		(uint8_t)(sync ? 0x01 : 0x00) // 數據低位：同步標誌
-	};
-
-	uint16_t crc = modbusCRC(cmd.data(), (int)cmd.size());
-	cmd.push_back((uint8_t)(crc & 0xFF));
-	cmd.push_back((uint8_t)(crc >> 8));
+	// 3.2.12 立即停止: Func 0x06, Reg 0x00FE, Data [0x98, 同步標誌]
+	uint16_t data = (0x98 << 8) | (sync ? 0x01 : 0x00);
+	auto cmd = build_write_single_register(0x00FE, data);
 
 	if (debug_mode) printHex(cmd, "[TX emergency_stop]");
-
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
 
 	auto resp = readEcho(200);
 	if (debug_mode) printHex(resp, "[RX emergency_stop]");
 
-	// 回應檢查：地址、功能碼、暫存器地址與數量是否相符
-	return (resp.size() == 8 && resp[1] == 0x10 && resp[3] == 0xFE);
+	// 0x06 回應為指令回波
+	return (!resp.empty() && resp == cmd);
 }
 
 bool ZDT_motor_control::motion_control_speed_mode(int dir, int acc_rpm, int rpm, int sync, int retry) {
 	// 1. 構建寫入多個暫存器 (0x10) 指令封包，地址 0x00F6
 	std::vector<uint8_t> cmd = {
 		slave_id, 0x10, 0x00, 0xF6, 0x00, 0x03, 0x06,
-		(uint8_t)dir,           // 數據1: 方向
-		(uint8_t)acc_rpm,       // 數據2: 加速度
-		(uint8_t)(rpm >> 8),    // 數據3: 速度高8位
-		(uint8_t)(rpm & 0xFF),  // 數據4: 速度低8位
-		(uint8_t)(sync >> 8),   // 數據5: 同步高8位
-		(uint8_t)(sync & 0xFF)  // 數據6: 同步低8位
+		(uint8_t)dir,           // 寄存器1 H: 方向 (00:CW / 01:CCW)
+		(uint8_t)acc_rpm,       // 寄存器1 L: 加速度 (0-255 檔位)
+		(uint8_t)(rpm >> 8),    // 寄存器2 H: 速度高8位
+		(uint8_t)(rpm & 0xFF),  // 寄存器2 L: 速度低8位
+		(uint8_t)sync,          // 寄存器3 H: 同步標誌 (00:立即 / 01:緩存)
+		0x00                    // 寄存器3 L: 固定 0x00
 	};
 
 	uint16_t crc = modbusCRC(cmd.data(), (int)cmd.size());
@@ -341,6 +338,63 @@ bool ZDT_motor_control::motion_control_pos_mode(int dir, int acc_rpm, int rpm, i
 
 	if (debug_mode) std::cout << "[FATAL] Pos Mode failed after reaching max retry limit." << std::endl;
 	return false;
+}
+
+bool ZDT_motor_control::factory_reset() {
+	// 3.1.5 恢復出廠設置: Func 0x06, Reg 0x000F, Data 0x0001
+	auto cmd = build_write_single_register(0x000F, 0x0001);
+	if (debug_mode) printHex(cmd, "[TX factory_reset]");
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
+	auto resp = readEcho(500);
+	if (debug_mode) printHex(resp, "[RX factory_reset]");
+	return (!resp.empty() && resp == cmd);
+}
+
+bool ZDT_motor_control::trigger_home(int mode, bool sync) {
+	// 3.3.2 觸發回零: Func 0x06, Reg 0x009A(Emm), Data [回零模式, 同步標誌]
+	// mode: 00=單圈就近 01=單圈方向 02=無限位碰撞 03=限位 04=絕對零點 05=掉電位置
+	uint16_t data = ((uint16_t)mode << 8) | (sync ? 0x01 : 0x00);
+	auto cmd = build_write_single_register(0x009A, data);
+	if (debug_mode) printHex(cmd, "[TX trigger_home]");
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
+	auto resp = readEcho(200);
+	if (debug_mode) printHex(resp, "[RX trigger_home]");
+	return (!resp.empty() && resp == cmd);
+}
+
+bool ZDT_motor_control::abort_home() {
+	// 3.3.3 強制中斷回零: Func 0x06, Reg 0x009C(Emm), Data [0x48, 0x00]
+	auto cmd = build_write_single_register(0x009C, 0x4800);
+	if (debug_mode) printHex(cmd, "[TX abort_home]");
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
+	auto resp = readEcho(200);
+	if (debug_mode) printHex(resp, "[RX abort_home]");
+	return (!resp.empty() && resp == cmd);
+}
+
+bool ZDT_motor_control::trigger_sync_move() {
+	// 3.2.13 觸發多機同步運動: Func 0x06, Reg 0x00FF, Data [0x66, 0x00]
+	// 以廣播地址 0x00 發送
+	std::vector<uint8_t> cmd = { 0x00, 0x06, 0x00, 0xFF, 0x66, 0x00 };
+	uint16_t crc = modbusCRC(cmd.data(), (int)cmd.size());
+	cmd.push_back((uint8_t)(crc & 0xFF));
+	cmd.push_back((uint8_t)(crc >> 8));
+	if (debug_mode) printHex(cmd, "[TX trigger_sync]");
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
+	auto resp = readEcho(200);
+	if (debug_mode) printHex(resp, "[RX trigger_sync]");
+	return (!resp.empty());
+}
+
+bool ZDT_motor_control::set_home_zero_position(bool store) {
+	// 3.3.1 設置單圈回零零點位置: Func 0x06, Reg 0x0093(Emm), Data [0x88, 是否存儲]
+	uint16_t data = (0x88 << 8) | (store ? 0x01 : 0x00);
+	auto cmd = build_write_single_register(0x0093, data);
+	if (debug_mode) printHex(cmd, "[TX set_home_zero]");
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
+	auto resp = readEcho(200);
+	if (debug_mode) printHex(resp, "[RX set_home_zero]");
+	return (!resp.empty() && resp == cmd);
 }
 
 uint16_t ZDT_motor_control::modbusCRC(const uint8_t* data, int len) {
