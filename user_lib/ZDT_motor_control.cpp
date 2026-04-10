@@ -168,6 +168,22 @@ bool ZDT_motor_control::get_system_status() {
 	return true;
 }
 
+bool ZDT_motor_control::wait_until_pos_reached(int timeout_ms, int poll_interval_ms) {
+	auto start = std::chrono::steady_clock::now();
+	while (true) {
+		if (get_system_status() && status.pos_reached) {
+			return true;
+		}
+		auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - start).count();
+		if (elapsed >= timeout_ms) {
+			if (debug_mode) std::cout << "[TIMEOUT] wait_until_pos_reached: " << elapsed << " ms" << std::endl;
+			return false;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(poll_interval_ms));
+	}
+}
+
 bool ZDT_motor_control::release_stall_flag() {
 	// 根據您的需求：寫入暫存器 0x000E，值為 0x0001
 	auto cmd = build_write_single_register(0x000E, 0x0001);
@@ -322,9 +338,94 @@ bool ZDT_motor_control::motion_control_pos_mode(int dir, int acc_rpm, int rpm, i
 		}
 
 		if (success) {
+			// 等待移動完成
+			if (wait_until_pos_reached()) {
+				return false; // 成功接收正確回應
+			}
+			else {
+				if (debug_mode) std::cout << "[WARN] Waiting for moving timeout..." << std::endl;
+				return true;
+			}
+		}
+		else {
+			auto resp = readEcho(500);
+
+			// --- 異常處理：執行解除堵轉並準備重試 ---
+			if (debug_mode) std::cout << "[WARN] RX Invalid or CRC Error. Releasing stall flag..." << std::endl;
+
+			// 呼叫解除堵轉 (內部也有自己的 TX/RX LOG)
+			release_stall_flag();
+
+			std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 給予馬達處理緩衝
+			attempt++;
+		}
+	}
+
+	if (debug_mode) std::cout << "[FATAL] Pos Mode failed after reaching max retry limit." << std::endl;
+	return true;
+}
+
+bool ZDT_motor_control::motion_control_pos_mode_nowait(int dir, int acc_rpm, int rpm, int pulse, int mode, int sync, int retry) {
+	// 1. 構建寫入多個暫存器 (0x10) 指令封包
+	std::vector<uint8_t> cmd = {
+		slave_id, 0x10, 0x00, 0xFD, 0x00, 0x05, 0x0A,
+		(uint8_t)dir,           // 數據1: 方向
+		(uint8_t)acc_rpm,       // 數據2: 加速度
+		(uint8_t)(rpm >> 8),    // 數據3: 速度高位
+		(uint8_t)(rpm & 0xFF),  // 數據4: 速度低位
+		(uint8_t)(pulse >> 24), // 數據5: 脈衝數 Byte3 (高)
+		(uint8_t)(pulse >> 16), // 數據6: 脈衝數 Byte2
+		(uint8_t)(pulse >> 8),  // 數據7: 脈衝數 Byte1
+		(uint8_t)(pulse & 0xFF),// 數據8: 脈衝數 Byte0 (低)
+		(uint8_t)mode,          // 數據9: 模式 (0相對/1絕對)
+		(uint8_t)sync           // 數據10: 同步 (0非同步/1同步)
+	};
+
+	// 計算並附加 CRC16
+	uint16_t crc = modbusCRC(cmd.data(), (int)cmd.size());
+	cmd.push_back((uint8_t)(crc & 0xFF));
+	cmd.push_back((uint8_t)(crc >> 8));
+
+	int attempt = 0;
+	while (attempt <= retry) {
+		// --- TX LOG ---
+		std::string tx_label = "[TX Pos Mode]";
+		if (attempt > 0) tx_label += " (Retry " + std::to_string(attempt) + ")";
+		if (debug_mode) printHex(cmd, tx_label);
+
+		// 發送數據
+		if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) {
+			if (debug_mode) std::cout << "[ERROR] Send failed, waiting for retry..." << std::endl;
+			attempt++;
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+			continue;
+		}
+
+		// 讀取回應
+		auto resp = readEcho(300);
+
+		// --- RX LOG ---
+		if (debug_mode) {
+			if (resp.empty()) std::cout << "[RX Pos Mode]: TIMEOUT" << std::endl;
+			else printHex(resp, "[RX Pos Mode]");
+		}
+
+		// --- 檢查回應正確性 ---
+		bool success = false;
+		if (resp.size() == 8 && resp[1] == 0x10 && resp[3] == 0xFD) {
+			// CRC 驗證確保通訊無誤
+			uint16_t rx_crc = (resp[7] << 8) | resp[6];
+			if (rx_crc == modbusCRC(resp.data(), 6)) {
+				success = true;
+			}
+		}
+
+		if (success) {
 			return true; // 成功接收正確回應
 		}
 		else {
+			auto resp = readEcho(500);
+
 			// --- 異常處理：執行解除堵轉並準備重試 ---
 			if (debug_mode) std::cout << "[WARN] RX Invalid or CRC Error. Releasing stall flag..." << std::endl;
 

@@ -58,6 +58,7 @@ public:
 	bool motion_control_driver_EN(bool status);  // 3.2.1 使能控制 (Reg 0x00F3)
 	bool motion_control_speed_mode(int dir, int acc_rpm, int rpm, int sync, int retry);  // 3.2.6 速度模式 Emm (Reg 0x00F6)
 	bool motion_control_pos_mode(int dir, int acc_rpm, int rpm, int pulse, int mode, int sync, int retry);  // 3.2.11 位置模式 Emm (Reg 0x00FD)
+	bool motion_control_pos_mode_nowait(int dir, int acc_rpm, int rpm, int pulse, int mode, int sync, int retry);
 	bool emergency_stop(bool sync);              // 3.2.12 立即停止 (Reg 0x00FE)
 	bool trigger_sync_move();                    // 3.2.13 觸發多機同步運動 (Reg 0x00FF, 廣播)
 
@@ -68,6 +69,7 @@ public:
 
 	// --- 讀取系統參數 (3.7.2) ---
 	bool get_system_status();            // 批量讀取 Emm 系統狀態 (Reg 0x0043, 16 regs)
+	bool wait_until_pos_reached(int timeout_ms = 10000, int poll_interval_ms = 500);  // 輪詢直到位置到達或超時
 	MotorSystemStatus status;
 
 private:

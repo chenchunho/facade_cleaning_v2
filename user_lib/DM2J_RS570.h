@@ -30,16 +30,16 @@ public:
 	void speed_move(int pr_num, int mode, int rpm, int pos);
 	void speed_move_stop();
 
-	// PR Move
-	void PR_move_set(int pr_num, int mode, int rpm, int pos, int acc, int dec);
+	// PR Move 兩步驟: 1.設定移動長度cm 2.觸發移動
+	void PR_move_set(int pr_num, int mode, int rpm, int pos, int acc, int dec); // 只設定，要自己算移動一公分要轉起圈
 	void PR_trigger(int pr_num);
 	void PR_trigger_sync(int pr_num);
-	bool PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec);
-	bool PR_move_cm_nowait(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec);
-	bool PR_move_cm_set(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec);
-	bool PR_move_cm_trigger_all(int pr_num);
+	bool PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec);        // 設定+觸發，單位公分，會等待執行完畢
+	bool PR_move_cm_nowait(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec); // 同上但不等待
+	bool PR_move_cm_set(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec);    // 只設定，單位公分
+	bool PR_move_cm_trigger_all(int pr_num); 
 
-	// JOG
+	// JOG 目前不需要用
 	void jog_forward();
 	void jog_reverse();
 	void jog_stop();

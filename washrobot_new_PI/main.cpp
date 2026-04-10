@@ -42,12 +42,7 @@ DM2J_RS570 drv_2;
 DM2J_RS570 drv_3;
 DM2J_RS570 drv_4;
 ZDT_motor_control m1;
-ZDT_motor_control m2;
-ZDT_motor_control m3;
-ZDT_motor_control m4;
-ZDT_motor_control m5;
-ZDT_motor_control m6;
-ZDT_motor_control m7;
+
 JC_100_METER meter_1;
 JC_100_METER meter_2;
 JC_100_METER meter_3;
@@ -367,7 +362,7 @@ int main() {
 		// ---------------------------------------------
 		// 處理 "set process up X"
 		// ---------------------------------------------
-		else if (cmd.rfind("upsync", 0) == 0) {
+		else if (cmd.rfind("downsync", 0) == 0) {
 
 			int x = -1;  // 用來儲存 X
 			std::istringstream iss(cmd);

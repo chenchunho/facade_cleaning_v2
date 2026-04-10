@@ -119,6 +119,7 @@ void DM2J_RS570::PR_trigger_sync(int pr_num)
 // PR Move (cm)
 // ======================================================================
 
+// mode => 0相對位置 1絕對位置
 bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec)
 {
 	uint16_t ppr = 10000;
@@ -142,25 +143,25 @@ bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int ac
 	const int timeout_ms = 10000;
 	int elapsed = 0;
 
+	uint16_t st = 0;
+
 	while (elapsed < timeout_ms)
 	{
-		uint16_t st = 0;
+		if (!read_status(st))
+		{
+			printf("Read status failed!\n");
+			return false;
+		}
 
-		//if (!read_status(st))
-		//{
-		//	printf("Read status failed!\n");
-		//	return false;
-		//}
+		bool cmd_done  = st & 0x0010;
+		bool path_done = st & 0x0020;
+		bool fault     = st & 0x0001;
 
 		if (debugEnabled)
 		{
 			printf("[WAIT] Status = 0x%04X => ", st);
 			print_status(st);
 		}
-
-		bool cmd_done = st & 0x0010;
-		bool path_done = st & 0x0020;
-		bool fault = st & 0x0001;
 
 		if (fault)
 		{
