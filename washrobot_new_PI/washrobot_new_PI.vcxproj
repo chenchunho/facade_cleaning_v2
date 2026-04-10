@@ -80,6 +80,7 @@
     <ClCompile Include="..\user_lib\JC_100_METER.cpp" />
     <ClCompile Include="..\user_lib\PQW_IO_16O_RLY.cpp" />
     <ClCompile Include="..\user_lib\TCP_client.cpp" />
+    <ClCompile Include="..\user_lib\WASH_ROBOT.cpp" />
     <ClCompile Include="..\user_lib\ZDT_motor_control.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
@@ -89,6 +90,7 @@
     <ClInclude Include="..\user_lib\JC_100_METER.h" />
     <ClInclude Include="..\user_lib\PQW_IO_16O_RLY.h" />
     <ClInclude Include="..\user_lib\TCP_client.h" />
+    <ClInclude Include="..\user_lib\WASH_ROBOT.h" />
     <ClInclude Include="..\user_lib\ZDT_motor_control.h" />
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">

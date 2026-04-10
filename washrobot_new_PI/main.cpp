@@ -13,8 +13,6 @@
     } while(0)
 #endif
 
-
-
 #include <stdio.h>
 #include <iostream>
 #include <stdlib.h>
@@ -23,33 +21,33 @@
 #include <thread>
 #include <iomanip>
 
-#include "PQW_IO_16O_RLY.h"
-#include "DM2J_RS570.h"
-#include "ZDT_motor_control.h"
-#include "JC_100_METER.h"
+#include "WASH_ROBOT.h"
 
 #define vacuum_motor		11
 #define vacuum_valve_left	12
 #define vacuum_valve_right	14
 #define vacuum_valve_center	13
 
-TCP_client cli_20;
-TCP_client cli_21;
-PQW_IO_16O_RLY relay;
-PQW_IO_16O_RLY relay_2;
-DM2J_RS570 drv_1;
-DM2J_RS570 drv_2;
-DM2J_RS570 drv_3;
-DM2J_RS570 drv_4;
-ZDT_motor_control m1;
+//TCP_client cli_20;
+//TCP_client cli_21;
 
-JC_100_METER meter_1;
-JC_100_METER meter_2;
-JC_100_METER meter_3;
-JC_100_METER meter_4;
-JC_100_METER meter_5;
-JC_100_METER meter_6;
-JC_100_METER meter_7;
+//PQW_IO_16O_RLY relay;
+//PQW_IO_16O_RLY relay_2;
+
+//DM2J_RS570 drv_1;
+//DM2J_RS570 drv_2;
+//DM2J_RS570 drv_3;
+//DM2J_RS570 drv_4;
+
+//ZDT_motor_control m1;
+
+//JC_100_METER meter_1;
+//JC_100_METER meter_2;
+//JC_100_METER meter_3;
+//JC_100_METER meter_4;
+//JC_100_METER meter_5;
+//JC_100_METER meter_6;
+//JC_100_METER meter_7;
 
 
 void waitEnter();
@@ -73,20 +71,78 @@ void doWashDisable();
 bool askPositionOK(int x);
 int askNewX();
 
+void startAutoWash();
 
 int main() {
 
+	WashRobot robot;
+
+	if (!robot.init()) {
+		std::cerr << "Init failed." << std::endl;
+		return 1;
+	}
+
+	robot.doInit();
+
+	std::string cmd;
+	while (true) {
+		std::cout << "> ";
+		std::getline(std::cin, cmd);
+
+		if (cmd == "exit") {
+			break;
+		}
+		else if (cmd == "right enable") {
+			robot.enableRight();
+		}
+		else if (cmd == "right disable") {
+			robot.disableRight();
+		}
+		else if (cmd == "pressure") {
+			int val = robot.readPressure(0);  // leg_index 0 = m1
+			std::cout << "Pressure: " << val << " (x0.1 kPa)" << std::endl;
+		}
+		else if (cmd == "move 0") {
+			robot.move(1, 300, 0.0);    // axis 1 = drv_1, 歸零
+		}
+		else if (cmd == "move 10") {
+			robot.move(1, 300, 10.0);   // axis 1 移動到 10cm
+		}
+		else if (cmd == "shutdown") {
+			robot.doShutdown();
+			break;
+		}
+		else if (cmd == "move") {
+			robot.moveRight();
+
+		}
+		else if (cmd == "start wash") {
+			robot.startWash(5, 300);
+		}
+		else if (!cmd.empty()) {
+			std::cout << "Unknown command: " << cmd << std::endl;
+		}
+	}
+
+	return 0;
+
+
+
+
+	/*
+
+	// -------------------峻禾-----------------------
 	if (!cli_20.connectToServer("192.168.1.20", 4001)) {
 		std::cerr << "Failed to connect 485 controller." << std::endl;
 		system("PAUSE");
 		return 1;
 	}
+	
 	if (!cli_21.connectToServer("192.168.1.21", 4001)) {
 		std::cerr << "Failed to connect 485 controller." << std::endl;
 		system("PAUSE");
 		return 1;
 	}
-
 	if (!drv_1.init(cli_20, 1, false)) {
 		std::cerr << "Failed to connect DM2J_RS570 controller 1." << std::endl;
 		return 1;
@@ -103,11 +159,11 @@ int main() {
 		std::cerr << "Failed to connect DM2J_RS570 controller 4." << std::endl;
 		return 1;
 	}
-
-	if (!m1.init(cli_21, 2)) {
+	if (!m1.init(cli_20, 2)) {
 		std::cerr << "Failed to connect ZDT_motor_control 1." << std::endl;
 		return 1;
 	}
+	/*
 	if (!m2.init(cli_21, 3)) {
 		std::cerr << "Failed to connect ZDT_motor_control 2." << std::endl;
 		return 1;
@@ -132,11 +188,12 @@ int main() {
 		std::cerr << "Failed to connect ZDT_motor_control 7." << std::endl;
 		return 1;
 	}
-
-	if (!meter_1.init(cli_21, 9)) {
+	
+	if (!meter_1.init(cli_20, 9)) {
 		std::cerr << "Failed to connect pressure meter 1." << std::endl;
 		return 1;
 	}
+	/*
 	if (!meter_2.init(cli_21, 10)) {
 		std::cerr << "Failed to connect pressure meter 2." << std::endl;
 		return 1;
@@ -161,16 +218,17 @@ int main() {
 		std::cerr << "Failed to connect pressure meter 7." << std::endl;
 		return 1;
 	}
-
-	if (!relay.init(cli_21, 1)) {
+	
+	if (!relay.init(cli_20, 1)) {
 		std::cerr << "Failed to connect relay controller." << std::endl;
 		return 1;
 	}
+	/*
 	if (!relay_2.init(cli_21, 16)) {
 		std::cerr << "Failed to connect relay controller." << std::endl;
 		return 1;
 	}
-
+	
 	std::string cmd;
 	while (true) {
 		std::cout << "> ";
@@ -210,7 +268,6 @@ int main() {
 		else if (cmd == "shutdown") {
 			doShutdown();
 		}
-
 		else if (cmd == "move1 get pos") {
 			double a = 0;
 			drv_1.read_position_cm(a);
@@ -235,7 +292,6 @@ int main() {
 				doMove_1(rpm, cm);
 			}
 		}
-
 		else if (cmd == "move2 get pos") {
 			double a = 0;
 			drv_2.read_position_cm(a);
@@ -260,7 +316,6 @@ int main() {
 				doMove_2(rpm, cm);
 			}
 		}
-
 		else if (cmd == "move3 get pos") {
 			double a = 0;
 			drv_3.read_position_cm(a);
@@ -285,7 +340,6 @@ int main() {
 				doMove_3(rpm, cm);
 			}
 		}
-
 		else if (cmd == "move4 get pos") {
 			double a = 0;
 			drv_4.read_position_cm(a);
@@ -310,7 +364,6 @@ int main() {
 				doMove_4(rpm, cm);
 			}
 		}
-
 		else if (cmd.rfind("get meter", 0) == 0)
 		{
 			//std::stringstream iss(cmd)
@@ -351,7 +404,6 @@ int main() {
 			m7.motion_control_pos_mode(00, 255, 1000, 0, 1, 0, 1);
 			std::cerr << "M1 test." << std::endl;
 		}
-
 		else if (cmd == "wash enable") {
 			doWashEable();
 		}
@@ -427,7 +479,6 @@ int main() {
 			doCenterVacuumEnable();
 			std::cout << "Process Done." << std::endl;
 		}
-
 		else if (cmd.rfind("up", 0) == 0) {
 
 			int x = -1;  // 用來儲存 X
@@ -604,16 +655,16 @@ int main() {
 
 			std::cout << "Process Done." << std::endl;
 		}
-
-
 		else if (!cmd.empty()) {
 			std::cout << "Unknown command: " << cmd << std::endl;
 		}
 	}
 
 	return 0;
+	*/
 }
 
+/*
 void waitEnter() {
 	std::cout << "Press Enter to continue...";
 	std::cin.get();
@@ -863,3 +914,4 @@ int askNewX()
 	std::cin >> newX;
 	return newX;
 }
+*/
