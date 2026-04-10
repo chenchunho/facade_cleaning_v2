@@ -33,7 +33,7 @@ bool JC_100_METER::init(TCP_client& extClient, int ID, bool debug) {
 	_debug = debug;
 	client = &extClient;
 	_isExternalClient = true;
-	return true;
+	return false;
 }
 
 bool JC_100_METER::init(const std::string& ip, int port, int ID, bool debug) {
@@ -42,7 +42,7 @@ bool JC_100_METER::init(const std::string& ip, int port, int ID, bool debug) {
 	_isExternalClient = false;
 	if (client) delete client;
 	client = new TCP_client();
-	return client->connectToServer(ip, port, debug);
+	return !client->connectToServer(ip, port, debug);
 }
 
 // ============================================================
@@ -52,7 +52,7 @@ bool JC_100_METER::init(const std::string& ip, int port, int ID, bool debug) {
 bool JC_100_METER::send_command(uint8_t func, uint16_t reg, uint16_t data, std::vector<uint8_t>& res) {
 	if (!client || !client->isConnected()) {
 		error_flag = 1;
-		return false;
+		return true;
 	}
 
 	uint8_t frame[8] = {
@@ -69,7 +69,7 @@ bool JC_100_METER::send_command(uint8_t func, uint16_t reg, uint16_t data, std::
 
 	if (!client->sendData((const char*)frame, 8, 500)) {
 		error_flag = 1;
-		return false;
+		return true;
 	}
 
 	char rxBuf[256];
@@ -78,7 +78,7 @@ bool JC_100_METER::send_command(uint8_t func, uint16_t reg, uint16_t data, std::
 	if (len < 5) {
 		error_flag = 1;
 		if (_debug) std::cout << "JC-100 [TIMEOUT ERROR]" << std::endl;
-		return false;
+		return true;
 	}
 
 	if (_debug) log_hex("JC-100 RX <- ", (uint8_t*)rxBuf, len);
@@ -88,12 +88,12 @@ bool JC_100_METER::send_command(uint8_t func, uint16_t reg, uint16_t data, std::
 	if (cCrc != rCrc) {
 		error_flag = 1;
 		if (_debug) std::cout << "JC-100 [CRC ERROR]" << std::endl;
-		return false;
+		return true;
 	}
 
 	error_flag = 0;
 	res.assign((uint8_t*)rxBuf, (uint8_t*)rxBuf + len);
-	return true;
+	return false;
 }
 
 void JC_100_METER::log_hex(const std::string& prefix, const uint8_t* data, int len) {
@@ -109,7 +109,7 @@ void JC_100_METER::log_hex(const std::string& prefix, const uint8_t* data, int l
 
 int JC_100_METER::read_pressure() {
 	std::vector<uint8_t> r;
-	if (send_command(0x03, JC100_REG::PRESSURE, 0x0001, r)) {
+	if (!send_command(0x03, JC100_REG::PRESSURE, 0x0001, r)) {
 		_last_pressure = (int16_t)(r[3] << 8 | r[4]);
 		std::this_thread::sleep_for(std::chrono::milliseconds(5));
 		return _last_pressure;
@@ -124,53 +124,53 @@ int JC_100_METER::read_pressure() {
 //  OUT1 設定 (0x0010~0x0012) — 值為帶符號 int16
 // ============================================================
 
-int  JC_100_METER::get_setpoint()    { std::vector<uint8_t> r; return send_command(0x03, JC100_REG::SETPOINT,    0x0001, r) ? (int16_t)(r[3] << 8 | r[4]) : -9999; }
+int  JC_100_METER::get_setpoint()    { std::vector<uint8_t> r; return !send_command(0x03, JC100_REG::SETPOINT,    0x0001, r) ? (int16_t)(r[3] << 8 | r[4]) : -9999; }
 bool JC_100_METER::set_setpoint(int v)    { std::vector<uint8_t> r; return send_command(0x06, JC100_REG::SETPOINT,    (uint16_t)v, r); }
 
-int  JC_100_METER::get_upper_limit() { std::vector<uint8_t> r; return send_command(0x03, JC100_REG::UPPER_LIMIT, 0x0001, r) ? (int16_t)(r[3] << 8 | r[4]) : -9999; }
+int  JC_100_METER::get_upper_limit() { std::vector<uint8_t> r; return !send_command(0x03, JC100_REG::UPPER_LIMIT, 0x0001, r) ? (int16_t)(r[3] << 8 | r[4]) : -9999; }
 bool JC_100_METER::set_upper_limit(int v) { std::vector<uint8_t> r; return send_command(0x06, JC100_REG::UPPER_LIMIT, (uint16_t)v, r); }
 
-int  JC_100_METER::get_lower_limit() { std::vector<uint8_t> r; return send_command(0x03, JC100_REG::LOWER_LIMIT, 0x0001, r) ? (int16_t)(r[3] << 8 | r[4]) : -9999; }
+int  JC_100_METER::get_lower_limit() { std::vector<uint8_t> r; return !send_command(0x03, JC100_REG::LOWER_LIMIT, 0x0001, r) ? (int16_t)(r[3] << 8 | r[4]) : -9999; }
 bool JC_100_METER::set_lower_limit(int v) { std::vector<uint8_t> r; return send_command(0x06, JC100_REG::LOWER_LIMIT, (uint16_t)v, r); }
 
 // ============================================================
 //  輸出設定 (0x0013, 0x0016)
 // ============================================================
 
-int  JC_100_METER::get_output_mode() { std::vector<uint8_t> r; return send_command(0x03, JC100_REG::OUTPUT_MODE, 0x0001, r) ? (r[3] << 8 | r[4]) : -1; }
+int  JC_100_METER::get_output_mode() { std::vector<uint8_t> r; return !send_command(0x03, JC100_REG::OUTPUT_MODE, 0x0001, r) ? (r[3] << 8 | r[4]) : -1; }
 bool JC_100_METER::set_output_mode(int v) { std::vector<uint8_t> r; return send_command(0x06, JC100_REG::OUTPUT_MODE, (uint16_t)v, r); }
 
-int  JC_100_METER::get_no_nc()       { std::vector<uint8_t> r; return send_command(0x03, JC100_REG::NO_NC,       0x0001, r) ? (r[3] << 8 | r[4]) : -1; }
+int  JC_100_METER::get_no_nc()       { std::vector<uint8_t> r; return !send_command(0x03, JC100_REG::NO_NC,       0x0001, r) ? (r[3] << 8 | r[4]) : -1; }
 bool JC_100_METER::set_no_nc(int v)       { std::vector<uint8_t> r; return send_command(0x06, JC100_REG::NO_NC,       (uint16_t)v, r); }
 
 // ============================================================
 //  顯示設定 (0x0014, 0x0015)
 // ============================================================
 
-int  JC_100_METER::get_display_color()  { std::vector<uint8_t> r; return send_command(0x03, JC100_REG::DISPLAY_COLOR, 0x0001, r) ? (r[3] << 8 | r[4]) : -1; }
+int  JC_100_METER::get_display_color()  { std::vector<uint8_t> r; return !send_command(0x03, JC100_REG::DISPLAY_COLOR, 0x0001, r) ? (r[3] << 8 | r[4]) : -1; }
 bool JC_100_METER::set_display_color(int v)  { std::vector<uint8_t> r; return send_command(0x06, JC100_REG::DISPLAY_COLOR, (uint16_t)v, r); }
 
-int  JC_100_METER::get_pressure_unit()  { std::vector<uint8_t> r; return send_command(0x03, JC100_REG::PRESSURE_UNIT, 0x0001, r) ? (r[3] << 8 | r[4]) : -1; }
+int  JC_100_METER::get_pressure_unit()  { std::vector<uint8_t> r; return !send_command(0x03, JC100_REG::PRESSURE_UNIT, 0x0001, r) ? (r[3] << 8 | r[4]) : -1; }
 bool JC_100_METER::set_pressure_unit(int v)  { std::vector<uint8_t> r; return send_command(0x06, JC100_REG::PRESSURE_UNIT, (uint16_t)v, r); }
 
 // ============================================================
 //  控制參數 (0x0017~0x0019)
 // ============================================================
 
-int  JC_100_METER::get_response_time() { std::vector<uint8_t> r; return send_command(0x03, JC100_REG::RESPONSE_TIME, 0x0001, r) ? (r[3] << 8 | r[4]) : -1; }
+int  JC_100_METER::get_response_time() { std::vector<uint8_t> r; return !send_command(0x03, JC100_REG::RESPONSE_TIME, 0x0001, r) ? (r[3] << 8 | r[4]) : -1; }
 bool JC_100_METER::set_response_time(int v) { std::vector<uint8_t> r; return send_command(0x06, JC100_REG::RESPONSE_TIME, (uint16_t)v, r); }
 
-int  JC_100_METER::get_hysteresis()    { std::vector<uint8_t> r; return send_command(0x03, JC100_REG::HYSTERESIS,    0x0001, r) ? (r[3] << 8 | r[4]) : -1; }
+int  JC_100_METER::get_hysteresis()    { std::vector<uint8_t> r; return !send_command(0x03, JC100_REG::HYSTERESIS,    0x0001, r) ? (r[3] << 8 | r[4]) : -1; }
 bool JC_100_METER::set_hysteresis(int v)    { std::vector<uint8_t> r; return send_command(0x06, JC100_REG::HYSTERESIS,    (uint16_t)v, r); }
 
-int  JC_100_METER::get_eco_mode()      { std::vector<uint8_t> r; return send_command(0x03, JC100_REG::ECO_MODE,      0x0001, r) ? (r[3] << 8 | r[4]) : -1; }
+int  JC_100_METER::get_eco_mode()      { std::vector<uint8_t> r; return !send_command(0x03, JC100_REG::ECO_MODE,      0x0001, r) ? (r[3] << 8 | r[4]) : -1; }
 bool JC_100_METER::set_eco_mode(int v)      { std::vector<uint8_t> r; return send_command(0x06, JC100_REG::ECO_MODE,      (uint16_t)v, r); }
 
 // ============================================================
 //  狀態讀取 (0x001A) — 唯讀，無 setter
 // ============================================================
 
-int JC_100_METER::get_switch_output_status() { std::vector<uint8_t> r; return send_command(0x03, JC100_REG::SWITCH_STATUS, 0x0001, r) ? (r[3] << 8 | r[4]) : -1; }
+int JC_100_METER::get_switch_output_status() { std::vector<uint8_t> r; return !send_command(0x03, JC100_REG::SWITCH_STATUS, 0x0001, r) ? (r[3] << 8 | r[4]) : -1; }
 
 // ============================================================
 //  命令 (0x0020)

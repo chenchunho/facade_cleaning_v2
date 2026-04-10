@@ -265,7 +265,7 @@ bool ZDT_motor_control::motion_control_speed_mode(int dir, int acc_rpm, int rpm,
 		}
 
 		if (success) {
-			return true;
+			return false; // no error
 		}
 		else {
 			// --- 異常處理：執行解除堵轉並準備重試 ---
@@ -279,7 +279,7 @@ bool ZDT_motor_control::motion_control_speed_mode(int dir, int acc_rpm, int rpm,
 	}
 
 	if (debug_mode) std::cout << "[FATAL] Speed Mode failed after reaching max retry limit." << std::endl;
-	return false;
+	return true; // error
 }
 
 bool ZDT_motor_control::motion_control_pos_mode(int dir, int acc_rpm, int rpm, int pulse, int mode, int sync, int retry) {
@@ -340,15 +340,15 @@ bool ZDT_motor_control::motion_control_pos_mode(int dir, int acc_rpm, int rpm, i
 		if (success) {
 			// 等待移動完成
 			if (wait_until_pos_reached()) {
-				return false; // 成功接收正確回應
+				return false; // no error
 			}
 			else {
 				if (debug_mode) std::cout << "[WARN] Waiting for moving timeout..." << std::endl;
-				return true;
+				return true; // error: timeout
 			}
 		}
 		else {
-			auto resp = readEcho(500);
+			readEcho(500); // drain remaining data from buffer
 
 			// --- 異常處理：執行解除堵轉並準備重試 ---
 			if (debug_mode) std::cout << "[WARN] RX Invalid or CRC Error. Releasing stall flag..." << std::endl;
@@ -362,7 +362,7 @@ bool ZDT_motor_control::motion_control_pos_mode(int dir, int acc_rpm, int rpm, i
 	}
 
 	if (debug_mode) std::cout << "[FATAL] Pos Mode failed after reaching max retry limit." << std::endl;
-	return true;
+	return true; // error
 }
 
 bool ZDT_motor_control::motion_control_pos_mode_nowait(int dir, int acc_rpm, int rpm, int pulse, int mode, int sync, int retry) {
@@ -421,10 +421,10 @@ bool ZDT_motor_control::motion_control_pos_mode_nowait(int dir, int acc_rpm, int
 		}
 
 		if (success) {
-			return true; // 成功接收正確回應
+			return false; // no error
 		}
 		else {
-			auto resp = readEcho(500);
+			readEcho(500); // drain remaining data from buffer
 
 			// --- 異常處理：執行解除堵轉並準備重試 ---
 			if (debug_mode) std::cout << "[WARN] RX Invalid or CRC Error. Releasing stall flag..." << std::endl;
@@ -438,7 +438,7 @@ bool ZDT_motor_control::motion_control_pos_mode_nowait(int dir, int acc_rpm, int
 	}
 
 	if (debug_mode) std::cout << "[FATAL] Pos Mode failed after reaching max retry limit." << std::endl;
-	return false;
+	return true; // error
 }
 
 bool ZDT_motor_control::factory_reset() {

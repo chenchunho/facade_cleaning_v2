@@ -87,19 +87,19 @@ int main() {
 		return 1;
 	}
 
-	if (!drv_1.init(cli_20, 1, false)) {
+	if (drv_1.init(cli_20, 1, false)) {
 		std::cerr << "Failed to connect DM2J_RS570 controller 1." << std::endl;
 		return 1;
 	}
-	if (!drv_2.init(cli_20, 2, false)) {
+	if (drv_2.init(cli_20, 2, false)) {
 		std::cerr << "Failed to connect DM2J_RS570 controller 2." << std::endl;
 		return 1;
 	}
-	if (!drv_3.init(cli_20, 3, false)) {
+	if (drv_3.init(cli_20, 3, false)) {
 		std::cerr << "Failed to connect DM2J_RS570 controller 3." << std::endl;
 		return 1;
 	}
-	if (!drv_4.init(cli_20, 4, false)) {
+	if (drv_4.init(cli_20, 4, false)) {
 		std::cerr << "Failed to connect DM2J_RS570 controller 4." << std::endl;
 		return 1;
 	}
@@ -133,36 +133,36 @@ int main() {
 		return 1;
 	}
 
-	if (!meter_1.init(cli_21, 9)) {
+	if (meter_1.init(cli_21, 9)) {
 		std::cerr << "Failed to connect pressure meter 1." << std::endl;
 		return 1;
 	}
-	if (!meter_2.init(cli_21, 10)) {
+	if (meter_2.init(cli_21, 10)) {
 		std::cerr << "Failed to connect pressure meter 2." << std::endl;
 		return 1;
 	}
-	if (!meter_3.init(cli_21, 11)) {
+	if (meter_3.init(cli_21, 11)) {
 		std::cerr << "Failed to connect pressure meter 3." << std::endl;
 		return 1;
 	}
-	if (!meter_4.init(cli_21, 12)) {
+	if (meter_4.init(cli_21, 12)) {
 		std::cerr << "Failed to connect pressure meter 4." << std::endl;
 		return 1;
 	}
-	if (!meter_5.init(cli_21, 13)) {
+	if (meter_5.init(cli_21, 13)) {
 		std::cerr << "Failed to connect pressure meter 5." << std::endl;
 		return 1;
 	}
-	if (!meter_6.init(cli_21, 14)) {
+	if (meter_6.init(cli_21, 14)) {
 		std::cerr << "Failed to connect pressure meter 6." << std::endl;
 		return 1;
 	}
-	if (!meter_7.init(cli_21, 15)) {
+	if (meter_7.init(cli_21, 15)) {
 		std::cerr << "Failed to connect pressure meter 7." << std::endl;
 		return 1;
 	}
 
-	if (!relay.init(cli_21, 1)) {
+	if (relay.init(cli_21, 1)) {
 		std::cerr << "Failed to connect relay controller." << std::endl;
 		return 1;
 	}
@@ -214,18 +214,18 @@ int main() {
 		else if (cmd == "move1 get pos") {
 			double a = 0;
 			drv_1.read_position_cm(a);
-			std::cout << "·í«e¦ì¸m: " << a << " cm" << std::endl;
+			std::cout << "ï¿½ï¿½ï¿½eï¿½ï¿½m: " << a << " cm" << std::endl;
 		}
 		else if (cmd == "move1 set zero") {
 			drv_1.home_set_current_pos_zero();
 		}
-		else if (cmd.rfind("move1", 0) == 0) {  // §PÂ_¬O§_¥H "move" ¶}ÀY
+		else if (cmd.rfind("move1", 0) == 0) {  // ï¿½Pï¿½_ï¿½Oï¿½_ï¿½H "move" ï¿½}ï¿½Y
 			std::stringstream ss(cmd);
 			std::string keyword;
 			int rpm = 0, cm = 0;
 
-			ss >> keyword;   // Åª¥X "move"
-			ss >> rpm >> cm; // Åª¥X¨â­Ó¼Æ¦r
+			ss >> keyword;   // Åªï¿½X "move"
+			ss >> rpm >> cm; // Åªï¿½Xï¿½ï¿½Ó¼Æ¦r
 
 			if (ss.fail()) {
 				std::cout << "Usage: move <rpm> <cm>" << std::endl;
@@ -239,18 +239,18 @@ int main() {
 		else if (cmd == "move2 get pos") {
 			double a = 0;
 			drv_2.read_position_cm(a);
-			std::cout << "·í«e¦ì¸m: " << a << " cm" << std::endl;
+			std::cout << "ï¿½ï¿½ï¿½eï¿½ï¿½m: " << a << " cm" << std::endl;
 		}
 		else if (cmd == "move2 set zero") {
 			drv_2.home_set_current_pos_zero();
 		}
-		else if (cmd.rfind("move2", 0) == 0) {  // §PÂ_¬O§_¥H "move" ¶}ÀY
+		else if (cmd.rfind("move2", 0) == 0) {  // ï¿½Pï¿½_ï¿½Oï¿½_ï¿½H "move" ï¿½}ï¿½Y
 			std::stringstream ss(cmd);
 			std::string keyword;
 			int rpm = 0, cm = 0;
 
-			ss >> keyword;   // Åª¥X "move"
-			ss >> rpm >> cm; // Åª¥X¨â­Ó¼Æ¦r
+			ss >> keyword;   // Åªï¿½X "move"
+			ss >> rpm >> cm; // Åªï¿½Xï¿½ï¿½Ó¼Æ¦r
 
 			if (ss.fail()) {
 				std::cout << "Usage: move <rpm> <cm>" << std::endl;
@@ -264,18 +264,18 @@ int main() {
 		else if (cmd == "move3 get pos") {
 			double a = 0;
 			drv_3.read_position_cm(a);
-			std::cout << "·í«e¦ì¸m: " << a << " cm" << std::endl;
+			std::cout << "ï¿½ï¿½ï¿½eï¿½ï¿½m: " << a << " cm" << std::endl;
 		}
 		else if (cmd == "move3 set zero") {
 			drv_3.home_set_current_pos_zero();
 		}
-		else if (cmd.rfind("move3", 0) == 0) {  // §PÂ_¬O§_¥H "move" ¶}ÀY
+		else if (cmd.rfind("move3", 0) == 0) {  // ï¿½Pï¿½_ï¿½Oï¿½_ï¿½H "move" ï¿½}ï¿½Y
 			std::stringstream ss(cmd);
 			std::string keyword;
 			int rpm = 0, cm = 0;
 
-			ss >> keyword;   // Åª¥X "move"
-			ss >> rpm >> cm; // Åª¥X¨â­Ó¼Æ¦r
+			ss >> keyword;   // Åªï¿½X "move"
+			ss >> rpm >> cm; // Åªï¿½Xï¿½ï¿½Ó¼Æ¦r
 
 			if (ss.fail()) {
 				std::cout << "Usage: move <rpm> <cm>" << std::endl;
@@ -289,18 +289,18 @@ int main() {
 		else if (cmd == "move4 get pos") {
 			double a = 0;
 			drv_4.read_position_cm(a);
-			std::cout << "·í«e¦ì¸m: " << a << " cm" << std::endl;
+			std::cout << "ï¿½ï¿½ï¿½eï¿½ï¿½m: " << a << " cm" << std::endl;
 		}
 		else if (cmd == "move4 set zero") {
 			drv_4.home_set_current_pos_zero();
 		}
-		else if (cmd.rfind("move4", 0) == 0) {  // §PÂ_¬O§_¥H "move" ¶}ÀY
+		else if (cmd.rfind("move4", 0) == 0) {  // ï¿½Pï¿½_ï¿½Oï¿½_ï¿½H "move" ï¿½}ï¿½Y
 			std::stringstream ss(cmd);
 			std::string keyword;
 			int rpm = 0, cm = 0;
 
-			ss >> keyword;   // Åª¥X "move"
-			ss >> rpm >> cm; // Åª¥X¨â­Ó¼Æ¦r
+			ss >> keyword;   // Åªï¿½X "move"
+			ss >> rpm >> cm; // Åªï¿½Xï¿½ï¿½Ó¼Æ¦r
 
 			if (ss.fail()) {
 				std::cout << "Usage: move <rpm> <cm>" << std::endl;
@@ -322,8 +322,8 @@ int main() {
 
 			double pressure = val ;
 			double pressure2 = val2 ;
-			std::cout << "\rÀ£¤O: " << std::fixed << std::setprecision(1) << std::setw(6) << pressure << " kPa" << std::endl;
-			std::cout << "\rÀ£¤O: " << std::fixed << std::setprecision(1) << std::setw(6) << pressure2 << " kPa" << std::endl;
+			std::cout << "\rï¿½ï¿½ï¿½O: " << std::fixed << std::setprecision(1) << std::setw(6) << pressure << " kPa" << std::endl;
+			std::cout << "\rï¿½ï¿½ï¿½O: " << std::fixed << std::setprecision(1) << std::setw(6) << pressure2 << " kPa" << std::endl;
 
 			std::cerr << "M1 test." << std::endl;
 		}
@@ -360,11 +360,11 @@ int main() {
 		}
 
 		// ---------------------------------------------
-		// ³B²z "set process up X"
+		// ï¿½Bï¿½z "set process up X"
 		// ---------------------------------------------
 		else if (cmd.rfind("downsync", 0) == 0) {
 
-			int x = -1;  // ¥Î¨ÓÀx¦s X
+			int x = -1;  // ï¿½Î¨ï¿½ï¿½xï¿½s X
 			std::istringstream iss(cmd);
 
 			std::string t1;
@@ -372,7 +372,7 @@ int main() {
 			// t1 = set
 			// t2 = process
 			// t3 = up
-			// x  = ¼Æ¦r
+			// x  = ï¿½Æ¦r
 
 			if (x < 0) {
 				std::cout << "Usage: set process up <number>" << std::endl;
@@ -383,7 +383,7 @@ int main() {
 
 			x = x * -1;
 			// ------------------------
-			//   ¶}©l°õ¦æ¬yµ{
+			//   ï¿½}ï¿½lï¿½ï¿½ï¿½ï¿½yï¿½{
 			// ------------------------
 			//Right move
 			doLeftVacuumDisable();
@@ -394,24 +394,24 @@ int main() {
 			while (true) {
 				doMove_sync(700, x);
 				if (askPositionOK(x)) {
-					std::cout << "¦ì¸m½T»{§¹¦¨\n";
+					std::cout << "ï¿½ï¿½mï¿½Tï¿½{ï¿½ï¿½ï¿½ï¿½\n";
 					break;
 				}
 
-				x = askNewX()*-1;   // ­«·s¨ú±o¨Ï¥ÎªÌ¿é¤J
+				x = askNewX()*-1;   // ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½oï¿½Ï¥ÎªÌ¿ï¿½J
 			}
 			waitEnter();
 			doLeftVacuumEnable();
 			doRightVacuumEnable();
 			while (true) {
 				if (askPositionOK(x)) {
-					std::cout << "¦ì¸m½T»{§¹¦¨\n";
+					std::cout << "ï¿½ï¿½mï¿½Tï¿½{ï¿½ï¿½ï¿½ï¿½\n";
 					break;
 				}
 				doLeftVacuumDisable();
 				Sleep(200);
 				doRightVacuumDisable();
-				x = askNewX()*-1;   // ­«·s¨ú±o¨Ï¥ÎªÌ¿é¤J
+				x = askNewX()*-1;   // ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½oï¿½Ï¥ÎªÌ¿ï¿½J
 				doMove_sync(700, x);
 				doLeftVacuumEnable();
 				doRightVacuumEnable();
@@ -430,7 +430,7 @@ int main() {
 
 		else if (cmd.rfind("up", 0) == 0) {
 
-			int x = -1;  // ¥Î¨ÓÀx¦s X
+			int x = -1;  // ï¿½Î¨ï¿½ï¿½xï¿½s X
 			std::istringstream iss(cmd);
 
 			std::string t1;
@@ -438,7 +438,7 @@ int main() {
 			// t1 = set
 			// t2 = process
 			// t3 = up
-			// x  = ¼Æ¦r
+			// x  = ï¿½Æ¦r
 
 			if (x < 0) {
 				std::cout << "Usage: set process up <number>" << std::endl;
@@ -449,7 +449,7 @@ int main() {
 
 			x = x * -1;
 			// ------------------------
-			//   ¶}©l°õ¦æ¬yµ{
+			//   ï¿½}ï¿½lï¿½ï¿½ï¿½ï¿½yï¿½{
 			// ------------------------
 			//Right move
 			doRightVacuumDisable();
@@ -459,21 +459,21 @@ int main() {
 				doMove_2(700, x);
 
 				if (askPositionOK(x)) {
-					std::cout << "¦ì¸m½T»{§¹¦¨\n";
+					std::cout << "ï¿½ï¿½mï¿½Tï¿½{ï¿½ï¿½ï¿½ï¿½\n";
 					break;
 				}
 
-				x = askNewX()*-1;   // ­«·s¨ú±o¨Ï¥ÎªÌ¿é¤J
+				x = askNewX()*-1;   // ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½oï¿½Ï¥ÎªÌ¿ï¿½J
 			}
 			waitEnter();
 			doRightVacuumEnable();
 			while (true) {
 				if (askPositionOK(x)) {
-					std::cout << "¦ì¸m½T»{§¹¦¨\n";
+					std::cout << "ï¿½ï¿½mï¿½Tï¿½{ï¿½ï¿½ï¿½ï¿½\n";
 					break;
 				}
 				doRightVacuumDisable();
-				x = askNewX()*-1;   // ­«·s¨ú±o¨Ï¥ÎªÌ¿é¤J
+				x = askNewX()*-1;   // ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½oï¿½Ï¥ÎªÌ¿ï¿½J
 				doMove_2(700, x);
 				doRightVacuumEnable();
 			}
@@ -486,21 +486,21 @@ int main() {
 			while (true) {
 				doMove_3(700, x);
 				if (askPositionOK(x)) {
-					std::cout << "¦ì¸m½T»{§¹¦¨\n";
+					std::cout << "ï¿½ï¿½mï¿½Tï¿½{ï¿½ï¿½ï¿½ï¿½\n";
 					break;
 				}
-				x = askNewX()*-1;   // ­«·s¨ú±o¨Ï¥ÎªÌ¿é¤J
+				x = askNewX()*-1;   // ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½oï¿½Ï¥ÎªÌ¿ï¿½J
 			}
 			waitEnter();
 			doLeftVacuumEnable();
 
 			while (true) {
 				if (askPositionOK(x)) {
-					std::cout << "¦ì¸m½T»{§¹¦¨\n";
+					std::cout << "ï¿½ï¿½mï¿½Tï¿½{ï¿½ï¿½ï¿½ï¿½\n";
 					break;
 				}
 				doLeftVacuumDisable();
-				x = askNewX()*-1;   // ­«·s¨ú±o¨Ï¥ÎªÌ¿é¤J
+				x = askNewX()*-1;   // ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½oï¿½Ï¥ÎªÌ¿ï¿½J
 				doMove_3(700, x);
 				doLeftVacuumEnable();
 			}
@@ -516,7 +516,7 @@ int main() {
 		}
 		else if (cmd.rfind("down", 0) == 0) {
 
-			int x = -1;  // ¥Î¨ÓÀx¦s X
+			int x = -1;  // ï¿½Î¨ï¿½ï¿½xï¿½s X
 			std::istringstream iss(cmd);
 
 			std::string t1;
@@ -524,7 +524,7 @@ int main() {
 			// t1 = set
 			// t2 = process
 			// t3 = up
-			// x  = ¼Æ¦r
+			// x  = ï¿½Æ¦r
 
 			if (x < 0) {
 				std::cout << "Usage: set process up <number>" << std::endl;
@@ -535,7 +535,7 @@ int main() {
 
 
 			// ------------------------
-			//   ¶}©l°õ¦æ¬yµ{
+			//   ï¿½}ï¿½lï¿½ï¿½ï¿½ï¿½yï¿½{
 			// ------------------------
 			//center move
 			doCenterVacuumDisable();
@@ -555,21 +555,21 @@ int main() {
 				doMove_2(700, 0);
 
 				if (askPositionOK(x)) {
-					std::cout << "¦ì¸m½T»{§¹¦¨\n";
+					std::cout << "ï¿½ï¿½mï¿½Tï¿½{ï¿½ï¿½ï¿½ï¿½\n";
 					break;
 				}
 
-				x = askNewX()*-1;   // ­«·s¨ú±o¨Ï¥ÎªÌ¿é¤J
+				x = askNewX()*-1;   // ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½oï¿½Ï¥ÎªÌ¿ï¿½J
 			}
 			waitEnter();
 			doRightVacuumEnable();
 			while (true) {
 				if (askPositionOK(x)) {
-					std::cout << "¦ì¸m½T»{§¹¦¨\n";
+					std::cout << "ï¿½ï¿½mï¿½Tï¿½{ï¿½ï¿½ï¿½ï¿½\n";
 					break;
 				}
 				doRightVacuumDisable();
-				x = askNewX()*-1;   // ­«·s¨ú±o¨Ï¥ÎªÌ¿é¤J
+				x = askNewX()*-1;   // ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½oï¿½Ï¥ÎªÌ¿ï¿½J
 				doMove_2(700, x);
 				doRightVacuumEnable();
 			}
@@ -583,21 +583,21 @@ int main() {
 			while (true) {
 				doMove_3(700, 0);
 				if (askPositionOK(x)) {
-					std::cout << "¦ì¸m½T»{§¹¦¨\n";
+					std::cout << "ï¿½ï¿½mï¿½Tï¿½{ï¿½ï¿½ï¿½ï¿½\n";
 					break;
 				}
-				x = askNewX()*-1;   // ­«·s¨ú±o¨Ï¥ÎªÌ¿é¤J
+				x = askNewX()*-1;   // ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½oï¿½Ï¥ÎªÌ¿ï¿½J
 			}
 			waitEnter();
 			doLeftVacuumEnable();
 
 			while (true) {
 				if (askPositionOK(x)) {
-					std::cout << "¦ì¸m½T»{§¹¦¨\n";
+					std::cout << "ï¿½ï¿½mï¿½Tï¿½{ï¿½ï¿½ï¿½ï¿½\n";
 					break;
 				}
 				doLeftVacuumDisable();
-				x = askNewX()*-1;   // ­«·s¨ú±o¨Ï¥ÎªÌ¿é¤J
+				x = askNewX()*-1;   // ï¿½ï¿½ï¿½sï¿½ï¿½ï¿½oï¿½Ï¥ÎªÌ¿ï¿½J
 				doMove_3(700, x);
 				doLeftVacuumEnable();
 			}
@@ -619,7 +619,7 @@ void waitEnter() {
 	std::cin.get();
 }
 
-// ---------------------- °Æµ{¦¡°Ï ----------------------
+// ---------------------- ï¿½Æµ{ï¿½ï¿½ï¿½ï¿½ ----------------------
 void doInit() {
 	relay.controlRelay(vacuum_valve_left, false);
 	relay.controlRelay(vacuum_valve_right, false);
@@ -846,20 +846,20 @@ void doWashDisable() {
 bool askPositionOK(int x)
 {
 	while (true) {
-		std::cout << "¥Ø«e¦ì¸m x = " << x << " ¬O§_¥¿½T¡H (y/n): ";
+		std::cout << "ï¿½Ø«eï¿½ï¿½m x = " << x << " ï¿½Oï¿½_ï¿½ï¿½ï¿½Tï¿½H (y/n): ";
 		std::string ans;
 		std::cin >> ans;
 
 		if (ans == "y" || ans == "Y") return true;
 		if (ans == "n" || ans == "N") return false;
 
-		std::cout << "½Ð¿é¤J y ©Î n\n";
+		std::cout << "ï¿½Ð¿ï¿½J y ï¿½ï¿½ n\n";
 	}
 }
 int askNewX()
 {
 	int newX;
-	std::cout << "½Ð¿é¤J·sªº x ­È: ";
+	std::cout << "ï¿½Ð¿ï¿½Jï¿½sï¿½ï¿½ x ï¿½ï¿½: ";
 	std::cin >> newX;
 	return newX;
 }

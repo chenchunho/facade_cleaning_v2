@@ -103,6 +103,7 @@ public:
 
 private:
 	TCP_client *client;
+	bool owns_client = false;
 
 	int relay_count = 16;
 	bool debug_mode = true;

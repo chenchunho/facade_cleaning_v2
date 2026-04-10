@@ -22,11 +22,11 @@ bool SD76_length_meters::init(const std::string& ip, int port, int id, bool debu
 	owns = true;
 
 	if (!client->connectToServer(ip, port))
-		return false;
+		return true;
 
 	deviceID = id;
 	debugPrint = debug;
-	return true;
+	return false;
 }
 
 bool SD76_length_meters::init(TCP_client& extClient, int id, bool debug)
@@ -35,7 +35,7 @@ bool SD76_length_meters::init(TCP_client& extClient, int id, bool debug)
 	owns = false;
 	deviceID = id;
 	debugPrint = debug;
-	return true;
+	return false;
 }
 
 //
@@ -66,7 +66,7 @@ bool SD76_length_meters::sendModbus(const uint8_t* req, int reqLen,
 	}
 
 	if (!client->sendData((const char*)req, reqLen, 200))
-		return false;
+		return true;
 
 	respLen = client->receiveData((char*)resp, 256, 300);
 
@@ -76,7 +76,7 @@ bool SD76_length_meters::sendModbus(const uint8_t* req, int reqLen,
 		printf("\n");
 	}
 
-	return respLen > 0;
+	return respLen <= 0;
 }
 
 //
@@ -100,11 +100,11 @@ bool SD76_length_meters::readRegister(uint16_t addr, uint16_t count, uint8_t* ra
 	uint8_t resp[256];
 	int respLen = 0;
 
-	if (!sendModbus(req, 8, resp, respLen))
-		return false;
+	if (sendModbus(req, 8, resp, respLen))
+		return true;
 
-	if (respLen < 5) return false;
-	if (resp[1] != 0x03) return false;
+	if (respLen < 5) return true;
+	if (resp[1] != 0x03) return true;
 
 	int byteCount = resp[2];
 	memcpy(raw, &resp[3], byteCount);
@@ -115,7 +115,7 @@ bool SD76_length_meters::readRegister(uint16_t addr, uint16_t count, uint8_t* ra
 		printf("\n");
 	}
 
-	return true;
+	return false;
 }
 
 //
@@ -146,11 +146,11 @@ bool SD76_length_meters::readUpperDisplayValue(int& value)
 {
 	uint8_t raw[4];
 
-	if (!readRegister(0x0001, 2, raw))
-		return false;
+	if (readRegister(0x0001, 2, raw))
+		return true;
 
 	value = decodeSignedBCD6(raw);
-	return true;
+	return false;
 }
 
 //
@@ -160,13 +160,13 @@ bool SD76_length_meters::readUpperLowerDisplayValue(int& upper, int& lower)
 {
 	uint8_t raw[8];
 
-	if (!readRegister(0x0001, 4, raw))
-		return false;
+	if (readRegister(0x0001, 4, raw))
+		return true;
 
 	upper = decodeSignedBCD6(&raw[0]);
 	lower = decodeSignedBCD6(&raw[4]);
 
-	return true;
+	return false;
 }
 
 //
@@ -198,8 +198,5 @@ bool SD76_length_meters::writeSingleRegister(uint16_t addr, uint16_t value)
 	uint8_t resp[256];
 	int respLen = 0;
 
-	if (!sendModbus(req, 8, resp, respLen))
-		return false;
-
-	return true;
+	return sendModbus(req, 8, resp, respLen);
 }

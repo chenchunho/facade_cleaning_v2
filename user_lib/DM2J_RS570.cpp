@@ -37,10 +37,10 @@ bool DM2J_RS570::init(const std::string& ip, int port, int ID, bool debug)
 
 	client = new TCP_client();
 	if (!client->connectToServer(ip, port))
-		return false;
+		return true;
 
 	useExternalClient = false;
-	return true;
+	return false;
 }
 
 bool DM2J_RS570::init(TCP_client& extClient, int ID, bool debug)
@@ -49,7 +49,7 @@ bool DM2J_RS570::init(TCP_client& extClient, int ID, bool debug)
 	useExternalClient = true;
 	debugEnabled = debug;
 	slaveID = ID;
-	return true;
+	return false;
 }
 
 // ======================================================================
@@ -123,12 +123,12 @@ void DM2J_RS570::PR_trigger_sync(int pr_num)
 bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec)
 {
 	uint16_t ppr = 10000;
-	if (!read_pulse_per_rev(ppr) || ppr == 0)
+	if (read_pulse_per_rev(ppr) || ppr == 0)
 	{
 		printf("Error: PPR read failed.\n");
-		return false;
+		return true;
 	}
-	
+
 	int pos_pulse = (int)(pos_cm * ppr);
 
 	if (debugEnabled)
@@ -136,7 +136,7 @@ bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int ac
 
 	PR_move_set(pr_num, mode, rpm, pos_pulse, acc, dec);
 	PR_trigger(pr_num);
-	
+
 	// ---------------------------------------------------------
 	// 等待 CMD_DONE + PATH_DONE
 	// ---------------------------------------------------------
@@ -147,10 +147,10 @@ bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int ac
 
 	while (elapsed < timeout_ms)
 	{
-		if (!read_status(st))
+		if (read_status(st))
 		{
 			printf("Read status failed!\n");
-			return false;
+			return true;
 		}
 
 		bool cmd_done  = st & 0x0010;
@@ -166,14 +166,14 @@ bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int ac
 		if (fault)
 		{
 			printf("[PR] Fault detected.\n");
-			return false;
+			return true;
 		}
 
 		if (cmd_done && path_done)
 		{
 			if (debugEnabled)
 				printf("[PR] Motion Completed\n");
-			return true;
+			return false;
 		}
 
 		std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -182,7 +182,7 @@ bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int ac
 	}
 
 	printf("[PR] Timeout waiting motion done.\n");
-	return false;
+	return true;
 }
 
 bool DM2J_RS570::PR_move_cm_nowait(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec)
@@ -202,7 +202,7 @@ bool DM2J_RS570::PR_move_cm_nowait(int pr_num, int mode, int rpm, double pos_cm,
 
 	PR_move_set(pr_num, mode, rpm, pos_pulse, acc, dec);
 	PR_trigger(pr_num);
-	return true;
+	return false;
 }
 
 bool DM2J_RS570::PR_move_cm_set(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec)
@@ -221,7 +221,7 @@ bool DM2J_RS570::PR_move_cm_set(int pr_num, int mode, int rpm, double pos_cm, in
 			pos_cm, pos_pulse, ppr);
 
 	PR_move_set(pr_num, mode, rpm, pos_pulse, acc, dec);
-	return true;
+	return false;
 }
 
 bool DM2J_RS570::PR_move_cm_trigger_all(int pr_num)
@@ -229,8 +229,8 @@ bool DM2J_RS570::PR_move_cm_trigger_all(int pr_num)
 	PR_trigger_sync(pr_num);
 
 	// ---------------------------------------------------------
-// 等待 CMD_DONE + PATH_DONE
-// ---------------------------------------------------------
+	// 等待 CMD_DONE + PATH_DONE
+	// ---------------------------------------------------------
 	const int timeout_ms = 10000;
 	int elapsed = 0;
 
@@ -238,10 +238,10 @@ bool DM2J_RS570::PR_move_cm_trigger_all(int pr_num)
 	{
 		uint16_t st = 0;
 
-		if (!read_status(st))
+		if (read_status(st))
 		{
 			printf("Read status failed!\n");
-			return false;
+			return true;
 		}
 
 		if (debugEnabled)
@@ -257,14 +257,14 @@ bool DM2J_RS570::PR_move_cm_trigger_all(int pr_num)
 		if (fault)
 		{
 			printf("[PR] Fault detected.\n");
-			return false;
+			return true;
 		}
 
 		if (cmd_done && path_done)
 		{
 			if (debugEnabled)
 				printf("[PR] Motion Completed\n");
-			return true;
+			return false;
 		}
 
 		std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -273,7 +273,7 @@ bool DM2J_RS570::PR_move_cm_trigger_all(int pr_num)
 	}
 
 	printf("[PR] Timeout waiting motion done.\n");
-	return false;
+	return true;
 }
 
 
@@ -378,11 +378,11 @@ bool DM2J_RS570::read_version(uint16_t& ver1, uint16_t& ver2)
 
 	uint8_t rx[32];
 	int len = client->receiveData((char*)rx, 32, 200);
-	if (len < 9) return false;
+	if (len < 9) return true;
 
 	ver1 = (rx[3] << 8) | rx[4];
 	ver2 = (rx[5] << 8) | rx[6];
-	return true;
+	return false;
 }
 
 // ======================================================================
@@ -412,11 +412,11 @@ bool DM2J_RS570::read_status(uint16_t& status)
 	}
 
 	client->sendData((char*)tx, 8, 200);
-	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
 	uint8_t rx[32] = { 0 };
 	int len = client->receiveData((char*)rx, 32, 200);
 
-	if (len < 7) return false;
+	if (len < 7) return true;
 
 	if (debugEnabled)
 	{
@@ -426,7 +426,7 @@ bool DM2J_RS570::read_status(uint16_t& status)
 	}
 
 	status = (rx[3] << 8) | rx[4];
-	return true;
+	return false;
 }
 
 void DM2J_RS570::print_status(uint16_t status)
@@ -473,7 +473,7 @@ bool DM2J_RS570::read_motor_position(int32_t& pos)
 
 	uint8_t rx[32];
 	int len = client->receiveData((char*)rx, 32, 200);
-	if (len < 9) return false;
+	if (len < 9) return true;
 
 	if (debugEnabled)
 	{
@@ -486,7 +486,7 @@ bool DM2J_RS570::read_motor_position(int32_t& pos)
 	uint16_t lo = (rx[5] << 8) | rx[6];
 
 	pos = (int32_t)((hi << 16) | lo);
-	return true;
+	return false;
 }
 
 // ======================================================================
@@ -519,8 +519,7 @@ bool DM2J_RS570::read_pulse_per_rev(uint16_t& ppr)
 	std::this_thread::sleep_for(std::chrono::milliseconds(200));
 	uint8_t rx[32];
 	int len = client->receiveData((char*)rx, 32, 200);
-	std::this_thread::sleep_for(std::chrono::milliseconds(200));
-	if (len < 7) return false;
+	if (len < 7) return true;
 
 	if (debugEnabled)
 	{
@@ -530,7 +529,7 @@ bool DM2J_RS570::read_pulse_per_rev(uint16_t& ppr)
 	}
 
 	ppr = (rx[3] << 8) | rx[4];
-	return true;
+	return false;
 }
 
 // ======================================================================
@@ -542,11 +541,11 @@ bool DM2J_RS570::read_position_cm(double& cm)
 	int32_t pos = 0;
 	uint16_t ppr = 0;
 
-	if (!read_motor_position(pos)) return false;
-	if (!read_pulse_per_rev(ppr) || ppr == 0) return false;
+	if (read_motor_position(pos)) return true;
+	if (read_pulse_per_rev(ppr) || ppr == 0) return true;
 
 	cm = (double)pos / (double)ppr;
-	return true;
+	return false;
 }
 
 // ======================================================================
@@ -577,8 +576,7 @@ bool DM2J_RS570::writeSingle(uint16_t reg, uint16_t value)
 
 	std::vector<uint8_t> tx(frame, frame + 8);
 	std::vector<uint8_t> rx;
-	int err = sendRecv(tx, rx);
-	return err;
+	return sendRecv(tx, rx);
 }
 bool DM2J_RS570::writeSingle_sync(uint16_t reg, uint16_t value)
 {
@@ -604,8 +602,7 @@ bool DM2J_RS570::writeSingle_sync(uint16_t reg, uint16_t value)
 
 	std::vector<uint8_t> tx(frame, frame + 8);
 	std::vector<uint8_t> rx;
-	int err = sendRecv(tx, rx);
-	return err;
+	return sendRecv(tx, rx);
 }
 
 // ======================================================================
@@ -645,20 +642,20 @@ bool DM2J_RS570::writeMulti(uint16_t startReg, const std::vector<uint16_t>& data
 	}
 
 	std::vector<uint8_t> rx;
-	bool success = sendRecv(tx, rx);
+	bool err = sendRecv(tx, rx);
 
 	// --- 新增 RX Debug Log ---
-	if (debugEnabled && success)
+	if (debugEnabled && !err)
 	{
 		printf("[RX Multi] ");
 		for (int i = 0; i < rx.size(); i++) printf("%02X ", rx[i]);
 		printf("\n");
 	}
-	else if (debugEnabled && !success)
+	else if (debugEnabled && err)
 	{
 		printf("[RX Multi] Failed to receive response.\n");
 	}
-	return success;
+	return err;
 }
 
 // ======================================================================
@@ -667,17 +664,17 @@ bool DM2J_RS570::writeMulti(uint16_t startReg, const std::vector<uint16_t>& data
 
 bool DM2J_RS570::sendRecv(const std::vector<uint8_t>& tx, std::vector<uint8_t>& rx)
 {
-	if (!client) return false;
+	if (!client) return true;
 
 	if (!client->sendData((const char*)tx.data(), tx.size(), 50))
-		return false;
+		return true;
 
 	uint8_t buf[256] = { 0 };
 	int r = client->receiveData((char*)buf, sizeof(buf), 50);
-	if (r <= 0) return false;
+	if (r <= 0) return true;
 
 	rx.assign(buf, buf + r);
-	return true;
+	return false;
 }
 
 // ======================================================================
