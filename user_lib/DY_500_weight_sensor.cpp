@@ -43,17 +43,16 @@ bool DY_500_weight_sensor::init(const std::string& ip, int port, int ID, bool de
 	slaveID = (uint8_t)ID;
 	debugMode = debug;
 	client = &ownedClient;
-	return client->connectToServer(ip, port);
+	return !client->connectToServer(ip, port);
 }
 
 bool DY_500_weight_sensor::init(TCP_client& extClient, int ID, bool debug)
 {
-	// 把外部 TCP_client 複製到內部（若 TCP_client 是安全的）
 	this->client = &extClient;
 	this->slaveID = (uint8_t)ID;
 	this->debugMode = debug;
 
-	return true;
+	return false;
 }
 
 
@@ -143,11 +142,11 @@ bool DY_500_weight_sensor::modbus_read(uint16_t addr, uint16_t quantity,
 	}
 
 	if (!client->sendData((char*)req, 8, 100))
-		return false;
+		return true;
 
 	char buf[128];
 	int n = client->receiveData(buf, sizeof(buf), 400);
-	if (n < 7) return false;
+	if (n < 7) return true;
 
 	if (debugMode) {
 		printf("RX: ");
@@ -158,7 +157,7 @@ bool DY_500_weight_sensor::modbus_read(uint16_t addr, uint16_t quantity,
 
 	memcpy(rx, buf, n);
 	rxLen = n;
-	return true;
+	return false;
 }
 
 /**************************************************
@@ -199,11 +198,11 @@ bool DY_500_weight_sensor::modbus_write_long(uint16_t addr, int32_t value)
 	}
 
 	if (!client->sendData((char*)req, sizeof(req), 100))
-		return false;
+		return true;
 
 	char buf[32];
 	int n = client->receiveData(buf, sizeof(buf), 300);
-	return n >= 8;
+	return n < 8;
 }
 
 /**************************************************
@@ -230,17 +229,17 @@ bool DY_500_weight_sensor::read_reg_long(uint16_t addr, int32_t& out)
 		uint8_t buf[64];
 		int len;
 
-		if (modbus_read(addr, 2, buf, len))
+		if (!modbus_read(addr, 2, buf, len))
 		{
 			out = parse_long(&buf[3], 0);
 			Sleep(8);   // 給儀表一點休息時間
-			return true;
+			return false;
 		}
 
 		Sleep(8);
 	}
 
-	return false;
+	return true;
 }
 
 /**************************************************
@@ -264,7 +263,7 @@ bool DY_500_weight_sensor::get_weight_float(float& outValue)
 	bool hasError = false;
 
 	// 1. 讀取資料 (FLOAT 地址 0x9CA4, 2 registers)
-	if (!modbus_read(0x9CA4, 2, buf, len) || len < 7)
+	if (modbus_read(0x9CA4, 2, buf, len) || len < 7)
 	{
 		hasError = true;
 	}
@@ -295,7 +294,7 @@ bool DY_500_weight_sensor::get_weight_float(float& outValue)
 			lastValidWeight = fValue;
 			outValue = fValue;
 			weightErrorCount = 0;
-			return true;               // 成功
+			return false;              // 成功
 		}
 	}
 
@@ -306,12 +305,12 @@ bool DY_500_weight_sensor::get_weight_float(float& outValue)
 	// 使用上一筆有效值
 	outValue = lastValidWeight;
 
-	// 連續錯誤未達門檻，仍回傳 true（使用上次有效值）
+	// 連續錯誤未達門檻，仍回傳 false（使用上次有效值）
 	if (weightErrorCount < ERROR_THRESHOLD) {
-		return true;
+		return false;
 	}
 
-	return false;                      // 連續錯誤 >= 門檻，確認異常
+	return true;                       // 連續錯誤 >= 門檻，確認異常
 }
 
 
@@ -322,11 +321,11 @@ bool DY_500_weight_sensor::get_weight_float(float& outValue)
 bool DY_500_weight_sensor::get_decimal_point(int& dp)
 {
 	int32_t val;
-	if (!read_reg_long(0x9C64, val))
-		return false;
+	if (read_reg_long(0x9C64, val))
+		return true;
 
 	dp = (int)val;
-	return true;
+	return false;
 }
 
 /**************************************************
@@ -347,11 +346,11 @@ bool DY_500_weight_sensor::do_clear()
 	req[12] = crc >> 8;
 
 	if (!client->sendData((char*)req, sizeof(req), 100))
-		return false;
+		return true;
 
 	char buf[32];
 	int n = client->receiveData(buf, sizeof(buf), 200);
-	return n >= 8;
+	return n < 8;
 }
 
 /**************************************************
@@ -359,45 +358,45 @@ bool DY_500_weight_sensor::do_clear()
  **************************************************/
 bool DY_500_weight_sensor::read_all_parm()
 {
-	bool ok = true;
+	bool err = false;
 
-	ok &= read_reg_long(0x9C40, reg.weight);
-	ok &= read_reg_long(0x9C42, reg.adc_value);
-	ok &= read_reg_long(0x9C44, reg.da_value);
-	ok &= read_reg_long(0x9C46, reg.system_status);
-	ok &= read_reg_long(0x9C48, reg.multi_function);
-	ok &= read_reg_long(0x9C4A, reg.calibrate_weight);
+	err |= read_reg_long(0x9C40, reg.weight);
+	err |= read_reg_long(0x9C42, reg.adc_value);
+	err |= read_reg_long(0x9C44, reg.da_value);
+	err |= read_reg_long(0x9C46, reg.system_status);
+	err |= read_reg_long(0x9C48, reg.multi_function);
+	err |= read_reg_long(0x9C4A, reg.calibrate_weight);
 
-	ok &= read_reg_long(0x9C54, reg.power_on_zero_range);
-	ok &= read_reg_long(0x9C56, reg.stable_range);
-	ok &= read_reg_long(0x9C58, reg.stable_time);
-	ok &= read_reg_long(0x9C5A, reg.zero_track);
-	ok &= read_reg_long(0x9C5C, reg.digital_filter);
-	ok &= read_reg_long(0x9C5E, reg.auto_zero_cfg);
-	ok &= read_reg_long(0x9C60, reg.auto_zero_trigger);
-	ok &= read_reg_long(0x9C62, reg.auto_zero_delay);
-	ok &= read_reg_long(0x9C64, reg.decimal_point);
+	err |= read_reg_long(0x9C54, reg.power_on_zero_range);
+	err |= read_reg_long(0x9C56, reg.stable_range);
+	err |= read_reg_long(0x9C58, reg.stable_time);
+	err |= read_reg_long(0x9C5A, reg.zero_track);
+	err |= read_reg_long(0x9C5C, reg.digital_filter);
+	err |= read_reg_long(0x9C5E, reg.auto_zero_cfg);
+	err |= read_reg_long(0x9C60, reg.auto_zero_trigger);
+	err |= read_reg_long(0x9C62, reg.auto_zero_delay);
+	err |= read_reg_long(0x9C64, reg.decimal_point);
 
-	ok &= read_reg_long(0x9C68, reg.rated_output);
-	ok &= read_reg_long(0x9C6A, reg.sample_speed);
-	ok &= read_reg_long(0x9C6E, reg.protocol_mode);
-	ok &= read_reg_long(0x9C70, reg.data_format);
-	ok &= read_reg_long(0x9C72, reg.baudrate);
-	ok &= read_reg_long(0x9C74, reg.station_id);
+	err |= read_reg_long(0x9C68, reg.rated_output);
+	err |= read_reg_long(0x9C6A, reg.sample_speed);
+	err |= read_reg_long(0x9C6E, reg.protocol_mode);
+	err |= read_reg_long(0x9C70, reg.data_format);
+	err |= read_reg_long(0x9C72, reg.baudrate);
+	err |= read_reg_long(0x9C74, reg.station_id);
 
-	ok &= read_reg_long(0x9C76, reg.auto_send_interval);
-	ok &= read_reg_long(0x9C78, reg.system_zero);
-	ok &= read_reg_long(0x9C7A, reg.span_factor);
-	ok &= read_reg_long(0x9C7C, reg.sensor_sensitivity);
-	ok &= read_reg_long(0x9C7E, reg.AD0);
-	ok &= read_reg_long(0x9C80, reg.AD1);
-	ok &= read_reg_long(0x9C82, reg.sensor_range);
-	ok &= read_reg_long(0x9C84, reg.auto_calibration);
-	ok &= read_reg_long(0x9C86, reg.trans_zero);
-	ok &= read_reg_long(0x9C88, reg.trans_full);
-	ok &= read_reg_long(0x9C8A, reg.trans_start);
+	err |= read_reg_long(0x9C76, reg.auto_send_interval);
+	err |= read_reg_long(0x9C78, reg.system_zero);
+	err |= read_reg_long(0x9C7A, reg.span_factor);
+	err |= read_reg_long(0x9C7C, reg.sensor_sensitivity);
+	err |= read_reg_long(0x9C7E, reg.AD0);
+	err |= read_reg_long(0x9C80, reg.AD1);
+	err |= read_reg_long(0x9C82, reg.sensor_range);
+	err |= read_reg_long(0x9C84, reg.auto_calibration);
+	err |= read_reg_long(0x9C86, reg.trans_zero);
+	err |= read_reg_long(0x9C88, reg.trans_full);
+	err |= read_reg_long(0x9C8A, reg.trans_start);
 
-	return ok;
+	return err;
 }
 
 /**************************************************

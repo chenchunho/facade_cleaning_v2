@@ -45,7 +45,7 @@ public:
 	void jog_stop();
 	void set_jog_speed(int rpm);     // Reg 0x01E1
 	void set_jog_acc(int acc_ms);    // Reg 0x01E7
-	void set_jog_dec(int dec_ms);    // Reg 0x01E8
+	void set_jog_dec(int dec_ms);    // Reg 0x01E7 (shared with acc, Pr6.03)
 
 	// Homing
 	void home_set_mode(uint16_t mode_bits);

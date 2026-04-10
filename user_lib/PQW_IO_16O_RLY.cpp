@@ -4,10 +4,14 @@
 #include <chrono>
 #include <thread>
 
-PQW_IO_16O_RLY::PQW_IO_16O_RLY() {}
+PQW_IO_16O_RLY::PQW_IO_16O_RLY() : client(nullptr), owns_client(false) {}
 PQW_IO_16O_RLY::~PQW_IO_16O_RLY() {
-	controlAll(false);
-	client->close();
+	if (client) {
+		controlAll(false);
+		client->close();
+		if (owns_client)
+			delete client;
+	}
 }
 
 /*--------------------------------------------------------------
@@ -19,15 +23,18 @@ bool PQW_IO_16O_RLY::init(const std::string& ip, int port, int ID, int total_rel
 	debug_mode = debug;
 	slave_id = (uint8_t)ID;
 
+	client = new TCP_client();
+	owns_client = true;
+
 	if (!client->connectToServer(ip, port)) {
 		std::cout << "[ERROR] Unable to connect to " << ip << ":" << port << "\n";
-		return false;
+		return true;
 	}
 
 	if (debug_mode)
 		std::cout << "Connected to PQW-IO module. slave_id=" << (int)slave_id << "\n";
 
-	return true;
+	return false;
 }
 
 /*--------------------------------------------------------------
@@ -43,7 +50,7 @@ bool PQW_IO_16O_RLY::init(TCP_client& extClient, int ID, int total_relay, bool d
 	if (debug_mode)
 		std::cout << "PQW_IO_16O_RLY initialized with external TCP_client-> slave_id=" << (int)slave_id << "\n";
 
-	return true;
+	return false;
 }
 
 /*--------------------------------------------------------------
@@ -178,7 +185,7 @@ bool PQW_IO_16O_RLY::controlRelay(int id, bool status)
 {
 	if (id < 1 || id > 16){//relay_count) {
 		std::cout << "[ERROR] Relay ID out of range.\n";
-		return false;
+		return true;
 	}
 
 	auto cmd = buildSingleRelayCmd(id, status);
@@ -195,7 +202,7 @@ bool PQW_IO_16O_RLY::controlRelay(int id, bool status)
 	auto resp = readEcho();
 	auto states = parseReadResponse(resp);
 
-	return (states[id - 1] == status);
+	return (states[id - 1] != status);
 }
 
 /*--------------------------------------------------------------
