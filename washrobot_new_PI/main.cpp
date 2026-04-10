@@ -104,31 +104,31 @@ int main() {
 		return 1;
 	}
 
-	if (!m1.init(cli_21, 2)) {
+	if (m1.init(cli_21, 2)) {
 		std::cerr << "Failed to connect ZDT_motor_control 1." << std::endl;
 		return 1;
 	}
-	if (!m2.init(cli_21, 3)) {
+	if (m2.init(cli_21, 3)) {
 		std::cerr << "Failed to connect ZDT_motor_control 2." << std::endl;
 		return 1;
 	}
-	if (!m3.init(cli_21, 4)) {
+	if (m3.init(cli_21, 4)) {
 		std::cerr << "Failed to connect ZDT_motor_control 3." << std::endl;
 		return 1;
 	}
-	if (!m4.init(cli_21, 5)) {
+	if (m4.init(cli_21, 5)) {
 		std::cerr << "Failed to connect ZDT_motor_control 4." << std::endl;
 		return 1;
 	}
-	if (!m5.init(cli_21, 6)) {
+	if (m5.init(cli_21, 6)) {
 		std::cerr << "Failed to connect ZDT_motor_control 5." << std::endl;
 		return 1;
 	}
-	if (!m6.init(cli_21, 7)) {
+	if (m6.init(cli_21, 7)) {
 		std::cerr << "Failed to connect ZDT_motor_control 6." << std::endl;
 		return 1;
 	}
-	if (!m7.init(cli_21, 8)) {
+	if (m7.init(cli_21, 8)) {
 		std::cerr << "Failed to connect ZDT_motor_control 7." << std::endl;
 		return 1;
 	}

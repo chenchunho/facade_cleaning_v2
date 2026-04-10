@@ -22,7 +22,7 @@ bool ZDT_motor_control::init(const std::string& ip, int port, int ID, bool debug
 	is_external_client = false;
 	bool connected = client->connectToServer(ip, port);
 	if (debug_mode) std::cout << "[INIT] Connection " << (connected ? "SUCCESS" : "FAILED") << " ID: " << ID << "\n";
-	return connected;
+	return !connected;
 }
 
 bool ZDT_motor_control::init(TCP_client& extClient, int ID, bool debug) {
@@ -31,35 +31,35 @@ bool ZDT_motor_control::init(TCP_client& extClient, int ID, bool debug) {
 	this->client = &extClient;
 	is_external_client = true;
 	if (debug_mode) std::cout << "[INIT] External Client bound to ID: " << ID << "\n";
-	return true;
+	return false;
 }
 
 bool ZDT_motor_control::set_zero() {
 	auto cmd = build_write_single_register(0x000A, 0x0001);
 	if (debug_mode) printHex(cmd, "[TX set_zero]");
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 	auto resp = readEcho(200);
 	if (debug_mode) printHex(resp, "[RX set_zero]");
-	return (!resp.empty() && resp == cmd);
+	return !(resp.size() > 0 && resp == cmd);
 }
 
 bool ZDT_motor_control::calibrate_encoder() {
 	auto cmd = build_write_single_register(0x0006, 0x0001);
 	if (debug_mode) printHex(cmd, "[TX calibrate_encoder]");
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 	std::this_thread::sleep_for(std::chrono::milliseconds(500));
 	auto resp = readEcho(500);
 	if (debug_mode) printHex(resp, "[RX calibrate_encoder]");
-	return (!resp.empty() && resp == cmd);
+	return !(resp.size() > 0 && resp == cmd);
 }
 
 bool ZDT_motor_control::reset_motor() {
 	auto cmd = build_write_single_register(0x0008, 0x0001);
 	if (debug_mode) printHex(cmd, "[TX reset_motor]");
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 	auto resp = readEcho(200);
 	if (debug_mode) printHex(resp, "[RX reset_motor]");
-	return (!resp.empty() && resp == cmd);
+	return !(resp.size() > 0 && resp == cmd);
 }
 
 bool ZDT_motor_control::motion_control_driver_EN(bool status) {
@@ -72,10 +72,10 @@ bool ZDT_motor_control::motion_control_driver_EN(bool status) {
 	cmd.push_back((uint8_t)(crc >> 8));
 
 	if (debug_mode) printHex(cmd, status ? "[TX Driver EN ON]" : "[TX Driver EN OFF]");
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 	auto resp = readEcho(200);
 	if (debug_mode) printHex(resp, "[RX Driver EN]");
-	return (resp.size() == 8 && resp[1] == 0x10);
+	return !(resp.size() == 8 && resp[1] == 0x10);
 }
 
 bool ZDT_motor_control::get_system_status() {
@@ -86,13 +86,13 @@ bool ZDT_motor_control::get_system_status() {
 	cmd.push_back((uint8_t)(crc >> 8));
 
 	if (debug_mode) printHex(cmd, "[TX get_status]");
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 
 	auto resp = readEcho(300);
 	if (debug_mode) printHex(resp, "[RX get_status]");
 
 	// Emm 回應: Addr(1) + Func(1) + ByteCount(1) + Data(32) + CRC(2) = 37 bytes
-	if (resp.size() < 37) return false;
+	if (resp.size() < 37) return true;
 
 	int p = 3; // 跳過 Addr, Func, ByteCount
 	auto get_u16 = [&](int& pos) {
@@ -165,20 +165,20 @@ bool ZDT_motor_control::get_system_status() {
 	// Emm 批量讀取不包含溫度
 	this->status.temperature = 0;
 
-	return true;
+	return false;
 }
 
 bool ZDT_motor_control::wait_until_pos_reached(int timeout_ms, int poll_interval_ms) {
 	auto start = std::chrono::steady_clock::now();
 	while (true) {
-		if (get_system_status() && status.pos_reached) {
-			return true;
+		if (!get_system_status() && status.pos_reached) {
+			return false;
 		}
 		auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
 			std::chrono::steady_clock::now() - start).count();
 		if (elapsed >= timeout_ms) {
 			if (debug_mode) std::cout << "[TIMEOUT] wait_until_pos_reached: " << elapsed << " ms" << std::endl;
-			return false;
+			return true;
 		}
 		std::this_thread::sleep_for(std::chrono::milliseconds(poll_interval_ms));
 	}
@@ -190,14 +190,14 @@ bool ZDT_motor_control::release_stall_flag() {
 
 	if (debug_mode) printHex(cmd, "[TX release_stall]");
 
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 
 	auto resp = readEcho(200);
 
 	if (debug_mode) printHex(resp, "[RX release_stall]");
 
 	// 標準 Modbus 06 功能碼回應應與發送指令相同
-	return (!resp.empty() && resp == cmd);
+	return !(resp.size() > 0 && resp == cmd);
 }
 
 bool ZDT_motor_control::emergency_stop(bool sync) {
@@ -206,13 +206,13 @@ bool ZDT_motor_control::emergency_stop(bool sync) {
 	auto cmd = build_write_single_register(0x00FE, data);
 
 	if (debug_mode) printHex(cmd, "[TX emergency_stop]");
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 
 	auto resp = readEcho(200);
 	if (debug_mode) printHex(resp, "[RX emergency_stop]");
 
 	// 0x06 回應為指令回波
-	return (!resp.empty() && resp == cmd);
+	return !(resp.size() > 0 && resp == cmd);
 }
 
 bool ZDT_motor_control::motion_control_speed_mode(int dir, int acc_rpm, int rpm, int sync, int retry) {
@@ -339,7 +339,7 @@ bool ZDT_motor_control::motion_control_pos_mode(int dir, int acc_rpm, int rpm, i
 
 		if (success) {
 			// 等待移動完成
-			if (wait_until_pos_reached()) {
+			if (!wait_until_pos_reached()) {
 				return false; // no error
 			}
 			else {
@@ -445,10 +445,10 @@ bool ZDT_motor_control::factory_reset() {
 	// 3.1.5 恢復出廠設置: Func 0x06, Reg 0x000F, Data 0x0001
 	auto cmd = build_write_single_register(0x000F, 0x0001);
 	if (debug_mode) printHex(cmd, "[TX factory_reset]");
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 	auto resp = readEcho(500);
 	if (debug_mode) printHex(resp, "[RX factory_reset]");
-	return (!resp.empty() && resp == cmd);
+	return !(resp.size() > 0 && resp == cmd);
 }
 
 bool ZDT_motor_control::trigger_home(int mode, bool sync) {
@@ -457,20 +457,20 @@ bool ZDT_motor_control::trigger_home(int mode, bool sync) {
 	uint16_t data = ((uint16_t)mode << 8) | (sync ? 0x01 : 0x00);
 	auto cmd = build_write_single_register(0x009A, data);
 	if (debug_mode) printHex(cmd, "[TX trigger_home]");
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 	auto resp = readEcho(200);
 	if (debug_mode) printHex(resp, "[RX trigger_home]");
-	return (!resp.empty() && resp == cmd);
+	return !(resp.size() > 0 && resp == cmd);
 }
 
 bool ZDT_motor_control::abort_home() {
 	// 3.3.3 強制中斷回零: Func 0x06, Reg 0x009C(Emm), Data [0x48, 0x00]
 	auto cmd = build_write_single_register(0x009C, 0x4800);
 	if (debug_mode) printHex(cmd, "[TX abort_home]");
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 	auto resp = readEcho(200);
 	if (debug_mode) printHex(resp, "[RX abort_home]");
-	return (!resp.empty() && resp == cmd);
+	return !(resp.size() > 0 && resp == cmd);
 }
 
 bool ZDT_motor_control::trigger_sync_move() {
@@ -481,10 +481,10 @@ bool ZDT_motor_control::trigger_sync_move() {
 	cmd.push_back((uint8_t)(crc & 0xFF));
 	cmd.push_back((uint8_t)(crc >> 8));
 	if (debug_mode) printHex(cmd, "[TX trigger_sync]");
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 	auto resp = readEcho(200);
 	if (debug_mode) printHex(resp, "[RX trigger_sync]");
-	return (!resp.empty());
+	return resp.empty();
 }
 
 bool ZDT_motor_control::set_home_zero_position(bool store) {
@@ -492,10 +492,10 @@ bool ZDT_motor_control::set_home_zero_position(bool store) {
 	uint16_t data = (0x88 << 8) | (store ? 0x01 : 0x00);
 	auto cmd = build_write_single_register(0x0093, data);
 	if (debug_mode) printHex(cmd, "[TX set_home_zero]");
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 	auto resp = readEcho(200);
 	if (debug_mode) printHex(resp, "[RX set_home_zero]");
-	return (!resp.empty() && resp == cmd);
+	return !(resp.size() > 0 && resp == cmd);
 }
 
 uint16_t ZDT_motor_control::modbusCRC(const uint8_t* data, int len) {

@@ -26,7 +26,7 @@ int main() {
 		system("PAUSE");
 		return 1;
 	}
-	if (!m1.init(cli_21, 7, false)) {
+	if (m1.init(cli_21, 7, false)) {
 		std::cerr << "Failed to init ZDT motor." << std::endl;
 		cli_21.close();
 		return 1;
@@ -336,7 +336,7 @@ int main() {
 	}
 
 	// --- Init motor (shared TCP, Slave ID = 7) ---
-	if (!m1.init(cli_21, 7, false)) {
+	if (m1.init(cli_21, 7, false)) {
 		std::cerr << "Failed to init ZDT motor." << std::endl;
 		cli_21.close();
 		return 1;
@@ -381,7 +381,7 @@ int main() {
 			std::cout << "Zero position set." << std::endl;
 		}
 		else if (cmd == "status") {
-			if (m1.get_system_status()) {
+			if (!m1.get_system_status()) {
 				std::cout << "--- Motor Status ---" << std::endl;
 				std::cout << "  Bus Voltage:   " << m1.status.bus_voltage << " mV" << std::endl;
 				std::cout << "  Bus Current:   " << m1.status.bus_current << " mA" << std::endl;
