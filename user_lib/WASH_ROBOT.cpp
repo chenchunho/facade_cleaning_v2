@@ -44,7 +44,7 @@ bool WashRobot::initDevices() {
     // 步進馬達 drv[0]~drv[3] — slave 1~4
     for (int i = 0; i < 1; i++) {
         //if (!drv[i].init(cli_20, i + 1, false)) {
-        if (!drv[i].init(cli_20, 2, false)) {
+        if (drv[i].init(cli_20, 2, false)) {
             std::cerr << "[WashRobot] Failed to init DM2J drv[" << i
                       << "] slave " << (i + 1) << std::endl;
             return false;
@@ -64,7 +64,7 @@ bool WashRobot::initDevices() {
     // 壓力感測器 meter[0]~meter[6] — slave 9~15
     for (int i = 0; i < 1; i++) {
       //if (!meter[i].init(cli_21, i + 9, false)) {
-        if (!meter[i].init(cli_20, 9, false)) {
+        if (meter[i].init(cli_20, 9, false)) {
             std::cerr << "[WashRobot] Failed to init JC100 meter[" << i
                       << "] slave " << (i + 9) << std::endl;
             return false;
@@ -72,7 +72,7 @@ bool WashRobot::initDevices() {
     }
 
     // 繼電器
-    if (!relay.init(cli_20, 1)) {
+    if (relay.init(cli_20, 1)) {
         std::cerr << "[WashRobot] Failed to init relay (slave 1)" << std::endl;
         return false;
     }
@@ -273,12 +273,11 @@ int WashRobot::readPressure(int leg_index) {
 }
 
 void WashRobot::adjustLegPos(Leg& leg) {
-  relay.controlRelay(3, true); //RELAY_VACUUM_MOTOR
-  leg.relay->controlRelay(leg.valve_ch, true);
+
 
   // 讀取起始位置
   double original_pos = 0;
-  if (leg.axis->read_position_cm(original_pos)) {
+  if (!leg.axis->read_position_cm(original_pos)) {
     std::cout << "[INFO] Start position: " << original_pos << " cm" << std::endl;
   }
 
@@ -309,7 +308,7 @@ void WashRobot::adjustLegPos(Leg& leg) {
     // 後退五公分
     double cm = 0;
     int rpm = 500;
-    if (!leg.axis->read_position_cm(cm)) {
+    if (leg.axis->read_position_cm(cm)) {
       std::cerr << "[ERROR] Failed to read position." << std::endl;
       continue;
     }
@@ -353,12 +352,15 @@ void WashRobot::moveRight() {
 
 void WashRobot::processWash(Leg& leg, int cycles, int rpm) {
 
+  relay.controlRelay(3, true); //RELAY_VACUUM_MOTOR
+  leg.relay->controlRelay(leg.valve_ch, true);
+
   for (int i = 0; i < cycles; i++) {
     std::cout << "[Wash] Cycle " << (i + 1) << "/" << cycles << std::endl;
 
     // ── 讀目前位置 ──────────────────────────────────────────
     double cm = 0;
-    if (!leg.axis->read_position_cm(cm)) {
+    if (leg.axis->read_position_cm(cm)) {
       std::cerr << "[ERROR] Failed to read position, abort." << std::endl;
       return;
     }
@@ -390,7 +392,7 @@ void WashRobot::processWash(Leg& leg, int cycles, int rpm) {
     adjustLegPos(leg);
 
     // ── 讀目前位置（adjustLegPos 可能已移動軸） ────────────
-    if (!leg.axis->read_position_cm(cm)) {
+    if (leg.axis->read_position_cm(cm)) {
       std::cerr << "[ERROR] Failed to read position, abort." << std::endl;
       return;
     }

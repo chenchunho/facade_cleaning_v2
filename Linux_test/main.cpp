@@ -43,7 +43,7 @@ int main() {
 	cout << "Press enter to continue..." << endl;
 	std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 
-	drv_1.PR_move_cm(0, 1, 500, -60, 50, 100);
+	drv_1.PR_move_cm(0, 1, 500, -40, 50, 100);
 	return 0;
 	relay.controlRelay(3, true);
 	relay.controlRelay(2, true);
