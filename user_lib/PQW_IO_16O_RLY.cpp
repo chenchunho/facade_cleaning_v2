@@ -208,15 +208,19 @@ bool PQW_IO_16O_RLY::controlRelay(int id, bool status)
 /*--------------------------------------------------------------
   控制全部繼電器
 --------------------------------------------------------------*/
-void PQW_IO_16O_RLY::controlAll(bool status)
+bool PQW_IO_16O_RLY::controlAll(bool status)
 {
 	auto cmd = buildAllRelayCmd(status);
 	printHex(cmd, "[TX all relay]");
 
-	client->sendData((char*)cmd.data(), cmd.size(), 100);
+	if (!client->sendData((char*)cmd.data(), cmd.size(), 100))
+		return true;
 
 	auto echo = readEcho();
 	printHex(echo, "[RX echo ALL]");
+
+	if (echo.size() < 8) return true;
+	return false;
 }
 
 /*--------------------------------------------------------------

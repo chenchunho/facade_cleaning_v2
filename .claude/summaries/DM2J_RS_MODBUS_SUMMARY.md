@@ -19,10 +19,11 @@ DM2J-RS570 is an RS485 stepper motor driver supporting Modbus RTU protocol with 
 
 | Register | Name | R/W | Description |
 |---|---|---|---|
-| 0x1003 | Status | R | Bit0=FAULT, Bit1=ENABLE, Bit2=RUN, Bit4=CMD_DONE, Bit5=PATH_DONE, Bit6=HOME_DONE |
-| 0x1801 | Command | W | 0x1111=enable, 0x2233=disable, 0x2211=enable+EEPROM, 0x2244=disable+EEPROM, 0x4001=JOG+, 0x4002=JOG- |
+| 0x1003 | Status | R | Bit0=FAULT, Bit1=ENABLE, Bit2=RUN, Bit4=CMD_DONE, Bit5=PATH_DONE, Bit16=HOME_DONE |
+| 0x1801 | Command | W | 0x1111=enable, 0x2233=disable, 0x2211=enable+EEPROM, 0x2244=disable+EEPROM, 0x1122=reset to disabled, 0x2222=save params (no enable change), 0x4001=JOG+, 0x4002=JOG- |
 | 0x6002 | Trigger | W | 0x001P=trigger PR P, 0x010P=write+trigger PR P, 0x0020=home start, 0x0021=set zero, 0x0040=stop |
-| 0x2203 | Error code | R | 0x01-0x06=fault codes, 0x09=stall |
+| 0x2203 | Error code | R | 0x01=overcurrent, 0x02=overvoltage, 0x03=current sampling fault, 0x80=lock/stall, 0x100=zero counter abnormal, 0x200=EEPROM fault |
+| 0x1901 | Save status | R | 0x5555=save success, 0xAAAA=save failed |
 
 ### PR Block (Position Register)
 
@@ -36,6 +37,8 @@ Each PR block = 8 registers, base = 0x6200 + (PR_num × 8)
 | +3 | PRx.03 Speed | RPM |
 | +4 | PRx.04 Acc | ms/1000rpm |
 | +5 | PRx.05 Dec | ms/1000rpm |
+| +6 | PRx.06 Dwell | Stop dwell time (ms) |
+| +7 | PRx.07 Special | Path linking / special parameter |
 
 16 PR blocks: PR0 (0x6200) through PR15 (0x6278).
 

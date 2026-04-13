@@ -19,7 +19,7 @@ namespace JC100_REG {
 	constexpr uint16_t ZERO_CAL      = 0x0020;  // 校零設定 (W)
 }
 
-JC_100_METER::JC_100_METER() : _slaveID(1), _debug(false), client(nullptr), _isExternalClient(false), error_flag(0) {}
+JC_100_METER::JC_100_METER() : error_flag(0), _slaveID(1), _debug(false), client(nullptr), _isExternalClient(false) {}
 
 JC_100_METER::~JC_100_METER() {
 	if (!_isExternalClient && client != nullptr) {

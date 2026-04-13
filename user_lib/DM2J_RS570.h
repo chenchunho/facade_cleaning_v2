@@ -57,10 +57,17 @@ public:
 	void home_start();
 	void home_set_current_pos_zero();
 
+	// 使能 / 儲存
+	bool motor_enable();                   // 0x1801 = 0x1111
+	bool motor_disable();                  // 0x1801 = 0x2233
+	bool save_params();                    // 0x1801 = 0x2222
+
 	// 讀取資訊
 	bool read_version(uint16_t& ver1, uint16_t& ver2);
-	bool read_status(uint16_t& status);
-	void print_status(uint16_t status);
+	bool read_status(uint32_t& status);
+	void print_status(uint32_t status);
+	bool read_error_code(uint16_t& errCode);  // 0x2203
+	bool read_save_status(uint16_t& saveStatus); // 0x1901
 
 	// 位置相關
 	bool read_motor_position(int32_t& pos);

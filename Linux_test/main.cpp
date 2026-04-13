@@ -186,8 +186,8 @@ int main() {
 			}
 		}
 		else if (cmd == "status") {
-			uint16_t st = 0;
-			if (drv_1.read_status(st)) {
+			uint32_t st = 0;
+			if (!drv_1.read_status(st)) {
 				drv_1.print_status(st);
 			}
 			else {

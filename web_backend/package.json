@@ -1,0 +1,13 @@
+{
+  "name": "washrobot-web-backend",
+  "version": "0.1.0",
+  "description": "WebSocket bridge between browser GUI and washrobot/crane C++ TCP servers",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
+  }
+}

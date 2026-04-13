@@ -44,12 +44,12 @@ PQW series digital output (relay) module with RS485 Modbus RTU interface.
 
 | Hex Addr | PLC Addr | Description |
 |---|---|---|
-| 0x0000-0x003F | 40001-40064 | Channel 1-64 mode setting (0=Normal, 1=Delay, 3=Jog, 4=Cycle, 5=Fixed) |
+| 0x0000-0x003F | 40001-40064 | Channel 1-64 mode setting (0=Normal, 1=Delay, 2=Reserved(Link), 3=Jog, 4=Cycle, 5=Fixed, 6=Reserved(Manual)) |
 | 0x0040 | 40065 | Parity setting (0=None, 1=Odd, 2=Even) |
-| 0x0041 | 40066 | Communication watchdog timer |
+| 0x0041 | 40066 | Communication watchdog timer (0=disabled, >=1: timeout=(val-1)×0.015s) |
 | 0x0042 | 40067 | Stop bits (0=1bit, 1=2bits) |
 | 0x0043 | 40068 | Station address (1-255) |
-| 0x0044 | 40069 | Baud rate (0-7: 4800-115200) |
+| 0x0044 | 40069 | Baud rate (0=4800, 1=9600, 2=14400, 3=19200, 4=38400, 5=56000, 6=57600, 7=115200) |
 | 0x0045-0x0084 | 40070-40133 | Channel 1-64 control value |
 | **0x0085** | **40134** | **All channels control: write 0=all OFF, >0=all ON** |
 | 0x0086 | 40135 | CH1-16 status bitmap (bit0=CH1, bit15=CH16) |
@@ -57,6 +57,15 @@ PQW series digital output (relay) module with RS485 Modbus RTU interface.
 | 0x0088 | 40137 | CH33-48 status bitmap |
 | 0x0089 | 40138 | CH49-64 status bitmap |
 | 0x008A | 40139 | Factory reset (write >=1 to reset) |
+
+## Input Register Map (0x04, Read-Only)
+
+| Hex Addr | PLC Addr | Description |
+|---|---|---|
+| 0x0084 | 30133 | CH1-16 status bitmap (read-only) |
+| 0x0085 | 30134 | CH17-32 status bitmap (read-only) |
+| 0x0086 | 30135 | CH33-48 status bitmap (read-only) |
+| 0x0087 | 30136 | CH49-64 status bitmap (read-only) |
 
 ## Code Implementation Notes
 

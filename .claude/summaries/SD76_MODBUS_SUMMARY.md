@@ -21,13 +21,13 @@ SD76-C series length/counter meter with RS485 Modbus RTU interface.
 
 | Hex Addr | Name | R/W | Data Format | Description |
 |---|---|---|---|---|
-| 0x0000 | Control / Status | R/W | uint16 | Read: alarm status bits; Write: control codes |
+| 0x0000 | Control / Status | R/W | uint16 | Read: high byte=work mode, low byte=alarm status; Write: control codes |
 | 0x0001-0x0002 | Upper Display Value | R/W | BCD (3 bytes) | 6-digit BCD, low 3 bytes valid |
 | 0x0003-0x0004 | Lower Display Value | R/W | BCD (3 bytes) | 6-digit BCD, low 3 bytes valid |
-| 0x0006-0x0007 | TIA1 Relay 1 Time | R/W | BCD | Relay 1 closure duration |
-| 0x0008-0x0009 | TIA2 Relay 2 Time | R/W | BCD | Relay 2 closure duration |
-| 0x000F-0x0010 | AL1 Alarm 1 | R/W | BCD | Must write with AL2 together |
-| 0x0011-0x0012 | AL2 Alarm 2 | R/W | BCD | Must write with AL1 together |
+| 0x0006-0x0007 | TIA1 Relay 1 Time | R | BCD | Relay 1 closure duration (read only) |
+| 0x0008-0x0009 | TIA2 Relay 2 Time | R | BCD | Relay 2 closure duration (read only) |
+| 0x000F-0x0010 | AL1 Alarm 1 | R/W | BCD | Must write with AL2 together via FC 0x10 (4 regs 0x000F~0x0012) |
+| 0x0011-0x0012 | AL2 Alarm 2 | R/W | BCD | Must write with AL1 together via FC 0x10 (4 regs 0x000F~0x0012) |
 | 0x0014-0x0015 | SCAL Counter Multiplier | R/W | BCD | Scaling factor |
 | 0x001A-0x001B | PRE1 Upper Initial | R/W | BCD | Preset for upper display |
 | 0x001C-0x001D | PRE2 Lower Initial | R/W | BCD | Preset for lower display |
@@ -46,6 +46,16 @@ SD76-C series length/counter meter with RS485 Modbus RTU interface.
 | 0x0003 | Reset both displays |
 | 0x0004 | Pause meter |
 | 0x0008 | Resume meter |
+
+## Work Mode (Read 0x0000 high byte)
+
+| Value | Mode |
+|---|---|
+| 0x00 | Counter / Length meter |
+| 0x01 | Timer |
+| 0x02 | Timer + Counter |
+| 0x03 | Total length meter |
+| 0x04 | Batch length meter |
 
 ## Alarm Status (Read 0x0000 low byte)
 
@@ -69,3 +79,11 @@ SD76-C series length/counter meter with RS485 Modbus RTU interface.
 - Driver reads BCD registers 0x0001-0x0002 (upper) and 0x0001-0x0004 (upper+lower)
 - `resetAll()` writes 0x0003 to register 0x0000 = reset both displays (correct)
 - `decodeSignedBCD6()` extracts sign from bit7 — undocumented but may work in practice
+- For signed values, prefer integer registers (0x0021-0x0024) over BCD registers
+
+## Error Codes
+
+| Code | Description |
+|---|---|
+| E-3 | Sensor abnormal |
+| E-10 | EEPROM abnormal |
