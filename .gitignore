@@ -1,4 +1,4 @@
 .vs/
 Debug/
 doc/
-.claude/work_log.md
+.claude/settings.local.json

@@ -170,11 +170,73 @@ bool SD76_length_meters::readUpperLowerDisplayValue(int& upper, int& lower)
 }
 
 //
-// 控制：清零 (相當於復位) = 寫 0x0000 = 0x0003
+// Read status register (0x0000)
+// High byte = work mode, low byte = alarm status
+//
+bool SD76_length_meters::readStatus(uint8_t& workMode, uint8_t& alarmStatus)
+{
+	uint8_t raw[2];
+
+	if (readRegister(0x0000, 1, raw))
+		return true;
+
+	workMode = raw[0];      // high byte
+	alarmStatus = raw[1];   // low byte
+	return false;
+}
+
+//
+// Read upper display as signed int32 (0x0021~0x0022)
+//
+bool SD76_length_meters::readUpperInteger(int32_t& value)
+{
+	uint8_t raw[4];
+
+	if (readRegister(0x0021, 2, raw))
+		return true;
+
+	value = (int32_t)(((uint32_t)raw[0] << 24) | ((uint32_t)raw[1] << 16) |
+	                   ((uint32_t)raw[2] << 8)  | (uint32_t)raw[3]);
+	return false;
+}
+
+//
+// Read lower display as signed int32 (0x0023~0x0024)
+//
+bool SD76_length_meters::readLowerInteger(int32_t& value)
+{
+	uint8_t raw[4];
+
+	if (readRegister(0x0023, 2, raw))
+		return true;
+
+	value = (int32_t)(((uint32_t)raw[0] << 24) | ((uint32_t)raw[1] << 16) |
+	                   ((uint32_t)raw[2] << 8)  | (uint32_t)raw[3]);
+	return false;
+}
+
+//
+// Control: reset both displays = write 0x0003 to reg 0x0000
 //
 bool SD76_length_meters::resetAll()
 {
 	return writeSingleRegister(0x0000, 0x0003);
+}
+
+//
+// Control: pause meter = write 0x0004 to reg 0x0000
+//
+bool SD76_length_meters::pauseMeter()
+{
+	return writeSingleRegister(0x0000, 0x0004);
+}
+
+//
+// Control: resume meter = write 0x0008 to reg 0x0000
+//
+bool SD76_length_meters::resumeMeter()
+{
+	return writeSingleRegister(0x0000, 0x0008);
 }
 
 //

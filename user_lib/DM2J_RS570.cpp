@@ -68,7 +68,9 @@ void DM2J_RS570::speed_move(int pr_num, int mode, int rpm, int pos)
 		pos_lo,               // PRx.02
 		(uint16_t)rpm,        // PRx.03
 		(uint16_t)100,        // PRx.04 acc
-		(uint16_t)100         // PRx.05 dec
+		(uint16_t)100,        // PRx.05 dec
+		(uint16_t)0,          // PRx.06 dwell (stop dwell time ms)
+		(uint16_t)0           // PRx.07 special (path linking)
 	};
 
 	writeMulti(0x6200 + pr_num * 8, block);
@@ -99,7 +101,9 @@ void DM2J_RS570::PR_move_set(int pr_num, int mode, int rpm, int pos, int acc, in
 		pos_lo,           // PRx.02
 		(uint16_t)rpm,    // PRx.03
 		(uint16_t)acc,    // PRx.04
-		(uint16_t)dec     // PRx.05
+		(uint16_t)dec,    // PRx.05
+		(uint16_t)0,      // PRx.06 dwell (stop dwell time ms)
+		(uint16_t)0       // PRx.07 special (path linking)
 	};
 
 	writeMulti(base, block);
@@ -143,7 +147,7 @@ bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int ac
 	const int timeout_ms = 10000;
 	int elapsed = 0;
 
-	uint16_t st = 0;
+	uint32_t st = 0;
 
 	while (elapsed < timeout_ms)
 	{
@@ -159,7 +163,7 @@ bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int ac
 
 		if (debugEnabled)
 		{
-			printf("[WAIT] Status = 0x%04X => ", st);
+			printf("[WAIT] Status = 0x%08X => ", st);
 			print_status(st);
 		}
 
@@ -236,7 +240,7 @@ bool DM2J_RS570::PR_move_cm_trigger_all(int pr_num)
 
 	while (elapsed < timeout_ms)
 	{
-		uint16_t st = 0;
+		uint32_t st = 0;
 
 		if (read_status(st))
 		{
@@ -246,7 +250,7 @@ bool DM2J_RS570::PR_move_cm_trigger_all(int pr_num)
 
 		if (debugEnabled)
 		{
-			printf("[WAIT] Status = 0x%04X => ", st);
+			printf("[WAIT] Status = 0x%08X => ", st);
 			print_status(st);
 		}
 
@@ -389,7 +393,7 @@ bool DM2J_RS570::read_version(uint16_t& ver1, uint16_t& ver2)
 // Read Status
 // ======================================================================
 
-bool DM2J_RS570::read_status(uint16_t& status)
+bool DM2J_RS570::read_status(uint32_t& status)
 {
 	uint8_t tx[8];
 
@@ -398,7 +402,7 @@ bool DM2J_RS570::read_status(uint16_t& status)
 	tx[2] = 0x10;     // 0x1003
 	tx[3] = 0x03;
 	tx[4] = 0x00;
-	tx[5] = 0x01;
+	tx[5] = 0x02;     // read 2 registers (32-bit for Bit16 HOME_DONE)
 
 	uint16_t crc = crc16(tx, 6);
 	tx[6] = crc & 0xFF;
@@ -416,7 +420,7 @@ bool DM2J_RS570::read_status(uint16_t& status)
 	uint8_t rx[32] = { 0 };
 	int len = client->receiveData((char*)rx, 32, 200);
 
-	if (len < 7) return true;
+	if (len < 9) return true;  // need 9 bytes for 2 registers
 
 	if (debugEnabled)
 	{
@@ -425,22 +429,101 @@ bool DM2J_RS570::read_status(uint16_t& status)
 		printf("\n");
 	}
 
-	status = (rx[3] << 8) | rx[4];
+	uint16_t hi = (rx[3] << 8) | rx[4];
+	uint16_t lo = (rx[5] << 8) | rx[6];
+	status = ((uint32_t)hi << 16) | lo;
 	return false;
 }
 
-void DM2J_RS570::print_status(uint16_t status)
+void DM2J_RS570::print_status(uint32_t status)
 {
-	printf("Status 0x%04X => ", status);
+	printf("Status 0x%08X => ", status);
 
-	if (status & 0x0001) printf("[FAULT] ");
-	if (status & 0x0002) printf("[ENABLE] ");
-	if (status & 0x0004) printf("[RUN] ");
-	if (status & 0x0010) printf("[CMD_DONE] ");
-	if (status & 0x0020) printf("[PATH_DONE] ");
-	if (status & 0x0040) printf("[HOME_DONE] ");
+	if (status & 0x0001)  printf("[FAULT] ");
+	if (status & 0x0002)  printf("[ENABLE] ");
+	if (status & 0x0004)  printf("[RUN] ");
+	if (status & 0x0010)  printf("[CMD_DONE] ");
+	if (status & 0x0020)  printf("[PATH_DONE] ");
+	if (status & 0x10000) printf("[HOME_DONE] ");  // Bit16
 
 	printf("\n");
+}
+
+// ======================================================================
+// Motor Enable / Disable / Save Params
+// ======================================================================
+
+bool DM2J_RS570::motor_enable()
+{
+	return writeSingle(0x1801, 0x1111);
+}
+
+bool DM2J_RS570::motor_disable()
+{
+	return writeSingle(0x1801, 0x2233);
+}
+
+bool DM2J_RS570::save_params()
+{
+	return writeSingle(0x1801, 0x2222);
+}
+
+// ======================================================================
+// Read Error Code (0x2203)
+// ======================================================================
+
+bool DM2J_RS570::read_error_code(uint16_t& errCode)
+{
+	uint8_t tx[8];
+
+	tx[0] = slaveID;
+	tx[1] = 0x03;
+	tx[2] = 0x22;     // 0x2203
+	tx[3] = 0x03;
+	tx[4] = 0x00;
+	tx[5] = 0x01;
+
+	uint16_t crc = crc16(tx, 6);
+	tx[6] = crc & 0xFF;
+	tx[7] = crc >> 8;
+
+	client->sendData((char*)tx, 8, 200);
+
+	uint8_t rx[32] = { 0 };
+	int len = client->receiveData((char*)rx, 32, 200);
+	if (len < 7) return true;
+
+	errCode = (rx[3] << 8) | rx[4];
+	return false;
+}
+
+// ======================================================================
+// Read Save Status (0x1901)
+// ======================================================================
+
+bool DM2J_RS570::read_save_status(uint16_t& saveStatus)
+{
+	uint8_t tx[8];
+
+	tx[0] = slaveID;
+	tx[1] = 0x03;
+	tx[2] = 0x19;     // 0x1901
+	tx[3] = 0x01;
+	tx[4] = 0x00;
+	tx[5] = 0x01;
+
+	uint16_t crc = crc16(tx, 6);
+	tx[6] = crc & 0xFF;
+	tx[7] = crc >> 8;
+
+	client->sendData((char*)tx, 8, 200);
+
+	uint8_t rx[32] = { 0 };
+	int len = client->receiveData((char*)rx, 32, 200);
+	if (len < 7) return true;
+
+	saveStatus = (rx[3] << 8) | rx[4];
+	return false;
 }
 
 // ======================================================================
@@ -637,7 +720,7 @@ bool DM2J_RS570::writeMulti(uint16_t startReg, const std::vector<uint16_t>& data
 	if (debugEnabled)
 	{
 		printf("[TX Multi] ");
-		for (int i = 0; i < tx.size(); i++) printf("%02X ", tx[i]);
+		for (size_t i = 0; i < tx.size(); i++) printf("%02X ", tx[i]);
 		printf("\n");
 	}
 
@@ -648,7 +731,7 @@ bool DM2J_RS570::writeMulti(uint16_t startReg, const std::vector<uint16_t>& data
 	if (debugEnabled && !err)
 	{
 		printf("[RX Multi] ");
-		for (int i = 0; i < rx.size(); i++) printf("%02X ", rx[i]);
+		for (size_t i = 0; i < rx.size(); i++) printf("%02X ", rx[i]);
 		printf("\n");
 	}
 	else if (debugEnabled && err)

@@ -17,8 +17,17 @@ public:
 	// 讀取上下兩排（0x0001~0x0004）
 	bool readUpperLowerDisplayValue(int& upper, int& lower);
 
-	// 清零（相當於復位）
-	bool resetAll();
+	// Read status register (0x0000): high byte=work mode, low byte=alarm status
+	bool readStatus(uint8_t& workMode, uint8_t& alarmStatus);
+
+	// Read integer display values (signed int32, alternative to BCD)
+	bool readUpperInteger(int32_t& value);   // 0x0021~0x0022
+	bool readLowerInteger(int32_t& value);   // 0x0023~0x0024
+
+	// Control
+	bool resetAll();         // Write 0x0003 to reg 0x0000
+	bool pauseMeter();       // Write 0x0004 to reg 0x0000
+	bool resumeMeter();      // Write 0x0008 to reg 0x0000
 
 private:
 	bool readRegister(uint16_t addr, uint16_t count, uint8_t* raw);

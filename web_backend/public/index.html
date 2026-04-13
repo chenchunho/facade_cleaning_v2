@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<title>washrobot control</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>washrobot control</h1>
+  <div id="status">
+    <span class="dot" id="dot-washrobot"></span>washrobot
+    <span class="dot" id="dot-crane"></span>crane
+  </div>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>auto cycle (washrobot)</h2>
+    <div class="row">
+      <button data-tgt="washrobot" data-cmd="init">init</button>
+      <button data-tgt="washrobot" data-cmd="attach">attach</button>
+      <button data-tgt="washrobot" data-cmd="detach">detach</button>
+      <button data-tgt="washrobot" data-cmd="arm_sweep">arm_sweep</button>
+      <button data-tgt="washrobot" data-cmd="step_down">step_down</button>
+    </div>
+    <div class="row">
+      <label>run steps: <input type="number" id="run-steps" value="1" min="1"></label>
+      <button id="btn-run">run</button>
+      <button data-tgt="washrobot" data-cmd="pause">pause</button>
+      <button data-tgt="washrobot" data-cmd="resume">resume</button>
+      <button class="danger" data-tgt="washrobot" data-cmd="stop">STOP (robot)</button>
+    </div>
+    <div class="row">
+      <button data-tgt="washrobot" data-cmd="status">status</button>
+      <button data-tgt="washrobot" data-cmd="shutdown">shutdown</button>
+      <button data-tgt="washrobot" data-cmd="tilt_mode on">tilt ON</button>
+      <button data-tgt="washrobot" data-cmd="tilt_mode off">tilt OFF</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>manual — vacuum</h2>
+    <div class="row">
+      <span class="label">feet:</span>
+      <button data-tgt="washrobot" data-cmd="vacuum feet on">ON</button>
+      <button data-tgt="washrobot" data-cmd="vacuum feet off">OFF</button>
+    </div>
+    <div class="row">
+      <span class="label">body:</span>
+      <button data-tgt="washrobot" data-cmd="vacuum body on">ON</button>
+      <button data-tgt="washrobot" data-cmd="vacuum body off">OFF</button>
+    </div>
+    <div class="row">
+      <span class="label">center:</span>
+      <button data-tgt="washrobot" data-cmd="vacuum center on">ON</button>
+      <button data-tgt="washrobot" data-cmd="vacuum center off">OFF</button>
+    </div>
+    <div class="row">
+      <span class="label">all:</span>
+      <button data-tgt="washrobot" data-cmd="vacuum all on">ON</button>
+      <button data-tgt="washrobot" data-cmd="vacuum all off">OFF</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>manual — pusher</h2>
+    <div class="row">
+      <span class="label">feet:</span>
+      <button data-tgt="washrobot" data-cmd="pusher feet extend">EXTEND</button>
+      <button data-tgt="washrobot" data-cmd="pusher feet retract">RETRACT</button>
+    </div>
+    <div class="row">
+      <span class="label">body:</span>
+      <button data-tgt="washrobot" data-cmd="pusher body extend">EXTEND</button>
+      <button data-tgt="washrobot" data-cmd="pusher body retract">RETRACT</button>
+    </div>
+    <div class="row">
+      <span class="label">center:</span>
+      <button data-tgt="washrobot" data-cmd="pusher center extend">EXTEND</button>
+      <button data-tgt="washrobot" data-cmd="pusher center retract">RETRACT</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>manual — DM2J move (cm, absolute)</h2>
+    <div class="row">
+      <label>motor:
+        <select id="move-motor">
+          <option>left_foot</option>
+          <option>right_foot</option>
+          <option selected>arm</option>
+        </select>
+      </label>
+      <label>cm: <input type="number" id="move-cm" value="0" step="0.5"></label>
+      <button id="btn-move">move</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>crane</h2>
+    <div class="row">
+      <label>cm: <input type="number" id="crane-cm" value="30" min="1"></label>
+      <button id="btn-payout">pay_out</button>
+      <button id="btn-retract">retract</button>
+      <button data-tgt="crane" data-cmd="status">status</button>
+      <button class="danger" data-tgt="crane" data-cmd="stop">STOP (crane)</button>
+    </div>
+    <div class="row">
+      <span class="label">left:</span>
+      <button data-tgt="crane" data-cmd="pay_out_left on">pay_out ON</button>
+      <button data-tgt="crane" data-cmd="pay_out_left off">OFF</button>
+      <button data-tgt="crane" data-cmd="retract_left on">retract ON</button>
+      <button data-tgt="crane" data-cmd="retract_left off">OFF</button>
+    </div>
+    <div class="row">
+      <span class="label">right:</span>
+      <button data-tgt="crane" data-cmd="pay_out_right on">pay_out ON</button>
+      <button data-tgt="crane" data-cmd="pay_out_right off">OFF</button>
+      <button data-tgt="crane" data-cmd="retract_right on">retract ON</button>
+      <button data-tgt="crane" data-cmd="retract_right off">OFF</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>raw command</h2>
+    <div class="row">
+      <select id="raw-tgt">
+        <option value="washrobot">washrobot</option>
+        <option value="crane">crane</option>
+      </select>
+      <input type="text" id="raw-cmd" placeholder="type command, Enter to send">
+      <button id="btn-raw">send</button>
+    </div>
+  </section>
+
+  <section class="panel panel-log">
+    <h2>log <button id="btn-clear">clear</button></h2>
+    <pre id="log"></pre>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

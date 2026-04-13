@@ -1,300 +1,276 @@
-﻿#include <iostream>
+// ============================================================================
+// Crane_control_PI — Rooftop crane controller
+//
+// Hardware (see CLAUDE.md / motion_flow.md):
+//   RPi @ 192.168.1.101
+//   USR-TCP232-304 @ 192.168.1.30 : 4001
+//     ZS_DIO_R_RLY  slave 1 (8CH)
+//       CH1 = retract_left   (左收繩)
+//       CH2 = retract_right  (右收繩)
+//       CH3 = pay_out_left   (左放繩)
+//       CH4 = pay_out_right  (右放繩)
+//     SD76 slave 2 : 左繩計米器
+//     SD76 slave 3 : 右繩計米器
+//
+// Command TCP server @ :5002 (line-based text protocol, multi-client)
+//   pay_out <cm>        : both ropes pay out N cm (SD76 feedback)
+//   retract <cm>        : both ropes retract N cm
+//   pay_out_left  <on|off>
+//   pay_out_right <on|off>
+//   retract_left  <on|off>
+//   retract_right <on|off>
+//   stop                : abort any motion, turn off all channels
+//   status              : reply with current lengths
+//
+// Reply format:
+//   OK [data]\n  / ERR <reason>\n  / EVT <type> <data>\n
+// ============================================================================
+
+#include <iostream>
+#include <string>
+#include <sstream>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include <chrono>
-#include <string>
-#include <cmath>
-#include <termios.h>
-#include <unistd.h>
-#include <sys/select.h>
+#include <cstdlib>
 
 #include "TCP_client.h"
+#include "TCP_server.h"
 #include "ZS_DIO_R_RLY.h"
-#include "DY_500_weight_sensor.h"
 #include "SD76_length_meters.h"
 
-#define CRANE_DOWN_PIN   7
-#define CRANE_UP_PIN     8
+// ============ Hardware config ============
 
-TCP_client cli_21;
-TCP_client cli_22;
-ZS_DIO_R_RLY relay;
-DY_500_weight_sensor dy;
-SD76_length_meters meter;
+static constexpr const char* USR_IP   = "192.168.1.30";
+static constexpr int         USR_PORT = 4001;
+static constexpr int         CMD_PORT = 5002;
 
-std::atomic<bool> program_running(true);
-std::atomic<float> g_weight(0.0f);  // 全域重量變數
+static constexpr int RELAY_SLAVE       = 1;
+static constexpr int METER_LEFT_SLAVE  = 2;
+static constexpr int METER_RIGHT_SLAVE = 3;
 
-void control_loop()
-{
-	// 用於計算平均的變數
-	double weight_sum = 0.0;
-	int weight_count = 0;
-	float current_avg = 0.0f;
+// Relay channel mapping (ZS_DIO CH1~4 per new hardware spec)
+static constexpr int CH_RETRACT_LEFT  = 1;
+static constexpr int CH_RETRACT_RIGHT = 2;
+static constexpr int CH_PAY_OUT_LEFT  = 3;
+static constexpr int CH_PAY_OUT_RIGHT = 4;
 
-	while (program_running)
-	{
-		float w = 0.0f;
-		if (!dy.get_weight_float(w)) {
-			// 累加數值
-			weight_sum += w;
-			weight_count++;
+// Safety
+static constexpr int MOTION_TIMEOUT_MS = 120000;  // 2 min hard cap per motion
+static constexpr int POLL_INTERVAL_MS  = 50;
 
-			// 每 500 次計算一次平均並更新全域變數
-			if (weight_count >= 10) {
-				current_avg = static_cast<float>(weight_sum / 10.0);
-				g_weight.store(current_avg, std::memory_order_relaxed);
+// ============ Globals ============
 
-				// 重置計數與累加器
-				weight_sum = 0.0;
-				weight_count = 0;
-			}
-		}
-		else {
-			std::cout << "[ERROR] weight read fail\n";
-		}
+static TCP_client           cli_30;
+static ZS_DIO_R_RLY         relay;
+static SD76_length_meters   meter_left;
+static SD76_length_meters   meter_right;
+static TCP_server           cmd_server;
 
-		// 畫面更新邏輯 (建議顯示平均值 current_avg)
-		std::cout << "\033[s";     // save cursor
-		std::cout << "\033[H";     // go top
+static std::atomic<bool> abort_flag(false);
+static std::mutex        motion_mtx;
 
-		std::cout << "\033[2K";
-		// 這裡顯示目前平均值，若還沒滿500次會顯示上一次的結果
-		std::cout << "[WEIGHT AVG] " << current_avg << " kg (sampling: " << weight_count << "/10)\n";
+// ============ Low-level helpers ============
 
-		std::cout << "\033[2K";
-		std::cout << "-------------------------------------\n";
-
-		std::cout << "\033[2K";
-		std::cout << "Command: manual / auto / hold / release / up / down / exit\n";
-
-		std::cout << "\033[u" << std::flush;
-
-		// 原本 sleep 1ms，500次大約 0.5 秒更新一次平均值
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
-	}
+static void allRopeOff() {
+    relay.controlRelay(CH_RETRACT_LEFT,  false);
+    relay.controlRelay(CH_RETRACT_RIGHT, false);
+    relay.controlRelay(CH_PAY_OUT_LEFT,  false);
+    relay.controlRelay(CH_PAY_OUT_RIGHT, false);
 }
-int main()
-{
-	std::cout << "\033[2J\033[H";
 
-	cli_21.connectToServer("192.168.1.21", 4001);
-	cli_22.connectToServer("192.168.1.22", 4001);
+// ============ Command handlers ============
 
-	relay.init(cli_21, 16, false);
-	meter.init(cli_21, 2, true);
-	dy.init(cli_22, 3, false);
+static std::string cmd_pay_out(int cm, bool is_retract) {
+    if (cm <= 0) return "ERR invalid_cm\n";
 
-	std::cout << "\n\n\n";
+    std::lock_guard<std::mutex> lock(motion_mtx);
+    abort_flag = false;
 
-	std::thread t(control_loop);
+    int32_t base_left = 0, base_right = 0;
+    if (meter_left.readUpperInteger(base_left))   return "ERR meter_left_read_fail\n";
+    if (meter_right.readUpperInteger(base_right)) return "ERR meter_right_read_fail\n";
 
-	while (true)
-	{
-		std::string cmd;
+    const int ch_left  = is_retract ? CH_RETRACT_LEFT  : CH_PAY_OUT_LEFT;
+    const int ch_right = is_retract ? CH_RETRACT_RIGHT : CH_PAY_OUT_RIGHT;
 
-		std::cout << "> ";
-		std::cin >> cmd;
+    if (relay.controlRelay(ch_left, true))
+        return "ERR relay_left_on_fail\n";
+    if (relay.controlRelay(ch_right, true)) {
+        relay.controlRelay(ch_left, false);
+        return "ERR relay_right_on_fail\n";
+    }
 
-		std::cout << "> " << cmd << "\n";
+    const auto start = std::chrono::steady_clock::now();
+    bool left_done = false, right_done = false;
+    std::string abort_reason;
 
-		if (cmd == "manual") {
-			relay.controlRelay(CRANE_UP_PIN, false);
-			relay.controlRelay(CRANE_DOWN_PIN, false);
-			std::cout << "[MODE] MANUAL\n";
-		}
-		else if (cmd == "auto") {
-			termios oldt, newt;
-			tcgetattr(STDIN_FILENO, &oldt);
-			newt = oldt;
-			newt.c_lflag &= ~(ICANON | ECHO);
-			tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    while (!(left_done && right_done)) {
+        if (abort_flag.load()) { abort_reason = "aborted"; break; }
 
-			std::cout << "[MODE] AUTO (press 'x' to exit)\n";
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        if (elapsed > MOTION_TIMEOUT_MS) { abort_reason = "timeout"; break; }
 
-			float base_weight = g_weight.load(std::memory_order_relaxed);
-			std::cout << "[AUTO] base weight = " << base_weight << " kg\n";
+        int32_t cur = 0;
+        if (!left_done && !meter_left.readUpperInteger(cur)) {
+            if (std::abs(cur - base_left) >= cm) {
+                relay.controlRelay(ch_left, false);
+                left_done = true;
+            }
+        }
+        if (!right_done && !meter_right.readUpperInteger(cur)) {
+            if (std::abs(cur - base_right) >= cm) {
+                relay.controlRelay(ch_right, false);
+                right_done = true;
+            }
+        }
 
-			bool up_on = false;
-			bool down_on = false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(POLL_INTERVAL_MS));
+    }
 
-			while (true) {
-				float w = g_weight.load(std::memory_order_relaxed);
-				float delta = w - base_weight;
+    // Safety off both channels regardless of exit path
+    relay.controlRelay(ch_left,  false);
+    relay.controlRelay(ch_right, false);
 
-				if (delta > 6.0f) {
-					if (!up_on) {
-						relay.controlRelay(CRANE_UP_PIN, true);
-						relay.controlRelay(CRANE_DOWN_PIN, false);
-						up_on = true;
-						down_on = false;
-						std::cout << "[AUTO] w=" << w << " → UP\n";
-					}
-				}
-				else if (delta < -6.0f) {
-					if (!down_on) {
-						relay.controlRelay(CRANE_UP_PIN, false);
-						relay.controlRelay(CRANE_DOWN_PIN, true);
-						down_on = true;
-						up_on = false;
-						std::cout << "[AUTO] w=" << w << " → DOWN\n";
-					}
-				}
-				else {
-					if (up_on || down_on) {
-						relay.controlRelay(CRANE_UP_PIN, false);
-						relay.controlRelay(CRANE_DOWN_PIN, false);
-						std::cout << "[AUTO] w=" << w << " → STOP\n";
-						up_on = false;
-						down_on = false;
-					}
-				}
+    if (!abort_reason.empty()) return "ERR " + abort_reason + "\n";
+    return "OK\n";
+}
 
-				// check key press 'x' to exit
-				fd_set set;
-				struct timeval timeout;
-				FD_ZERO(&set);
-				FD_SET(STDIN_FILENO, &set);
-				timeout.tv_sec = 0;
-				timeout.tv_usec = 0;
+static std::string cmd_manual(const std::string& dir, const std::string& onoff) {
+    int ch = -1;
+    if      (dir == "pay_out_left")  ch = CH_PAY_OUT_LEFT;
+    else if (dir == "pay_out_right") ch = CH_PAY_OUT_RIGHT;
+    else if (dir == "retract_left")  ch = CH_RETRACT_LEFT;
+    else if (dir == "retract_right") ch = CH_RETRACT_RIGHT;
+    else return "ERR unknown_channel\n";
 
-				int rv = select(STDIN_FILENO + 1, &set, NULL, NULL, &timeout);
-				if (rv > 0) {
-					char c;
-					read(STDIN_FILENO, &c, 1);
-					if (c == 'x' || c == 'X') {
-						std::cout << "[AUTO] Exit by key\n";
-						break;
-					}
-				}
+    bool on;
+    if      (onoff == "on")  on = true;
+    else if (onoff == "off") on = false;
+    else return "ERR expected_on_or_off\n";
 
-				std::this_thread::sleep_for(std::chrono::milliseconds(200));
-			}
+    if (relay.controlRelay(ch, on)) return "ERR relay_fail\n";
+    return "OK\n";
+}
 
-			// 安全關閉
-			relay.controlRelay(CRANE_UP_PIN, false);
-			relay.controlRelay(CRANE_DOWN_PIN, false);
-			tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-		}
-		else if (cmd == "hold") {
-			const float HOLD_THRESHOLD = -0.4f;
-			std::cout << "[MODE] HOLD (↑ when weight > " << HOLD_THRESHOLD << ")\n";
+static std::string cmd_status() {
+    int32_t l = 0, r = 0;
+    const bool lok = !meter_left.readUpperInteger(l);
+    const bool rok = !meter_right.readUpperInteger(r);
 
-			while (true)
-			{
-				// 讀取的是 500 次採樣的平均值
-				float w = g_weight.load(std::memory_order_relaxed);
+    std::ostringstream oss;
+    oss << "OK";
+    oss << " length_left="  << (lok ? std::to_string(l) : std::string("ERR"));
+    oss << " length_right=" << (rok ? std::to_string(r) : std::string("ERR"));
+    oss << "\n";
+    return oss.str();
+}
 
-				if (w > HOLD_THRESHOLD) {
-					relay.controlRelay(CRANE_UP_PIN, true);
-					relay.controlRelay(CRANE_DOWN_PIN, false);
-					std::cout << "[HOLD] w=" << w << " → UP\r" << std::flush;
-				}
-				else {
-					relay.controlRelay(CRANE_UP_PIN, false);
-					relay.controlRelay(CRANE_DOWN_PIN, false);
-					std::cout << "\n[HOLD] Target reached. STOP.\n";
-					break;
-				}
-				std::this_thread::sleep_for(std::chrono::milliseconds(1));
-			}
+static std::string cmd_stop() {
+    abort_flag = true;
+    allRopeOff();
+    return "OK\n";
+}
 
-			// --- 修正後的結束判斷邏輯 ---
-			// 停止後稍微等一下，確保讀到的是停止後的穩定平均值
-			std::this_thread::sleep_for(std::chrono::milliseconds(600));
-			float final_w = g_weight.load(std::memory_order_relaxed);
+// ============ Dispatcher ============
 
-			std::cout << "[HOLD] Final stable weight = " << final_w << " kg\n";
+static std::string dispatch(const std::string& line) {
+    std::istringstream iss(line);
+    std::string cmd;
+    iss >> cmd;
 
-			if (final_w < -2.0f) {
-				std::cout << "[ADJUST] Weight < -2kg, releasing (DOWN) for 500ms...\n";
-				relay.controlRelay(CRANE_DOWN_PIN, true);
-				std::this_thread::sleep_for(std::chrono::milliseconds(300));
-				relay.controlRelay(CRANE_DOWN_PIN, false);
-				std::cout << "[ADJUST] Done.\n";
-			}
-			// -------------------------
-		}
-		else if (cmd == "release") {
-			const float RELEASE_THRESHOLD = -1.0f;
-			std::cout << "[MODE] RELEASE (↓ while weight < " << RELEASE_THRESHOLD << ", STOP when ≥ " << RELEASE_THRESHOLD << ")\n";
+    if (cmd == "pay_out") {
+        int cm = 0; iss >> cm;
+        if (iss.fail()) return "ERR usage:pay_out_<cm>\n";
+        return cmd_pay_out(cm, false);
+    }
+    if (cmd == "retract") {
+        int cm = 0; iss >> cm;
+        if (iss.fail()) return "ERR usage:retract_<cm>\n";
+        return cmd_pay_out(cm, true);
+    }
+    if (cmd == "pay_out_left" || cmd == "pay_out_right" ||
+        cmd == "retract_left" || cmd == "retract_right") {
+        std::string onoff; iss >> onoff;
+        if (iss.fail()) return "ERR usage:<cmd>_<on|off>\n";
+        return cmd_manual(cmd, onoff);
+    }
+    if (cmd == "status") return cmd_status();
+    if (cmd == "stop")   return cmd_stop();
+    return "ERR unknown_cmd\n";
+}
 
-			while (true)
-			{
-				float w = g_weight.load(std::memory_order_relaxed);
+// ============ TCP receive callback (line-buffered per client thread) ============
 
-				if (w < RELEASE_THRESHOLD) {
-					relay.controlRelay(CRANE_DOWN_PIN, true);
-					relay.controlRelay(CRANE_UP_PIN, false);
-					std::cout << "[RELEASE] w=" << w << " → DOWN\n";
-				}
-				else {
-					relay.controlRelay(CRANE_DOWN_PIN, false);
-					relay.controlRelay(CRANE_UP_PIN, false);
-					std::cout << "[RELEASE] w=" << w << " → STOP & EXIT RELEASE\n";
-					break;
-				}
+static void on_receive(socket_t sock, const char* data, int len) {
+    // thread_local: each client handler thread has its own accumulator;
+    // cleaned up automatically when the thread exits (on disconnect).
+    thread_local std::string rx_buf;
+    rx_buf.append(data, len);
 
-				std::this_thread::sleep_for(std::chrono::milliseconds(50));
-			}
+    size_t pos;
+    while ((pos = rx_buf.find('\n')) != std::string::npos) {
+        std::string line = rx_buf.substr(0, pos);
+        rx_buf.erase(0, pos + 1);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
 
-			// 安全關閉
-			relay.controlRelay(CRANE_UP_PIN, false);
-			relay.controlRelay(CRANE_DOWN_PIN, false);
+        const std::string reply = dispatch(line);
+        cmd_server.sendToClient(sock, reply.c_str(), (int)reply.size());
+    }
+}
 
-			float final_w = g_weight.load(std::memory_order_relaxed);
-			std::cout << "[RELEASE] done, current weight = " << final_w << " kg\n";
-		}
-		else if (cmd == "up") {
-			int ms = 0;
-			std::cin >> ms;
-			std::cout << "> up " << ms << "\n";
+// ============ Main ============
 
-			// 限制範圍在 100ms - 3000ms 之間
-			if (ms < 100 || ms > 5000) {
-				std::cout << "[ERR] ms must be between 100 and 3000\n";
-				continue;
-			}
+int main() {
+    std::cout << "[Crane_control_PI] starting..." << std::endl;
 
-			relay.controlRelay(CRANE_UP_PIN, true);
-			relay.controlRelay(CRANE_DOWN_PIN, false);
+    if (!cli_30.connectToServer(USR_IP, USR_PORT)) {
+        std::cerr << "[FATAL] connect USR " << USR_IP << ":" << USR_PORT << " failed" << std::endl;
+        return 1;
+    }
+    std::cout << "[OK] USR @ " << USR_IP << ":" << USR_PORT << std::endl;
 
-			std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    if (relay.init(cli_30, RELAY_SLAVE, 8, false)) {
+        std::cerr << "[FATAL] ZS_DIO_R_RLY init (slave " << RELAY_SLAVE << ") failed" << std::endl;
+        return 1;
+    }
+    std::cout << "[OK] ZS_DIO_R_RLY slave " << RELAY_SLAVE << std::endl;
 
-			relay.controlRelay(CRANE_UP_PIN, false);
-			std::cout << "[DONE] up\n";
-		}
-		else if (cmd == "down") {
-			int ms = 0;
-			std::cin >> ms;
-			std::cout << "> down " << ms << "\n";
+    if (meter_left.init(cli_30, METER_LEFT_SLAVE, false)) {
+        std::cerr << "[FATAL] SD76 left (slave " << METER_LEFT_SLAVE << ") init failed" << std::endl;
+        return 1;
+    }
+    std::cout << "[OK] SD76 left  slave " << METER_LEFT_SLAVE << std::endl;
 
-			// 限制範圍在 100ms - 3000ms 之間
-			if (ms < 100 || ms > 5000) {
-				std::cout << "[ERR] ms must be between 100 and 3000\n";
-				continue;
-			}
+    if (meter_right.init(cli_30, METER_RIGHT_SLAVE, false)) {
+        std::cerr << "[FATAL] SD76 right (slave " << METER_RIGHT_SLAVE << ") init failed" << std::endl;
+        return 1;
+    }
+    std::cout << "[OK] SD76 right slave " << METER_RIGHT_SLAVE << std::endl;
 
-			relay.controlRelay(CRANE_DOWN_PIN, true);
-			relay.controlRelay(CRANE_UP_PIN, false);
+    // Safe startup state
+    allRopeOff();
 
-			std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    cmd_server.setReceiveCallback(on_receive);
+    if (!cmd_server.start(CMD_PORT, false)) {
+        std::cerr << "[FATAL] TCP server start on port " << CMD_PORT << " failed" << std::endl;
+        return 1;
+    }
+    std::cout << "[OK] command server :" << CMD_PORT << " (type 'exit' to stop)" << std::endl;
 
-			relay.controlRelay(CRANE_DOWN_PIN, false);
-			std::cout << "[DONE] down\n";
-		}
-		else if (cmd == "exit") {
-			program_running = false;
-			break;
-		}
-		else {
-			std::cout << "[ERR] Unknown command\n";
-		}
-	}
+    // Local console for operator to kill the daemon
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line == "exit" || line == "quit") break;
+        if (line == "status") std::cout << cmd_status();
+    }
 
-	t.join();
-	relay.controlRelay(CRANE_UP_PIN, false);
-	relay.controlRelay(CRANE_DOWN_PIN, false);
-
-	return 0;
+    std::cout << "[SHUTDOWN] stopping..." << std::endl;
+    abort_flag = true;
+    cmd_server.stop();
+    allRopeOff();
+    return 0;
 }

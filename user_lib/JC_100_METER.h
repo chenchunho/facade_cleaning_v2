@@ -90,9 +90,9 @@ public:
 	int error_flag;  // 0: 正常, 1: 異常
 
 private:
-	TCP_client* client = nullptr;
 	int  _slaveID;
 	bool _debug;
+	TCP_client* client = nullptr;
 	bool _isExternalClient;
 	int  _last_pressure = 0;
 

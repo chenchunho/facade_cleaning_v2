@@ -72,7 +72,7 @@ RX: Addr 10 00 FD 00 05 CRC16
 | acc | 0x00-0xFF | Acceleration gear (same formula as speed mode) |
 | speed | 0x0000-0x0BB8 | 0-3000 RPM |
 | pulse | 0x00000000-0xFFFFFFFF | Pulse count (microstep × step_angle/360 per revolution) |
-| mode | 0x00/0x01/0x02 | 0=relative, 1=absolute, 2=??? |
+| mode | 0x00/0x01 | 0=relative, 1=absolute |
 | sync | 0x00/0x01 | 0=execute now, 1=buffer for sync trigger |
 
 **Pulse conversion (Emm):** With 1.8° step and 16 microsteps: 3200 pulses = 360°.
@@ -218,17 +218,29 @@ TX: Addr 10 00 AE 00 02 04 4B [store] [new_ID] CRC16
 - store: 0x00/0x01
 - new_ID: 0x01-0xFF (0x00 = broadcast, not allowed as ID)
 
-### 3.5.2 Set Microstep (Function 0x10, Reg 0x0084)
+### 3.5.2 Set Microstep (Function 0x10, Reg 0x00B4)
 
 ```
-TX: Addr 10 00 84 00 02 04 8A [store] [microstep] CRC16
+TX: Addr 10 00 B4 00 02 04 8A [store] [microstep] CRC16
 ```
 
 - microstep: subdivision value (e.g., 16 for 1.8° motor → 3200 pulses/rev)
 
+### 3.5.3 Power-Loss Flag (Function 0x10, Reg 0x0050/0x00DF)
+
+Modify power-loss record flag setting.
+- Reg 0x0050 (Emm) / 0x00DF (X firmware)
+
 ### 3.5.11 Speed 10x Resolution Emm (Function 0x10, Reg 0x004F)
 
 When enabled, speed reporting switches from 1 RPM to 0.1 RPM resolution.
+
+## 3.3.6 Modify Homing Parameters
+
+Adjustable homing parameters (via dedicated registers):
+- Homing speed
+- Homing timeout
+- Collision detection: RPM threshold, current threshold, duration threshold
 
 ## Acceleration Formula (Emm)
 
@@ -236,7 +248,8 @@ When enabled, speed reporting switches from 1 RPM to 0.1 RPM resolution.
 Time per 1 RPM increment = (256 - acc) × 50 μs
 ```
 
-- acc=0: slowest acceleration, (256-0)×50μs = 12.8ms per RPM step
+- acc=0: **direct start** (no acceleration curve, immediate speed)
+- acc=1: slowest acceleration, (256-1)×50μs = 12.75ms per RPM step
 - acc=100: (256-100)×50μs = 7.8ms per RPM step
 - acc=255: fastest acceleration, (256-255)×50μs = 50μs per RPM step
 

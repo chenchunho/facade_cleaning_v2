@@ -220,7 +220,7 @@ bool ZDT_motor_control::motion_control_speed_mode(int dir, int acc_rpm, int rpm,
 	std::vector<uint8_t> cmd = {
 		slave_id, 0x10, 0x00, 0xF6, 0x00, 0x03, 0x06,
 		(uint8_t)dir,           // 寄存器1 H: 方向 (00:CW / 01:CCW)
-		(uint8_t)acc_rpm,       // 寄存器1 L: 加速度 (0-255 檔位)
+		(uint8_t)acc_rpm,       // 寄存器1 L: 加速度 (0-255, 0=direct start no ramp)
 		(uint8_t)(rpm >> 8),    // 寄存器2 H: 速度高8位
 		(uint8_t)(rpm & 0xFF),  // 寄存器2 L: 速度低8位
 		(uint8_t)sync,          // 寄存器3 H: 同步標誌 (00:立即 / 01:緩存)
@@ -283,11 +283,17 @@ bool ZDT_motor_control::motion_control_speed_mode(int dir, int acc_rpm, int rpm,
 }
 
 bool ZDT_motor_control::motion_control_pos_mode(int dir, int acc_rpm, int rpm, int pulse, int mode, int sync, int retry) {
+	// mode: 0=relative, 1=absolute (only valid values)
+	if (mode != 0 && mode != 1) {
+		if (debug_mode) std::cout << "[ERROR] Invalid mode " << mode << ", must be 0 (relative) or 1 (absolute)" << std::endl;
+		return true;
+	}
+
 	// 1. 構建寫入多個暫存器 (0x10) 指令封包
 	std::vector<uint8_t> cmd = {
 		slave_id, 0x10, 0x00, 0xFD, 0x00, 0x05, 0x0A,
 		(uint8_t)dir,           // 數據1: 方向
-		(uint8_t)acc_rpm,       // 數據2: 加速度
+		(uint8_t)acc_rpm,       // 數據2: 加速度 (0-255, 0=direct start no ramp)
 		(uint8_t)(rpm >> 8),    // 數據3: 速度高位
 		(uint8_t)(rpm & 0xFF),  // 數據4: 速度低位
 		(uint8_t)(pulse >> 24), // 數據5: 脈衝數 Byte3 (高)
@@ -366,11 +372,17 @@ bool ZDT_motor_control::motion_control_pos_mode(int dir, int acc_rpm, int rpm, i
 }
 
 bool ZDT_motor_control::motion_control_pos_mode_nowait(int dir, int acc_rpm, int rpm, int pulse, int mode, int sync, int retry) {
+	// mode: 0=relative, 1=absolute (only valid values)
+	if (mode != 0 && mode != 1) {
+		if (debug_mode) std::cout << "[ERROR] Invalid mode " << mode << ", must be 0 (relative) or 1 (absolute)" << std::endl;
+		return true;
+	}
+
 	// 1. 構建寫入多個暫存器 (0x10) 指令封包
 	std::vector<uint8_t> cmd = {
 		slave_id, 0x10, 0x00, 0xFD, 0x00, 0x05, 0x0A,
 		(uint8_t)dir,           // 數據1: 方向
-		(uint8_t)acc_rpm,       // 數據2: 加速度
+		(uint8_t)acc_rpm,       // 數據2: 加速度 (0-255, 0=direct start no ramp)
 		(uint8_t)(rpm >> 8),    // 數據3: 速度高位
 		(uint8_t)(rpm & 0xFF),  // 數據4: 速度低位
 		(uint8_t)(pulse >> 24), // 數據5: 脈衝數 Byte3 (高)
