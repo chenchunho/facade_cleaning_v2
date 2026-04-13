@@ -50,6 +50,129 @@
 //JC_100_METER meter_7;
 
 
+int main() {
+
+	WashRobot robot;
+	bool robot_initialized = false;
+
+	// ============================================================
+	//  ★ 單腳測試設定 — 換腳測試時修改這裡 ★
+	// ============================================================
+	SingleLegTestConfig testCfg;
+	testCfg.tcp_ip           = "10.0.0.3";
+	testCfg.tcp_port         = 4001;
+	testCfg.zdt_slave        = 7;      // ZDT 無刷馬達 slave ID
+	testCfg.jc100_slave      = 9;      // JC100 壓力感測器 slave ID（0 = 不使用）
+	testCfg.dm2j_slave       = 2;      // DM2J 步進馬達 slave ID
+	testCfg.relay_slave      = 1;      // PQW 繼電器 slave ID
+	testCfg.valve_ch         = 2;      // 真空閥繼電器通道
+	testCfg.vacuum_motor_ch  = 3;      // 抽真空馬達通道（0 = 不控制）
+	testCfg.enable_rpm       = 1000;
+	testCfg.enable_pulses    = 144000;
+	testCfg.retract_rpm      = 500;
+	testCfg.retract_pulses   = 72000;
+	testCfg.zero_rpm         = 1000;
+	testCfg.axis_rpm         = 300;
+	testCfg.axis_min_cm      = -38.0;
+	testCfg.axis_max_cm      =  38.0;
+	testCfg.pressure_threshold = -50;
+	testCfg.adjust_back_cm   = 5;
+
+	// ============================================================
+
+	std::string cmd;
+	while (true) {
+		std::cout << "> ";
+		std::getline(std::cin, cmd);
+
+		if (cmd == "exit") {
+			break;
+		}
+		else if (cmd == "init") {
+			if (robot.init()) {
+				robot_initialized = true;
+				std::cout << "Robot initialized." << std::endl;
+			} else {
+				std::cerr << "Init failed." << std::endl;
+			}
+		}
+		else if (cmd == "doinit") {
+			if (!robot_initialized) {
+				std::cerr << "Run 'init' first." << std::endl;
+			} else {
+				robot.doInit();
+			}
+		}
+		else if (cmd == "right enable") {
+			if (!robot_initialized) { std::cerr << "Run 'init' first.\n"; }
+			else robot.enableRight();
+		}
+		else if (cmd == "right disable") {
+			if (!robot_initialized) { std::cerr << "Run 'init' first.\n"; }
+			else robot.disableRight();
+		}
+		else if (cmd == "pressure") {
+			if (!robot_initialized) { std::cerr << "Run 'init' first.\n"; }
+			else {
+				int val = robot.readPressure(0);
+				std::cout << "Pressure: " << val << " (x0.1 kPa)" << std::endl;
+			}
+		}
+		else if (cmd == "move 0") {
+			if (!robot_initialized) { std::cerr << "Run 'init' first.\n"; }
+			else robot.move(1, 300, 0.0);
+		}
+		else if (cmd == "move 10") {
+			if (!robot_initialized) { std::cerr << "Run 'init' first.\n"; }
+			else robot.move(1, 300, 10.0);
+		}
+		else if (cmd == "shutdown") {
+			if (!robot_initialized) { std::cerr << "Run 'init' first.\n"; }
+			else { robot.doShutdown(); break; }
+		}
+		else if (cmd == "move") {
+			if (!robot_initialized) { std::cerr << "Run 'init' first.\n"; }
+			else robot.moveRight();
+		}
+		else if (cmd.rfind("test leg wash", 0) == 0) {
+			// Usage: test leg wash <cycles> <step_cm>
+			int cycles = 1, step = 30;
+			std::istringstream iss(cmd);
+			std::string w1, w2, w3;
+			iss >> w1 >> w2 >> w3 >> cycles >> step;
+			std::cout << "Test single leg wash: cycles=" << cycles
+			          << "  step=" << step << " cm" << std::endl;
+			robot.testSingleLegWash(testCfg, cycles, step);
+		}
+		else if (cmd.rfind("start cleaning all with step", 0) == 0) {
+			if (!robot_initialized) { std::cerr << "Run 'init' first.\n"; }
+			else {
+				// Usage: start cleaning all with step <cm>
+				int step = 30;
+				std::istringstream iss(cmd);
+				std::string w;
+				for (int i = 0; i < 5; i++) iss >> w;
+				if (iss >> step) {
+					std::cout << "Start cleaning all, step=" << step << " cm" << std::endl;
+					robot.startCleaningAll(step);
+				} else {
+					std::cout << "Usage: start cleaning all with step <cm>" << std::endl;
+				}
+			}
+		}
+		else if (!cmd.empty()) {
+			std::cout << "Unknown command: " << cmd << std::endl;
+		}
+	}
+
+	return 0;
+
+	/*
+
+	// -------------------峻禾-----------------------
+	
+	
+
 void waitEnter();
 void doInit();
 void doVacuumEnable();
@@ -72,66 +195,8 @@ bool askPositionOK(int x);
 int askNewX();
 
 void startAutoWash();
-
-int main() {
-
-	WashRobot robot;
-
-	if (!robot.init()) {
-		std::cerr << "Init failed." << std::endl;
-		return 1;
-	}
-
-	robot.doInit();
-
-	std::string cmd;
-	while (true) {
-		std::cout << "> ";
-		std::getline(std::cin, cmd);
-
-		if (cmd == "exit") {
-			break;
-		}
-		else if (cmd == "right enable") {
-			robot.enableRight();
-		}
-		else if (cmd == "right disable") {
-			robot.disableRight();
-		}
-		else if (cmd == "pressure") {
-			int val = robot.readPressure(0);  // leg_index 0 = m1
-			std::cout << "Pressure: " << val << " (x0.1 kPa)" << std::endl;
-		}
-		else if (cmd == "move 0") {
-			robot.move(1, 300, 0.0);    // axis 1 = drv_1, 歸零
-		}
-		else if (cmd == "move 10") {
-			robot.move(1, 300, 10.0);   // axis 1 移動到 10cm
-		}
-		else if (cmd == "shutdown") {
-			robot.doShutdown();
-			break;
-		}
-		else if (cmd == "move") {
-			robot.moveRight();
-
-		}
-		else if (cmd == "start wash") {
-			robot.startWash(5, 300);
-		}
-		else if (!cmd.empty()) {
-			std::cout << "Unknown command: " << cmd << std::endl;
-		}
-	}
-
-	return 0;
-
-
-
-
-	/*
-
-	// -------------------峻禾-----------------------
+	
+	
 	if (!cli_20.connectToServer("192.168.1.20", 4001)) {
 		std::cerr << "Failed to connect 485 controller." << std::endl;
 		system("PAUSE");

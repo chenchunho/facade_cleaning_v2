@@ -20,6 +20,60 @@
 #include <iomanip>
 
 // ============================================================
+//  ★ Robot Hardware Config — 修改此區域以對應實際接線 ★
+//
+//  腳位索引（陣列下標）：
+//    [0]=上-左-1  [1]=上-左-2  [2]=上-右-1  [3]=上-右-2
+//    [4]=下-左-1  [5]=下-左-2  [6]=下-右-1  [7]=下-右-2
+// ============================================================
+namespace RobotConfig {
+
+    // ── ZDT 無刷馬達 Slave ID（SMC 推桿，8 腳）─────────────
+    constexpr int ZDT_SLAVE[8] = {
+        2, 3,    // 上-左-1, 上-左-2
+        4, 5,    // 上-右-1, 上-右-2
+        6, 7,    // 下-左-1, 下-左-2
+        8, 9     // 下-右-1, 下-右-2
+    };
+
+    // ── JC_100 壓力感測器 Slave ID（8 腳）──────────────────
+    constexpr int JC100_SLAVE[8] = {
+        10, 11,  // 上-左-1, 上-左-2
+        12, 13,  // 上-右-1, 上-右-2
+        14, 15,  // 下-左-1, 下-左-2
+        16, 17   // 下-右-1, 下-右-2
+    };
+
+    // ── DM2J 步進馬達 Slave ID（左/右滑桿）─────────────────
+    constexpr int SLIDER_LEFT_SLAVE  = 1;
+    constexpr int SLIDER_RIGHT_SLAVE = 2;
+
+    // ── 繼電器：抽真空馬達通道（每腳獨立，0 = 未使用）──────
+    constexpr int RELAY_VACUUM_MOTOR[8] = {
+        1, 2,    // 上-左-1, 上-左-2
+        3, 4,    // 上-右-1, 上-右-2
+        5, 6,    // 下-左-1, 下-左-2
+        7, 8     // 下-右-1, 下-右-2
+    };
+
+    // ── 繼電器：真空閥通道（每腳獨立）──────────────────────
+    constexpr int RELAY_VALVE[8] = {
+        9,  10,  // 上-左-1, 上-左-2
+        11, 12,  // 上-右-1, 上-右-2
+        13, 14,  // 下-左-1, 下-左-2
+        15, 16   // 下-右-1, 下-右-2
+    };
+
+    // ── 動作參數 ─────────────────────────────────────────────
+    constexpr int    PRESSURE_THRESHOLD = -50;   // 吸附閾值 (x0.1 kPa)，< 此值視為吸好
+    constexpr int    ADJUST_BACK_CM     = 5;     // 吸附失敗後退距離 (cm)
+    constexpr double SLIDER_MAX_CM      = 38.0;  // 滑桿行程上限 (cm)
+    constexpr double SLIDER_MIN_CM      = -38.0; // 滑桿行程下限 (cm)
+    constexpr int    SLIDER_RPM         = 300;   // 滑桿移動速度 (rpm)
+
+}  // namespace RobotConfig
+
+// ============================================================
 //  Leg  ─ 單腳：馬達 + 壓力感測器 + 動作參數
 //
 //  縮回分兩段：
@@ -28,20 +82,16 @@
 // ============================================================
 struct Leg {
     ZDT_motor_control* motor;
-    JC_100_METER*      sensor;    // 無感測器時設為 nullptr
-    DM2J_RS570*        axis;      // 該腳對應的線性軸（同側兩腳共用）
-    PQW_IO_16O_RLY*    relay;     // 該腳對應的繼電器模組
-    int                valve_ch;  // 氣閥繼電器通道
+    JC_100_METER*      sensor;
+    DM2J_RS570*        axis;
+    PQW_IO_16O_RLY*    relay;
+    int                valve_ch;         // 真空閥繼電器通道
+    int                vacuum_motor_ch;  // 抽真空馬達繼電器通道（0 = 不控制）
 
-    // 吸附（enable）參數
     int enable_rpm;
     int enable_pulses;
-
-    // 縮回 Phase 1：中間位置（retract_pulses == 0 則略過，直接歸零）
     int retract_rpm;
     int retract_pulses;
-
-    // 縮回 Phase 2 / 直接歸零速度
     int zero_rpm;
 };
 
@@ -55,7 +105,7 @@ struct LegGroupConfig {
 };
 
 // ============================================================
-//  LegGroup  ─ 一組腳（共用同一個 vacuum valve）
+//  LegGroup  ─ 一組腳
 // ============================================================
 struct LegGroup {
     std::vector<Leg> legs;
@@ -74,95 +124,126 @@ struct LinearAxis {
 };
 
 // ============================================================
+//  SingleLegTestConfig  ─ 單腳測試設定
+//
+//  ★ 在 main.cpp 裡修改這個 struct 的值以對應實際接線 ★
+// ============================================================
+struct SingleLegTestConfig {
+    // ── 網路連線 ──────────────────────────────────────────
+    std::string tcp_ip   = "10.0.0.42";
+    int         tcp_port = 4001;
+
+    // ── Slave ID ──────────────────────────────────────────
+    int zdt_slave        = 7;   // ZDT 無刷馬達（SMC 推桿）
+    int jc100_slave      = 9;   // JC100 壓力感測器（0 = 不使用）
+    int dm2j_slave       = 2;   // DM2J 步進馬達（線性軸）
+    int relay_slave      = 1;   // PQW 繼電器
+
+    // ── 繼電器通道 ────────────────────────────────────────
+    int valve_ch         = 2;   // 真空閥通道
+    int vacuum_motor_ch  = 0;   // 抽真空馬達通道（0 = 不控制）
+
+    // ── 推桿動作參數 ──────────────────────────────────────
+    int enable_rpm       = 1000;
+    int enable_pulses    = 144000;
+    int retract_rpm      = 500;
+    int retract_pulses   = 72000;
+    int zero_rpm         = 1000;
+
+    // ── 線性軸參數 ────────────────────────────────────────
+    int    axis_rpm      = 300;
+    double axis_min_cm   = -38.0;
+    double axis_max_cm   =  38.0;
+
+    // ── 吸附判斷 ──────────────────────────────────────────
+    int pressure_threshold = -50;  // < 此值視為吸好 (x0.1 kPa)
+    int adjust_back_cm     = 5;    // 吸附失敗後退距離 (cm)
+};
+
+// ============================================================
 //  WashRobot  ─ 洗窗機器人主控制類別
 //
-//  網路佈局：
-//    cli_20 (192.168.1.20:4001) — DM2J 步進馬達 slave 1~4
-//    cli_21 (192.168.1.21:4001) — ZDT 無刷馬達 slave 2~8
-//                               — JC100 壓力感測器 slave 9~15
-//                               — PQW 繼電器 slave 1, 16
+//  主清洗腳組：
+//    body_group  ─ 上部分 4 腳（m[0]~m[3]）
+//    foot_group  ─ 下部分 4 腳（m[4]~m[7]）
 //
-//  腳組對應：
-//    right_group  ─ m[0](m1), m[1](m2)        slave 2, 3
-//    left_group   ─ m[5](m6), m[6](m7)        slave 7, 8
-//    center_group ─ m[2](m3), m[3](m4), m[4](m5) slave 4, 5, 6
+//  滑桿：
+//    axes[0] = 左滑桿 (drv[0], SLIDER_LEFT_SLAVE)
+//    axes[1] = 右滑桿 (drv[1], SLIDER_RIGHT_SLAVE)
 // ============================================================
 class WashRobot {
 public:
     WashRobot();
     ~WashRobot();
 
-    // 初始化所有連線與裝置
     bool init();
 
     // ── 腳組操作 ──────────────────────────────────────────
-    // 開閥 + 伸出腳
     void enableGroup (LegGroup& g);
-    // 關閥 + 縮回腳（兩段式）
     void disableGroup(LegGroup& g);
 
     void enableLeft  ();  void disableLeft  ();
     void enableRight ();  void disableRight ();
     void enableCenter();  void disableCenter();
     void enableAll   ();  void disableAll   ();
-    void adjustLegPos(Leg& leg);
-    void processWash(Leg& leg, int cycles, int rpm);
-    void startWash(int cycles, int rpm);
+    int  adjustLegPos(Leg& leg);
     void moveRight();
 
     // ── 線性軸移動 ─────────────────────────────────────────
-    // axis_id: 1~4 對應 drv[0]~drv[3]（slave 1~4）
+    // axis_id: 1~4 對應 drv[0]~drv[3]
     void move    (int axis_id, int rpm, double cm);
-    void moveSync(int rpm, double cm);  // drv[1]+drv[2] 同步（drv_2, drv_3）
+    void moveSync(int rpm, double cm);  // 左右滑桿同步
 
     // ── 高階流程 ───────────────────────────────────────────
-    void doInit    ();   // 初始化：關閥、開真空馬達、伸出所有腳
-    void doShutdown();   // 關機：開閥放壓、關真空馬達
+    void doInit    ();
+    void doShutdown();
+
+    // ── 主清洗流程 ─────────────────────────────────────────
+    // step_cm: 每次滑桿移動公分數
+    void startCleaningAll(int step_cm);
+
+    // ── 單腳測試：來回洗窗 ─────────────────────────────────
+    // cfg    : 單腳硬體設定（在 main.cpp 定義並修改）
+    // cycles : 來回次數
+    // step_cm: 每次前進公分數
+    void testSingleLegWash(const SingleLegTestConfig& cfg, int cycles, int step_cm);
 
     // ── 壓力讀取 ───────────────────────────────────────────
-    // leg_index: 0~6 對應 meter[0]~meter[6]
+    // leg_index: 0~7 對應 meter[0]~meter[7]
     int readPressure(int leg_index);
 
 private:
-    // ── TCP 連線 ───────────────────────────────────────────
     TCP_client cli_20;
     TCP_client cli_21;
 
-    // ── 無刷馬達 m[0]~m[6]，slave ID 2~8 ─────────────────
-    ZDT_motor_control m[7];
+    ZDT_motor_control  m[8];      // slave ID 由 RobotConfig::ZDT_SLAVE 決定
+    JC_100_METER       meter[8];  // slave ID 由 RobotConfig::JC100_SLAVE 決定
+    DM2J_RS570         drv[4];    // drv[0]=左滑桿, drv[1]=右滑桿
 
-    // ── 壓力感測器 meter[0]~meter[6]，slave ID 9~15 ───────
-    JC_100_METER meter[7];
+    PQW_IO_16O_RLY relay;
+    PQW_IO_16O_RLY relay_2;
 
-    // ── 步進馬達 drv[0]~drv[3]，slave ID 1~4 ──────────────
-    DM2J_RS570 drv[4];
+    // ── 主清洗腳組 ─────────────────────────────────────────
+    LegGroup body_group;   // 上部分 4 腳
+    LegGroup foot_group;   // 下部分 4 腳
 
-    // ── 繼電器 ─────────────────────────────────────────────
-    PQW_IO_16O_RLY relay;    // cli_21, slave 1
-    PQW_IO_16O_RLY relay_2;  // cli_21, slave 16
-
-    // ── 腳組 ───────────────────────────────────────────────
+    // ── 舊測試腳組（保留供 enable/disable 指令使用）────────
     LegGroup right_group;
     LegGroup left_group;
     LegGroup center_group;
 
-    // ── 線性軸 ─────────────────────────────────────────────
-    LinearAxis axes[4];
+    LinearAxis axes[4];    // axes[0]=左滑桿, axes[1]=右滑桿
 
-    // ── 繼電器通道定義（依原始接線） ──────────────────────
-    // 注意：valve_left/right 命名與腳組左右相反，保留原始定義
-    static const int RELAY_VACUUM_MOTOR  = 11;
-    static const int RELAY_VALVE_LEFT    = 12;
-    static const int RELAY_VALVE_CENTER  = 13;
-    static const int RELAY_VALVE_RIGHT   = 14;
+    // 舊繼電器通道（保留供舊指令相容）
+    static const int COMPAT_RELAY_VACUUM_MOTOR  = 11;
+    static const int COMPAT_RELAY_VALVE_LEFT    = 12;
+    static const int COMPAT_RELAY_VALVE_CENTER  = 13;
+    static const int COMPAT_RELAY_VALVE_RIGHT   = 14;
 
-    // ── 內部輔助 ───────────────────────────────────────────
     bool initConnections();
     bool initDevices();
     void setupGroups();
     bool checkAxis(const LinearAxis& axis, int rpm, double cm);
-
-    // 只伸出腳，不動 valve（供 doInit 使用）
     void extendGroupMotors(LegGroup& g);
 };
 

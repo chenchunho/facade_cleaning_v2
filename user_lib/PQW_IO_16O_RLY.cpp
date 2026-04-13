@@ -6,11 +6,10 @@
 
 PQW_IO_16O_RLY::PQW_IO_16O_RLY() : client(nullptr), owns_client(false) {}
 PQW_IO_16O_RLY::~PQW_IO_16O_RLY() {
-	if (client) {
+	if (client && owns_client) {
 		controlAll(false);
 		client->close();
-		if (owns_client)
-			delete client;
+		delete client;
 	}
 }
 

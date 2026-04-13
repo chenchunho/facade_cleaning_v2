@@ -20,9 +20,7 @@ WashRobot::~WashRobot() {}
 // ============================================================
 
 bool WashRobot::init() {
-    // Init 2 re485 tcp connection
     if (!initConnections()) return false;
-    // Init all device
     if (!initDevices())     return false;
     setupGroups();
     return true;
@@ -30,7 +28,7 @@ bool WashRobot::init() {
 
 bool WashRobot::initConnections() {
     if (!cli_20.connectToServer("10.0.0.42", 4001)) {
-        std::cerr << "[WashRobot] Failed to connect 192.168.1.20:4001" << std::endl;
+        std::cerr << "[WashRobot] Failed to connect 10.0.0.42:4001" << std::endl;
         return false;
     }
     /*if (!cli_21.connectToServer("192.168.1.21", 4001)) {
@@ -41,45 +39,42 @@ bool WashRobot::initConnections() {
 }
 
 bool WashRobot::initDevices() {
-    // 步進馬達 drv[0]~drv[3] — slave 1~4
-    for (int i = 0; i < 1; i++) {
-        //if (!drv[i].init(cli_20, i + 1, false)) {
-        if (drv[i].init(cli_20, 2, false)) {
-            std::cerr << "[WashRobot] Failed to init DM2J drv[" << i
-                      << "] slave " << (i + 1) << std::endl;
-            return false;
-        }
+
+    // ── 步進馬達：左右滑桿 ───────────────────────────────────
+    if (drv[0].init(cli_20, RobotConfig::SLIDER_LEFT_SLAVE, false)) {
+        std::cerr << "[WashRobot] Failed to init left slider (slave "
+                  << RobotConfig::SLIDER_LEFT_SLAVE << ")" << std::endl;
+        return false;
+    }
+    if (drv[1].init(cli_20, RobotConfig::SLIDER_RIGHT_SLAVE, false)) {
+        std::cerr << "[WashRobot] Failed to init right slider (slave "
+                  << RobotConfig::SLIDER_RIGHT_SLAVE << ")" << std::endl;
+        return false;
     }
 
-    // 無刷馬達 m[0]~m[6] — slave 2~8
-    for (int i = 0; i < 1; i++) {
-        //if (!m[i].init(cli_21, i + 2, false)) {
-        if (!m[i].init(cli_20, 7, false)) {
+    // ── 無刷馬達 m[0]~m[7]（SMC 推桿，8 腳）───────────────
+    //    初始化失敗為非致命，繼續初始化其他裝置
+    for (int i = 0; i < 8; i++) {
+        if (!m[i].init(cli_20, RobotConfig::ZDT_SLAVE[i], false)) {
             std::cerr << "[WashRobot] Failed to init ZDT m[" << i
-                      << "] slave " << (i + 2) << std::endl;
-            return false;
+                      << "] slave " << RobotConfig::ZDT_SLAVE[i] << std::endl;
         }
     }
 
-    // 壓力感測器 meter[0]~meter[6] — slave 9~15
-    for (int i = 0; i < 1; i++) {
-      //if (!meter[i].init(cli_21, i + 9, false)) {
-        if (meter[i].init(cli_20, 9, false)) {
+    // ── 壓力感測器 meter[0]~meter[7]（8 腳）────────────────
+    //    初始化失敗為非致命
+    for (int i = 0; i < 8; i++) {
+        if (meter[i].init(cli_20, RobotConfig::JC100_SLAVE[i], false)) {
             std::cerr << "[WashRobot] Failed to init JC100 meter[" << i
-                      << "] slave " << (i + 9) << std::endl;
-            return false;
+                      << "] slave " << RobotConfig::JC100_SLAVE[i] << std::endl;
         }
     }
 
-    // 繼電器
+    // ── 繼電器 ───────────────────────────────────────────────
     if (relay.init(cli_20, 1)) {
         std::cerr << "[WashRobot] Failed to init relay (slave 1)" << std::endl;
         return false;
     }
-    //if (!relay_2.init(cli_21, 16)) {
-    //    std::cerr << "[WashRobot] Failed to init relay_2 (slave 16)" << std::endl;
-    //    return false;
-    //}
 
     return true;
 }
@@ -87,48 +82,57 @@ bool WashRobot::initDevices() {
 // ============================================================
 //  setupGroups  ─ 定義腳組與線性軸設定
 //
-//  右側 (right_group): m[0](m1), m[1](m2)
-//    m[0](m1): 無中間位置，直接歸零
-//    m[1](m2): 先縮回至 72000 pulse，等待後歸零
-//
-//  左側 (left_group): m[5](m6), m[6](m7)
-//    兩腳皆縮回至 72000 pulse，等待後歸零
-//
-//  中間 (center_group): m[2](m3), m[3](m4), m[4](m5)
-//    三腳皆縮回至 15000 pulse，等待後歸零
-//
-//  注意：RELAY_VALVE_LEFT/RIGHT 命名依原始接線，
-//        right_group 使用 RELAY_VALVE_LEFT（原始行為保留）
+//  欄位順序（Leg 初始化）：
+//    motor, sensor, axis, relay,
+//    valve_ch, vacuum_motor_ch,
+//    enable_rpm, enable_pulses,
+//    retract_rpm, retract_pulses, zero_rpm
 // ============================================================
 
 void WashRobot::setupGroups() {
 
-    // ── 右側腳組（線性軸 drv[0]）────────────────────────────
-    right_group.cfg = { &relay, RELAY_VALVE_LEFT, 4000 };
+    // ── 左右滑桿軸 ───────────────────────────────────────────
+    axes[0] = { &drv[0], RobotConfig::SLIDER_LEFT_SLAVE,
+                RobotConfig::SLIDER_MIN_CM, RobotConfig::SLIDER_MAX_CM,
+                RobotConfig::SLIDER_RPM };
+    axes[1] = { &drv[1], RobotConfig::SLIDER_RIGHT_SLAVE,
+                RobotConfig::SLIDER_MIN_CM, RobotConfig::SLIDER_MAX_CM,
+                RobotConfig::SLIDER_RPM };
+
+    // ── body_group（上部分 4 腳）─────────────────────────────
+    //  legs[0,1] = 上-左-1, 上-左-2  ─ 共用左滑桿 drv[0]
+    //  legs[2,3] = 上-右-1, 上-右-2  ─ 共用右滑桿 drv[1]
+    body_group.cfg = { &relay, 0, 2000 };
+    body_group.legs = {
+        { &m[0], &meter[0], &drv[0], &relay, RobotConfig::RELAY_VALVE[0], RobotConfig::RELAY_VACUUM_MOTOR[0], 1000, 144000, 500, 72000, 1000 },
+        { &m[1], &meter[1], &drv[0], &relay, RobotConfig::RELAY_VALVE[1], RobotConfig::RELAY_VACUUM_MOTOR[1], 1000, 144000, 500, 72000, 1000 },
+        { &m[2], &meter[2], &drv[1], &relay, RobotConfig::RELAY_VALVE[2], RobotConfig::RELAY_VACUUM_MOTOR[2], 1000, 144000, 500, 72000, 1000 },
+        { &m[3], &meter[3], &drv[1], &relay, RobotConfig::RELAY_VALVE[3], RobotConfig::RELAY_VACUUM_MOTOR[3], 1000, 144000, 500, 72000, 1000 },
+    };
+
+    // ── foot_group（下部分 4 腳）─────────────────────────────
+    //  legs[0,1] = 下-左-1, 下-左-2  ─ 共用左滑桿 drv[0]
+    //  legs[2,3] = 下-右-1, 下-右-2  ─ 共用右滑桿 drv[1]
+    foot_group.cfg = { &relay, 0, 2000 };
+    foot_group.legs = {
+        { &m[4], &meter[4], &drv[0], &relay, RobotConfig::RELAY_VALVE[4], RobotConfig::RELAY_VACUUM_MOTOR[4], 1000, 144000, 500, 72000, 1000 },
+        { &m[5], &meter[5], &drv[0], &relay, RobotConfig::RELAY_VALVE[5], RobotConfig::RELAY_VACUUM_MOTOR[5], 1000, 144000, 500, 72000, 1000 },
+        { &m[6], &meter[6], &drv[1], &relay, RobotConfig::RELAY_VALVE[6], RobotConfig::RELAY_VACUUM_MOTOR[6], 1000, 144000, 500, 72000, 1000 },
+        { &m[7], &meter[7], &drv[1], &relay, RobotConfig::RELAY_VALVE[7], RobotConfig::RELAY_VACUUM_MOTOR[7], 1000, 144000, 500, 72000, 1000 },
+    };
+
+    // ── 舊測試腳組（保留相容）────────────────────────────────
+    //    vacuum_motor_ch = 0 表示不控制個別真空馬達（使用舊的共用馬達邏輯）
+    right_group.cfg = { &relay, COMPAT_RELAY_VALVE_LEFT, 4000 };
     right_group.legs = {
-        //  motor    sensor     axis      relay    valve_ch           en_rpm  en_pulse  ret_rpm  ret_pulse  zero_rpm
-        { &m[0], &meter[0], &drv[0], &relay, 2,       1000,   144000,       0,        0,     1000 },  // m1: 直接歸零
-    //  { &m[1], &meter[1], &drv[0], &relay, RELAY_VALVE_LEFT,       1000,   144000,     500,    72000,     1000 },  // m2: 先縮回
+        { &m[0], &meter[0], &drv[0], &relay, 2, 0, 1000, 144000, 0, 0, 1000 },
     };
 
-    // ── 左側腳組（線性軸 drv[1]）────────────────────────────
-    left_group.cfg = { &relay, RELAY_VALVE_RIGHT, 4000 };
-    left_group.legs = {
-    //  { &m[5], &meter[5], &drv[1], &relay, RELAY_VALVE_RIGHT,      1000,   144000,     500,    72000,     1000 },  // m6
-    //  { &m[6], &meter[6], &drv[1], &relay, RELAY_VALVE_RIGHT,      1000,   144000,     500,    72000,     1000 },  // m7
-    };
+    left_group.cfg  = { &relay, COMPAT_RELAY_VALVE_RIGHT, 4000 };
+    left_group.legs = {};
 
-    // ── 中間腳組（線性軸 drv[2]）────────────────────────────
-    center_group.cfg = { &relay, RELAY_VALVE_CENTER, 2000 };
-    center_group.legs = {
-    //  { &m[2], &meter[2], &drv[2], &relay, RELAY_VALVE_CENTER,      300,    30000,      80,    15000,      300 },  // m3
-    //  { &m[3], &meter[3], &drv[2], &relay, RELAY_VALVE_CENTER,      300,    30000,      80,    15000,      300 },  // m4
-    //  { &m[4], &meter[4], &drv[2], &relay, RELAY_VALVE_CENTER,      300,    30000,      80,    15000,      300 },  // m5
-    };
-
-    // ── 線性軸 ────────────────────────────────────────────────
-    for (int i = 0; i < 1; i++)
-        axes[i] = { &drv[i], i + 1, -38.0, 38.0, 700 };
+    center_group.cfg  = { &relay, COMPAT_RELAY_VALVE_CENTER, 2000 };
+    center_group.legs = {};
 }
 
 // ============================================================
@@ -136,16 +140,24 @@ void WashRobot::setupGroups() {
 // ============================================================
 
 void WashRobot::enableGroup(LegGroup& g) {
-    g.cfg.relay->controlRelay(g.cfg.valve_channel, true);
-    for (auto& leg : g.legs)
+    for (auto& leg : g.legs) {
+        if (leg.vacuum_motor_ch != 0)
+            leg.relay->controlRelay(leg.vacuum_motor_ch, true);  // 啟動真空馬達
+        leg.relay->controlRelay(leg.valve_ch, true);              // 開真空閥
         leg.motor->motion_control_pos_mode(
             0, 255, leg.enable_rpm, leg.enable_pulses, 1, 0, 1);
+    }
 }
 
 void WashRobot::disableGroup(LegGroup& g) {
-    g.cfg.relay->controlRelay(g.cfg.valve_channel, false);
+    // 停止吸附
+    for (auto& leg : g.legs) {
+        leg.relay->controlRelay(leg.valve_ch, false);              // 關真空閥
+        if (leg.vacuum_motor_ch != 0)
+            leg.relay->controlRelay(leg.vacuum_motor_ch, false);  // 停真空馬達
+    }
 
-    // Phase 1：有中間位置的腳縮回，無中間位置的腳直接歸零
+    // Phase 1：縮回（有中間位置的腳先縮回，無的直接歸零）
     for (auto& leg : g.legs) {
         if (leg.retract_pulses != 0)
             leg.motor->motion_control_pos_mode(
@@ -180,15 +192,11 @@ void WashRobot::enableCenter() { enableGroup(center_group); }
 void WashRobot::disableCenter(){ disableGroup(center_group);}
 
 void WashRobot::enableAll() {
-    enableLeft();
-    enableRight();
-    enableCenter();
+    enableLeft(); enableRight(); enableCenter();
 }
 
 void WashRobot::disableAll() {
-    disableLeft();
-    disableRight();
-    disableCenter();
+    disableLeft(); disableRight(); disableCenter();
 }
 
 // ============================================================
@@ -216,19 +224,17 @@ void WashRobot::move(int axis_id, int rpm, double cm) {
     }
     LinearAxis& ax = axes[axis_id - 1];
     if (!checkAxis(ax, rpm, cm)) return;
-
     ax.drv->PR_move_cm(0, 1, rpm, cm, 100, 100);
     std::cout << "[LOG] Axis " << axis_id << " -> " << cm
               << " cm @ " << rpm << " RPM" << std::endl;
 }
 
 void WashRobot::moveSync(int rpm, double cm) {
-    // drv[1](drv_2) + drv[2](drv_3) 同步移動
-    if (!checkAxis(axes[1], rpm, cm)) return;
-
+    // 左滑桿(axes[0]) + 右滑桿(axes[1]) 同步移動
+    if (!checkAxis(axes[0], rpm, cm)) return;
+    axes[0].drv->PR_move_cm_set(1, 1, rpm, cm, 100, 100);
     axes[1].drv->PR_move_cm_set(1, 1, rpm, cm, 100, 100);
-    axes[2].drv->PR_move_cm_set(1, 1, rpm, cm, 100, 100);
-    axes[1].drv->PR_trigger_sync(1);
+    axes[0].drv->PR_trigger_sync(1);
 }
 
 // ============================================================
@@ -236,13 +242,12 @@ void WashRobot::moveSync(int rpm, double cm) {
 // ============================================================
 
 void WashRobot::doInit() {
-    // 關閉所有 valve，啟動真空馬達
-    relay.controlRelay(RELAY_VALVE_LEFT,   false);
-    relay.controlRelay(RELAY_VALVE_RIGHT,  false);
-    relay.controlRelay(RELAY_VALVE_CENTER, false);
-    relay.controlRelay(RELAY_VACUUM_MOTOR, true);
+    // 舊共用繼電器：關閉所有 valve、啟動共用真空馬達
+    relay.controlRelay(COMPAT_RELAY_VALVE_LEFT,   false);
+    relay.controlRelay(COMPAT_RELAY_VALVE_RIGHT,  false);
+    relay.controlRelay(COMPAT_RELAY_VALVE_CENTER, false);
+    relay.controlRelay(COMPAT_RELAY_VACUUM_MOTOR, true);
 
-    // 伸出所有腳（valve 保持關閉，待確認接觸後再 enable）
     extendGroupMotors(right_group);
     extendGroupMotors(left_group);
     extendGroupMotors(center_group);
@@ -251,11 +256,10 @@ void WashRobot::doInit() {
 }
 
 void WashRobot::doShutdown() {
-    // 開啟所有 valve（釋放吸附），關閉真空馬達
-    relay.controlRelay(RELAY_VALVE_LEFT,   true);
-    relay.controlRelay(RELAY_VALVE_RIGHT,  true);
-    relay.controlRelay(RELAY_VALVE_CENTER, true);
-    relay.controlRelay(RELAY_VACUUM_MOTOR, false);
+    relay.controlRelay(COMPAT_RELAY_VALVE_LEFT,   true);
+    relay.controlRelay(COMPAT_RELAY_VALVE_RIGHT,  true);
+    relay.controlRelay(COMPAT_RELAY_VALVE_CENTER, true);
+    relay.controlRelay(COMPAT_RELAY_VACUUM_MOTOR, false);
 
     std::cout << "[WashRobot] Shutdown." << std::endl;
 }
@@ -265,159 +269,311 @@ void WashRobot::doShutdown() {
 // ============================================================
 
 int WashRobot::readPressure(int leg_index) {
-    if (leg_index < 0 || leg_index > 6) {
-        std::cerr << "[ERROR] leg_index must be 0~6" << std::endl;
+    if (leg_index < 0 || leg_index > 7) {
+        std::cerr << "[ERROR] leg_index must be 0~7" << std::endl;
         return -1;
     }
     return meter[leg_index].read_pressure();
 }
 
-void WashRobot::adjustLegPos(Leg& leg) {
+// ============================================================
+//  adjustLegPos  ─ 確認吸附，失敗則後退重試
+//  回傳：最終位置 - 起始位置（cm，int）
+// ============================================================
 
-
-  // 讀取起始位置
-  double original_pos = 0;
-  if (!leg.axis->read_position_cm(original_pos)) {
-    std::cout << "[INFO] Start position: " << original_pos << " cm" << std::endl;
-  }
-
-  bool is_fail = true;
-  while (is_fail) {
-    // 確認壓力計
-    int val = leg.sensor->read_pressure();
-    double pressure = val;
-    std::cout << "[INFO] Pressure now: " << std::fixed << std::setprecision(1) << std::setw(6) << pressure << " kPa" << std::endl;
-
-    if (pressure >= -50) {
-      std::cout << "[WARN] The suction cup isn't sticking properly, try next location." << std::endl;
-    }
-    else {
-      // 吸附成功
-      is_fail = false;
-      break;
+int WashRobot::adjustLegPos(Leg& leg) {
+    if (leg.sensor == nullptr) {
+        std::cout << "[INFO] No pressure sensor configured, skipping suction adjust." << std::endl;
+        return 0;
     }
 
-    // 解真空
-    leg.relay->controlRelay(leg.valve_ch, false);
-
-    // 縮腳
-    leg.motor->motion_control_pos_mode(0, 255, leg.retract_rpm, leg.retract_pulses, 1, 0, 1);
-    Sleep(2000);
-    leg.motor->motion_control_pos_mode(0, 255, leg.zero_rpm, 0, 1, 0, 1);
-
-    // 後退五公分
-    double cm = 0;
-    int rpm = 500;
-    if (leg.axis->read_position_cm(cm)) {
-      std::cerr << "[ERROR] Failed to read position." << std::endl;
-      continue;
-    }
-    std::cout << "[INFO] Position: " << cm << " cm" << std::endl;
-
-    cm -= 5;
-    if (cm < -60.0 || cm > 60.0) {
-      std::cerr << "[ERROR] Position " << cm << " cm OUT OF RANGE (-38 ~ 38)." << std::endl;
-    }
-    else {
-      leg.axis->PR_move_cm(0, 1, rpm, cm, 100, 100);
-      std::cout << "[INFO] Move: RPM=" << rpm << " CM=" << cm << std::endl;
+    double original_pos = 0;
+    if (!leg.axis->read_position_cm(original_pos)) {
+        std::cout << "[INFO] Start position: " << original_pos << " cm" << std::endl;
     }
 
-    // 腳下去重吸
-    leg.relay->controlRelay(leg.valve_ch, true);
-    leg.motor->motion_control_pos_mode(0, 255, leg.enable_rpm, leg.enable_pulses, 1, 0, 1);
+    bool is_fail = true;
+    while (is_fail) {
+        int val = leg.sensor->read_pressure();
+        double pressure = val;
+        std::cout << "[INFO] Pressure: " << std::fixed << std::setprecision(1)
+                  << std::setw(6) << pressure << " (x0.1 kPa)" << std::endl;
 
-    // 不delay收不到值
-    sleep(1);
-  }
+        if (pressure < RobotConfig::PRESSURE_THRESHOLD) {
+            // 壓力夠負，吸附成功
+            is_fail = false;
+            break;
+        }
 
-  // 讀取最終位置
-  double final_pos = 0;
-  if (leg.axis->read_position_cm(final_pos)) {
-    std::cout << "[INFO] Final position: " << final_pos << " cm" << std::endl;
-  }
+        std::cout << "[WARN] Suction cup not attached, backing up "
+                  << RobotConfig::ADJUST_BACK_CM << " cm." << std::endl;
 
-  std::cout << "Total move: " << final_pos - original_pos << " cm" << std::endl;
-  relay.controlRelay(RELAY_VACUUM_MOTOR, false);
-  leg.relay->controlRelay(leg.valve_ch, false);
+        // 解真空
+        leg.relay->controlRelay(leg.valve_ch, false);
+        //if (leg.vacuum_motor_ch != 0)
+        //    leg.relay->controlRelay(leg.vacuum_motor_ch, false);
+
+        // 縮腳
+        leg.motor->motion_control_pos_mode(0, 255, leg.retract_rpm, leg.retract_pulses, 1, 0, 1);
+        Sleep(2000);
+        leg.motor->motion_control_pos_mode(0, 255, leg.zero_rpm, 0, 1, 0, 1);
+
+        // 後退
+        double cm = 0;
+        if (leg.axis->read_position_cm(cm)) {
+            std::cerr << "[ERROR] Failed to read position." << std::endl;
+            continue;
+        }
+        cm -= RobotConfig::ADJUST_BACK_CM;
+        if (cm < RobotConfig::SLIDER_MIN_CM || cm > RobotConfig::SLIDER_MAX_CM) {
+            std::cerr << "[ERROR] Adjusted position " << cm << " cm out of range, abort." << std::endl;
+            break;
+        }
+        leg.axis->PR_move_cm(0, 1, 500, cm, 100, 100);
+        Sleep(500);
+
+        // 重新吸附
+        if (leg.vacuum_motor_ch != 0)
+            leg.relay->controlRelay(leg.vacuum_motor_ch, true);
+        leg.relay->controlRelay(leg.valve_ch, true);
+        leg.motor->motion_control_pos_mode(0, 255, leg.enable_rpm, leg.enable_pulses, 1, 0, 1);
+        Sleep(1000);
+    }
+
+    double final_pos = 0;
+    leg.axis->read_position_cm(final_pos);
+    int total_adj = (int)(final_pos - original_pos);
+    std::cout << "[INFO] Adjust total: " << total_adj << " cm" << std::endl;
+    return total_adj;
 }
+
+// ============================================================
+//  moveRight / processWash / startWash  （舊測試流程，保留）
+// ============================================================
 
 void WashRobot::moveRight() {
-  adjustLegPos(right_group.legs[0]);
+    adjustLegPos(right_group.legs[0]);
 }
 
 // ============================================================
-//  startWash  ─ 線性軸來回洗窗，每次停點確認吸附
+//  startCleaningAll  ─ 主清洗流程（一路往下）
+//
+//  step_cm: 每次移動公分數（正值）
+//
+//  流程（重複直到 Ctrl+C）：
+//    Phase A: body_group 縮推桿+停真空 → 滑桿往正 → body_group 開真空+伸推桿 → 確認吸附
+//    Phase B: foot_group 縮推桿+停真空 → 滑桿往負 → foot_group 開真空+伸推桿 → 確認吸附
 // ============================================================
 
-void WashRobot::processWash(Leg& leg, int cycles, int rpm) {
+void WashRobot::startCleaningAll(int step_cm) {
+    int slider_pos_cm = 0;
 
-  relay.controlRelay(3, true); //RELAY_VACUUM_MOTOR
-  leg.relay->controlRelay(leg.valve_ch, true);
+    std::cout << "[CleanAll] Starting. Step=" << step_cm
+              << " cm. Press Ctrl+C to stop." << std::endl;
 
-  for (int i = 0; i < cycles; i++) {
-    std::cout << "[Wash] Cycle " << (i + 1) << "/" << cycles << std::endl;
+    while (true) {
 
-    // ── 讀目前位置 ──────────────────────────────────────────
-    double cm = 0;
-    if (leg.axis->read_position_cm(cm)) {
-      std::cerr << "[ERROR] Failed to read position, abort." << std::endl;
-      return;
+        // ── Phase A: body_group（上部分）往前 ───────────────────
+        std::cout << "[CleanAll] Phase A ──────────────────────────────" << std::endl;
+
+        // 1. body_group 縮推桿 + 停真空
+        disableGroup(body_group);
+
+        // 2. 兩支滑桿往正移動
+        slider_pos_cm += step_cm;
+        std::cout << "[CleanAll] Sliders -> +" << slider_pos_cm << " cm" << std::endl;
+        moveSync(RobotConfig::SLIDER_RPM, (double)slider_pos_cm);
+        Sleep(3000);  // 等待滑桿到位
+
+        // 3. body_group 開真空 + 伸推桿
+        enableGroup(body_group);
+        Sleep(1000);  // 等待吸附建立
+
+        // 4. 逐腳確認吸附，累計位移補償
+        for (auto& leg : body_group.legs) {
+            int adj = adjustLegPos(leg);
+            slider_pos_cm += adj;
+        }
+
+        // ── Phase B: foot_group（下部分）往前 ───────────────────
+        std::cout << "[CleanAll] Phase B ──────────────────────────────" << std::endl;
+
+        // 5. foot_group 縮推桿 + 停真空
+        disableGroup(foot_group);
+
+        // 6. 兩支滑桿往負移動
+        slider_pos_cm -= step_cm;
+        std::cout << "[CleanAll] Sliders -> " << slider_pos_cm << " cm" << std::endl;
+        moveSync(RobotConfig::SLIDER_RPM, (double)slider_pos_cm);
+        Sleep(3000);
+
+        // 7. foot_group 開真空 + 伸推桿
+        enableGroup(foot_group);
+        Sleep(1000);
+
+        // 8. 逐腳確認吸附
+        for (auto& leg : foot_group.legs) {
+            int adj = adjustLegPos(leg);
+            slider_pos_cm += adj;
+        }
+    }
+}
+
+// ============================================================
+//  testSingleLegWash  ─ 單腳來回洗窗測試
+//
+//  建立獨立連線與裝置，不依賴主機器人的 cli_20/cli_21。
+//  在 main.cpp 定義 SingleLegTestConfig 並修改其中數值即可換腳測試。
+// ============================================================
+
+void WashRobot::testSingleLegWash(const SingleLegTestConfig& cfg, int cycles, int step_cm) {
+
+    // ── 建立獨立 TCP 連線 ─────────────────────────────────────
+    TCP_client tcp;
+    if (!tcp.connectToServer(cfg.tcp_ip, cfg.tcp_port)) {
+        std::cerr << "[TestLeg] Failed to connect "
+                  << cfg.tcp_ip << ":" << cfg.tcp_port << std::endl;
+        return;
+    }
+    std::cout << "[TestLeg] Connected to "
+              << cfg.tcp_ip << ":" << cfg.tcp_port << std::endl;
+
+    // ── 初始化裝置 ────────────────────────────────────────────
+    ZDT_motor_control motor;
+    if (!motor.init(tcp, cfg.zdt_slave, false)) {
+        std::cerr << "[TestLeg] Failed to init ZDT slave " << cfg.zdt_slave << std::endl;
+        return;
     }
 
-    // 解真空
-    leg.relay->controlRelay(leg.valve_ch, false);
+    DM2J_RS570 axis;
+    if (axis.init(tcp, cfg.dm2j_slave, false)) {
+        std::cerr << "[TestLeg] Failed to init DM2J slave " << cfg.dm2j_slave << std::endl;
+        return;
+    }
 
-    // 縮腳
-    leg.motor->motion_control_pos_mode(0, 255, leg.retract_rpm, leg.retract_pulses, 1, 0, 1);
+    PQW_IO_16O_RLY rly;
+    if (rly.init(tcp, cfg.relay_slave)) {   // total_relay 用預設 16，不傳 false
+        std::cerr << "[TestLeg] Failed to init relay slave " << cfg.relay_slave << std::endl;
+        return;
+    }
+
+    JC_100_METER sensor;
+    bool has_sensor = (cfg.jc100_slave != 0);
+    if (has_sensor && sensor.init(tcp, cfg.jc100_slave, false)) {
+        std::cerr << "[TestLeg] Failed to init JC100 slave " << cfg.jc100_slave
+                  << ", continuing without pressure check." << std::endl;
+        has_sensor = false;
+    }
+
+    // ── 建立 Leg struct（供 adjustLegPos 使用）────────────────
+    Leg leg;
+    leg.motor           = &motor;
+    leg.sensor          = has_sensor ? &sensor : nullptr;
+    leg.axis            = &axis;
+    leg.relay           = &rly;
+    leg.valve_ch        = cfg.valve_ch;
+    leg.vacuum_motor_ch = cfg.vacuum_motor_ch;
+    leg.enable_rpm      = cfg.enable_rpm;
+    leg.enable_pulses   = cfg.enable_pulses;
+    leg.retract_rpm     = cfg.retract_rpm;
+    leg.retract_pulses  = cfg.retract_pulses;
+    leg.zero_rpm        = cfg.zero_rpm;
+
+    // ── 初始：啟動真空馬達 + 開真空閥 + 伸腳 ─────────────────
+    if (cfg.vacuum_motor_ch != 0)
+        rly.controlRelay(cfg.vacuum_motor_ch, true);
+    rly.controlRelay(cfg.valve_ch, true);
+    motor.motion_control_pos_mode(0, 255, cfg.enable_rpm, cfg.enable_pulses, 1, 0, 1);
     Sleep(2000);
-    leg.motor->motion_control_pos_mode(0, 255, leg.zero_rpm, 0, 1, 0, 1);
 
-    // ── 往前 30 cm ─────────────────────────────────────────
-    double fwd = cm + 30.0;
-    if (fwd < -60.0 || fwd > 60.0) {
-      std::cerr << "[ERROR] Forward target " << fwd << " cm out of range, abort." << std::endl;
-      return;
+    std::cout << "[TestLeg] Start. Cycles=" << cycles
+              << "  Step=" << step_cm << " cm" << std::endl;
+
+    // actual_step 記錄本次前進後實際停留的位移（含 adjustLegPos 補償）
+    int actual_step = step_cm;
+
+    for (int i = 0; i < cycles; i++) {
+        std::cout << "[TestLeg] ── Cycle " << (i + 1) << "/" << cycles
+                  << " ───────────────────────────" << std::endl;
+
+        // ======================================================
+        //  FORWARD PHASE: 解真空 → 縮腳 → 前進 → 吸附 → adjustLegPos
+        //  （上一次 backward 或初始狀態下，valve 已開；此時才釋放）
+        // ======================================================
+
+        double cm = 0;
+        if (axis.read_position_cm(cm)) {
+            std::cerr << "[TestLeg] Failed to read position, abort." << std::endl;
+            break;
+        }
+        std::cout << "[TestLeg] Fwd start pos: " << cm << " cm" << std::endl;
+
+        // 解真空
+        rly.controlRelay(cfg.valve_ch, false);
+        //if (cfg.vacuum_motor_ch != 0)
+        //    rly.controlRelay(cfg.vacuum_motor_ch, false);
+
+        // 縮腳
+        motor.motion_control_pos_mode(0, 255, cfg.retract_rpm, cfg.retract_pulses, 1, 0, 1);
+        Sleep(2000);
+        motor.motion_control_pos_mode(0, 255, cfg.zero_rpm, 0, 1, 0, 1);
+
+        // 往前 step_cm
+        double fwd = cm + step_cm;
+        if (fwd < cfg.axis_min_cm || fwd > cfg.axis_max_cm) {
+            std::cerr << "[TestLeg] Forward target " << fwd
+                      << " cm out of range [" << cfg.axis_min_cm
+                      << ", " << cfg.axis_max_cm << "], abort." << std::endl;
+            break;
+        }
+        std::cout << "[TestLeg] Move forward -> " << fwd << " cm" << std::endl;
+        axis.PR_move_cm(0, 1, cfg.axis_rpm, fwd, 100, 100);
+        Sleep(3000);
+
+        // 開真空 + 伸腳
+        //if (cfg.vacuum_motor_ch != 0)
+        //    rly.controlRelay(cfg.vacuum_motor_ch, true);
+        rly.controlRelay(cfg.valve_ch, true);
+        motor.motion_control_pos_mode(0, 255, cfg.enable_rpm, cfg.enable_pulses, 1, 0, 1);
+        Sleep(1000);
+
+        // 確認吸附，計算實際步長（adj ≤ 0 表示退後補償）
+        int adj = adjustLegPos(leg);
+        actual_step = step_cm + adj;
+        std::cout << "[TestLeg] Fwd actual_step=" << actual_step
+                  << " cm (step=" << step_cm << ", adj=" << adj << ")" << std::endl;
+
+        // ======================================================
+        //  BACKWARD PHASE: 真空保持 ON → 縮腳 → 後退 actual_step
+        //                  → 伸腳 → adjustLegPos（確認吸附）
+        //  注意：valve 全程維持開啟，下一次迴圈開頭才解真空
+        // ======================================================
+
+        if (axis.read_position_cm(cm)) {
+            std::cerr << "[TestLeg] Failed to read position, abort." << std::endl;
+            break;
+        }
+        std::cout << "[TestLeg] Bwd start pos: " << cm << " cm" << std::endl;
+
+
+        // 往後 actual_step
+        double bwd = cm - actual_step;
+        if (bwd < cfg.axis_min_cm || bwd > cfg.axis_max_cm) {
+            std::cerr << "[TestLeg] Backward target " << bwd
+                      << " cm out of range, abort." << std::endl;
+            break;
+        }
+        std::cout << "[TestLeg] Move backward <- " << bwd << " cm" << std::endl;
+        axis.PR_move_cm(0, 1, cfg.axis_rpm, bwd, 100, 100);
+        Sleep(3000);
+
+        // valve 保持 ON → 下一次迴圈 FORWARD PHASE 開頭才解真空
     }
-    std::cout << "[Wash] Move forward -> " << fwd << " cm" << std::endl;
-    leg.axis->PR_move_cm(0, 1, rpm, fwd, 100, 100);
-    sleep(3);  // 等待移動完成
 
-    // 腳下去重吸
-    leg.relay->controlRelay(leg.valve_ch, true);
-    leg.motor->motion_control_pos_mode(0, 255, leg.enable_rpm, leg.enable_pulses, 1, 0, 1);
+    // ── 結束：關真空閥 + 停真空馬達 ──────────────────────────
+    rly.controlRelay(cfg.valve_ch, false);
+    if (cfg.vacuum_motor_ch != 0)
+        rly.controlRelay(cfg.vacuum_motor_ch, false);
 
-
-    // ── 確認吸附，必要時自動調整 ───────────────────────────
-    adjustLegPos(leg);
-
-    // ── 讀目前位置（adjustLegPos 可能已移動軸） ────────────
-    if (leg.axis->read_position_cm(cm)) {
-      std::cerr << "[ERROR] Failed to read position, abort." << std::endl;
-      return;
-    }
-
-    // ── 往後 30 cm ─────────────────────────────────────────
-    double bwd = cm - 30.0;
-    if (bwd < -60.0 || bwd > 60.0) {
-      std::cerr << "[ERROR] Backward target " << bwd << " cm out of range, abort." << std::endl;
-      return;
-    }
-    std::cout << "[Wash] Move backward -> " << bwd << " cm" << std::endl;
-    leg.axis->PR_move_cm(0, 1, rpm, bwd, 100, 100);
-    sleep(3);
-
-    // ── 確認吸附，必要時自動調整 ───────────────────────────
-    adjustLegPos(leg);
-  }
-
-  std::cout << "[Wash] Done." << std::endl;
+    std::cout << "[TestLeg] Done." << std::endl;
 }
-
-void WashRobot::startWash(int cycles, int rpm) {
-  std::cout << "Start wash, " << cycles << " cycles @ " << rpm << " RPM." << std::endl;
-  std::cout << "Press enter to continue..." << std::endl;
-  std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-  processWash(right_group.legs[0], cycles, rpm);
-}
-

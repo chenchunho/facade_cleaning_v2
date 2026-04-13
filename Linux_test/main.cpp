@@ -21,7 +21,7 @@ int main() {
 	PQW_IO_16O_RLY relay;
 	ZDT_motor_control m1;
 	DM2J_RS570 drv_1;
-	if (!cli_21.connectToServer("10.0.0.42", 4001, false)) {
+	if (!cli_21.connectToServer("10.0.0.3", 4001, false)) {
 		std::cerr << "Failed to connect to server." << std::endl;
 		system("PAUSE");
 		return 1;
@@ -43,8 +43,11 @@ int main() {
 	cout << "Press enter to continue..." << endl;
 	std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 
-	drv_1.PR_move_cm(0, 1, 500, -40, 50, 100);
+
+	m1.motion_control_pos_mode(00, 255, 500, 72000, 1, 0, 1);
 	return 0;
+	//drv_1.PR_move_cm(0, 1, 500, -50, 50, 100);
+	//return 0;
 	relay.controlRelay(3, true);
 	relay.controlRelay(2, true);
 
