@@ -84,24 +84,32 @@ x64/                 # 編譯輸出目錄
   ├─▶ (Ethernet) USR-TCP232-304 #3 ─── RS485_3 ─── 192.168.1.22
   │     ├─▶ JC_100_METER × 9 (Slave 1~9) ─── 真空氣壓感測器，各裝於推桿末端吸盤
   │     ├─▶ DY_500_weight_sensor × 2 (Slave 10~11) ─── 鋼索重量感測器
-  │     └─▶ PQW_IO_16O_RLY × 1 (Slave 12, 8CH) ─── 吸盤真空控制
+  │     └─▶ PQW_IO_16O_RLY × 1 (Slave 12, 8CH) ─── 吸盤真空 + 清洗系統控制
   │           ├─ CH1: dp0105 真空泵浦 × 9（共用，給電/斷電）
   │           ├─ CH2: VT307 電磁閥 ─── 腳組吸盤（左腳 + 右腳，共 4 顆）
   │           ├─ CH3: VT307 電磁閥 ─── 身體組吸盤（左右身體，共 4 顆）
-  │           └─ CH4: VT307 電磁閥 ─── 中心吸盤（獨立 1 顆，姿態校正用）
+  │           ├─ CH4: VT307 電磁閥 ─── 中心吸盤（獨立 1 顆，姿態校正用）
+  │           ├─ CH5: 手臂刷洗滾筒馬達（裝於上滑台機械臂，清洗時旋轉）
+  │           ├─ CH6: 水箱泵浦
+  │           ├─ CH7: 水箱進水球閥（頂樓水壓 → 水箱補水）
+  │           └─ CH8: 保留
   │
   │ ─────────── 吊機 (Crane) 子系統 ───────────
   │
   ├─▶ (Ethernet) Raspberry Pi ─── 吊機主控 ─── 192.168.1.101
   │
   └─▶ (Ethernet) USR-TCP232-304 #4 ─── RS485_crane ─── 192.168.1.30
-        ├─▶ ZS_DIO_R_RLY × 1 (Slave 1, 8CH) ─── 鋼索絞盤控制
+        ├─▶ ZS_DIO_R_RLY × 1 (Slave 1, 8CH) ─── 左右鋼索絞盤繼電器（不經變頻器）
         │     ├─ CH1: 左收繩
         │     ├─ CH2: 右收繩
         │     ├─ CH3: 左放繩
         │     └─ CH4: 右放繩
-        ├─▶ SD76_length_meters (Slave 2) ─── 左繩計米器
-        └─▶ SD76_length_meters (Slave 3) ─── 右繩計米器
+        ├─▶ SD76_length_meters (Slave 2) ─── 左鋼索計米
+        ├─▶ SD76_length_meters (Slave 3) ─── 右鋼索計米
+        ├─▶ SD76_length_meters (Slave 4) ─── 中間管線計米（水管 + 電線）
+        ├─▶ DSZL_107 (Slave 5) ─── 左鋼索張力感測 [TBD Modbus 暫存器表]
+        ├─▶ DSZL_107 (Slave 6) ─── 右鋼索張力感測 [TBD Modbus 暫存器表]
+        └─▶ 變頻器 (Slave 7) ─── 中間絞盤馬達控制 [TBD 型號 + 暫存器表]
 ```
 
 ### 分散式系統通訊
@@ -164,20 +172,23 @@ Socket timeouts: 100-500ms per device. TCP monitor thread: 500ms reconnect polli
 | Class | Device | Interface | Description |
 |---|---|---|---|
 | `TCP_client` | TCP socket abstraction | WinSock2/BSD | Cross-platform TCP with auto-reconnect & monitor thread |
+| `TCP_server` | TCP listener | WinSock2/BSD | washrobot :5001 / crane :5002，多 client、line-buffered |
 | `Serial_port` | Serial port (Windows/Linux) | Native | TTL serial communication (8N1, multiple baud rates) |
 | `DM2J_RS570` | 步進馬達驅動器 × 5 | Modbus-TCP (RS485_1) | 左腳/左輪/右腳/右輪/上滑台，cm 精度，PR/JOG/Home 模式 |
 | `ZDT_motor_control` | 閉環步進驅動卡 × 9 | Modbus-TCP (RS485_2) | 驅動 SMC LEYG25 推桿，encoder 回饋，堵轉保護 |
 | `JC_100_METER` | 真空氣壓感測器 × 9 | Modbus-TCP (RS485_3) | 讀取壓力 (0.1 kPa)，裝於各推桿末端吸盤 |
 | `DY_500_weight_sensor` | 鋼索重量感測器 × 2 | Modbus-TCP (RS485_3) | 讀取重量 (int32/float)，裝於機體與鋼索連接處 |
-| `PQW_IO_16O_RLY` | 8CH 繼電器模組 × 1 | Modbus-TCP (RS485_3) | 控制 dp0105 泵浦 + VT307 電磁閥 |
-| `WT901BC_TTL` | 九軸姿態儀 | USB→TTL Serial 115200 | 背景執行緒連續讀取，checksum 驗證 |
+| `PQW_IO_16O_RLY` | 8CH 繼電器模組 × 1 | Modbus-TCP (RS485_3) | 控制 dp0105 泵浦 + VT307 電磁閥 + 刷洗/水泵/水閥 |
+| `WT901BC_TTL` | 九軸姿態儀 | USB→TTL Serial 115200 | 背景執行緒連續讀取，checksum 驗證；Roll+Pitch 平衡監控 |
+| `ZS_DIO_R_RLY` | 8CH 繼電器模組 × 1 | Modbus-TCP (RS485_crane) | 吊機左右鋼索絞盤收/放繩控制 |
+| `SD76_length_meters` | 計米器 × 3 | Modbus-TCP (RS485_crane) | 左/右鋼索 + 中間管線計米，int32 讀取，支援 pause/resume/zero |
 
-**備用（保留供未來替換元件）：**
+**待實作（等硬體文件到位）：**
 
 | Class | Device | Description |
 |---|---|---|
-| `SD76_length_meters` | 計米器 | Modbus-TCP，BCD 解碼 |
-| `ZS_DIO_R_RLY` | 數位 I/O 繼電器 | Modbus-TCP，預建指令列表 |
+| `DSZL_107` | 張力感測器 × 2 | 左/右鋼索張力 (kg)，裝於吊機端；等使用者補 Modbus 暫存器表 |
+| 中間絞盤變頻器 | 馬達控制器 × 1 | 中間放繩同步 (RPM + 方向)，等使用者補型號與暫存器表 |
 
 **未使用：**
 
@@ -185,7 +196,6 @@ Socket timeouts: 100-500ms per device. TCP monitor thread: 500ms reconnect polli
 |---|---|
 | `DIHOOL_control` | 馬達定位控制器，已編譯未整合 |
 | `QX_DO24` | 數位輸出模組，已編譯未整合 |
-| `TCP_server` | TCP 監聽，已建未使用 |
 
 ### Driver Initialization Pattern
 

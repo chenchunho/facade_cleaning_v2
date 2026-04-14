@@ -1,8 +1,149 @@
 # Work Log
 
-## 2026-04-13
+## 2026-04-14 — 架構細化（攝影機 / 水系統 / 剎車 / Fathom-X）
 
-### 已完成（規格增補，`motion_flow.md` 本次主要異動）
+### 已完成（規格文件同步）
+
+1. **PoE 攝影機 × 4 整合方案確認** — 方案 A（Node.js + ffmpeg → HLS → Browser `<video>` grid）
+   - 4 角落監看（左上/左下/右上/右下），清洗時即時觀看
+   - motion_flow.md §8 新增「攝影機整合」節 + Port 554/8081 分配
+   - 待提供：攝影機型號 + RTSP URL 格式
+
+2. **水系統流向確認**
+   - CH7 = **水箱進水球閥**（不是出水），連接 頂樓水源 → CH7 → 10L 水箱 → CH6 泵浦 → 機械臂噴頭 → 牆面 → 地面
+   - CLAUDE.md 架構圖、motion_flow.md §2/§3/§4 全部同步更新
+   - Phase 4-C 邏輯不變（清洗時 CH7/CH6 同時 ON 補水+出水），只是 CH7 意義變了
+   - 新 Open Q10：水箱溢流處理（浮球閥 / 溢流孔 / 軟體控制）待使用者確認
+
+3. **絞盤機械規格補齊**
+   - 鋼索直徑 **6 mm**
+   - 斷電行為：**自動剎車**（電磁剎車失電夾持）
+   - motion_flow.md §2 新增「絞盤機械規格」節
+   - §5「斷電即脫離設計原則」補註：機器人脫牆後由剎車懸吊（不會墜落也不會繼續下滑）
+
+4. **DM2J 步進剎車** — 失電後**鎖死**（確認）
+5. **DY-500 重量感測器** — 硬體有問題，確認暫不啟用（規格保留）
+6. **機械手臂 USB→CAN** — 確認本版不整合，保留未來擴充
+
+7. **Open Questions 同步**
+   - Q8 中間絞盤變頻器 → ✅ 已解決（CLV900 驅動完成）
+   - 新增 Q10 水箱溢流處理
+   - 新增 Q11 Fathom-X 100m 拔插/長穩度實測（未做）
+
+### 架構決策（不做）
+
+- **時間同步** 不做（watchdog 即時控制不需要；事後日誌分析誤差可接受）
+- **UPS / 雷擊 / 漏電保護** 不做
+- **Web GUI 認證** 不做
+- **日誌** 先存本地（SD 卡）
+
+### 待完成（更新）
+
+- 🟡 DSZL-107 Modbus 暫存器表（唯一卡點硬體文件）
+- 🟡 水箱溢流處理方式（Open Q10）
+- 🟡 攝影機型號 + RTSP URL 格式
+- 🔴 寫 `user_lib/DSZL_107.{h,cpp}`
+- 🔴 重寫 `Crane_control_PI/main.cpp`（ZS_DIO + SD76×3 + DSZL×2 + CLV900 + watchdog）
+- 🔴 washrobot main.cpp 加 IMU baseline + balance_ask EVT + crane watchdog + confirm_balance
+- 🔴 Web GUI：鋼索歸零按鈕 + 平衡校正詢問 modal + **4 路攝影機 grid**（Node.js ffmpeg+HLS）
+- 🔴 Fathom-X 100m 拔插測試（實機 Gate 項目）
+- 🔴 實機測試 + 參數回填 + 一次性 commit
+
+---
+
+## 2026-04-13 (Session 3) — CLV900 變頻器驅動
+
+### 已完成
+
+1. **解鎖中間絞盤變頻器**：使用者確認型號為 **clvdrives 900-0007M1**，PDF `doc/900系列通用变频器说明书-V900.24.01.16.C版本（6按键）.pdf`
+2. **PDF 摘要** `.claude/summaries/CLV900_INVERTER_MODBUS_SUMMARY.md`
+   - Modbus-RTU 透過 USR 透傳（FC 僅 0x03 / 0x06，無多寫）
+   - 控制 reg `0x0001`（freq -10000~+10000）/ `0x0002`（命令 1~7）/ `0x0003~5`（DO/AO）
+   - F-group 位址公式 `0xF000 + group*0x100 + index`（F0-00=0xF000、F9-40=0xF928）
+   - U-group 位址 `0x1000+`，U0-00 運行狀態、U0-03 運行頻率（0.1Hz）等完整對照
+   - F7 通訊參數：F7-00 slave / F7-01 baud / F7-02 格式 / F7-03 timeout
+   - 啟用 Modbus 控制：F0-00=2、F0-01=8（一次性，需面板或本驅動 `configureModbusControl()`）
+3. **驅動實作** `user_lib/CLV900_inverter.{h,cpp}`
+   - Mode A / Mode B init（與其他驅動一致）
+   - **Control**：runForward / runReverse / jogForward / jogReverse / stopDecel / stopFree / resetFault
+   - **Frequency**：setFreqRaw（int16）/ setFreqPercent / setFreqHz（含 max_hz）
+   - **Monitor reads**：runStatus / faultCode / setFreq / runFreq / speedRpm / outputVoltage / outputCurrent / busVoltage / outputTorque（signed）/ igbtTemp
+   - **Generic param**：writeParam(reg, val) / readParam(reg, val) + 靜態 fxAddr / uxAddr 地址計算
+   - **Convenience**：configureModbusControl()
+   - 風格：false=success、tab 縮排、`//=== section ===` 區塊註解、CRC16 polynomial 0xA001、寫入 echo 驗證 + 異常 0x86 檢查
+4. **OCR 雙重驗證**（PyMuPDF @ 2.5x → 視覺比對 p49/50/54/55/56/57）
+   - 6 頁全對：FC 0x03/0x06、12 暫存器上限、0x01~0x05 控制 reg、F7-00~03、U0-00~U0-26 全部位址 + 單位
+   - 額外發現 **F7-19 MODBUS 數據通訊格式**（0=標準/1=非標準，驅動假設 0）+ F7-20 兼容旗標
+   - 已補進 `CLV900_inverter.h` 上機前清單 + 摘要文件 F7 表 + 注意事項
+   - 暫存圖檔 `.claude/tmp_clv900/` 已清除
+
+### 待完成（更新）
+
+- 🟡 **僅剩** DSZL-107 Modbus 暫存器表
+- 🔴 寫 `user_lib/DSZL_107.{h,cpp}`
+- 🔴 重寫 `Crane_control_PI/main.cpp`（ZS_DIO + SD76×3 + DSZL-107×2 + **CLV900** + watchdog + 新指令）
+- 🔴 washrobot main.cpp 加 IMU baseline + balance_ask EVT + 對 Crane watchdog + confirm_balance handler
+- 🔴 Web GUI 加「鋼索歸零」按鈕 + 「平衡校正詢問」modal
+- 🔴 deploy_and_test.pdf Gate 7~11 實機驗證後微調
+- 🔴 實機測試 + 參數回填 + 一次性 commit
+
+### 上機前一次性設定（透過 CLV900 面板，建議）
+
+- F0-00 = 2（運行命令 = 通訊）
+- F0-01 = 8（頻率設定 = 通訊）
+- F7-00 = 7（slave ID 對齊 motion_flow §2）
+- F7-01 = 對齊 RS485_crane 線上其他裝置 baud
+- F7-02 = 對齊資料格式
+- F7-03 = 1.0~5.0（通訊超時，配合 RPi watchdog 邏輯）
+
+---
+
+## 2026-04-13 (Session 2) — 文件同步
+
+### 已完成
+
+1. **CLAUDE.md 架構圖同步至 motion_flow.md §2 權威版**
+   - **RS485_crane** 擴充至 slave 1~7：
+     - Slave 1 ZS_DIO 8CH（左右絞盤繼電器，**不經變頻器**）
+     - Slave 2/3 SD76 左/右鋼索計米（既有）
+     - Slave 4 SD76 #3 中間管線計米（**新**）
+     - Slave 5/6 DSZL_107 左/右鋼索張力（**新**，TBD 暫存器表）
+     - Slave 7 變頻器 中間絞盤馬達控制（**新**，TBD 型號）
+   - **PQW 8CH** 補齊 CH5~7：CH5 刷洗滾筒馬達 / CH6 水箱泵浦 / CH7 出水球閥 / CH8 保留
+   - **驅動表重整**：
+     - SD76_length_meters、ZS_DIO_R_RLY 從「備用」移至「使用中」
+     - 新增「待實作」分類：DSZL_107、中間絞盤變頻器
+     - TCP_server 從「未使用」移至「使用中」（washrobot/crane 都已用）
+     - WT901BC_TTL 描述加上「Roll+Pitch 平衡監控」
+     - PQW 描述加上「+ 刷洗/水泵/水閥」
+
+2. **deploy_and_test.pdf Phase 2 新增**
+   - 標頭日期 2026-04-12 → 2026-04-13
+   - 新增「Phase 2 測試（硬體擴充後執行）」整頁，含前提清單 + Crane Phase 2 編譯指令
+   - **Gate 7 — Watchdog 雙向心跳**：閒置 vs 動作中行為差異、TCP RST 不等 timeout、自動 reconnect
+   - **Gate 8 — Phase 1 鋼索人工歸零**：未歸零 ERR cables_not_zeroed、Web GUI 按鈕、SD76 #1/#2/#3 同步歸零
+   - **Gate 9 — 中間絞盤同步 (C 案)**：MIDDLE_WINCH_RATIO_K、計米回授驅動 stop
+   - **Gate 10 — DSZL-107 鋼索張力監控**：MIN/MAX/DIFF 三種告警、自動 pause vs 手動 log
+   - **Gate 11 — IMU 平衡監控**：3s baseline、step 完成後才 ask、>45° 立停、Phase 5 Roll 校正收斂判定
+   - 緊急操作備忘新增 Watchdog / IMU / 張力 三條 + 變頻器斷電
+   - 重生 `deploy_and_test.pdf` 成功
+
+### 待完成（不變）
+
+- 🟡 等使用者補 DSZL-107 Modbus 暫存器表
+- 🟡 等使用者補中間絞盤變頻器型號 + 暫存器表
+- 🔴 寫 `user_lib/DSZL_107.{h,cpp}` + 變頻器驅動
+- 🔴 重寫 `Crane_control_PI/main.cpp`（ZS_DIO + SD76×3 + DSZL-107×2 + 變頻器 + watchdog + 新指令）
+- 🔴 washrobot main.cpp 加入姿態儀 baseline + balance_ask EVT + 對 Crane watchdog + `confirm_balance` handler
+- 🔴 Web GUI 加「鋼索歸零」按鈕 + 「平衡校正詢問」modal
+- 🔴 deploy_and_test.pdf Gate 7~11 進一步補強（待實作完成後實機驗證再修）
+- 🔴 實機測試 + 參數回填 + 一次性 commit
+
+---
+
+## 2026-04-13 — 規格增補（`motion_flow.md` 主要異動）
+
+### 已完成
 
 1. **吊機端硬體擴充**
    - 新增 RS485_crane (192.168.1.30) 配置表：slave 4 (SD76 #3 中間管線計米)、slave 5/6 (DSZL-107 × 2 左右張力)、slave 7 (中間絞盤變頻器)
