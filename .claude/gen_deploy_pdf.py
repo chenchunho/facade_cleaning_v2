@@ -16,7 +16,7 @@ class PDF(FPDF):
         self.set_font("CJK", "B", 10)
         self.set_text_color(120, 120, 120)
         self.cell(0, 6, "washrobot_new_PI — 正式環境部署 + 測試步驟", 0, 0, "L")
-        self.cell(0, 6, "2026-04-12", 0, 1, "R")
+        self.cell(0, 6, "2026-04-13", 0, 1, "R")
         self.set_draw_color(200, 200, 200)
         self.line(15, 22, 195, 22)
         self.ln(4)
@@ -261,12 +261,104 @@ def build():
     ])
 
     # -------------------------------------------------------
+    pdf.add_page()
+    pdf.h1("Phase 2 測試（硬體擴充後執行）")
+    pdf.para(
+        "以下測試針對 2026-04-13 規格新增的 Crane 端硬體擴充："
+        "RS485_crane slave 4~7（SD76 #3 中間管線計米 + DSZL-107 × 2 張力 + 中間絞盤變頻器），"
+        "以及 washrobot 端 IMU 平衡監控 + 雙向 watchdog。"
+    )
+    pdf.para(
+        "[前提] 需先完成：(1) DSZL_107 驅動實作 (2) 變頻器驅動實作 (3) Crane_control_PI "
+        "重寫（含 watchdog + 新指令） (4) washrobot main.cpp 加 IMU baseline + balance_ask + "
+        "對 Crane watchdog (5) Web GUI 加「鋼索歸零」按鈕 + 「平衡校正詢問」modal。"
+    )
+
+    pdf.h2("Crane 端 Phase 2 編譯（補充驅動）")
+    pdf.code(
+        "cd ~/washrobot_build\n"
+        "g++ -std=c++17 -O2 -Wall -Iuser_lib -pthread \\\n"
+        "    Crane_control_PI/main.cpp \\\n"
+        "    user_lib/{TCP_client,TCP_server,ZS_DIO_R_RLY,SD76_length_meters,\\\n"
+        "              DSZL_107,inverter_middle_winch}.cpp \\\n"
+        "    -o crane"
+    )
+
+    pdf.h3("Gate 7 — Watchdog 雙向心跳", (180, 0, 0))
+    pdf.para("HEARTBEAT_INTERVAL_MS=500、WATCHDOG_TIMEOUT_MS=2000，雙端皆需驗。")
+    pdf.checklist([
+        "Crane idle 中拔 washrobot 網路線：crane log 出現 watchdog timeout 警告但不停機（閒置僅 log）",
+        "Crane 動作中（pay_out 進行）拔 washrobot 網路線：2 秒內繼電器全 OFF + 變頻器 stop "
+        "+ 廣播 EVT watchdog_timeout",
+        "Crane 動作中 kill -9 washrobot 程序（TCP RST）：不等 timeout，連線斷立即停 + EVT",
+        "washrobot 自動模式中拔 crane 網路線：2 秒內 pause + EVT watchdog_timeout",
+        "恢復網路後雙端自動 reconnect，狀態回正常 ready",
+    ])
+
+    pdf.h3("Gate 8 — Phase 1 鋼索人工歸零", (200, 130, 0))
+    pdf.para("Phase 1 步驟 3：起始位置校準後必須先歸零，否則禁進 Phase 2。")
+    pdf.checklist([
+        "Web GUI 出現「鋼索歸零」按鈕（Phase 1 階段才 enable）",
+        "未按歸零直接送 attach → washrobot 回 ERR cables_not_zeroed",
+        "按下按鈕 → Crane 收到 zero_meters → SD76 #1/#2/#3 同時歸零",
+        "歸零後 status 顯示 length_left=0 / length_right=0 / length_middle=0",
+        "再送 attach → 通過進 Phase 2",
+    ])
+
+    pdf.h3("Gate 9 — 中間絞盤同步 (C 案)", (200, 130, 0))
+    pdf.para("中間放繩 cm = 左右放繩 cm × MIDDLE_WINCH_RATIO_K（預設 1.00）。")
+    pdf.checklist([
+        "Crane status 包含 length_middle 欄位",
+        "pay_out 30 → 左右繩各放 30cm，中間管線同步放 30cm（K=1.00）",
+        "改 MIDDLE_WINCH_RATIO_K=1.10 重編 → pay_out 30 → 中間放 33cm",
+        "pay_out 中按 stop → 三條繩同時停（變頻器 stop + 繼電器 OFF）",
+        "計米回授驅動變頻器 stop（非依時間），中間繩到位停",
+    ])
+
+    pdf.h3("Gate 10 — DSZL-107 鋼索張力監控", (200, 130, 0))
+    pdf.para("TENSION_MIN_KG=0.5 / TENSION_MAX_KG=3.0 / TENSION_DIFF_MAX_PCT=30。")
+    pdf.checklist([
+        "Crane status 包含 tension_left=<kg> / tension_right=<kg>，無載時讀值近 0",
+        "人工掛 1 kg 配重於單側鋼索 → 該側讀值 = 1.0 ± 0.1 kg",
+        "拉一邊到 < 0.5 kg → EVT tension_alarm reason=min side=left",
+        "壓一邊到 > 3.0 kg → EVT tension_alarm reason=max side=right",
+        "兩邊差 30% 以上（左 1.0、右 1.5）→ EVT tension_alarm reason=diff",
+        "張力告警時自動模式 pause（非立即停），手動模式僅 log",
+    ])
+
+    pdf.h3("Gate 11 — IMU 平衡監控（不上牆，手扶傾斜）", (0, 130, 60))
+    pdf.para(
+        "坐標系：X 垂直於牆面（法線朝外）/ Y 水平沿牆 / Z 朝上。"
+        "監控 Roll + Pitch（不監控 Yaw）。"
+        "balance_deg = max(|Δroll|, |Δpitch|) 相對 Phase 2 Init 取 3 秒平均的 baseline。"
+    )
+    pdf.checklist([
+        "init/attach 完成後，washrobot log 出現 IMU baseline roll=<r> pitch=<p>（3 秒平均）",
+        "輕微抖動（< 5°，< 500ms）→ 不觸發（1s 滑動平均 + 持續 500ms 才觸發）",
+        "持續傾斜 20°（> IMU_ASK_DEG=15，< IMU_STOP_DEG=45）：\n"
+        "   A. step_down 進行中 → 當前 step 完成後 pause + EVT balance_ask\n"
+        "   B. Web GUI 跳出「平衡校正詢問」modal\n"
+        "   C. 按 Yes → 送 confirm_balance yes → 進 Phase 5 Roll 校正\n"
+        "   D. 按 No → 送 confirm_balance no → 繼續下一步",
+        "持續傾斜 50°（> IMU_STOP_DEG=45）→ 立即停機 + crane stop + EVT imu_stop（不詢問）",
+        "Phase 5 校正：washrobot 送 roll_correct <delta_cm> 給 crane → 差動鋼索 → "
+        "|Δroll| < 1° 收斂",
+        "Phase 5 重試 5 次仍不收斂 → EVT roll_correct_fail",
+    ])
+
+    # -------------------------------------------------------
     pdf.h1("緊急操作備忘")
     pdf.kv_table([
         ("任一環節異常",  "Web GUI 紅色 STOP (robot) + STOP (crane)"),
         ("機器人卡住",    "tilt_mode on  +  手動 crane 收/放繩微調"),
         ("Web 失聯",      "SSH 到任一 RPi  →  nc localhost 5001 或 5002  →  stop"),
-        ("最後手段",      "切斷 PQW CH1（泵浦）+ 吊機電源"),
+        ("Watchdog 觸發",  "EVT watchdog_timeout 後拔網路復原即可，雙端會自動 reconnect；"
+                           "若仍卡住，重啟對應端程序"),
+        ("IMU > 45° 停機",  "EVT imu_stop 後人工扶正機體 → 重新 init 取新 baseline；"
+                           "勿強行解 abort"),
+        ("張力告警",       "EVT tension_alarm → 檢查鋼索是否纏繞或卡住 → "
+                           "解除後送 resume；max 告警須先卸載再 resume"),
+        ("最後手段",      "切斷 PQW CH1（泵浦）+ 吊機電源（含中間絞盤變頻器）"),
     ], widths=(45, 135))
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
