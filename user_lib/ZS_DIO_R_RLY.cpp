@@ -1,5 +1,5 @@
 #include "ZS_DIO_R_RLY.h"
-#include <iostream>
+#include "log_utils.h"
 #include <thread>
 #include <chrono>
 #include <cstring>
@@ -60,7 +60,7 @@ std::vector<uint8_t> ZS_DIO_R_RLY::buildReadCmd(uint8_t funcCode, uint16_t start
 
 std::vector<uint8_t> ZS_DIO_R_RLY::sendAndReceive(const std::vector<uint8_t>& cmd, int timeout_ms)
 {
-	printHex(cmd, "[TX]");
+	LOG_HEX(_log_tag, "TX", cmd.data(), (int)cmd.size());
 
 	client().sendData(
 		reinterpret_cast<const char*>(cmd.data()),
@@ -75,18 +75,8 @@ std::vector<uint8_t> ZS_DIO_R_RLY::sendAndReceive(const std::vector<uint8_t>& cm
 		return {};
 
 	std::vector<uint8_t> resp(buf, buf + n);
-	printHex(resp, "[RX]");
+	LOG_HEX(_log_tag, "RX", resp.data(), (int)resp.size());
 	return resp;
-}
-
-void ZS_DIO_R_RLY::printHex(const std::vector<uint8_t>& data, const std::string& tag)
-{
-	if (!debugEnabled) return;
-
-	std::cout << tag << ": ";
-	for (size_t i = 0; i < data.size(); i++)
-		printf("%02X ", data[i]);
-	std::cout << std::endl;
 }
 
 bool ZS_DIO_R_RLY::verifyEcho(const std::vector<uint8_t>& cmd, const std::vector<uint8_t>& resp)
@@ -97,9 +87,7 @@ bool ZS_DIO_R_RLY::verifyEcho(const std::vector<uint8_t>& cmd, const std::vector
 
 	// check function code error flag (high bit set = exception)
 	if (resp.size() >= 2 && (resp[1] & 0x80)) {
-		if (debugEnabled)
-			std::cout << "[ZS_DIO] ERR exception code=0x"
-			          << std::hex << (int)resp[2] << std::dec << std::endl;
+		LOG_ERR(_log_tag, "exception code=0x%02X", (int)resp[2]);
 		return true;
 	}
 
@@ -136,7 +124,9 @@ bool ZS_DIO_R_RLY::parseBitResponse(const std::vector<uint8_t>& resp, int count,
 
 //=========== init ===========
 
-ZS_DIO_R_RLY::ZS_DIO_R_RLY() {}
+ZS_DIO_R_RLY::ZS_DIO_R_RLY() {
+	_log_tag = "ZSDIO:?";
+}
 
 ZS_DIO_R_RLY::~ZS_DIO_R_RLY()
 {
@@ -147,9 +137,10 @@ ZS_DIO_R_RLY::~ZS_DIO_R_RLY()
 bool ZS_DIO_R_RLY::init(const std::string& ip, int port, int ID, int total_relay, bool debug)
 {
 	use_external_client = false;
-	debugEnabled = debug;
+	debug_mode = debug;
 	slave_id = (uint8_t)ID;
 	relay_count = total_relay;
+	_log_tag = "ZSDIO:" + std::to_string(ID);
 
 	// build pre-computed commands for single relay control
 	relay_on_cmds.clear();
@@ -163,9 +154,7 @@ bool ZS_DIO_R_RLY::init(const std::string& ip, int port, int ID, int total_relay
 	relay_all_on = buildWriteRegCmd(0x0034, 1);
 	relay_all_off = buildWriteRegCmd(0x0034, 0);
 
-	if (debugEnabled)
-		std::cout << "[ZS_DIO] init internal, slave_id=" << (int)slave_id
-		          << " relay_count=" << relay_count << std::endl;
+	LOG_INF(_log_tag, "init internal, slave_id=%d relay_count=%d", (int)slave_id, relay_count);
 
 	if (!internal_client.connectToServer(ip, port))
 		return true;
@@ -177,9 +166,10 @@ bool ZS_DIO_R_RLY::init(TCP_client& extClient, int ID, int total_relay, bool deb
 {
 	ext_client = &extClient;
 	use_external_client = true;
-	debugEnabled = debug;
+	debug_mode = debug;
 	slave_id = (uint8_t)ID;
 	relay_count = total_relay;
+	_log_tag = "ZSDIO:" + std::to_string(ID);
 
 	relay_on_cmds.clear();
 	relay_off_cmds.clear();
@@ -192,9 +182,7 @@ bool ZS_DIO_R_RLY::init(TCP_client& extClient, int ID, int total_relay, bool deb
 	relay_all_on = buildWriteRegCmd(0x0034, 1);
 	relay_all_off = buildWriteRegCmd(0x0034, 0);
 
-	if (debugEnabled)
-		std::cout << "[ZS_DIO] init external, slave_id=" << (int)slave_id
-		          << " relay_count=" << relay_count << std::endl;
+	LOG_INF(_log_tag, "init external, slave_id=%d relay_count=%d", (int)slave_id, relay_count);
 
 	return false;
 }
@@ -204,9 +192,7 @@ bool ZS_DIO_R_RLY::init(TCP_client& extClient, int ID, int total_relay, bool deb
 bool ZS_DIO_R_RLY::controlRelay(int ch, bool status)
 {
 	if (ch < 1 || ch > relay_count) {
-		if (debugEnabled)
-			std::cout << "[ZS_DIO] ERR invalid ch=" << ch
-			          << " (max=" << relay_count << ")" << std::endl;
+		LOG_ERR(_log_tag, "invalid ch=%d (max=%d)", ch, relay_count);
 		return true;
 	}
 
@@ -214,21 +200,17 @@ bool ZS_DIO_R_RLY::controlRelay(int ch, bool status)
 		status ? relay_on_cmds[ch - 1] : relay_off_cmds[ch - 1];
 
 	for (int attempt = 0; attempt < MAX_RETRY; attempt++) {
-		if (debugEnabled)
-			std::cout << "[ZS_DIO] CH" << ch << " -> " << (status ? "ON" : "OFF")
-			          << " (attempt " << attempt + 1 << ")" << std::endl;
+		LOG_DBG(_log_tag, "CH%d -> %s (attempt %d)", ch, status ? "ON" : "OFF", attempt + 1);
 
 		auto resp = sendAndReceive(cmd);
 
 		if (!verifyEcho(cmd, resp))
 			return false;
 
-		if (debugEnabled)
-			std::cout << "[ZS_DIO] CH" << ch << " echo mismatch, retrying..." << std::endl;
+		LOG_WRN(_log_tag, "CH%d echo mismatch, retrying...", ch);
 	}
 
-	if (debugEnabled)
-		std::cout << "[ZS_DIO] CH" << ch << " FAILED after " << MAX_RETRY << " retries" << std::endl;
+	LOG_ERR(_log_tag, "CH%d FAILED after %d retries", ch, MAX_RETRY);
 	return true;
 }
 
@@ -237,29 +219,24 @@ bool ZS_DIO_R_RLY::controlAll(bool status)
 	const std::vector<uint8_t>& cmd = status ? relay_all_on : relay_all_off;
 
 	for (int attempt = 0; attempt < MAX_RETRY; attempt++) {
-		if (debugEnabled)
-			std::cout << "[ZS_DIO] ALL -> " << (status ? "ON" : "OFF")
-			          << " (attempt " << attempt + 1 << ")" << std::endl;
+		LOG_DBG(_log_tag, "ALL -> %s (attempt %d)", status ? "ON" : "OFF", attempt + 1);
 
 		auto resp = sendAndReceive(cmd);
 
 		if (!verifyEcho(cmd, resp))
 			return false;
 
-		if (debugEnabled)
-			std::cout << "[ZS_DIO] ALL echo mismatch, retrying..." << std::endl;
+		LOG_WRN(_log_tag, "ALL echo mismatch, retrying...");
 	}
 
-	if (debugEnabled)
-		std::cout << "[ZS_DIO] ALL FAILED after " << MAX_RETRY << " retries" << std::endl;
+	LOG_ERR(_log_tag, "ALL FAILED after %d retries", MAX_RETRY);
 	return true;
 }
 
 bool ZS_DIO_R_RLY::controlGroup(int group, uint16_t bitmask)
 {
 	if (group < 1 || group > 3) {
-		if (debugEnabled)
-			std::cout << "[ZS_DIO] ERR invalid group=" << group << " (1~3)" << std::endl;
+		LOG_ERR(_log_tag, "invalid group=%d (1~3)", group);
 		return true;
 	}
 
@@ -268,22 +245,17 @@ bool ZS_DIO_R_RLY::controlGroup(int group, uint16_t bitmask)
 	auto cmd = buildWriteRegCmd(regAddr, bitmask);
 
 	for (int attempt = 0; attempt < MAX_RETRY; attempt++) {
-		if (debugEnabled)
-			std::cout << "[ZS_DIO] GROUP" << group << " bitmask=0x"
-			          << std::hex << bitmask << std::dec
-			          << " (attempt " << attempt + 1 << ")" << std::endl;
+		LOG_DBG(_log_tag, "GROUP%d bitmask=0x%04X (attempt %d)", group, bitmask, attempt + 1);
 
 		auto resp = sendAndReceive(cmd);
 
 		if (!verifyEcho(cmd, resp))
 			return false;
 
-		if (debugEnabled)
-			std::cout << "[ZS_DIO] GROUP" << group << " echo mismatch, retrying..." << std::endl;
+		LOG_WRN(_log_tag, "GROUP%d echo mismatch, retrying...", group);
 	}
 
-	if (debugEnabled)
-		std::cout << "[ZS_DIO] GROUP" << group << " FAILED after " << MAX_RETRY << " retries" << std::endl;
+	LOG_ERR(_log_tag, "GROUP%d FAILED after %d retries", group, MAX_RETRY);
 	return true;
 }
 
@@ -343,8 +315,7 @@ bool ZS_DIO_R_RLY::readGroupState(int group, uint16_t& bitmask)
 
 void ZS_DIO_R_RLY::close()
 {
-	if (debugEnabled)
-		std::cout << "[ZS_DIO] internal client closed" << std::endl;
+	LOG_INF(_log_tag, "internal client closed");
 
 	internal_client.close();
 }

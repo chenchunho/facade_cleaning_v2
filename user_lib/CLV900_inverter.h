@@ -133,5 +133,6 @@ private:
 	TCP_client* client;
 	bool owns;
 	int deviceID;
-	bool debugPrint;
+	bool debug_mode;
+	std::string _log_tag;
 };

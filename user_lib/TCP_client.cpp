@@ -1,47 +1,20 @@
-﻿#include "TCP_client.h"
-#include <iostream>
+#include "TCP_client.h"
+#include "log_utils.h"
 #include <cstring>
-#include <iomanip>    // 用於 std::put_time, std::setfill, std::setw
-#include <ctime>      // 用於 std::tm
-#include <sstream>    // <--- 補上這行，修正 C2079 錯誤
-#include <chrono>     // 確保時間工具可用
 
-// 取得目前時間字串 [YYYY-MM-DD HH:MM:SS.ms]
-std::string TCP_client::getCurrentTimestamp() {
-	using namespace std::chrono;
-	auto now = system_clock::now();
-	auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
-	auto timer = system_clock::to_time_t(now);
-	std::tm bt;
-#ifdef _WIN32
-	localtime_s(&bt, &timer);
-#else
-	localtime_r(&timer, &bt);
-#endif
-	std::ostringstream oss;
-	oss << "[" << std::put_time(&bt, "%Y-%m-%d %H:%M:%S")
-		<< "." << std::setfill('0') << std::setw(3) << ms.count() << "] ";
-	return oss.str();
-}
-
-void TCP_client::printLog(const std::string& tag, const char* data, int len) {
-	std::cout << getCurrentTimestamp() << tag;
-	if (data && len > 0) {
-		for (int i = 0; i < len; ++i) {
-			printf("%02X ", (unsigned char)data[i]);
-		}
-	}
-	std::cout << std::endl;
-}
+//=========== init ===========
 
 #ifdef _WIN32
 TCP_client::TCP_client() : sock(INVALID_SOCKET), initialized(false), connected(false), monitor_running(false) {
+	_log_tag = "TCP";
 	WSADATA wsa;
 	if (WSAStartup(MAKEWORD(2, 2), &wsa) == 0) initialized = true;
 }
 TCP_client::~TCP_client() { close(); if (initialized) WSACleanup(); }
 #else
-TCP_client::TCP_client() : sock(INVALID_SOCKET), initialized(true), connected(false), monitor_running(false) {}
+TCP_client::TCP_client() : sock(INVALID_SOCKET), initialized(true), connected(false), monitor_running(false) {
+	_log_tag = "TCP";
+}
 TCP_client::~TCP_client() { close(); }
 #endif
 
@@ -50,6 +23,7 @@ bool TCP_client::connectToServer(const std::string& ip, int port, bool debug) {
 	debug_mode = debug;
 	last_ip = ip;
 	last_port = port;
+	_log_tag = "TCP " + ip + ":" + std::to_string(port);
 
 	if (!initialized) return false;
 
@@ -66,7 +40,7 @@ bool TCP_client::connectToServer(const std::string& ip, int port, bool debug) {
 #endif
 
 	if (connect(sock, (sockaddr*)&server, sizeof(server)) == SOCKET_ERROR) {
-		if (debug_mode) printLog("[ERROR] Initial connection failed");
+		LOG_ERR(_log_tag, "Initial connection failed");
 #ifdef _WIN32
 		closesocket(sock);
 #else
@@ -74,16 +48,18 @@ bool TCP_client::connectToServer(const std::string& ip, int port, bool debug) {
 #endif
 		sock = INVALID_SOCKET;
 		connected = false;
-		// 即便連線失敗也啟動 Monitor，讓它之後能自動嘗試
+		// start Monitor even on failure so it can retry later
 		startMonitor();
 		return false;
 	}
 
 	connected = true;
-	if (debug_mode) printLog("[INFO] Connected to " + ip + ":" + std::to_string(port));
+	LOG_INF(_log_tag, "Connected to %s:%d", ip.c_str(), port);
 	startMonitor();
 	return true;
 }
+
+//=========== worker thread: monitor ===========
 
 void TCP_client::startMonitor() {
 	if (monitor_running) return;
@@ -110,12 +86,12 @@ void TCP_client::reconnectLoop() {
 				sock = INVALID_SOCKET;
 			}
 
-			if (debug_mode) printLog("[RECONNECT] Attempting to reconnect...");
+			LOG_INF(_log_tag, "Attempting to reconnect...");
 
 			socket_t new_sock = socket(AF_INET, SOCK_STREAM, 0);
 			if (new_sock == INVALID_SOCKET) continue;
 
-			// 1. 設定為非阻塞模式
+			// 1. set non-blocking
 #ifdef _WIN32
 			u_long mode = 1;
 			ioctlsocket(new_sock, FIONBIO, &mode);
@@ -133,7 +109,7 @@ void TCP_client::reconnectLoop() {
 			inet_pton(AF_INET, last_ip.c_str(), &server.sin_addr);
 #endif
 
-			// 2. 嘗試連線
+			// 2. attempt connect
 			int res = connect(new_sock, (sockaddr*)&server, sizeof(server));
 
 			bool success = false;
@@ -142,22 +118,22 @@ void TCP_client::reconnectLoop() {
 #else
 			if (res == SOCKET_ERROR && errno == EINPROGRESS) {
 #endif
-				// 3. 使用 select 等待 1 秒超時
+				// 3. wait with 1s select timeout
 				fd_set writefds;
 				FD_ZERO(&writefds);
 				FD_SET(new_sock, &writefds);
 				struct timeval timeout;
-				timeout.tv_sec = 1; // 設定連線超時為 1 秒
+				timeout.tv_sec = 1;
 				timeout.tv_usec = 0;
 
 				res = select((int)new_sock + 1, NULL, &writefds, NULL, &timeout);
-				if (res > 0) success = true; // Socket 變得可寫，代表連線成功
+				if (res > 0) success = true;
 			}
 			else if (res == 0) {
-				success = true; // 直接連線成功
+				success = true;
 			}
 
-			// 4. 將模式設回阻塞 (重要！)
+			// 4. set back to blocking
 #ifdef _WIN32
 			mode = 0;
 			ioctlsocket(new_sock, FIONBIO, &mode);
@@ -168,7 +144,7 @@ void TCP_client::reconnectLoop() {
 			if (success) {
 				sock = new_sock;
 				connected = true;
-				if (debug_mode) printLog("[RECONNECT] Success!");
+				LOG_INF(_log_tag, "Reconnect success");
 			}
 			else {
 #ifdef _WIN32
@@ -180,6 +156,8 @@ void TCP_client::reconnectLoop() {
 			}
 		}
 	}
+
+//=========== utility: send/recv ===========
 
 bool TCP_client::sendData(const char* buf, int len, int timeout_ms) {
 	std::lock_guard<std::mutex> lock(socket_mtx);
@@ -195,7 +173,7 @@ bool TCP_client::sendData(const char* buf, int len, int timeout_ms) {
 #endif
 
 	int result = send(sock, buf, len, 0);
-	if (debug_mode && result > 0) printLog("[TX] ", buf, len);
+	if (result > 0) LOG_HEX(_log_tag, "TX", buf, len);
 	return result > 0;
 }
 
@@ -215,10 +193,12 @@ int TCP_client::receiveData(char* buf, int bufSize, int timeout_ms) {
 	int received = recv(sock, buf, bufSize - 1, 0);
 	if (received <= 0) return (received == 0) ? -1 : 0;
 
-	if (debug_mode) printLog("[RX] ", buf, received);
+	LOG_HEX(_log_tag, "RX", buf, received);
 	buf[received] = 0;
 	return received;
 }
+
+//=========== utility: available / close ===========
 
 int TCP_client::available() {
 	if (sock == INVALID_SOCKET) return -1;
@@ -243,7 +223,7 @@ int TCP_client::available() {
 void TCP_client::close() {
 	monitor_running = false;
 	if (monitor_thread.joinable()) {
-		// 不要在 lock 內部 join，避免死鎖
+		// must not join under lock — would deadlock
 		monitor_thread.join();
 	}
 	std::lock_guard<std::mutex> lock(socket_mtx);

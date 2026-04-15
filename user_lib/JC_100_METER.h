@@ -91,13 +91,13 @@ public:
 
 private:
 	int  _slaveID;
-	bool _debug;
+	bool debug_mode;
 	TCP_client* client = nullptr;
 	bool _isExternalClient;
 	int  _last_pressure = 0;
+	std::string _log_tag;
 
 	bool send_command(uint8_t func, uint16_t reg, uint16_t data, std::vector<uint8_t>& res);
-	void log_hex(const std::string& prefix, const uint8_t* data, int len);
 };
 
 #endif

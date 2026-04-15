@@ -1,5 +1,90 @@
 # Work Log
 
+## 2026-04-15 — user_lib 統一 log 格式
+
+> **規範權威：** `CLAUDE.md` 的「Log 格式規範」節 + `user_lib/log_utils.h` 檔頭 comment
+> **協作者必讀：** 本項決策影響所有 user_lib 驅動；新增/修改驅動時一律用 LOG_* 巨集，禁用 printf/cout/cerr
+
+### 已完成
+- **新增 `user_lib/log_utils.h`** — 4 個 LOG_* 巨集 + LOG_HEX
+  - 格式：`[HH:MM:SS.mmm] [LEVEL] [DEVICE:ID] <message>`
+  - Levels：ERR / WRN / INF / DBG（+ LOG_HEX for hex dumps）
+  - **所有 level 統一由 `debug_mode` 成員控制**（關掉完全靜默，錯誤已透過 bool return 通知呼叫端）
+  - 輸出到 stderr，不落檔、不加鎖（輕量 A 方案）
+- **`CLAUDE.md` 新增「Log 格式規範」節** 在 Coding Style 之後
+- **14 個驅動全改造完成：**
+  - 改名統一：`debugEnabled` / `_debug` / `debugMode` / `debugPrint` → `debug_mode`
+  - 每個 class 新增 `std::string _log_tag` 成員，init 裡設為 `"PREFIX:<ID>"`
+  - 所有 `printf` / `std::cout` / `std::cerr` 換成 LOG_* 巨集
+  - 分級：ERR（連線斷/CRC/timeout/fault）、WRN（retry/echo mismatch）、INF（init 成功/狀態轉換）、DBG（輪詢/值讀取）、HEX（所有 TX/RX 幀）
+  - TCP_client 特別處理：刪除自有 `printLog()` + `getCurrentTimestamp()`（log_utils.h 已提供時戳）
+  - Prefix 表：DM2J / ZDT / JC100 / DY500 / PQW / SD76 / CLV900 / QX / DIHOOL / ZSDIO / WT901 / SER / TCP / TCPSVR
+- **驗證：**
+  - Grep `printf|std::cout|std::cerr` 於 `user_lib/*.cpp` → 0 筆
+  - Grep `debugEnabled|_debug|debugPrint|debugMode` → 0 筆（全改為 `debug_mode`）
+  - 15 個 .h 檔皆有 `_log_tag` 成員
+
+### 備註
+- DIHOOL_control / QX_DO24 用 inverted convention（true=success）— 維持不動，只改 log
+- 業務邏輯 / public API / 回傳值一律不動，純 log 輸出格式改造
+- 以子 agent 批次完成 13 檔，主線驗證無遺漏
+
+---
+
+## 2026-04-15 — Web Backend 搬家決策（.100 → .101）+ 失聯模式規範
+
+> **規範權威：** `.claude/motion_flow.md` §8（網路拓撲 + 失聯模式 + 緊急收繩）+ `CLAUDE.md` 分散式通訊段
+> **協作者必讀：** 部署位置、失聯模式 UI、緊急收繩按鈕以 motion_flow §8 為準；web_backend 實作者請依此規範
+
+### 決策
+- **Web Backend 部署位置：washrobot RPi (.100) → crane RPi (.101)**
+- **理由：** washrobot 是高風險側（控制機體吸附/下移），若 GUI 與它同台，washrobot 掛掉 = 失去所有遠端控制能力（機體懸吊半空無法救援）。搬到 crane 側後，即便 washrobot 完全失聯，操作員仍能透過 GUI → crane 手動收繩回收機體
+- **程式碼影響：** 零 — `server.js` 原本就用環境變數 / 預設 IP 連（非 localhost），搬家只影響部署位置
+
+### 規格文件已更新
+- `.claude/motion_flow.md` §8：
+  - 網路拓撲圖改為 Web Backend 跑在 .101:8080
+  - 新增「失聯模式 UI 行為」表：4 種 (washrobot × crane) 連線狀態對應的 UI 模式
+  - 新增「緊急收繩按鈕」規範：
+    - 互動方式 **按住持續收（press-and-hold）**
+    - mousedown → `retract_left on` + `retract_right on`
+    - mouseup/touchend/mouseleave → 對應 off + 補 `stop` 保險
+    - 設計理由：防誤觸，按著才動放開就停
+    - 獨立大紅按鈕區塊，即使 washrobot 失聯也能用
+- `CLAUDE.md` 分散式通訊段同步：Web Backend 位置 + 救援設計註記
+
+### 待完成（留給實作者）
+- 🔴 前端 `public/app.js` + `index.html` 實作失聯模式 UI + 緊急收繩按鈕（本次僅流程/架構規格，不動程式碼）
+- 🔴 crane RPi (.101) 部署：裝 Node.js 20.x、複製 `web_backend/`、建立 systemd unit
+- 🔴 停用 .100 上原本的 web_backend 服務
+- 🔴 `EVT state_changed` / `EVT watchdog_timeout` 與失聯 banner 的聯動測試
+
+### 備註（協作分工）
+- 本人角色：流程架構負責人，本次僅更新 .md 規格（motion_flow + CLAUDE）
+- 後端 / 前端 / 部署實作交給其他協作者，依 motion_flow.md §8 實作
+
+---
+
+## 2026-04-14 — 階段性 commit（規格定稿 + CLV900 驅動）
+
+### 已完成
+- **Commit `d7e4132`** — `feat+docs: add CLV900 inverter driver + finalize architecture spec`
+- 8 files changed, +833/-25
+- 包含：CLV900 驅動（.h/.cpp + 摘要）、motion_flow.md / CLAUDE.md 架構同步、deploy_and_test.pdf Phase 2 + Gates 7-11、gen_deploy_pdf.py、本 work_log
+- **未 push**（本地 ahead of origin/main by 1）
+- 原計畫「一次性 commit」改為分階段：本次鎖住規格 + CLV900，DSZL / Crane 重寫 / IMU 後續再提
+
+### 待完成（不變）
+- 🟡 DSZL-107 Modbus 暫存器表（唯一卡點硬體文件）
+- 🟡 水箱溢流處理 + 攝影機型號/RTSP URL
+- 🔴 寫 `user_lib/DSZL_107.{h,cpp}` → 重寫 `Crane_control_PI/main.cpp`
+- 🔴 washrobot main.cpp 加 IMU baseline + balance_ask + crane watchdog + confirm_balance
+- 🔴 Web GUI：鋼索歸零 + 平衡校正 modal + 4 路攝影機 grid
+- 🔴 Fathom-X 100m 實機拔插測試
+- 🔴 實機測試 + 參數回填
+
+---
+
 ## 2026-04-14 — 架構細化（攝影機 / 水系統 / 剎車 / Fathom-X）
 
 ### 已完成（規格文件同步）

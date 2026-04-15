@@ -1,10 +1,15 @@
-﻿#include "PQW_IO_16O_RLY.h"
-#include <iostream>
+#include "PQW_IO_16O_RLY.h"
+#include "log_utils.h"
 #include <cstring>
 #include <chrono>
 #include <thread>
 
-PQW_IO_16O_RLY::PQW_IO_16O_RLY() : client(nullptr), owns_client(false) {}
+//=========== init ===========
+
+PQW_IO_16O_RLY::PQW_IO_16O_RLY() : client(nullptr), owns_client(false) {
+	_log_tag = "PQW:?";
+}
+
 PQW_IO_16O_RLY::~PQW_IO_16O_RLY() {
 	if (client) {
 		controlAll(false);
@@ -14,48 +19,41 @@ PQW_IO_16O_RLY::~PQW_IO_16O_RLY() {
 	}
 }
 
-/*--------------------------------------------------------------
-  初始化：由本類別主動連線至設備
---------------------------------------------------------------*/
 bool PQW_IO_16O_RLY::init(const std::string& ip, int port, int ID, int total_relay, bool debug)
 {
 	relay_count = total_relay;
 	debug_mode = debug;
 	slave_id = (uint8_t)ID;
+	_log_tag = "PQW:" + std::to_string(ID);
 
 	client = new TCP_client();
 	owns_client = true;
 
 	if (!client->connectToServer(ip, port)) {
-		std::cout << "[ERROR] Unable to connect to " << ip << ":" << port << "\n";
+		LOG_ERR(_log_tag, "connect failed %s:%d", ip.c_str(), port);
 		return true;
 	}
 
-	if (debug_mode)
-		std::cout << "Connected to PQW-IO module. slave_id=" << (int)slave_id << "\n";
+	LOG_INF(_log_tag, "Connected, slave_id=%d", (int)slave_id);
 
 	return false;
 }
 
-/*--------------------------------------------------------------
-  初始化：使用外部的 TCP_client（不重新建立連線）
---------------------------------------------------------------*/
 bool PQW_IO_16O_RLY::init(TCP_client& extClient, int ID, int total_relay, bool debug)
 {
 	relay_count = total_relay;
 	debug_mode = debug;
 	slave_id = (uint8_t)ID;
+	_log_tag = "PQW:" + std::to_string(ID);
 	this->client = &extClient;
 
-	if (debug_mode)
-		std::cout << "PQW_IO_16O_RLY initialized with external TCP_client-> slave_id=" << (int)slave_id << "\n";
+	LOG_INF(_log_tag, "initialized with external TCP_client, slave_id=%d", (int)slave_id);
 
 	return false;
 }
 
-/*--------------------------------------------------------------
-  Modbus CRC
---------------------------------------------------------------*/
+//=========== utility: Modbus CRC ===========
+
 uint16_t PQW_IO_16O_RLY::modbusCRC(const uint8_t* data, int len)
 {
 	uint16_t crc = 0xFFFF;
@@ -68,9 +66,8 @@ uint16_t PQW_IO_16O_RLY::modbusCRC(const uint8_t* data, int len)
 	return crc;
 }
 
-/*--------------------------------------------------------------
-  建立單顆繼電器指令 (Function 0x05)
---------------------------------------------------------------*/
+//=========== utility: build single relay command (0x05) ===========
+
 std::vector<uint8_t> PQW_IO_16O_RLY::buildSingleRelayCmd(int relay_num, bool status)
 {
 	uint16_t addr = relay_num - 1;
@@ -94,9 +91,8 @@ std::vector<uint8_t> PQW_IO_16O_RLY::buildSingleRelayCmd(int relay_num, bool sta
 	return cmd;
 }
 
-/*--------------------------------------------------------------
-  建立全開/全關指令 (特殊地址 0x0085)
---------------------------------------------------------------*/
+//=========== utility: build all on/off command (special addr 0x0085) ===========
+
 std::vector<uint8_t> PQW_IO_16O_RLY::buildAllRelayCmd(bool status)
 {
 	uint8_t val_hi = status ? 0xFF : 0x00;
@@ -114,9 +110,8 @@ std::vector<uint8_t> PQW_IO_16O_RLY::buildAllRelayCmd(bool status)
 	return cmd;
 }
 
-/*--------------------------------------------------------------
-  建立讀取全部繼電器狀態指令 (Function 0x01)
---------------------------------------------------------------*/
+//=========== utility: build read all status command (0x01) ===========
+
 std::vector<uint8_t> PQW_IO_16O_RLY::buildReadCmd()
 {
 	std::vector<uint8_t> cmd = {
@@ -133,22 +128,15 @@ std::vector<uint8_t> PQW_IO_16O_RLY::buildReadCmd()
 	return cmd;
 }
 
-/*--------------------------------------------------------------
-  Debug 印 HEX
---------------------------------------------------------------*/
+//=========== utility: hex dump ===========
+
 void PQW_IO_16O_RLY::printHex(const std::vector<uint8_t>& data, const std::string& tag)
 {
-	if (!debug_mode) return;
-
-	std::cout << tag << ": ";
-	for (size_t i = 0; i < data.size(); i++)
-		printf("%02X ", data[i]);
-	std::cout << "\n";
+	LOG_HEX(_log_tag, tag.c_str(), data.data(), (int)data.size());
 }
 
-/*--------------------------------------------------------------
-  讀取 Echo 回應
---------------------------------------------------------------*/
+//=========== utility: read echo ===========
+
 std::vector<uint8_t> PQW_IO_16O_RLY::readEcho()
 {
 	uint8_t buf[32];
@@ -159,9 +147,8 @@ std::vector<uint8_t> PQW_IO_16O_RLY::readEcho()
 	return std::vector<uint8_t>(buf, buf + n);
 }
 
-/*--------------------------------------------------------------
-  解析讀取全部線圈狀態 (Function 0x01)
---------------------------------------------------------------*/
+//=========== utility: parse read response (0x01) ===========
+
 std::vector<bool> PQW_IO_16O_RLY::parseReadResponse(const std::vector<uint8_t>& resp)
 {
 	std::vector<bool> out(relay_count, false);
@@ -178,23 +165,22 @@ std::vector<bool> PQW_IO_16O_RLY::parseReadResponse(const std::vector<uint8_t>& 
 	return out;
 }
 
-/*--------------------------------------------------------------
-  控制單顆繼電器（含 Echo 回應與讀回確認）
---------------------------------------------------------------*/
+//=========== control: single relay (with echo + readback) ===========
+
 bool PQW_IO_16O_RLY::controlRelay(int id, bool status)
 {
 	if (id < 1 || id > 16){//relay_count) {
-		std::cout << "[ERROR] Relay ID out of range.\n";
+		LOG_ERR(_log_tag, "Relay ID out of range: %d", id);
 		return true;
 	}
 
 	auto cmd = buildSingleRelayCmd(id, status);
-	printHex(cmd, "[TX single relay]");
+	printHex(cmd, "TX single relay");
 
 	client->sendData((char*)cmd.data(), cmd.size(), 50);
 
 	auto echo = readEcho();
-	printHex(echo, "[RX echo]");
+	printHex(echo, "RX echo");
 
 	auto readcmd = buildReadCmd();
 	client->sendData((char*)readcmd.data(), readcmd.size(), 50);
@@ -205,43 +191,40 @@ bool PQW_IO_16O_RLY::controlRelay(int id, bool status)
 	return (states[id - 1] != status);
 }
 
-/*--------------------------------------------------------------
-  控制全部繼電器
---------------------------------------------------------------*/
+//=========== control: all relay ===========
+
 bool PQW_IO_16O_RLY::controlAll(bool status)
 {
 	auto cmd = buildAllRelayCmd(status);
-	printHex(cmd, "[TX all relay]");
+	printHex(cmd, "TX all relay");
 
 	if (!client->sendData((char*)cmd.data(), cmd.size(), 100))
 		return true;
 
 	auto echo = readEcho();
-	printHex(echo, "[RX echo ALL]");
+	printHex(echo, "RX echo ALL");
 
 	if (echo.size() < 8) return true;
 	return false;
 }
 
-/*--------------------------------------------------------------
-  讀取全部繼電器狀態
---------------------------------------------------------------*/
+//=========== read: all status ===========
+
 std::vector<bool> PQW_IO_16O_RLY::readAllStatus()
 {
 	auto cmd = buildReadCmd();
-	printHex(cmd, "[TX read status]");
+	printHex(cmd, "TX read status");
 
 	client->sendData((char*)cmd.data(), cmd.size(), 100);
 
 	auto resp = readEcho();
-	printHex(resp, "[RX read status]");
+	printHex(resp, "RX read status");
 
 	return parseReadResponse(resp);
 }
 
-/*--------------------------------------------------------------
-  關閉 TCP 連線
---------------------------------------------------------------*/
+//=========== utility: close ===========
+
 void PQW_IO_16O_RLY::close()
 {
 	client->close();

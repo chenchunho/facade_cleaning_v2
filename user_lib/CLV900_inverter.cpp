@@ -1,14 +1,17 @@
 #include "CLV900_inverter.h"
-#include <stdio.h>
+#include "log_utils.h"
 #include <string.h>
 #include <math.h>
+
+//=========== init ===========
 
 CLV900_inverter::CLV900_inverter()
 {
 	client = nullptr;
 	owns = false;
 	deviceID = 1;
-	debugPrint = false;
+	debug_mode = false;
+	_log_tag = "CLV900:?";
 }
 
 CLV900_inverter::~CLV900_inverter()
@@ -17,18 +20,20 @@ CLV900_inverter::~CLV900_inverter()
 		delete client;
 }
 
-//=========== init ===========
-
 bool CLV900_inverter::init(const std::string& ip, int port, int id, bool debug)
 {
 	client = new TCP_client();
 	owns = true;
 
-	if (!client->connectToServer(ip, port))
-		return true;
-
 	deviceID = id;
-	debugPrint = debug;
+	debug_mode = debug;
+	_log_tag = "CLV900:" + std::to_string(id);
+
+	if (!client->connectToServer(ip, port)) {
+		LOG_ERR(_log_tag, "connect failed %s:%d", ip.c_str(), port);
+		return true;
+	}
+
 	return false;
 }
 
@@ -37,11 +42,12 @@ bool CLV900_inverter::init(TCP_client& extClient, int id, bool debug)
 	client = &extClient;
 	owns = false;
 	deviceID = id;
-	debugPrint = debug;
+	debug_mode = debug;
+	_log_tag = "CLV900:" + std::to_string(id);
 	return false;
 }
 
-//=========== CRC16 (Modbus, init 0xFFFF, poly 0xA001) ===========
+//=========== utility: CRC16 (Modbus, init 0xFFFF, poly 0xA001) ===========
 
 uint16_t CLV900_inverter::crc16(const uint8_t* buf, int len)
 {
@@ -55,32 +61,25 @@ uint16_t CLV900_inverter::crc16(const uint8_t* buf, int len)
 	return crc;
 }
 
-//=========== TX/RX ===========
+//=========== utility: TX/RX ===========
 
 bool CLV900_inverter::sendModbus(const uint8_t* req, int reqLen,
 	uint8_t* resp, int& respLen)
 {
-	if (debugPrint) {
-		printf("[CLV900 TX] ");
-		for (int i = 0; i < reqLen; i++) printf("%02X ", req[i]);
-		printf("\n");
-	}
+	LOG_HEX(_log_tag, "TX", req, reqLen);
 
 	if (!client->sendData((const char*)req, reqLen, 200))
 		return true;
 
 	respLen = client->receiveData((char*)resp, 256, 300);
 
-	if (debugPrint && respLen > 0) {
-		printf("[CLV900 RX] ");
-		for (int i = 0; i < respLen; i++) printf("%02X ", resp[i]);
-		printf("\n");
-	}
+	if (respLen > 0)
+		LOG_HEX(_log_tag, "RX", resp, respLen);
 
 	return respLen <= 0;
 }
 
-//=========== generic param write/read ===========
+//=========== utility: generic param write/read ===========
 
 bool CLV900_inverter::writeParam(uint16_t reg, uint16_t value)
 {
@@ -153,7 +152,7 @@ bool CLV900_inverter::stopFree()    { return writeParam(0x0002, 5); }
 bool CLV900_inverter::stopDecel()   { return writeParam(0x0002, 6); }
 bool CLV900_inverter::resetFault()  { return writeParam(0x0002, 7); }
 
-//=========== frequency setpoint (write reg 0x0001) ===========
+//=========== control: frequency setpoint (write reg 0x0001) ===========
 
 bool CLV900_inverter::setFreqRaw(int16_t value)
 {
@@ -179,7 +178,7 @@ bool CLV900_inverter::setFreqHz(double hz, double max_hz)
 	return setFreqPercent(pct);
 }
 
-//=========== monitor reads ===========
+//=========== read: monitor ===========
 
 bool CLV900_inverter::readRunStatus(uint16_t& status)
 {
@@ -243,7 +242,7 @@ bool CLV900_inverter::readIgbtTemp(uint16_t& celsius)
 	return readParam(0x101A, celsius);
 }
 
-//=========== convenience ===========
+//=========== utility: convenience ===========
 
 bool CLV900_inverter::configureModbusControl()
 {

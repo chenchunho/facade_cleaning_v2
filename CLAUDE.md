@@ -4,13 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 給 Claude CLI 的交接指引（接手必讀）
 
-新 session 接手此專案時，請依序閱讀：
+新 session 接手此專案時，**務必先做以下動作再開始工作**：
 
-1. **`.claude/work_log.md`** — 最新進度 + 待完成項目（最新紀錄在最上方）
-2. **`.claude/motion_flow.md`** — 完整運動流程規格（硬體表、phase、狀態機、指令協定、參數常數）
+1. 讀 **`.claude/work_log.md`** — 最新進度 + 待完成項目（最新紀錄在最上方）；每個決策條目上方會標示「**規範權威：** xxx」告訴你該決策落在哪份規範文件
+2. 讀 **`.claude/motion_flow.md`** — 完整運動流程規格（硬體表、phase、狀態機、指令協定、參數常數）
 3. 本 CLAUDE.md 的硬體架構圖可能**落後於 motion_flow.md**，以 motion_flow.md §2 為準
 
 待完成工作、已討論但尚未實作的設計決策，都在上述兩份 `.claude/` 文件中。
+
+## 多人協作紀律（重要）
+
+本專案多人協作，每位協作者用自己的 Claude Code。協作者之間**只能透過 git 裡的文件同步資訊** — 任何 Claude 的本機 auto memory 都不會共享。因此：
+
+- **決策 / 規範 / 架構變動一律寫進 git 追蹤的 .md 檔**（CLAUDE.md / motion_flow.md / work_log.md），不要只留在對話或個人 Claude memory
+- **規範文件與程式改動放在同一個 PR**（不要只 commit 程式、.md 留到下次）；reviewer 會在 PR 看到規範 diff，討論後才合併
+- **work_log 每筆重要決策要標「規範權威」指標**，指向該決策落在哪個權威文件（CLAUDE.md 某節 / motion_flow.md §X），方便協作者跳去確認完整規範
+- **分工邊界：** 流程架構 + `user_lib/` 由 Jim 維護；`washrobot_new_PI/main.cpp` / `Crane_control_PI/main.cpp` / `web_backend/` / 實機部署由其他協作者負責。動工前請確認要改的檔屬於誰的範圍，跨界改動要先開 PR 討論
 
 ## Project Overview
 
@@ -116,7 +125,9 @@ x64/                 # 編譯輸出目錄
 
 - **washrobot RPi (192.168.1.100)** 跑 `washrobot_new_PI/main.cpp`，TCP server :5001
 - **crane RPi (192.168.1.101)** 跑 `Crane_control_PI/main.cpp`，TCP server :5002
-- **Web GUI backend (Node.js)** 跑在 washrobot RPi :8080，橋接 Browser WebSocket ↔ 兩裝置的 TCP
+- **Web GUI backend (Node.js)** 跑在 **crane RPi (.101) :8080**，橋接 Browser WebSocket ↔ 兩裝置的 TCP
+  - 刻意放在救援側：washrobot 在半空中掛掉時，GUI 仍可透過 crane 手動收繩救援
+  - 失聯模式 + 緊急收繩（按住持續收）行為詳見 `.claude/motion_flow.md` §8
 - 自動下移時 washrobot 當 TCP client 連 crane :5002 下 `pay_out <cm>` 指令同步放繩
 - 指令協定：簡單文字，`\n` 結尾；回應 `OK\n` / `OK <data>\n` / `ERR <msg>\n` / `EVT <type> <data>\n`
 - 詳見 `.claude/motion_flow.md`
@@ -276,3 +287,52 @@ if (drv.init("192.168.1.20", 4001)) {
 
 //=========== utility ===========
 ```
+
+### Log 格式規範（user_lib 統一）
+
+`user_lib/` 所有驅動的 log **必須**透過 `user_lib/log_utils.h` 的巨集輸出，格式固定：
+
+```
+[HH:MM:SS.mmm] [LEVEL] [DEVICE:ID] <message>
+```
+
+**Levels：**
+
+| Macro | Level | 用途 |
+|---|---|---|
+| `LOG_ERR(tag, fmt, ...)` | ERR | 嚴重錯誤（連線斷、CRC 錯、timeout 超限）|
+| `LOG_WRN(tag, fmt, ...)` | WRN | 警告（重試、異常值但可繼續）|
+| `LOG_INF(tag, fmt, ...)` | INF | 重要流程訊息（動作完成、狀態轉換）|
+| `LOG_DBG(tag, fmt, ...)` | DBG | 除錯訊息 |
+| `LOG_HEX(tag, note, data, len)` | DBG | Hex dump |
+
+**所有 level 都由 `debug_mode` 成員統一控制：**
+
+- `debug_mode == false`（預設）→ 完全靜默，一行都不印
+- `debug_mode == true` → ERR/WRN/INF/DBG/HEX 全部輸出
+- 理由：錯誤本來就透過 bool return（true=error）通知呼叫端，log 純為除錯觀察用；驅動庫預設不吵，由使用者決定何時打開
+
+**呼叫端要求：**
+
+- 每個驅動 class 必須有成員 `std::string _log_tag`，在 `init()` 裡設為 `"DEVICE:ID"`（例：`"DM2J:3"`、`"ZDT:5"`、`"TCP"`）
+- 每個驅動 class 必須有成員 `bool debug_mode`（所有 LOG_* 巨集都依賴它）
+- **禁止**在驅動內直接用 `printf` / `std::cout` / `std::cerr`（regression 守則）
+
+**範例：**
+
+```cpp
+LOG_ERR(_log_tag, "PPR read failed");
+LOG_INF(_log_tag, "target %.3f cm -> %d pulses", pos_cm, pulses);
+LOG_DBG(_log_tag, "status=0x%08X", st);
+LOG_HEX(_log_tag, "TX", buf, len);
+```
+
+輸出範例：
+
+```
+[14:32:01.123] [INF] [DM2J:3] target 15.500 cm -> 6200 pulses
+[14:32:01.145] [DBG] [DM2J:3] TX 03 03 00 5F 00 02 35 86
+[14:32:01.178] [ERR] [DM2J:3] Motion timeout
+```
+
+規範範圍：`user_lib/` 資料夾內。`main.cpp` / 應用層的 log 不受此約束（但建議對齊）。

@@ -1,12 +1,15 @@
-﻿#include "WT901BC_TTL.h"
-#include <iomanip>
+#include "WT901BC_TTL.h"
+#include "log_utils.h"
 #include <cmath>
+
+//=========== init ===========
 
 WT901BC_TTL::WT901BC_TTL()
 	: ax(0), ay(0), az(0), gx(0), gy(0), gz(0),
 	x(0), y(0), z(0), pressure(0), altitude(0),
 	read_error(false), error_count(0),
-	_serial(nullptr), _debug(false), _buf_count(0), _running(false) {
+	_serial(nullptr), debug_mode(false), _buf_count(0), _running(false) {
+	_log_tag = "WT901";
 }
 
 WT901BC_TTL::~WT901BC_TTL() {
@@ -15,12 +18,12 @@ WT901BC_TTL::~WT901BC_TTL() {
 
 void WT901BC_TTL::init(Serial_port* com, bool debug) {
 	_serial = com;
-	_debug = debug;
+	debug_mode = debug;
 
 	if (_serial && _serial->is_connected()) {
 		_running = true;
 		_worker_thread = std::thread(&WT901BC_TTL::update, this);
-		if (_debug) std::cout << "[WT901BC] Thread started." << std::endl;
+		LOG_INF(_log_tag, "Thread started");
 	}
 }
 
@@ -31,20 +34,21 @@ void WT901BC_TTL::stop() {
 	}
 }
 
+//=========== worker thread ===========
+
 void WT901BC_TTL::update() {
-	// 初始化時間，避免啟動瞬間就判定超時
+	// initialize timestamp so startup doesn't immediately trigger timeout
 	_last_update_time = std::chrono::steady_clock::now();
 	while (_running) {
 		// 1. Check if the serial object exists or is disconnected
 		if (!_serial || !_serial->is_connected()) {
-			if (_debug) std::cerr << "[WT901BC] Connection lost. Attempting to reconnect..." << std::endl;
+			LOG_ERR(_log_tag, "Connection lost. Attempting to reconnect...");
 
 			read_error = true;
 
 			// Try to reconnect through the serial port's own reconnect method
-			// Note: You need to implement 'reconnect()' in your Serial_port class
 			if (_serial && _serial->reconnect()) {
-				if (_debug) std::cout << "[WT901BC] Reconnected successfully!" << std::endl;
+				LOG_INF(_log_tag, "Reconnected successfully");
 				read_error = false;
 				_buf_count = 0;
 			}
@@ -82,7 +86,7 @@ void WT901BC_TTL::update() {
 				_buf_count = 0;
 			}
 		}
-		// 超時檢查：超過 500ms 未收到有效封包
+		// timeout check: no valid packet for > 500ms
 		auto now = std::chrono::steady_clock::now();
 		auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - _last_update_time).count();
 
@@ -97,6 +101,8 @@ void WT901BC_TTL::update() {
 	}
 }
 
+//=========== utility: validation ===========
+
 bool WT901BC_TTL::validateChecksum(uint8_t* buf) {
 	uint8_t sum = 0;
 	for (int i = 0; i < 10; i++) {
@@ -105,14 +111,13 @@ bool WT901BC_TTL::validateChecksum(uint8_t* buf) {
 	return (sum == buf[10]);
 }
 
+//=========== utility: debug ===========
+
 void WT901BC_TTL::printDebugInfo(uint8_t* buf) {
-	std::cout << "[WT901BC RX] ";
-	for (int i = 0; i < 11; ++i) {
-		std::cout << std::hex << std::setw(2) << std::setfill('0') << std::uppercase
-			<< (int)buf[i] << " ";
-	}
-	std::cout << std::dec << std::endl;
+	LOG_HEX(_log_tag, "RX", buf, 11);
 }
+
+//=========== read: parse packet ===========
 
 void WT901BC_TTL::parsePacket(uint8_t* buf) {
 	_last_update_time = std::chrono::steady_clock::now();
@@ -138,12 +143,12 @@ void WT901BC_TTL::parsePacket(uint8_t* buf) {
 		y = (double)d2 / 32768.0 * 180.0;
 		z = (double)d3 / 32768.0 * 180.0;
 		break;
-	case 0x56: // 氣壓封包
+	case 0x56: // pressure packet
 	{
-		// 合併 4 bytes 取得原始氣壓值 (Pa)，使用 uint32_t 避免位移溢位
+		// combine 4 bytes to get raw pressure (Pa), use uint32_t to avoid shift overflow
 		uint32_t p_raw = ((uint32_t)buf[5] << 24) | ((uint32_t)buf[4] << 16) | ((uint32_t)buf[3] << 8) | buf[2];
 
-		// 換算成 hPa (除以 100.0)
+		// convert to hPa
 		pressure = (double)(int32_t)p_raw / 100.0;
 
 		calculateAltitude();
@@ -152,13 +157,15 @@ void WT901BC_TTL::parsePacket(uint8_t* buf) {
 	}
 }
 
+//=========== utility: altitude calculation ===========
+
 void WT901BC_TTL::calculateAltitude() {
 	if (pressure <= 0) return;
 
-	// 海平面標準大氣壓 (hPa)
+	// sea-level standard atmospheric pressure (hPa)
 	const double P0 = 1013.25;
 
-	// 國際壓高公式
+	// international barometric formula
 	// Altitude = 44330 * (1 - (P/P0)^(1/5.255))
 	altitude = 44330.0 * (1.0 - std::pow(pressure / P0, 1.0 / 5.255));
 }

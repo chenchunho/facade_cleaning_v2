@@ -101,10 +101,7 @@ private:
 	std::list<socket_t> clients;
 
 	DataCallback onReceive = nullptr;
-
-	// 內部工具
-	void printLog(const std::string& tag, socket_t s = INVALID_SOCKET, const char* data = nullptr, int len = 0);
-	std::string getCurrentTimestamp();
+	std::string _log_tag;
 
 	void acceptLoop();
 	void handleClient(socket_t clientSock);

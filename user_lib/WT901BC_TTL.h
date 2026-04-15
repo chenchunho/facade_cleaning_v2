@@ -2,7 +2,7 @@
 #define WT901BC_TTL_H
 
 #include "Serial_port.h"
-#include <iostream>
+#include <string>
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -53,9 +53,10 @@ public:
 
 private:
 	Serial_port* _serial;
-	bool _debug;
+	bool debug_mode;
 	uint8_t _msg_buf[11];
 	int _buf_count;
+	std::string _log_tag;
 
 	std::thread _worker_thread;
 	std::atomic<bool> _running;

@@ -47,13 +47,11 @@ private:
 
 	std::string last_ip;
 	int last_port;
+	std::string _log_tag;
 	std::thread monitor_thread;
 	std::atomic<bool> monitor_running;
 	std::mutex socket_mtx;
 
-	// 輔助工具
-	void printLog(const std::string& tag, const char* data = nullptr, int len = 0);
-	std::string getCurrentTimestamp();
 	void startMonitor();
 	void reconnectLoop();
 };

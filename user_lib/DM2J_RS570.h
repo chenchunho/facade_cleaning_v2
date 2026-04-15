@@ -77,8 +77,9 @@ public:
 private:
 	TCP_client* client;
 	bool useExternalClient;
-	bool debugEnabled;
+	bool debug_mode;
 	int slaveID;
+	std::string _log_tag;
 
 	uint16_t crc16(const uint8_t* buf, int len);
 	bool sendRecv(const std::vector<uint8_t>& tx, std::vector<uint8_t>& rx);

@@ -38,9 +38,9 @@ private:
 	SerialConfig config;
 	bool connected;
 	bool debug_mode;
+	std::string _log_tag;
 
 	bool configure_port();
-	void print_hex(const std::string& label, const char* data, int length);
 };
 
 #endif

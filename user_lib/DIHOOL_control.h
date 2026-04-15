@@ -32,9 +32,10 @@ public:
 private:
 	TCP_client* _client;
 	bool _ownedClient;
-	bool _debug;
+	bool debug_mode;
 	int _id;           // RS485 現在的 ID
 	int _total_motor;  // 總電機數 (1~4)
+	std::string _log_tag;
 
 	bool sendCommand(uint8_t regLow, uint8_t dataLow);
 	bool sendRawPacket(const std::vector<uint8_t>& packet);
