@@ -76,6 +76,7 @@
   <ImportGroup Label="PropertySheets" />
   <PropertyGroup Label="UserMacros" />
   <ItemGroup>
+    <ClCompile Include="..\user_lib\CLV900_inverter.cpp" />
     <ClCompile Include="..\user_lib\DY_500_weight_sensor.cpp" />
     <ClCompile Include="..\user_lib\SD76_length_meters.cpp" />
     <ClCompile Include="..\user_lib\TCP_client.cpp" />
@@ -84,6 +85,7 @@
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\user_lib\CLV900_inverter.h" />
     <ClInclude Include="..\user_lib\DY_500_weight_sensor.h" />
     <ClInclude Include="..\user_lib\SD76_length_meters.h" />
     <ClInclude Include="..\user_lib\TCP_client.h" />
@@ -92,7 +94,7 @@
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>C:\Users\Administrator\source\repos\washrobot_new_PI\user_lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\user_lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

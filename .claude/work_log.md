@@ -1,5 +1,81 @@
 # Work Log
 
+## 2026-04-15 — Crane_control_PI 重寫（Step 1 + Step 2）
+
+### 已完成
+
+1. **Step 1：硬體 + 指令擴充**（`Crane_control_PI/main.cpp`）
+   - 新增 SD76 #3（slave 4，中間管線計米）+ CLV900（slave 7，中間絞盤變頻器）
+   - `motion_rope()` 整合雙繩 + 中間管線同步：CLV900 forward/reverse @ `MIDDLE_WINCH_HZ=20` (placeholder)，中間完成條件 `|Δ| >= cm × MIDDLE_WINCH_RATIO_K`
+   - 新指令：`ping` / `zero_meters <ground|top>` / `home_status` / `roll_correct <delta_cm>` / `middle_set <rpm> <pay|retract|stop>`
+   - `zero_meters top` 存 `home_ground_cm`（atomic）供 Phase 6 召回算放繩量
+   - `roll_correct`：正值=左放右收，中間絞盤不動
+   - `Crane_control_PI.vcxproj` 加 CLV900 + 修 include 路徑 `C:\Users\Administrator\...` → `..\user_lib`
+
+2. **Step 2：Watchdog 執行緒 + EVT**（`Crane_control_PI/main.cpp`）
+   - Atomics：`last_ping_ms` / `motion_active` / `watchdog_fired` / `watchdog_stop`
+   - `touch_heartbeat()` 在 `on_receive` 頂呼叫；任何 inbound 資料都算心跳
+   - `watchdog_loop()`：每 250ms 檢查，超 2000ms 且有 client → 動作中 abort + allMotionOff + EVT；閒置中僅 EVT
+   - `MotionScope` RAII guard 在 `motion_rope` / `cmd_roll_correct` 頭尾管理 flag
+   - EVT：`watchdog_timeout state=aborted|idle` / `watchdog_recovered`
+
+### 待完成（更新）
+
+- 🟡 `MIDDLE_WINCH_HZ` 實機調校（目前 20 Hz placeholder）
+- 🟡 `middle_set` rpm→Hz 換算需驗證馬達極數（目前假設 4 極 50Hz→1500rpm）
+- 🟡 CLV900 正反轉方向 wiring-dependent，實機若反向需翻轉
+- 🔴 **Step 3：DSZL-107 張力 monitor** — 等 Modbus 暫存器表才能實作 `user_lib/DSZL_107.{h,cpp}`，目前整個跳過
+- 🟡 IMU serial port 上機確認（`/dev/ttyUSB0` 暫定）
+- 🟡 水箱溢流處理（Open Q10）
+- 🟡 攝影機型號 + RTSP URL
+- 🔴 Phase 6 `recall` 指令（washrobot 端：吸盤脫附 + 呼叫 `pay_out home_ground_cm - current_down`）
+- 🔴 Web GUI 補強
+- 🔴 實機測試 + 參數回填
+
+---
+
+## 2026-04-14b — washrobot main.cpp 實作（Phase 4-A / Crane Watchdog / IMU）
+
+### 已完成
+
+1. **Phase 4-A margin 修正**（`washrobot_new_PI/main.cpp`）
+   - 新增 `STEP_MARGIN_CM = 15`
+   - 修正 `feet_displace` 順序：crane 先放繩（STEP_CM + MARGIN）→ DM2J 動 → crane 收繩（MARGIN）
+   - 新增 `dm2j_wait_done()` helper，取代舊的 `sleep_ms(4000)`，改為 poll CMD_DONE + PATH_DONE
+   - DM2J 左右腳同步：`PR_trigger_sync`（廣播）+ 分別 poll 等待
+
+2. **Crane watchdog**（`washrobot_new_PI/main.cpp`）
+   - 新增常數 `HEARTBEAT_INTERVAL_MS=500`、`WATCHDOG_TIMEOUT_MS=2000`
+   - `crane_cmd` 加 `timeout_sec` 參數（預設 30s，ping 用 2s），移除舊 180s hardcode
+   - 任何 crane 指令成功時更新 `crane_last_ok_ms`
+   - `crane_watchdog_loop()`：每 500ms ping，超時 2000ms → 動作中 abort + EVT，閒置中只推 EVT
+   - `motion_active` atomic flag，`do_step_down` / `do_run` 頭尾設定
+
+3. **IMU 整合**（`washrobot_new_PI/main.cpp`）
+   - `Serial_port` + `WT901BC_TTL` init（`/dev/ttyUSB0`，待上機確認）
+   - `imu_take_baseline()`：Phase 2 init 時取 3 秒平均存 `roll0/pitch0`
+   - `imu_monitor_loop()`：100ms 取樣，1s 滑動平均，持續 500ms 超標觸發
+     - `> 45°` → abort + crane stop + EVT `imu_stop`
+     - `> 15°` → `imu_ask_pending = true` + EVT `balance_ask`
+   - `do_phase5_roll_correct()`：送 `roll_correct <cm>` 給 crane，最多重試 5 次，收斂 `|Δroll| < 1°`
+   - `confirm_balance <yes|no>` 指令：yes → Phase 5 → 清 pending；no → 直接清
+   - `do_run()` 每步後若 `imu_ask_pending` 則 `pause_flag=true` 等回覆
+
+### 待完成（更新）
+
+- 🟡 DSZL-107 Modbus 暫存器表
+- 🟡 水箱溢流處理（Open Q10）
+- 🟡 攝影機型號 + RTSP URL
+- 🟡 IMU serial port 確認（目前暫定 `/dev/ttyUSB0`）
+- ✅ CH5/CH6/CH7 繼電器定義 + `arm_sweep` 加入清洗動作
+- 🔴 Phase 6 `recall` 指令（吸盤脫附 + crane 放繩回地面）
+- 🔴 重寫 `Crane_control_PI/main.cpp`
+- 🔴 寫 `user_lib/DSZL_107.{h,cpp}`
+- 🔴 Web GUI 補強
+- 🔴 實機測試 + 參數回填
+
+---
+
 ## 2026-04-14 — 架構細化（攝影機 / 水系統 / 剎車 / Fathom-X）
 
 ### 已完成（規格文件同步）

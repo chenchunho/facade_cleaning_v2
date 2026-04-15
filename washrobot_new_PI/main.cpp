@@ -1,589 +1,98 @@
 // ============================================================================
-// washrobot_new_PI — Vertical-glass-wall window-washing robot (inchworm crawl)
+// washrobot_new_PI — TCP command server + dispatch
 //
-// See CLAUDE.md + .claude/motion_flow.md for full spec.
+// All hardware, motion logic, and background threads live in WashRobot (WASH_ROBOT.h/.cpp).
+// This file owns only the TCP server and routes incoming commands to robot.cmd_*().
 //
-// Hardware:
-//   RPi @ 192.168.1.100
-//   USR-TCP232-304 #1 @ 192.168.1.20:4001  (RS485_1)
-//     DM2J_RS570 slave 1~5 (left_foot / left_wheel / right_foot / right_wheel / arm)
-//   USR-TCP232-304 #2 @ 192.168.1.21:4001  (RS485_2)
-//     ZDT_motor_control slave 1~9 (SMC LEYG25 pushers)
-//       1,2 = left_foot      (feet group)
-//       3,4 = left_body      (body group)
-//       5,6 = right_foot     (feet group)
-//       7,8 = right_body     (body group)
-//       9   = center         (center group)
-//   USR-TCP232-304 #3 @ 192.168.1.22:4001  (RS485_3)
-//     JC_100_METER     slave 1~9   (one per pusher, vacuum feedback)
-//     PQW_IO_16O_RLY   slave 12    (8CH)
-//       CH1 = vacuum pump (dp0105, always ON while running)
-//       CH2 = VT307 feet valve    (4 cups)
-//       CH3 = VT307 body valve    (4 cups)
-//       CH4 = VT307 center valve  (1 cup, standalone)
+// Command server @ :5001 (line-based, multi-client):
+//   init / attach / detach / step_down / run <n>
+//   pause / resume / emergency_stop / reset / ping
+//   vacuum <group> <on|off>   pusher <group> <extend|retract>
+//   move <motor> <cm>         arm_sweep / tilt_mode <on|off>
+//   confirm_balance <yes|no>  return_home <descent_cm>
+//   status / shutdown
 //
-//   Crane (separate RPi) @ 192.168.1.101, crane command TCP server @ :5002
-//
-// This process exposes a TCP command server on :5002 for the Web backend GUI,
-// and, during auto-descent, acts as a TCP client to the crane to request
-// synchronous pay_out.
-//
-// Command TCP server @ :5001 (line-based, multi-client):
-//   init                       Phase 2 init (enable drivers, extend pushers, pump ON)
-//   attach                     Phase 3 (center extend + all valves ON, verify vacuum)
-//   detach                     All valves OFF
-//   step_down                  One complete cycle (feet down + body down + wash sweep)
-//   run <steps>                N step_down cycles
-//   pause / resume / stop      flow control
-//   vacuum <group> <on|off>    group = feet|body|center|all
-//   pusher <group> <extend|retract>   group = feet|body|center|all
-//   move <motor> <cm>          motor = left_foot|right_foot|arm
-//   arm_sweep                  sweep arm left → right → left once
-//   tilt_mode <on|off>         Phase 5 (only center vacuum ON)
-//   status                     report lengths / pressures
-//   shutdown                   stop motion, pump off, valves off
-//
-// Reply format:
-//   OK [data]\n  / ERR <reason>\n  / EVT <type> <data>\n
+// Reply format: OK [data]\n  /  ERR <reason>\n  /  EVT <type> <data>\n
 // ============================================================================
 
 #include <iostream>
 #include <string>
 #include <sstream>
-#include <thread>
-#include <atomic>
-#include <mutex>
-#include <chrono>
-#include <vector>
-#include <cstdlib>
-#include <cmath>
 
-#include "TCP_client.h"
 #include "TCP_server.h"
-#include "DM2J_RS570.h"
-#include "ZDT_motor_control.h"
-#include "JC_100_METER.h"
-#include "PQW_IO_16O_RLY.h"
+#include "WASH_ROBOT.h"
 
-// ============ Config ============
+static constexpr int CMD_PORT = 5001;
 
-static constexpr const char* IP_485_1 = "192.168.1.20";
-static constexpr const char* IP_485_2 = "192.168.1.21";
-static constexpr const char* IP_485_3 = "192.168.1.22";
-static constexpr int PORT_485 = 4001;
+static WashRobot   robot;
+static TCP_server  cmd_server;
 
-static constexpr const char* CRANE_IP   = "192.168.1.101";
-static constexpr int         CRANE_PORT = 5002;
-static constexpr int         CMD_PORT   = 5001;
-
-// PQW relay channels (slave 12, 8CH)
-static constexpr int PQW_SLAVE        = 12;
-static constexpr int PQW_TOTAL_CH     = 8;
-static constexpr int CH_PUMP          = 1;
-static constexpr int CH_VALVE_FEET    = 2;
-static constexpr int CH_VALVE_BODY    = 3;
-static constexpr int CH_VALVE_CENTER  = 4;
-
-// ZDT slaves (pushers)
-static constexpr int ZDT_LF1 = 1, ZDT_LF2 = 2;   // left foot
-static constexpr int ZDT_LB1 = 3, ZDT_LB2 = 4;   // left body
-static constexpr int ZDT_RF1 = 5, ZDT_RF2 = 6;   // right foot
-static constexpr int ZDT_RB1 = 7, ZDT_RB2 = 8;   // right body
-static constexpr int ZDT_C   = 9;                // center
-
-// DM2J slaves
-static constexpr int DM2J_LEFT_FOOT   = 1;
-static constexpr int DM2J_LEFT_WHEEL  = 2;
-static constexpr int DM2J_RIGHT_FOOT  = 3;
-static constexpr int DM2J_RIGHT_WHEEL = 4;
-static constexpr int DM2J_ARM        = 5;
-
-// Tunable parameters (adjust after field trials)
-static constexpr int  PUSHER_EXTEND_PULSE   = 144000;  // pulse count: fully extended (to wall)
-static constexpr int  PUSHER_RETRACT_PULSE  = 0;       // pulse count: fully retracted
-static constexpr int  PUSHER_RPM            = 1000;
-static constexpr int  PUSHER_ACC            = 255;
-static constexpr int  PUSHER_SETTLE_MS      = 1500;    // settle time after pusher move before vacuum read
-
-static constexpr int  STEP_CM               = 30;      // single down-step distance (tunable)
-static constexpr int  TOTAL_DISTANCE_CM     = 30;      // TODO set actual building height
-static constexpr int  DM2J_RPM              = 700;
-static constexpr int  DM2J_ACC              = 100;
-static constexpr int  DM2J_DEC              = 100;
-
-static constexpr int  ARM_SWEEP_CM          = 30;      // TODO arm sweep half-range
-static constexpr int  ARM_SWEEP_RPM         = 500;
-
-static constexpr int  VACUUM_RETRY_MAX      = 5;
-static constexpr int  VACUUM_THRESHOLD_X10  = -500;    // 0.1 kPa; -50 kPa worst-case
-static constexpr int  VACUUM_SETTLE_MS      = 2000;
-static constexpr int  POLL_INTERVAL_MS      = 50;
-
-// ============ Globals ============
-
-static TCP_client cli_20, cli_21, cli_22;
-static TCP_client crane_cli;
-
-static DM2J_RS570        dm2j[5];  // index 0..4 → slave 1..5
-static ZDT_motor_control zdt[9];   // index 0..8 → slave 1..9
-static JC_100_METER      meter[9]; // index 0..8 → slave 1..9
-static PQW_IO_16O_RLY    pqw;
-
-static TCP_server        cmd_server;
-
-static std::atomic<bool> abort_flag(false);
-static std::atomic<bool> pause_flag(false);
-static std::mutex        motion_mtx;
-
-// ============ Utility ============
-
-static DM2J_RS570& D(int slave) { return dm2j[slave - 1]; }
-static ZDT_motor_control& Z(int slave) { return zdt[slave - 1]; }
-static JC_100_METER&      M(int slave) { return meter[slave - 1]; }
-
-static void sleep_ms(int ms) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-}
-
-// Broadcast an EVT line to all connected GUI clients
-static void evt(const std::string& line) {
-    std::string s = "EVT " + line;
-    if (s.empty() || s.back() != '\n') s.push_back('\n');
-    cmd_server.broadcast(s.c_str(), (int)s.size());
-}
-
-// Cooperative pause/stop check inside long loops
-static bool check_abort() {
-    while (pause_flag.load() && !abort_flag.load()) sleep_ms(POLL_INTERVAL_MS);
-    return abort_flag.load();
-}
-
-// ============ Crane TCP client ============
-
-static std::mutex crane_mtx;
-
-static bool crane_connect_if_needed() {
-    if (crane_cli.isConnected()) return false;
-    return !crane_cli.connectToServer(CRANE_IP, CRANE_PORT);
-}
-
-// Send one command line and wait for one reply line.
-// Returns the reply (including terminator stripped) or empty on failure.
-static std::string crane_cmd(const std::string& line) {
-    std::lock_guard<std::mutex> lk(crane_mtx);
-    if (crane_connect_if_needed()) return "";
-
-    std::string tx = line;
-    if (tx.empty() || tx.back() != '\n') tx.push_back('\n');
-    if (!crane_cli.sendData(tx.c_str(), (int)tx.size(), 1000)) return "";
-
-    // Accumulate until we see a '\n'
-    std::string rx;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(180);
-    char buf[512];
-    while (std::chrono::steady_clock::now() < deadline) {
-        int n = crane_cli.receiveData(buf, sizeof(buf), 500);
-        if (n > 0) {
-            rx.append(buf, n);
-            size_t pos = rx.find('\n');
-            if (pos != std::string::npos) {
-                std::string reply = rx.substr(0, pos);
-                if (!reply.empty() && reply.back() == '\r') reply.pop_back();
-                return reply;
-            }
-        } else {
-            sleep_ms(POLL_INTERVAL_MS);
-        }
-    }
-    return "";
-}
-
-// ============ Pusher helpers ============
-
-// Fire-and-wait single pusher move (blocking until pos_reached)
-static bool pusher_move(int slave, int pulse) {
-    if (Z(slave).motion_control_pos_mode(0, PUSHER_ACC, PUSHER_RPM, pulse, 1, 0, 1))
-        return true;
-    Z(slave).wait_until_pos_reached(15000, 200);
-    return false;
-}
-
-// Parallel multi-pusher move via sync trigger
-static bool pusher_move_many(const std::vector<int>& slaves, int pulse) {
-    // Stage all moves with sync=1
-    for (int s : slaves) {
-        if (Z(s).motion_control_pos_mode(0, PUSHER_ACC, PUSHER_RPM, pulse, 1, 1, 1))
-            return true;
-    }
-    // One broadcast trigger (any slave's call works — it's a Modbus broadcast)
-    if (!slaves.empty()) Z(slaves.front()).trigger_sync_move();
-
-    // Poll each for completion
-    for (int s : slaves) Z(s).wait_until_pos_reached(15000, 200);
-    sleep_ms(PUSHER_SETTLE_MS);
-    return false;
-}
-
-static std::vector<int> group_slaves(const std::string& group) {
-    if (group == "feet")   return {ZDT_LF1, ZDT_LF2, ZDT_RF1, ZDT_RF2};
-    if (group == "body")   return {ZDT_LB1, ZDT_LB2, ZDT_RB1, ZDT_RB2};
-    if (group == "center") return {ZDT_C};
-    if (group == "all")    return {ZDT_LF1, ZDT_LF2, ZDT_LB1, ZDT_LB2,
-                                   ZDT_RF1, ZDT_RF2, ZDT_RB1, ZDT_RB2, ZDT_C};
-    return {};
-}
-
-static int group_valve_ch(const std::string& group) {
-    if (group == "feet")   return CH_VALVE_FEET;
-    if (group == "body")   return CH_VALVE_BODY;
-    if (group == "center") return CH_VALVE_CENTER;
-    return -1;
-}
-
-// ============ Vacuum helpers ============
-
-static bool vacuum_valve(const std::string& group, bool on) {
-    if (group == "all") {
-        bool err = false;
-        err |= pqw.controlRelay(CH_VALVE_FEET,   on);
-        err |= pqw.controlRelay(CH_VALVE_BODY,   on);
-        err |= pqw.controlRelay(CH_VALVE_CENTER, on);
-        return err;
-    }
-    int ch = group_valve_ch(group);
-    if (ch < 0) return true;
-    return pqw.controlRelay(ch, on);
-}
-
-// Check all pressure meters in group reach the vacuum threshold.
-// Returns list of failing slave IDs; empty = success.
-static std::vector<int> vacuum_check(const std::string& group) {
-    std::vector<int> fail;
-    std::vector<int> slaves = group_slaves(group);  // JC meter slave = ZDT slave (1:1)
-    for (int s : slaves) {
-        int p = M(s).read_pressure();  // 0.1 kPa, negative = vacuum
-        if (p > VACUUM_THRESHOLD_X10) fail.push_back(s);
-    }
-    return fail;
-}
-
-// ============ Core motion: one down-step for a group ============
-//
-// 1. valve OFF         (release the group)
-// 2. pushers retract   (group's pushers to 0)
-// 3. caller-supplied "displace" lambda    (e.g. DM2J foot rails move, or crane pay_out)
-// 4. pushers extend    (group's pushers to 10cm-equivalent)
-// 5. valve ON
-// 6. verify vacuum; retry up to VACUUM_RETRY_MAX from step 1
-//
-// Returns empty string on success, else error message.
-//
-template <typename Displace>
-static std::string cycle_group(const std::string& group, Displace displace) {
-    const int valve_ch = group_valve_ch(group);
-    const auto slaves  = group_slaves(group);
-
-    for (int attempt = 1; attempt <= VACUUM_RETRY_MAX; ++attempt) {
-        if (check_abort()) return "aborted";
-
-        // 1. release
-        if (pqw.controlRelay(valve_ch, false)) return "valve_off_fail";
-        sleep_ms(300);
-
-        // 2. retract
-        if (pusher_move_many(slaves, PUSHER_RETRACT_PULSE)) return "pusher_retract_fail";
-
-        if (check_abort()) return "aborted";
-
-        // 3. displace (step down of foot or body, plus crane sync for feet case)
-        std::string derr = displace();
-        if (!derr.empty()) return derr;
-
-        if (check_abort()) return "aborted";
-
-        // 4. extend
-        if (pusher_move_many(slaves, PUSHER_EXTEND_PULSE)) return "pusher_extend_fail";
-
-        // 5. valve ON
-        if (pqw.controlRelay(valve_ch, true)) return "valve_on_fail";
-        sleep_ms(VACUUM_SETTLE_MS);
-
-        // 6. verify
-        auto fails = vacuum_check(group);
-        if (fails.empty()) return "";
-
-        std::ostringstream oss;
-        oss << "vacuum_fail " << group << " attempt=" << attempt << " slaves=";
-        for (size_t i = 0; i < fails.size(); ++i) {
-            if (i) oss << ",";
-            oss << fails[i];
-        }
-        evt(oss.str());
-    }
-    return "vacuum_retry_exceeded " + group;
-}
-
-// ============ Phase implementations ============
-
-static std::string do_init() {
-    std::lock_guard<std::mutex> lk(motion_mtx);
-    abort_flag = false;
-    pause_flag = false;
-
-    // Pump ON, all valves OFF
-    if (pqw.controlRelay(CH_PUMP,          true))  return "ERR pump_on_fail\n";
-    if (pqw.controlRelay(CH_VALVE_FEET,    false)) return "ERR valve_feet_off_fail\n";
-    if (pqw.controlRelay(CH_VALVE_BODY,    false)) return "ERR valve_body_off_fail\n";
-    if (pqw.controlRelay(CH_VALVE_CENTER,  false)) return "ERR valve_center_off_fail\n";
-
-    // Extend feet + body pushers (center stays retracted until attach)
-    std::vector<int> feet_body = {ZDT_LF1, ZDT_LF2, ZDT_LB1, ZDT_LB2,
-                                  ZDT_RF1, ZDT_RF2, ZDT_RB1, ZDT_RB2};
-    if (pusher_move_many(feet_body, PUSHER_EXTEND_PULSE)) return "ERR pusher_extend_fail\n";
-
-    // Arm home
-    D(DM2J_ARM).home_set_current_pos_zero();
-
-    return "OK init_done\n";
-}
-
-static std::string do_attach() {
-    std::lock_guard<std::mutex> lk(motion_mtx);
-    abort_flag = false;
-
-    if (pusher_move(ZDT_C, PUSHER_EXTEND_PULSE)) return "ERR center_extend_fail\n";
-    if (pqw.controlRelay(CH_VALVE_FEET,   true)) return "ERR valve_feet_fail\n";
-    if (pqw.controlRelay(CH_VALVE_BODY,   true)) return "ERR valve_body_fail\n";
-    if (pqw.controlRelay(CH_VALVE_CENTER, true)) return "ERR valve_center_fail\n";
-    sleep_ms(VACUUM_SETTLE_MS);
-
-    auto fails = vacuum_check("all");
-    if (!fails.empty()) {
-        std::ostringstream oss;
-        oss << "ERR attach_vacuum_fail slaves=";
-        for (size_t i = 0; i < fails.size(); ++i) { if (i) oss << ","; oss << fails[i]; }
-        oss << "\n";
-        return oss.str();
-    }
-    return "OK attached\n";
-}
-
-static std::string do_detach() {
-    std::lock_guard<std::mutex> lk(motion_mtx);
-    pqw.controlRelay(CH_VALVE_FEET,   false);
-    pqw.controlRelay(CH_VALVE_BODY,   false);
-    pqw.controlRelay(CH_VALVE_CENTER, false);
-    return "OK detached\n";
-}
-
-// Arm platform left-to-right-to-left sweep
-static std::string do_arm_sweep() {
-    std::lock_guard<std::mutex> lk(motion_mtx);
-    if (D(DM2J_ARM).PR_move_cm(0, 1, ARM_SWEEP_RPM,  ARM_SWEEP_CM, DM2J_ACC, DM2J_DEC))
-        return "ERR arm_right_fail\n";
-    if (check_abort()) return "ERR aborted\n";
-    if (D(DM2J_ARM).PR_move_cm(0, 1, ARM_SWEEP_RPM, -ARM_SWEEP_CM, DM2J_ACC, DM2J_DEC))
-        return "ERR arm_left_fail\n";
-    if (check_abort()) return "ERR aborted\n";
-    if (D(DM2J_ARM).PR_move_cm(0, 1, ARM_SWEEP_RPM, 0.0,           DM2J_ACC, DM2J_DEC))
-        return "ERR arm_home_fail\n";
-    return "OK arm_sweep_done\n";
-}
-
-// One full cycle: feet down + body down + arm wash
-static std::string do_step_down() {
-    std::lock_guard<std::mutex> lk(motion_mtx);
-    abort_flag = false;
-
-    // A. Feet group down (body supports). During feet move crane pays out.
-    auto feet_displace = [&]() -> std::string {
-        // DM2J foot rails: left_foot and right_foot step STEP_CM downward
-        // (direction convention: positive cm = away from body joint = feet extend down)
-        D(DM2J_LEFT_FOOT ).PR_move_cm_set(1, 1, DM2J_RPM,  (double)STEP_CM, DM2J_ACC, DM2J_DEC);
-        D(DM2J_RIGHT_FOOT).PR_move_cm_set(1, 1, DM2J_RPM,  (double)STEP_CM, DM2J_ACC, DM2J_DEC);
-        D(DM2J_LEFT_FOOT ).PR_trigger_sync(1);
-
-        // Crane pays out STEP_CM (blocks until SD76 confirms)
-        std::ostringstream oss; oss << "pay_out " << STEP_CM;
-        std::string reply = crane_cmd(oss.str());
-        if (reply.rfind("OK", 0) != 0) return "crane_pay_out_fail";
-
-        // Simple settle wait for DM2J move (proper impl would poll status)
-        sleep_ms(4000);
-        return "";
-    };
-    std::string err = cycle_group("feet", feet_displace);
-    if (!err.empty()) return "ERR " + err + "\n";
-
-    if (check_abort()) return "ERR aborted\n";
-
-    // B. Body group down (feet now supporting). Body moves relative to foot, no crane.
-    auto body_displace = [&]() -> std::string {
-        // Also release center briefly so body can slide
-        pqw.controlRelay(CH_VALVE_CENTER, false);
-        if (pusher_move(ZDT_C, PUSHER_RETRACT_PULSE)) return "center_retract_fail";
-
-        // Body shifts down STEP_CM — mechanically this is the feet rails returning
-        // to zero relative to the new foot anchor, which is equivalent to a negative
-        // PR move on the same DM2J axes.
-        D(DM2J_LEFT_FOOT ).PR_move_cm_set(1, 1, DM2J_RPM, 0.0, DM2J_ACC, DM2J_DEC);
-        D(DM2J_RIGHT_FOOT).PR_move_cm_set(1, 1, DM2J_RPM, 0.0, DM2J_ACC, DM2J_DEC);
-        D(DM2J_LEFT_FOOT ).PR_trigger_sync(1);
-        sleep_ms(4000);
-
-        // Re-extend center and re-attach at the end of body cycle (valve handled by cycle_group)
-        if (pusher_move(ZDT_C, PUSHER_EXTEND_PULSE)) return "center_extend_fail";
-        pqw.controlRelay(CH_VALVE_CENTER, true);
-        return "";
-    };
-    err = cycle_group("body", body_displace);
-    if (!err.empty()) return "ERR " + err + "\n";
-
-    if (check_abort()) return "ERR aborted\n";
-
-    // C. Wash
-    std::string arm_reply = do_arm_sweep();
-    if (arm_reply.rfind("OK", 0) != 0) return arm_reply;
-
-    return "OK step_done\n";
-}
-
-static std::string do_run(int steps) {
-    if (steps <= 0) return "ERR invalid_steps\n";
-    for (int i = 1; i <= steps; ++i) {
-        if (abort_flag.load()) return "ERR aborted\n";
-        std::ostringstream oss; oss << "step " << i << "/" << steps;
-        evt(oss.str());
-        std::string r = do_step_down();
-        if (r.rfind("OK", 0) != 0) return r;
-    }
-    return "OK run_done\n";
-}
-
-static std::string do_tilt_mode(bool on) {
-    std::lock_guard<std::mutex> lk(motion_mtx);
-    if (on) {
-        pqw.controlRelay(CH_VALVE_FEET, false);
-        pqw.controlRelay(CH_VALVE_BODY, false);
-        pqw.controlRelay(CH_VALVE_CENTER, true);
-    } else {
-        pqw.controlRelay(CH_VALVE_BODY, true);
-        sleep_ms(VACUUM_SETTLE_MS);
-        pqw.controlRelay(CH_VALVE_FEET, true);
-    }
-    return on ? "OK tilt_on\n" : "OK tilt_off\n";
-}
-
-static std::string do_stop() {
-    abort_flag = true;
-    pause_flag = false;
-    // Best-effort emergency stop on active motors
-    for (int s = 1; s <= 9; ++s) Z(s).emergency_stop(false);
-    return "OK stopped\n";
-}
-
-static std::string do_shutdown() {
-    abort_flag = true;
-    pause_flag = false;
-    for (int s = 1; s <= 9; ++s) Z(s).emergency_stop(false);
-    pqw.controlRelay(CH_VALVE_FEET,   false);
-    pqw.controlRelay(CH_VALVE_BODY,   false);
-    pqw.controlRelay(CH_VALVE_CENTER, false);
-    pqw.controlRelay(CH_PUMP,         false);
-    return "OK shutdown\n";
-}
-
-static std::string do_status() {
-    std::ostringstream oss;
-    oss << "OK";
-    for (int s = 1; s <= 9; ++s) {
-        int p = M(s).read_pressure();
-        oss << " p" << s << "=" << p;
-    }
-    oss << "\n";
-    return oss.str();
-}
-
-// ============ Command dispatcher ============
-
-static std::string cmd_manual_vacuum(const std::string& group, const std::string& onoff) {
-    bool on;
-    if      (onoff == "on")  on = true;
-    else if (onoff == "off") on = false;
-    else return "ERR expected_on_or_off\n";
-    if (vacuum_valve(group, on)) return "ERR vacuum_valve_fail\n";
-    return "OK\n";
-}
-
-static std::string cmd_manual_pusher(const std::string& group, const std::string& pos) {
-    int pulse;
-    if      (pos == "extend")  pulse = PUSHER_EXTEND_PULSE;
-    else if (pos == "retract") pulse = PUSHER_RETRACT_PULSE;
-    else return "ERR expected_extend_or_retract\n";
-    auto slaves = group_slaves(group);
-    if (slaves.empty()) return "ERR unknown_group\n";
-    if (pusher_move_many(slaves, pulse)) return "ERR pusher_fail\n";
-    return "OK\n";
-}
-
-static std::string cmd_manual_move(const std::string& motor, double cm) {
-    int slave;
-    if      (motor == "left_foot")  slave = DM2J_LEFT_FOOT;
-    else if (motor == "right_foot") slave = DM2J_RIGHT_FOOT;
-    else if (motor == "arm")        slave = DM2J_ARM;
-    else return "ERR unknown_motor\n";
-    if (D(slave).PR_move_cm(0, 1, DM2J_RPM, cm, DM2J_ACC, DM2J_DEC))
-        return "ERR move_fail\n";
-    return "OK\n";
-}
+// ============ Dispatcher ============
 
 static std::string dispatch(const std::string& line) {
     std::istringstream iss(line);
     std::string cmd; iss >> cmd;
 
-    if (cmd == "init")      return do_init();
-    if (cmd == "attach")    return do_attach();
-    if (cmd == "detach")    return do_detach();
-    if (cmd == "step_down") return do_step_down();
-    if (cmd == "arm_sweep") return do_arm_sweep();
-    if (cmd == "shutdown")  return do_shutdown();
-    if (cmd == "status")    return do_status();
-    if (cmd == "stop")      return do_stop();
-    if (cmd == "pause")  { pause_flag = true;  return "OK paused\n";  }
-    if (cmd == "resume") { pause_flag = false; return "OK resumed\n"; }
+    if (cmd == "init")           return robot.cmd_init();
+    if (cmd == "attach")         return robot.cmd_attach();
+    if (cmd == "detach")         return robot.cmd_detach();
+    if (cmd == "step_down")      return robot.cmd_step_down();
+    if (cmd == "arm_sweep")      return robot.cmd_arm_sweep();
+    if (cmd == "shutdown")       return robot.cmd_shutdown();
+    if (cmd == "status")         return robot.cmd_status();
+    if (cmd == "emergency_stop") return robot.cmd_emergency_stop();
+    if (cmd == "reset")          return robot.cmd_reset();
+    if (cmd == "ping")           return robot.cmd_ping();
+    if (cmd == "pause")          return robot.cmd_pause();
+    if (cmd == "resume")         return robot.cmd_resume();
 
     if (cmd == "run") {
         int n = 0; iss >> n;
         if (iss.fail()) return "ERR usage:run_<steps>\n";
-        return do_run(n);
+        return robot.cmd_run(n);
     }
     if (cmd == "vacuum") {
         std::string g, s; iss >> g >> s;
         if (iss.fail()) return "ERR usage:vacuum_<group>_<on|off>\n";
-        return cmd_manual_vacuum(g, s);
+        bool on;
+        if      (s == "on")  on = true;
+        else if (s == "off") on = false;
+        else return "ERR expected_on_or_off\n";
+        return robot.cmd_vacuum(g, on);
     }
     if (cmd == "pusher") {
         std::string g, p; iss >> g >> p;
         if (iss.fail()) return "ERR usage:pusher_<group>_<extend|retract>\n";
-        return cmd_manual_pusher(g, p);
+        return robot.cmd_pusher(g, p);
     }
     if (cmd == "move") {
         std::string m; double cm = 0;
         iss >> m >> cm;
         if (iss.fail()) return "ERR usage:move_<motor>_<cm>\n";
-        return cmd_manual_move(m, cm);
+        return robot.cmd_move(m, cm);
     }
     if (cmd == "tilt_mode") {
         std::string s; iss >> s;
         if (iss.fail()) return "ERR usage:tilt_mode_<on|off>\n";
-        if (s == "on")  return do_tilt_mode(true);
-        if (s == "off") return do_tilt_mode(false);
+        if (s == "on")  return robot.cmd_tilt_mode(true);
+        if (s == "off") return robot.cmd_tilt_mode(false);
         return "ERR expected_on_or_off\n";
     }
+    if (cmd == "confirm_balance") {
+        std::string ans; iss >> ans;
+        if (iss.fail()) return "ERR usage:confirm_balance_<yes|no>\n";
+        return robot.cmd_confirm_balance(ans);
+    }
+    if (cmd == "return_home") {
+        int cm = 0; iss >> cm;
+        if (iss.fail() || cm <= 0) return "ERR usage:return_home_<descent_cm>\n";
+        return robot.cmd_return_home(cm);
+    }
+
     return "ERR unknown_cmd\n";
 }
 
-// ============ TCP receive (line-buffered per client thread) ============
+// ============ TCP receive callback ============
 
 static void on_receive(socket_t sock, const char* data, int len) {
     thread_local std::string rx_buf;
@@ -604,76 +113,36 @@ static void on_receive(socket_t sock, const char* data, int len) {
 // ============ Main ============
 
 int main() {
-    std::cout << "[washrobot_new_PI] starting..." << std::endl;
+    std::cout << "[washrobot_new_PI] starting...\n";
 
-    // TCP connections to the three USR gateways
-    if (!cli_20.connectToServer(IP_485_1, PORT_485)) { std::cerr << "[FATAL] connect " << IP_485_1 << " fail\n"; return 1; }
-    if (!cli_21.connectToServer(IP_485_2, PORT_485)) { std::cerr << "[FATAL] connect " << IP_485_2 << " fail\n"; return 1; }
-    if (!cli_22.connectToServer(IP_485_3, PORT_485)) { std::cerr << "[FATAL] connect " << IP_485_3 << " fail\n"; return 1; }
-    std::cout << "[OK] USR .20 / .21 / .22 connected" << std::endl;
+    // Wire EVT broadcast before calling init (background threads may fire events during init)
+    robot.evt_cb = [](const std::string& line) {
+        cmd_server.broadcast(line.c_str(), (int)line.size());
+    };
 
-    // DM2J (slave 1..5)
-    for (int i = 1; i <= 5; ++i) {
-        if (D(i).init(cli_20, i, false)) {
-            std::cerr << "[FATAL] DM2J slave " << i << " init fail\n"; return 1;
-        }
+    if (robot.init()) {
+        std::cerr << "[FATAL] WashRobot init failed\n";
+        return 1;
     }
-    std::cout << "[OK] DM2J 1~5" << std::endl;
 
-    // ZDT (slave 1..9)
-    for (int i = 1; i <= 9; ++i) {
-        if (Z(i).init(cli_21, i, false)) {
-            std::cerr << "[FATAL] ZDT slave " << i << " init fail\n"; return 1;
-        }
-    }
-    std::cout << "[OK] ZDT 1~9" << std::endl;
-
-    // JC-100 (slave 1..9)
-    for (int i = 1; i <= 9; ++i) {
-        if (M(i).init(cli_22, i, false)) {
-            std::cerr << "[FATAL] JC-100 slave " << i << " init fail\n"; return 1;
-        }
-    }
-    std::cout << "[OK] JC-100 1~9" << std::endl;
-
-    // PQW 8CH relay (slave 12)
-    if (pqw.init(cli_22, PQW_SLAVE, PQW_TOTAL_CH, false)) {
-        std::cerr << "[FATAL] PQW slave " << PQW_SLAVE << " init fail\n"; return 1;
-    }
-    std::cout << "[OK] PQW slave " << PQW_SLAVE << " (" << PQW_TOTAL_CH << "CH)" << std::endl;
-
-    // Crane client: connect lazily — don't fail boot if crane down
-    if (crane_connect_if_needed())
-        std::cerr << "[WARN] crane " << CRANE_IP << ":" << CRANE_PORT << " not yet reachable (will retry)\n";
-    else
-        std::cout << "[OK] crane " << CRANE_IP << ":" << CRANE_PORT << std::endl;
-
-    // Safe startup: pump off, valves off
-    pqw.controlRelay(CH_PUMP, false);
-    pqw.controlRelay(CH_VALVE_FEET, false);
-    pqw.controlRelay(CH_VALVE_BODY, false);
-    pqw.controlRelay(CH_VALVE_CENTER, false);
-
-    // Start command TCP server
+    // Command TCP server
     cmd_server.setReceiveCallback(on_receive);
     if (!cmd_server.start(CMD_PORT, false)) {
-        std::cerr << "[FATAL] TCP server :" << CMD_PORT << " fail\n"; return 1;
+        std::cerr << "[FATAL] TCP server :" << CMD_PORT << " fail\n";
+        return 1;
     }
-    std::cout << "[OK] command server :" << CMD_PORT << " (type 'exit' to stop)" << std::endl;
+    std::cout << "[OK] command server :" << CMD_PORT << " (type 'exit' to stop)\n";
 
-    // Local console
+    // Local console (status / exit)
     std::string line;
     while (std::getline(std::cin, line)) {
         if (line == "exit" || line == "quit") break;
-        if (line == "status") std::cout << do_status();
+        if (line == "status") std::cout << robot.cmd_status();
     }
 
-    std::cout << "[SHUTDOWN] stopping..." << std::endl;
-    abort_flag = true;
+    std::cout << "[SHUTDOWN] stopping...\n";
+    robot.cmd_shutdown();
+    robot.stop();
     cmd_server.stop();
-    pqw.controlRelay(CH_VALVE_FEET,   false);
-    pqw.controlRelay(CH_VALVE_BODY,   false);
-    pqw.controlRelay(CH_VALVE_CENTER, false);
-    pqw.controlRelay(CH_PUMP,         false);
     return 0;
 }

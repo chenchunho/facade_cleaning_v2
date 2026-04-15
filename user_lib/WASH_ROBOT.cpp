@@ -2,578 +2,974 @@
 #include <windows.h>
 #else
 #include <unistd.h>
-#define Sleep(ms) usleep((ms) * 1000)
 #endif
 
 #include "WASH_ROBOT.h"
+
 #include <iostream>
+#include <sstream>
+#include <iomanip>
+#include <chrono>
+#include <cmath>
 
 // ============================================================
 //  Constructor / Destructor
 // ============================================================
 
-WashRobot::WashRobot() {}
-WashRobot::~WashRobot() {}
+WashRobot::WashRobot()
+    : abort_flag(false)
+    , pause_flag(false)
+    , motion_active_(false)
+    , crane_wd_running_(false)
+    , crane_last_ok_ms_(0)
+    , imu_roll0_(0.0)
+    , imu_pitch0_(0.0)
+    , imu_ask_pending_(false)
+    , imu_mon_running_(false)
+    , state_(State::Idle)
+    , state_before_pause_(State::Idle)
+    , state_before_wait_(State::Idle)
+    , rail_pos_cm_(0.0)
+    , body_residual_cm_(0.0)
+    , actual_feet_cm_(0.0)
+{}
 
-// ============================================================
-//  init
-// ============================================================
+WashRobot::~WashRobot() {
+    stop();
+}
+
+//=========== init ===========
 
 bool WashRobot::init() {
-    if (!initConnections()) return false;
-    if (!initDevices())     return false;
-    setupGroups();
-    return true;
-}
-
-bool WashRobot::initConnections() {
-    if (!cli_20.connectToServer("10.0.0.42", 4001)) {
-        std::cerr << "[WashRobot] Failed to connect 10.0.0.42:4001" << std::endl;
-        return false;
+    // TCP connections
+    if (!cli_20_.connectToServer(IP_485_1, PORT_485)) {
+        std::cerr << "[WashRobot] connect " << IP_485_1 << " fail\n"; return true;
     }
-    /*if (!cli_21.connectToServer("192.168.1.21", 4001)) {
-        std::cerr << "[WashRobot] Failed to connect 192.168.1.21:4001" << std::endl;
-        return false;
-    }*/
-    return true;
-}
-
-bool WashRobot::initDevices() {
-
-    // ── 步進馬達：左右滑桿 ───────────────────────────────────
-    if (drv[0].init(cli_20, RobotConfig::SLIDER_LEFT_SLAVE, false)) {
-        std::cerr << "[WashRobot] Failed to init left slider (slave "
-                  << RobotConfig::SLIDER_LEFT_SLAVE << ")" << std::endl;
-        return false;
+    if (!cli_21_.connectToServer(IP_485_2, PORT_485)) {
+        std::cerr << "[WashRobot] connect " << IP_485_2 << " fail\n"; return true;
     }
-    if (drv[1].init(cli_20, RobotConfig::SLIDER_RIGHT_SLAVE, false)) {
-        std::cerr << "[WashRobot] Failed to init right slider (slave "
-                  << RobotConfig::SLIDER_RIGHT_SLAVE << ")" << std::endl;
-        return false;
+    if (!cli_22_.connectToServer(IP_485_3, PORT_485)) {
+        std::cerr << "[WashRobot] connect " << IP_485_3 << " fail\n"; return true;
     }
+    std::cout << "[OK] USR .20 / .21 / .22 connected\n";
 
-    // ── 無刷馬達 m[0]~m[7]（SMC 推桿，8 腳）───────────────
-    //    初始化失敗為非致命，繼續初始化其他裝置
-    for (int i = 0; i < 8; i++) {
-        if (!m[i].init(cli_20, RobotConfig::ZDT_SLAVE[i], false)) {
-            std::cerr << "[WashRobot] Failed to init ZDT m[" << i
-                      << "] slave " << RobotConfig::ZDT_SLAVE[i] << std::endl;
+    // DM2J slave 1..5
+    for (int i = 1; i <= 5; ++i) {
+        if (D_(i).init(cli_20_, i, false)) {
+            std::cerr << "[FATAL] DM2J slave " << i << " init fail\n"; return true;
         }
     }
+    std::cout << "[OK] DM2J 1~5\n";
 
-    // ── 壓力感測器 meter[0]~meter[7]（8 腳）────────────────
-    //    初始化失敗為非致命
-    for (int i = 0; i < 8; i++) {
-        if (meter[i].init(cli_20, RobotConfig::JC100_SLAVE[i], false)) {
-            std::cerr << "[WashRobot] Failed to init JC100 meter[" << i
-                      << "] slave " << RobotConfig::JC100_SLAVE[i] << std::endl;
+    // ZDT slave 1..9
+    for (int i = 1; i <= 9; ++i) {
+        if (Z_(i).init(cli_21_, i, false)) {
+            std::cerr << "[FATAL] ZDT slave " << i << " init fail\n"; return true;
         }
     }
+    std::cout << "[OK] ZDT 1~9\n";
 
-    // ── 繼電器 ───────────────────────────────────────────────
-    if (relay.init(cli_20, 1)) {
-        std::cerr << "[WashRobot] Failed to init relay (slave 1)" << std::endl;
-        return false;
+    // JC-100 slave 1..9
+    for (int i = 1; i <= 9; ++i) {
+        if (M_(i).init(cli_22_, i, false)) {
+            std::cerr << "[FATAL] JC-100 slave " << i << " init fail\n"; return true;
+        }
     }
+    std::cout << "[OK] JC-100 1~9\n";
 
-    return true;
+    // PQW 8CH relay
+    if (pqw_.init(cli_22_, PQW_SLAVE, PQW_TOTAL_CH, false)) {
+        std::cerr << "[FATAL] PQW slave " << PQW_SLAVE << " init fail\n"; return true;
+    }
+    std::cout << "[OK] PQW slave " << PQW_SLAVE << "\n";
+
+    // Crane (lazy — don't fail boot if crane is down)
+    if (crane_connect_if_needed_())
+        std::cerr << "[WARN] crane " << CRANE_IP << ":" << CRANE_PORT << " not yet reachable\n";
+    else
+        std::cout << "[OK] crane " << CRANE_IP << ":" << CRANE_PORT << "\n";
+
+    // IMU (Serial_port::init returns true = success, unlike project convention)
+    if (!imu_serial_.init(IMU_PORT, IMU_BAUD)) {
+        std::cerr << "[FATAL] IMU serial " << IMU_PORT << " open fail\n"; return true;
+    }
+    imu_.init(&imu_serial_, false);
+    sleep_ms_(500);
+    if (imu_.read_error.load())
+        std::cerr << "[WARN] IMU read error on startup\n";
+    else
+        std::cout << "[OK] IMU " << IMU_PORT
+                  << " roll=" << imu_.x << " pitch=" << imu_.y << "\n";
+
+    // Start background threads
+    imu_mon_running_ = true;
+    imu_mon_thread_  = std::thread(&WashRobot::imu_monitor_loop_, this);
+    std::cout << "[OK] IMU monitor started\n";
+
+    crane_wd_running_ = true;
+    crane_wd_thread_  = std::thread(&WashRobot::crane_watchdog_loop_, this);
+    std::cout << "[OK] crane watchdog started\n";
+
+    // Safe startup: ensure all relays off
+    pqw_.controlRelay(CH_BRUSH,        false);
+    pqw_.controlRelay(CH_WATER_PUMP,   false);
+    pqw_.controlRelay(CH_WATER_INLET,  false);
+    pqw_.controlRelay(CH_PUMP,         false);
+    pqw_.controlRelay(CH_VALVE_FEET,   false);
+    pqw_.controlRelay(CH_VALVE_BODY,   false);
+    pqw_.controlRelay(CH_VALVE_CENTER, false);
+
+    return false;
 }
 
-// ============================================================
-//  setupGroups  ─ 定義腳組與線性軸設定
-//
-//  欄位順序（Leg 初始化）：
-//    motor, sensor, axis, relay,
-//    valve_ch, vacuum_motor_ch,
-//    enable_rpm, enable_pulses,
-//    retract_rpm, retract_pulses, zero_rpm
-// ============================================================
-
-void WashRobot::setupGroups() {
-
-    // ── 左右滑桿軸 ───────────────────────────────────────────
-    axes[0] = { &drv[0], RobotConfig::SLIDER_LEFT_SLAVE,
-                RobotConfig::SLIDER_MIN_CM, RobotConfig::SLIDER_MAX_CM,
-                RobotConfig::SLIDER_RPM };
-    axes[1] = { &drv[1], RobotConfig::SLIDER_RIGHT_SLAVE,
-                RobotConfig::SLIDER_MIN_CM, RobotConfig::SLIDER_MAX_CM,
-                RobotConfig::SLIDER_RPM };
-
-    // ── body_group（上部分 4 腳）─────────────────────────────
-    //  legs[0,1] = 上-左-1, 上-左-2  ─ 共用左滑桿 drv[0]
-    //  legs[2,3] = 上-右-1, 上-右-2  ─ 共用右滑桿 drv[1]
-    body_group.cfg = { &relay, 0, 2000 };
-    body_group.legs = {
-        { &m[0], &meter[0], &drv[0], &relay, RobotConfig::RELAY_VALVE[0], RobotConfig::RELAY_VACUUM_MOTOR[0], 1000, 144000, 500, 72000, 1000 },
-        { &m[1], &meter[1], &drv[0], &relay, RobotConfig::RELAY_VALVE[1], RobotConfig::RELAY_VACUUM_MOTOR[1], 1000, 144000, 500, 72000, 1000 },
-        { &m[2], &meter[2], &drv[1], &relay, RobotConfig::RELAY_VALVE[2], RobotConfig::RELAY_VACUUM_MOTOR[2], 1000, 144000, 500, 72000, 1000 },
-        { &m[3], &meter[3], &drv[1], &relay, RobotConfig::RELAY_VALVE[3], RobotConfig::RELAY_VACUUM_MOTOR[3], 1000, 144000, 500, 72000, 1000 },
-    };
-
-    // ── foot_group（下部分 4 腳）─────────────────────────────
-    //  legs[0,1] = 下-左-1, 下-左-2  ─ 共用左滑桿 drv[0]
-    //  legs[2,3] = 下-右-1, 下-右-2  ─ 共用右滑桿 drv[1]
-    foot_group.cfg = { &relay, 0, 2000 };
-    foot_group.legs = {
-        { &m[4], &meter[4], &drv[0], &relay, RobotConfig::RELAY_VALVE[4], RobotConfig::RELAY_VACUUM_MOTOR[4], 1000, 144000, 500, 72000, 1000 },
-        { &m[5], &meter[5], &drv[0], &relay, RobotConfig::RELAY_VALVE[5], RobotConfig::RELAY_VACUUM_MOTOR[5], 1000, 144000, 500, 72000, 1000 },
-        { &m[6], &meter[6], &drv[1], &relay, RobotConfig::RELAY_VALVE[6], RobotConfig::RELAY_VACUUM_MOTOR[6], 1000, 144000, 500, 72000, 1000 },
-        { &m[7], &meter[7], &drv[1], &relay, RobotConfig::RELAY_VALVE[7], RobotConfig::RELAY_VACUUM_MOTOR[7], 1000, 144000, 500, 72000, 1000 },
-    };
-
-    // ── 舊測試腳組（保留相容）────────────────────────────────
-    //    vacuum_motor_ch = 0 表示不控制個別真空馬達（使用舊的共用馬達邏輯）
-    right_group.cfg = { &relay, COMPAT_RELAY_VALVE_LEFT, 4000 };
-    right_group.legs = {
-        { &m[0], &meter[0], &drv[0], &relay, 2, 0, 1000, 144000, 0, 0, 1000 },
-    };
-
-    left_group.cfg  = { &relay, COMPAT_RELAY_VALVE_RIGHT, 4000 };
-    left_group.legs = {};
-
-    center_group.cfg  = { &relay, COMPAT_RELAY_VALVE_CENTER, 2000 };
-    center_group.legs = {};
+void WashRobot::stop() {
+    abort_flag    = true;
+    motion_active_ = false;
+    imu_mon_running_ = false;
+    if (imu_mon_thread_.joinable()) imu_mon_thread_.join();
+    imu_.stop();
+    crane_wd_running_ = false;
+    if (crane_wd_thread_.joinable()) crane_wd_thread_.join();
 }
 
-// ============================================================
-//  LegGroup 操作
-// ============================================================
+//=========== utility ===========
 
-void WashRobot::enableGroup(LegGroup& g) {
-    for (auto& leg : g.legs) {
-        if (leg.vacuum_motor_ch != 0)
-            leg.relay->controlRelay(leg.vacuum_motor_ch, true);  // 啟動真空馬達
-        leg.relay->controlRelay(leg.valve_ch, true);              // 開真空閥
-        leg.motor->motion_control_pos_mode(
-            0, 255, leg.enable_rpm, leg.enable_pulses, 1, 0, 1);
+int64_t WashRobot::now_ms_() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void WashRobot::sleep_ms_(int ms) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
+void WashRobot::evt_(const std::string& msg) {
+    if (!evt_cb) return;
+    std::string s = "EVT " + msg;
+    if (s.empty() || s.back() != '\n') s.push_back('\n');
+    evt_cb(s);
+}
+
+bool WashRobot::dm2j_wait_done_(int slave, int timeout_ms) {
+    for (int e = 0; e < timeout_ms; e += 100) {
+        uint32_t st = 0;
+        if (D_(slave).read_status(st)) return true;           // comms error
+        if (st & 0x0001)              return true;           // fault
+        if ((st & 0x0010) && (st & 0x0020)) return false;   // cmd_done + path_done
+        sleep_ms_(100);
+    }
+    return true; // timeout
+}
+
+bool WashRobot::check_abort_() {
+    while (pause_flag.load() && !abort_flag.load()) sleep_ms_(POLL_INTERVAL_MS);
+    return abort_flag.load();
+}
+
+const char* WashRobot::state_name(State s) {
+    switch (s) {
+        case State::Idle:           return "idle";
+        case State::Ready:          return "ready";
+        case State::Attached:       return "attached";
+        case State::Running:        return "running";
+        case State::WaitingConfirm: return "waiting_confirm";
+        case State::Paused:         return "paused";
+        case State::Balancing:      return "balancing";
+        case State::ReturningHome:  return "returning_home";
+        case State::Error:          return "error";
+    }
+    return "unknown";
+}
+
+void WashRobot::set_state_(State s) {
+    State old = state_.exchange(s);
+    if (old == s) return;
+    std::ostringstream oss;
+    oss << "state_changed " << state_name(old) << " " << state_name(s);
+    evt_(oss.str());
+}
+
+std::string WashRobot::state_violation_(State cur) const {
+    return std::string("ERR state_violation current=") + state_name(cur) + "\n";
+}
+
+//=========== crane ===========
+
+bool WashRobot::crane_connect_if_needed_() {
+    if (crane_cli_.isConnected()) return false;
+    return !crane_cli_.connectToServer(CRANE_IP, CRANE_PORT);
+}
+
+std::string WashRobot::crane_cmd_(const std::string& line, int timeout_sec) {
+    std::lock_guard<std::mutex> lk(crane_mtx_);
+    if (crane_connect_if_needed_()) return "";
+
+    std::string tx = line;
+    if (tx.empty() || tx.back() != '\n') tx.push_back('\n');
+    if (!crane_cli_.sendData(tx.c_str(), (int)tx.size(), 1000)) return "";
+
+    std::string rx;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_sec);
+    char buf[512];
+    while (std::chrono::steady_clock::now() < deadline) {
+        int n = crane_cli_.receiveData(buf, sizeof(buf), 500);
+        if (n > 0) {
+            rx.append(buf, n);
+            size_t pos = rx.find('\n');
+            if (pos != std::string::npos) {
+                std::string reply = rx.substr(0, pos);
+                if (!reply.empty() && reply.back() == '\r') reply.pop_back();
+                if (reply.rfind("OK", 0) == 0) crane_last_ok_ms_ = now_ms_();
+                return reply;
+            }
+        } else {
+            sleep_ms_(POLL_INTERVAL_MS);
+        }
+    }
+    return "";
+}
+
+void WashRobot::crane_watchdog_loop_() {
+    crane_last_ok_ms_ = now_ms_();
+    while (crane_wd_running_.load()) {
+        sleep_ms_(HEARTBEAT_INTERVAL_MS);
+        if (!crane_wd_running_.load()) break;
+
+        crane_cmd_("ping", 2);
+
+        int64_t elapsed = now_ms_() - crane_last_ok_ms_.load();
+        if (elapsed > WATCHDOG_TIMEOUT_MS) {
+            if (motion_active_.load()) {
+                abort_flag = true;
+                evt_("crane_watchdog timeout");
+            } else {
+                evt_("crane_watchdog timeout idle");
+            }
+        }
     }
 }
 
-void WashRobot::disableGroup(LegGroup& g) {
-    // 停止吸附
-    for (auto& leg : g.legs) {
-        leg.relay->controlRelay(leg.valve_ch, false);              // 關真空閥
-        if (leg.vacuum_motor_ch != 0)
-            leg.relay->controlRelay(leg.vacuum_motor_ch, false);  // 停真空馬達
+//=========== IMU ===========
+
+bool WashRobot::imu_take_baseline_() {
+    double sum_roll = 0.0, sum_pitch = 0.0;
+    int n = 0;
+    auto end = std::chrono::steady_clock::now() + std::chrono::seconds(IMU_BASELINE_SEC);
+    while (std::chrono::steady_clock::now() < end) {
+        if (!imu_.read_error.load()) {
+            sum_roll  += imu_.x;
+            sum_pitch += imu_.y;
+            ++n;
+        }
+        sleep_ms_(100);
     }
-
-    // Phase 1：縮回（有中間位置的腳先縮回，無的直接歸零）
-    for (auto& leg : g.legs) {
-        if (leg.retract_pulses != 0)
-            leg.motor->motion_control_pos_mode(
-                0, 255, leg.retract_rpm, leg.retract_pulses, 1, 0, 1);
-        else
-            leg.motor->motion_control_pos_mode(
-                0, 255, leg.zero_rpm, 0, 1, 0, 1);
-    }
-
-    Sleep(g.cfg.settle_ms);
-
-    // Phase 2：有中間位置的腳歸零
-    for (auto& leg : g.legs) {
-        if (leg.retract_pulses != 0)
-            leg.motor->motion_control_pos_mode(
-                0, 255, leg.zero_rpm, 0, 1, 0, 1);
-    }
+    if (n == 0) return true;
+    imu_roll0_  = sum_roll  / n;
+    imu_pitch0_ = sum_pitch / n;
+    return false;
 }
 
-// 只伸出腳馬達，不動 valve（供 doInit 使用）
-void WashRobot::extendGroupMotors(LegGroup& g) {
-    for (auto& leg : g.legs)
-        leg.motor->motion_control_pos_mode(
-            0, 255, leg.enable_rpm, leg.enable_pulses, 1, 0, 1);
-}
+std::string WashRobot::do_phase5_roll_correct_() {
+    std::lock_guard<std::mutex> lk(motion_mtx_);
 
-void WashRobot::enableLeft  () { enableGroup(left_group);   }
-void WashRobot::disableLeft () { disableGroup(left_group);  }
-void WashRobot::enableRight () { enableGroup(right_group);  }
-void WashRobot::disableRight() { disableGroup(right_group); }
-void WashRobot::enableCenter() { enableGroup(center_group); }
-void WashRobot::disableCenter(){ disableGroup(center_group);}
+    // Step 1: release feet + body, keep only center attached (sole support point)
+    if (pqw_.controlRelay(CH_VALVE_FEET, false)) return "phase5_feet_off_fail";
+    if (pqw_.controlRelay(CH_VALVE_BODY, false)) return "phase5_body_off_fail";
+    if (pqw_.controlRelay(CH_VALVE_CENTER, true)) return "phase5_center_on_fail";
+    sleep_ms_(300);
 
-void WashRobot::enableAll() {
-    enableLeft(); enableRight(); enableCenter();
-}
+    // Verify center is holding before touching ropes
+    if (M_(ZDT_C).read_pressure() > VACUUM_THRESHOLD_X10)
+        return "phase5_center_vacuum_fail";
 
-void WashRobot::disableAll() {
-    disableLeft(); disableRight(); disableCenter();
-}
+    // Steps 2-6: iterative roll correction
+    std::string err;
+    for (int attempt = 1; attempt <= ROLL_CORRECT_RETRY_MAX; ++attempt) {
+        double roll = imu_.x - imu_roll0_;
+        if (std::abs(roll) < IMU_HYSTERESIS_DEG) { err = ""; break; }
 
-// ============================================================
-//  線性軸移動
-// ============================================================
-
-bool WashRobot::checkAxis(const LinearAxis& axis, int rpm, double cm) {
-    if (cm < axis.min_cm || cm > axis.max_cm) {
-        std::cerr << "[ERROR] Position " << cm << " cm out of range ("
-                  << axis.min_cm << " to " << axis.max_cm << ")" << std::endl;
-        return false;
-    }
-    if (rpm < 0 || rpm > axis.max_rpm) {
-        std::cerr << "[ERROR] Speed " << rpm << " RPM out of range (0 to "
-                  << axis.max_rpm << ")" << std::endl;
-        return false;
-    }
-    return true;
-}
-
-void WashRobot::move(int axis_id, int rpm, double cm) {
-    if (axis_id < 1 || axis_id > 4) {
-        std::cerr << "[ERROR] axis_id must be 1~4" << std::endl;
-        return;
-    }
-    LinearAxis& ax = axes[axis_id - 1];
-    if (!checkAxis(ax, rpm, cm)) return;
-    ax.drv->PR_move_cm(0, 1, rpm, cm, 100, 100);
-    std::cout << "[LOG] Axis " << axis_id << " -> " << cm
-              << " cm @ " << rpm << " RPM" << std::endl;
-}
-
-void WashRobot::moveSync(int rpm, double cm) {
-    // 左滑桿(axes[0]) + 右滑桿(axes[1]) 同步移動
-    if (!checkAxis(axes[0], rpm, cm)) return;
-    axes[0].drv->PR_move_cm_set(1, 1, rpm, cm, 100, 100);
-    axes[1].drv->PR_move_cm_set(1, 1, rpm, cm, 100, 100);
-    axes[0].drv->PR_trigger_sync(1);
-}
-
-// ============================================================
-//  高階流程
-// ============================================================
-
-void WashRobot::doInit() {
-    // 舊共用繼電器：關閉所有 valve、啟動共用真空馬達
-    relay.controlRelay(COMPAT_RELAY_VALVE_LEFT,   false);
-    relay.controlRelay(COMPAT_RELAY_VALVE_RIGHT,  false);
-    relay.controlRelay(COMPAT_RELAY_VALVE_CENTER, false);
-    relay.controlRelay(COMPAT_RELAY_VACUUM_MOTOR, true);
-
-    extendGroupMotors(right_group);
-    extendGroupMotors(left_group);
-    extendGroupMotors(center_group);
-
-    std::cout << "[WashRobot] Initialization done." << std::endl;
-}
-
-void WashRobot::doShutdown() {
-    relay.controlRelay(COMPAT_RELAY_VALVE_LEFT,   true);
-    relay.controlRelay(COMPAT_RELAY_VALVE_RIGHT,  true);
-    relay.controlRelay(COMPAT_RELAY_VALVE_CENTER, true);
-    relay.controlRelay(COMPAT_RELAY_VACUUM_MOTOR, false);
-
-    std::cout << "[WashRobot] Shutdown." << std::endl;
-}
-
-// ============================================================
-//  壓力讀取
-// ============================================================
-
-int WashRobot::readPressure(int leg_index) {
-    if (leg_index < 0 || leg_index > 7) {
-        std::cerr << "[ERROR] leg_index must be 0~7" << std::endl;
-        return -1;
-    }
-    return meter[leg_index].read_pressure();
-}
-
-// ============================================================
-//  adjustLegPos  ─ 確認吸附，失敗則後退重試
-//  回傳：最終位置 - 起始位置（cm，int）
-// ============================================================
-
-int WashRobot::adjustLegPos(Leg& leg) {
-    if (leg.sensor == nullptr) {
-        std::cout << "[INFO] No pressure sensor configured, skipping suction adjust." << std::endl;
-        return 0;
-    }
-
-    double original_pos = 0;
-    if (!leg.axis->read_position_cm(original_pos)) {
-        std::cout << "[INFO] Start position: " << original_pos << " cm" << std::endl;
-    }
-
-    bool is_fail = true;
-    while (is_fail) {
-        int val = leg.sensor->read_pressure();
-        double pressure = val;
-        std::cout << "[INFO] Pressure: " << std::fixed << std::setprecision(1)
-                  << std::setw(6) << pressure << " (x0.1 kPa)" << std::endl;
-
-        if (pressure < RobotConfig::PRESSURE_THRESHOLD) {
-            // 壓力夠負，吸附成功
-            is_fail = false;
+        // Monitor center vacuum on every iteration
+        if (M_(ZDT_C).read_pressure() > VACUUM_THRESHOLD_X10) {
+            err = "phase5_center_lost";
             break;
         }
 
-        std::cout << "[WARN] Suction cup not attached, backing up "
-                  << RobotConfig::ADJUST_BACK_CM << " cm." << std::endl;
+        double delta_cm = std::abs(roll) * ROLL_CORRECT_CM_PER_DEG;
+        std::ostringstream oss;
+        oss << "roll_correct " << std::fixed << std::setprecision(1)
+            << (roll > 0 ? delta_cm : -delta_cm);
+        if (crane_cmd_(oss.str()).rfind("OK", 0) != 0) {
+            err = "crane_roll_correct_fail";
+            break;
+        }
 
-        // 解真空
-        leg.relay->controlRelay(leg.valve_ch, false);
-        //if (leg.vacuum_motor_ch != 0)
-        //    leg.relay->controlRelay(leg.vacuum_motor_ch, false);
+        sleep_ms_(500);
 
-        // 縮腳
-        leg.motor->motion_control_pos_mode(0, 255, leg.retract_rpm, leg.retract_pulses, 1, 0, 1);
-        Sleep(2000);
-        leg.motor->motion_control_pos_mode(0, 255, leg.zero_rpm, 0, 1, 0, 1);
+        if (attempt == ROLL_CORRECT_RETRY_MAX &&
+            std::abs(imu_.x - imu_roll0_) >= IMU_HYSTERESIS_DEG)
+            err = "phase5_no_converge";
+    }
 
-        // 後退
-        double cm = 0;
-        if (leg.axis->read_position_cm(cm)) {
-            std::cerr << "[ERROR] Failed to read position." << std::endl;
+    // Step 8: restore full attachment regardless of outcome
+    // body first (closer to center), then feet
+    pqw_.controlRelay(CH_VALVE_BODY, true);
+    sleep_ms_(VACUUM_SETTLE_MS);
+    pqw_.controlRelay(CH_VALVE_FEET, true);
+    sleep_ms_(VACUUM_SETTLE_MS);
+
+    return err;
+}
+
+void WashRobot::imu_monitor_loop_() {
+    const int SAMPLE_MS   = 100;
+    const int AVG_SAMPLES = 10;
+    const int SUSTAIN_MS  = 500;
+
+    std::deque<double> window;
+    int  over_ask_ms  = 0;
+    int  over_stop_ms = 0;
+    bool ask_sent     = false;
+
+    while (imu_mon_running_.load()) {
+        sleep_ms_(SAMPLE_MS);
+        if (!imu_mon_running_.load()) break;
+
+        if (imu_.read_error.load()) {
+            over_ask_ms = over_stop_ms = 0;
             continue;
         }
-        cm -= RobotConfig::ADJUST_BACK_CM;
-        if (cm < RobotConfig::SLIDER_MIN_CM || cm > RobotConfig::SLIDER_MAX_CM) {
-            std::cerr << "[ERROR] Adjusted position " << cm << " cm out of range, abort." << std::endl;
-            break;
-        }
-        leg.axis->PR_move_cm(0, 1, 500, cm, 100, 100);
-        Sleep(500);
 
-        // 重新吸附
-        if (leg.vacuum_motor_ch != 0)
-            leg.relay->controlRelay(leg.vacuum_motor_ch, true);
-        leg.relay->controlRelay(leg.valve_ch, true);
-        leg.motor->motion_control_pos_mode(0, 255, leg.enable_rpm, leg.enable_pulses, 1, 0, 1);
-        Sleep(1000);
-    }
+        double roll  = imu_.x - imu_roll0_;
+        double pitch = imu_.y - imu_pitch0_;
+        double deg   = std::max(std::abs(roll), std::abs(pitch));
 
-    double final_pos = 0;
-    leg.axis->read_position_cm(final_pos);
-    int total_adj = (int)(final_pos - original_pos);
-    std::cout << "[INFO] Adjust total: " << total_adj << " cm" << std::endl;
-    return total_adj;
-}
+        window.push_back(deg);
+        if ((int)window.size() > AVG_SAMPLES) window.pop_front();
 
-// ============================================================
-//  moveRight / processWash / startWash  （舊測試流程，保留）
-// ============================================================
+        double avg = 0.0;
+        for (double d : window) avg += d;
+        avg /= (double)window.size();
 
-void WashRobot::moveRight() {
-    adjustLegPos(right_group.legs[0]);
-}
-
-// ============================================================
-//  startCleaningAll  ─ 主清洗流程（一路往下）
-//
-//  step_cm: 每次移動公分數（正值）
-//
-//  流程（重複直到 Ctrl+C）：
-//    Phase A: body_group 縮推桿+停真空 → 滑桿往正 → body_group 開真空+伸推桿 → 確認吸附
-//    Phase B: foot_group 縮推桿+停真空 → 滑桿往負 → foot_group 開真空+伸推桿 → 確認吸附
-// ============================================================
-
-void WashRobot::startCleaningAll(int step_cm) {
-    int slider_pos_cm = 0;
-
-    std::cout << "[CleanAll] Starting. Step=" << step_cm
-              << " cm. Press Ctrl+C to stop." << std::endl;
-
-    while (true) {
-
-        // ── Phase A: body_group（上部分）往前 ───────────────────
-        std::cout << "[CleanAll] Phase A ──────────────────────────────" << std::endl;
-
-        // 1. body_group 縮推桿 + 停真空
-        disableGroup(body_group);
-
-        // 2. 兩支滑桿往正移動
-        slider_pos_cm += step_cm;
-        std::cout << "[CleanAll] Sliders -> +" << slider_pos_cm << " cm" << std::endl;
-        moveSync(RobotConfig::SLIDER_RPM, (double)slider_pos_cm);
-        Sleep(3000);  // 等待滑桿到位
-
-        // 3. body_group 開真空 + 伸推桿
-        enableGroup(body_group);
-        Sleep(1000);  // 等待吸附建立
-
-        // 4. 逐腳確認吸附，累計位移補償
-        for (auto& leg : body_group.legs) {
-            int adj = adjustLegPos(leg);
-            slider_pos_cm += adj;
+        // --- EMERGENCY threshold ---
+        if (avg >= IMU_EMERGENCY_DEG) {
+            over_stop_ms += SAMPLE_MS;
+            if (over_stop_ms >= SUSTAIN_MS && !abort_flag.load()) {
+                abort_flag    = true;
+                motion_active_ = false;
+                crane_cmd_("emergency_stop", 2);
+                set_state_(State::Error);
+                std::ostringstream oss;
+                oss << "imu_emergency balance_deg=" << std::fixed << std::setprecision(1) << avg;
+                evt_(oss.str());
+            }
+        } else {
+            over_stop_ms = 0;
         }
 
-        // ── Phase B: foot_group（下部分）往前 ───────────────────
-        std::cout << "[CleanAll] Phase B ──────────────────────────────" << std::endl;
-
-        // 5. foot_group 縮推桿 + 停真空
-        disableGroup(foot_group);
-
-        // 6. 兩支滑桿往負移動
-        slider_pos_cm -= step_cm;
-        std::cout << "[CleanAll] Sliders -> " << slider_pos_cm << " cm" << std::endl;
-        moveSync(RobotConfig::SLIDER_RPM, (double)slider_pos_cm);
-        Sleep(3000);
-
-        // 7. foot_group 開真空 + 伸推桿
-        enableGroup(foot_group);
-        Sleep(1000);
-
-        // 8. 逐腳確認吸附
-        for (auto& leg : foot_group.legs) {
-            int adj = adjustLegPos(leg);
-            slider_pos_cm += adj;
+        // --- ASK threshold ---
+        if (avg >= IMU_ASK_DEG && avg < IMU_EMERGENCY_DEG) {
+            over_ask_ms += SAMPLE_MS;
+            if (over_ask_ms >= SUSTAIN_MS && !ask_sent) {
+                ask_sent        = true;
+                imu_ask_pending_ = true;
+                {
+                    std::lock_guard<std::mutex> lk(state_mtx_);
+                    State cur = state_.load();
+                    if (cur == State::Running || cur == State::Balancing || cur == State::Attached) {
+                        state_before_wait_ = cur;
+                        set_state_(State::WaitingConfirm);
+                    }
+                }
+                std::ostringstream oss;
+                oss << "balance_ask roll=" << std::fixed << std::setprecision(1) << roll
+                    << " pitch=" << pitch;
+                evt_(oss.str());
+            }
+        } else {
+            over_ask_ms = 0;
+            if (avg < IMU_ASK_DEG - IMU_HYSTERESIS_DEG) {
+                if (ask_sent) {
+                    std::lock_guard<std::mutex> lk(state_mtx_);
+                    if (state_.load() == State::WaitingConfirm)
+                        set_state_(state_before_wait_);
+                }
+                ask_sent        = false;
+                imu_ask_pending_ = false;
+            }
         }
     }
 }
 
-// ============================================================
-//  testSingleLegWash  ─ 單腳來回洗窗測試
+//=========== pusher / vacuum ===========
+
+bool WashRobot::pusher_move_(int slave, int pulse) {
+    if (Z_(slave).motion_control_pos_mode(0, PUSHER_ACC, PUSHER_RPM, pulse, 1, 0, 1))
+        return true;
+    Z_(slave).wait_until_pos_reached(15000, 200);
+    return false;
+}
+
+bool WashRobot::pusher_move_many_(const std::vector<int>& slaves, int pulse) {
+    for (int s : slaves) {
+        if (Z_(s).motion_control_pos_mode(0, PUSHER_ACC, PUSHER_RPM, pulse, 1, 1, 1))
+            return true;
+    }
+    if (!slaves.empty()) Z_(slaves.front()).trigger_sync_move();
+    for (int s : slaves) Z_(s).wait_until_pos_reached(15000, 200);
+    sleep_ms_(PUSHER_SETTLE_MS);
+    return false;
+}
+
+std::vector<int> WashRobot::group_slaves_(const std::string& group) {
+    if (group == "feet")   return {ZDT_LF1, ZDT_LF2, ZDT_RF1, ZDT_RF2};
+    if (group == "body")   return {ZDT_LB1, ZDT_LB2, ZDT_RB1, ZDT_RB2};
+    if (group == "center") return {ZDT_C};
+    if (group == "all")    return {ZDT_LF1, ZDT_LF2, ZDT_LB1, ZDT_LB2,
+                                   ZDT_RF1, ZDT_RF2, ZDT_RB1, ZDT_RB2, ZDT_C};
+    return {};
+}
+
+int WashRobot::group_valve_ch_(const std::string& group) {
+    if (group == "feet")   return CH_VALVE_FEET;
+    if (group == "body")   return CH_VALVE_BODY;
+    if (group == "center") return CH_VALVE_CENTER;
+    return -1;
+}
+
+bool WashRobot::vacuum_valve_(const std::string& group, bool on) {
+    if (group == "all") {
+        bool err = false;
+        err |= pqw_.controlRelay(CH_VALVE_FEET,   on);
+        err |= pqw_.controlRelay(CH_VALVE_BODY,   on);
+        err |= pqw_.controlRelay(CH_VALVE_CENTER, on);
+        return err;
+    }
+    int ch = group_valve_ch_(group);
+    if (ch < 0) return true;
+    return pqw_.controlRelay(ch, on);
+}
+
+std::vector<int> WashRobot::vacuum_check_(const std::string& group) {
+    std::vector<int> fail;
+    for (int s : group_slaves_(group)) {
+        int p = M_(s).read_pressure();
+        if (p > VACUUM_THRESHOLD_X10) fail.push_back(s);
+    }
+    return fail;
+}
+
+//=========== commands ===========
+
+std::string WashRobot::cmd_init() {
+    State cur = state_.load();
+    if (cur != State::Idle && cur != State::Ready && cur != State::Error)
+        return state_violation_(cur);
+
+    std::lock_guard<std::mutex> lk(motion_mtx_);
+    abort_flag = false;
+    pause_flag = false;
+
+    if (pqw_.controlRelay(CH_PUMP,         true))  return "ERR pump_on_fail\n";
+    if (pqw_.controlRelay(CH_VALVE_FEET,   false)) return "ERR valve_feet_off_fail\n";
+    if (pqw_.controlRelay(CH_VALVE_BODY,   false)) return "ERR valve_body_off_fail\n";
+    if (pqw_.controlRelay(CH_VALVE_CENTER, false)) return "ERR valve_center_off_fail\n";
+    if (pqw_.controlRelay(CH_BRUSH,        false)) return "ERR brush_off_fail\n";
+    if (pqw_.controlRelay(CH_WATER_PUMP,   false)) return "ERR water_pump_off_fail\n";
+    if (pqw_.controlRelay(CH_WATER_INLET,  false)) return "ERR water_inlet_off_fail\n";
+
+    std::vector<int> feet_body = {ZDT_LF1, ZDT_LF2, ZDT_LB1, ZDT_LB2,
+                                  ZDT_RF1, ZDT_RF2, ZDT_RB1, ZDT_RB2};
+    if (pusher_move_many_(feet_body, PUSHER_EXTEND_PULSE)) return "ERR pusher_extend_fail\n";
+
+    D_(DM2J_ARM).home_set_current_pos_zero();
+
+    if (imu_take_baseline_()) return "ERR imu_baseline_fail\n";
+
+    set_state_(State::Ready);
+    return "OK init_done\n";
+}
+
+std::string WashRobot::cmd_attach() {
+    State cur = state_.load();
+    if (cur != State::Ready) return state_violation_(cur);
+
+    std::lock_guard<std::mutex> lk(motion_mtx_);
+    abort_flag = false;
+
+    if (pusher_move_(ZDT_C, PUSHER_EXTEND_PULSE)) return "ERR center_extend_fail\n";
+    if (pqw_.controlRelay(CH_VALVE_FEET,   true)) return "ERR valve_feet_fail\n";
+    if (pqw_.controlRelay(CH_VALVE_BODY,   true)) return "ERR valve_body_fail\n";
+    if (pqw_.controlRelay(CH_VALVE_CENTER, true)) return "ERR valve_center_fail\n";
+    sleep_ms_(VACUUM_SETTLE_MS);
+
+    auto fails = vacuum_check_("all");
+    if (!fails.empty()) {
+        std::string msg = "ERR attach_vacuum_fail slaves=";
+        for (size_t i = 0; i < fails.size(); ++i) { if (i) msg += ","; msg += std::to_string(fails[i]); }
+        msg += "\n";
+        return msg;
+    }
+    set_state_(State::Attached);
+    return "OK attached\n";
+}
+
+std::string WashRobot::cmd_detach() {
+    State cur = state_.load();
+    if (cur != State::Attached) return state_violation_(cur);
+
+    std::lock_guard<std::mutex> lk(motion_mtx_);
+    pqw_.controlRelay(CH_VALVE_FEET,   false);
+    pqw_.controlRelay(CH_VALVE_BODY,   false);
+    pqw_.controlRelay(CH_VALVE_CENTER, false);
+    set_state_(State::Ready);
+    return "OK detached\n";
+}
+
+// Internal sweep — caller must already hold motion_mtx_
+std::string WashRobot::do_arm_sweep_() {
+    // Start cleaning: brush motor + water pump + water inlet valve
+    pqw_.controlRelay(CH_WATER_INLET, true);
+    pqw_.controlRelay(CH_WATER_PUMP,  true);
+    pqw_.controlRelay(CH_BRUSH,       true);
+
+    // Sweep: centre → right → left → centre (home)
+    std::string err;
+    if (D_(DM2J_ARM).PR_move_cm(0, 1, ARM_SWEEP_RPM,  ARM_SWEEP_CM, DM2J_ACC, DM2J_DEC))
+        err = "ERR arm_right_fail\n";
+    else if (check_abort_())
+        err = "ERR aborted\n";
+    else if (D_(DM2J_ARM).PR_move_cm(0, 1, ARM_SWEEP_RPM, -ARM_SWEEP_CM, DM2J_ACC, DM2J_DEC))
+        err = "ERR arm_left_fail\n";
+    else if (check_abort_())
+        err = "ERR aborted\n";
+    else if (D_(DM2J_ARM).PR_move_cm(0, 1, ARM_SWEEP_RPM, 0.0, DM2J_ACC, DM2J_DEC))
+        err = "ERR arm_home_fail\n";
+
+    // Stop cleaning regardless of outcome
+    pqw_.controlRelay(CH_BRUSH,       false);
+    pqw_.controlRelay(CH_WATER_PUMP,  false);
+    pqw_.controlRelay(CH_WATER_INLET, false);
+
+    return err.empty() ? "OK arm_sweep_done\n" : err;
+}
+
+// Public: acquires motion_mtx_ then delegates to do_arm_sweep_
+std::string WashRobot::cmd_arm_sweep() {
+    State cur = state_.load();
+    if (cur == State::Error) return state_violation_(cur);
+    std::lock_guard<std::mutex> lk(motion_mtx_);
+    return do_arm_sweep_();
+}
+
+// Internal one-step engine. No state guard (caller manages State::Running transition).
+// Acquires motion_mtx_. Returns "OK step_done\n" / "ERR <reason>\n".
 //
-//  建立獨立連線與裝置，不依賴主機器人的 cli_20/cli_21。
-//  在 main.cpp 定義 SingleLegTestConfig 並修改其中數值即可換腳測試。
-// ============================================================
+// Uses DM2J absolute positioning:
+//   feet target = absolute +STEP_CM  → auto-absorbs any body_residual_cm_ at start
+//   body target = absolute 0
+//   retries use relative ±VACUUM_BACKUP_CM backup
+//
+// Rail coord: feet forward = rail +, body forward = rail - (shared rail axis).
+std::string WashRobot::do_step_down_() {
+    std::lock_guard<std::mutex> lk(motion_mtx_);
+    abort_flag    = false;
+    motion_active_ = true;
 
-void WashRobot::testSingleLegWash(const SingleLegTestConfig& cfg, int cycles, int step_cm) {
+    const double rail_at_start  = rail_pos_cm_.load();
+    const double residual_start = body_residual_cm_.load();
 
-    // ── 建立獨立 TCP 連線 ─────────────────────────────────────
-    TCP_client tcp;
-    if (!tcp.connectToServer(cfg.tcp_ip, cfg.tcp_port)) {
-        std::cerr << "[TestLeg] Failed to connect "
-                  << cfg.tcp_ip << ":" << cfg.tcp_port << std::endl;
-        return;
-    }
-    std::cout << "[TestLeg] Connected to "
-              << cfg.tcp_ip << ":" << cfg.tcp_port << std::endl;
+    // ---------- A. Feet phase ----------
+    auto feet_pre_cycle = [this]() -> std::string {
+        // Initial release + retract (prep for crane move)
+        if (pqw_.controlRelay(CH_VALVE_FEET, false)) return "feet_valve_off_fail";
+        sleep_ms_(300);
+        std::vector<int> feet_slaves = {ZDT_LF1, ZDT_LF2, ZDT_RF1, ZDT_RF2};
+        if (pusher_move_many_(feet_slaves, PUSHER_RETRACT_PULSE)) return "feet_pusher_retract_fail";
 
-    // ── 初始化裝置 ────────────────────────────────────────────
-    ZDT_motor_control motor;
-    if (!motor.init(tcp, cfg.zdt_slave, false)) {
-        std::cerr << "[TestLeg] Failed to init ZDT slave " << cfg.zdt_slave << std::endl;
-        return;
-    }
-
-    DM2J_RS570 axis;
-    if (axis.init(tcp, cfg.dm2j_slave, false)) {
-        std::cerr << "[TestLeg] Failed to init DM2J slave " << cfg.dm2j_slave << std::endl;
-        return;
-    }
-
-    PQW_IO_16O_RLY rly;
-    if (rly.init(tcp, cfg.relay_slave)) {   // total_relay 用預設 16，不傳 false
-        std::cerr << "[TestLeg] Failed to init relay slave " << cfg.relay_slave << std::endl;
-        return;
-    }
-
-    JC_100_METER sensor;
-    bool has_sensor = (cfg.jc100_slave != 0);
-    if (has_sensor && sensor.init(tcp, cfg.jc100_slave, false)) {
-        std::cerr << "[TestLeg] Failed to init JC100 slave " << cfg.jc100_slave
-                  << ", continuing without pressure check." << std::endl;
-        has_sensor = false;
-    }
-
-    // ── 建立 Leg struct（供 adjustLegPos 使用）────────────────
-    Leg leg;
-    leg.motor           = &motor;
-    leg.sensor          = has_sensor ? &sensor : nullptr;
-    leg.axis            = &axis;
-    leg.relay           = &rly;
-    leg.valve_ch        = cfg.valve_ch;
-    leg.vacuum_motor_ch = cfg.vacuum_motor_ch;
-    leg.enable_rpm      = cfg.enable_rpm;
-    leg.enable_pulses   = cfg.enable_pulses;
-    leg.retract_rpm     = cfg.retract_rpm;
-    leg.retract_pulses  = cfg.retract_pulses;
-    leg.zero_rpm        = cfg.zero_rpm;
-
-    // ── 初始：啟動真空馬達 + 開真空閥 + 伸腳 ─────────────────
-    if (cfg.vacuum_motor_ch != 0)
-        rly.controlRelay(cfg.vacuum_motor_ch, true);
-    rly.controlRelay(cfg.valve_ch, true);
-    motor.motion_control_pos_mode(0, 255, cfg.enable_rpm, cfg.enable_pulses, 1, 0, 1);
-    Sleep(2000);
-
-    std::cout << "[TestLeg] Start. Cycles=" << cycles
-              << "  Step=" << step_cm << " cm" << std::endl;
-
-    // actual_step 記錄本次前進後實際停留的位移（含 adjustLegPos 補償）
-    int actual_step = step_cm;
-
-    for (int i = 0; i < cycles; i++) {
-        std::cout << "[TestLeg] ── Cycle " << (i + 1) << "/" << cycles
-                  << " ───────────────────────────" << std::endl;
-
-        // ======================================================
-        //  FORWARD PHASE: 解真空 → 縮腳 → 前進 → 吸附 → adjustLegPos
-        //  （上一次 backward 或初始狀態下，valve 已開；此時才釋放）
-        // ======================================================
-
-        double cm = 0;
-        if (axis.read_position_cm(cm)) {
-            std::cerr << "[TestLeg] Failed to read position, abort." << std::endl;
-            break;
+        // Crane pay out (STEP_CM + margin) for rope slack
+        {
+            std::ostringstream oss;
+            oss << "pay_out " << (STEP_CM + STEP_MARGIN_CM);
+            if (crane_cmd_(oss.str()).rfind("OK", 0) != 0) return "crane_pay_out_fail";
         }
-        std::cout << "[TestLeg] Fwd start pos: " << cm << " cm" << std::endl;
 
-        // 解真空
-        rly.controlRelay(cfg.valve_ch, false);
-        //if (cfg.vacuum_motor_ch != 0)
-        //    rly.controlRelay(cfg.vacuum_motor_ch, false);
+        // DM2J move rails to absolute +STEP_CM (auto-compensates body residual)
+        D_(DM2J_LEFT_FOOT ).PR_move_cm_set(1, 1, DM2J_RPM, (double)STEP_CM, DM2J_ACC, DM2J_DEC);
+        D_(DM2J_RIGHT_FOOT).PR_move_cm_set(1, 1, DM2J_RPM, (double)STEP_CM, DM2J_ACC, DM2J_DEC);
+        D_(DM2J_LEFT_FOOT ).PR_trigger_sync(1);
+        if (dm2j_wait_done_(DM2J_LEFT_FOOT))  return "feet_left_move_fail";
+        if (dm2j_wait_done_(DM2J_RIGHT_FOOT)) return "feet_right_move_fail";
+        rail_pos_cm_.store((double)STEP_CM);
 
-        // 縮腳
-        motor.motion_control_pos_mode(0, 255, cfg.retract_rpm, cfg.retract_pulses, 1, 0, 1);
-        Sleep(2000);
-        motor.motion_control_pos_mode(0, 255, cfg.zero_rpm, 0, 1, 0, 1);
-
-        // 往前 step_cm
-        double fwd = cm + step_cm;
-        if (fwd < cfg.axis_min_cm || fwd > cfg.axis_max_cm) {
-            std::cerr << "[TestLeg] Forward target " << fwd
-                      << " cm out of range [" << cfg.axis_min_cm
-                      << ", " << cfg.axis_max_cm << "], abort." << std::endl;
-            break;
+        // Crane retract margin to restore normal tension
+        {
+            std::ostringstream oss;
+            oss << "retract " << STEP_MARGIN_CM;
+            if (crane_cmd_(oss.str()).rfind("OK", 0) != 0) return "crane_retract_fail";
         }
-        std::cout << "[TestLeg] Move forward -> " << fwd << " cm" << std::endl;
-        axis.PR_move_cm(0, 1, cfg.axis_rpm, fwd, 100, 100);
-        Sleep(3000);
+        return "";
+    };
 
-        // 開真空 + 伸腳
-        //if (cfg.vacuum_motor_ch != 0)
-        //    rly.controlRelay(cfg.vacuum_motor_ch, true);
-        rly.controlRelay(cfg.valve_ch, true);
-        motor.motion_control_pos_mode(0, 255, cfg.enable_rpm, cfg.enable_pulses, 1, 0, 1);
-        Sleep(1000);
+    auto feet_backup = [this]() -> std::string {
+        // Relative -VACUUM_BACKUP_CM (rail reverses toward body)
+        D_(DM2J_LEFT_FOOT ).PR_move_cm_set(1, 0, DM2J_RPM, -VACUUM_BACKUP_CM, DM2J_ACC, DM2J_DEC);
+        D_(DM2J_RIGHT_FOOT).PR_move_cm_set(1, 0, DM2J_RPM, -VACUUM_BACKUP_CM, DM2J_ACC, DM2J_DEC);
+        D_(DM2J_LEFT_FOOT ).PR_trigger_sync(1);
+        if (dm2j_wait_done_(DM2J_LEFT_FOOT))  return "feet_backup_left_fail";
+        if (dm2j_wait_done_(DM2J_RIGHT_FOOT)) return "feet_backup_right_fail";
+        rail_pos_cm_.store(rail_pos_cm_.load() - VACUUM_BACKUP_CM);
+        return "";
+    };
 
-        // 確認吸附，計算實際步長（adj ≤ 0 表示退後補償）
-        int adj = adjustLegPos(leg);
-        actual_step = step_cm + adj;
-        std::cout << "[TestLeg] Fwd actual_step=" << actual_step
-                  << " cm (step=" << step_cm << ", adj=" << adj << ")" << std::endl;
+    int feet_retries = 0;
+    std::string err = cycle_group_("feet", feet_pre_cycle, feet_backup, feet_retries);
+    if (!err.empty()) { motion_active_ = false; return "ERR " + err + "\n"; }
 
-        // ======================================================
-        //  BACKWARD PHASE: 真空保持 ON → 縮腳 → 後退 actual_step
-        //                  → 伸腳 → adjustLegPos（確認吸附）
-        //  注意：valve 全程維持開啟，下一次迴圈開頭才解真空
-        // ======================================================
+    // Feet phase consumed any prior body residual
+    body_residual_cm_.store(0.0);
+    // Actual DM2J travel in feet phase (for diagnostics / body target)
+    actual_feet_cm_ = (double)STEP_CM - rail_at_start - VACUUM_BACKUP_CM * feet_retries;
+    (void)residual_start;  // already absorbed via absolute positioning
 
-        if (axis.read_position_cm(cm)) {
-            std::cerr << "[TestLeg] Failed to read position, abort." << std::endl;
-            break;
+    if (check_abort_()) { motion_active_ = false; return "ERR aborted\n"; }
+
+    // ---------- B. Body phase ----------
+    auto body_pre_cycle = [this]() -> std::string {
+        // Release center briefly so body can slide
+        if (pqw_.controlRelay(CH_VALVE_CENTER, false)) return "center_valve_off_fail";
+        sleep_ms_(300);
+        if (pusher_move_(ZDT_C, PUSHER_RETRACT_PULSE)) return "center_retract_fail";
+
+        // Retract body pushers
+        std::vector<int> body_slaves = {ZDT_LB1, ZDT_LB2, ZDT_RB1, ZDT_RB2};
+        if (pusher_move_many_(body_slaves, PUSHER_RETRACT_PULSE)) return "body_pusher_retract_fail";
+
+        // DM2J absolute to 0 (body slides down, rail returns to origin)
+        D_(DM2J_LEFT_FOOT ).PR_move_cm_set(1, 1, DM2J_RPM, 0.0, DM2J_ACC, DM2J_DEC);
+        D_(DM2J_RIGHT_FOOT).PR_move_cm_set(1, 1, DM2J_RPM, 0.0, DM2J_ACC, DM2J_DEC);
+        D_(DM2J_LEFT_FOOT ).PR_trigger_sync(1);
+        if (dm2j_wait_done_(DM2J_LEFT_FOOT))  return "body_left_move_fail";
+        if (dm2j_wait_done_(DM2J_RIGHT_FOOT)) return "body_right_move_fail";
+        rail_pos_cm_.store(0.0);
+
+        // Re-extend center + re-attach center valve
+        if (pusher_move_(ZDT_C, PUSHER_EXTEND_PULSE)) return "center_extend_fail";
+        if (pqw_.controlRelay(CH_VALVE_CENTER, true)) return "center_valve_on_fail";
+        return "";
+    };
+
+    auto body_backup = [this]() -> std::string {
+        // Relative +VACUUM_BACKUP_CM (rail reverses toward feet, body retreats)
+        D_(DM2J_LEFT_FOOT ).PR_move_cm_set(1, 0, DM2J_RPM, VACUUM_BACKUP_CM, DM2J_ACC, DM2J_DEC);
+        D_(DM2J_RIGHT_FOOT).PR_move_cm_set(1, 0, DM2J_RPM, VACUUM_BACKUP_CM, DM2J_ACC, DM2J_DEC);
+        D_(DM2J_LEFT_FOOT ).PR_trigger_sync(1);
+        if (dm2j_wait_done_(DM2J_LEFT_FOOT))  return "body_backup_left_fail";
+        if (dm2j_wait_done_(DM2J_RIGHT_FOOT)) return "body_backup_right_fail";
+        rail_pos_cm_.store(rail_pos_cm_.load() + VACUUM_BACKUP_CM);
+        return "";
+    };
+
+    int body_retries = 0;
+    err = cycle_group_("body", body_pre_cycle, body_backup, body_retries);
+    if (!err.empty()) { motion_active_ = false; return "ERR " + err + "\n"; }
+
+    // Body residual = how much body under-retracted (next feet phase absorbs via absolute target)
+    body_residual_cm_.store(VACUUM_BACKUP_CM * body_retries);
+
+    if (check_abort_()) { motion_active_ = false; return "ERR aborted\n"; }
+
+    // ---------- C. Wash sweep ----------
+    std::string arm_reply = do_arm_sweep_();
+    motion_active_ = false;
+    if (arm_reply.rfind("OK", 0) != 0) return arm_reply;
+
+    return "OK step_done\n";
+}
+
+std::string WashRobot::cmd_step_down() {
+    State cur = state_.load();
+    if (cur != State::Attached) return state_violation_(cur);
+    set_state_(State::Running);
+
+    std::string r = do_step_down_();
+    if (r.rfind("OK", 0) != 0) {
+        set_state_(State::Error);
+        return r;
+    }
+    set_state_(State::Attached);
+    return r;
+}
+
+std::string WashRobot::cmd_run(int steps) {
+    if (steps <= 0) return "ERR invalid_steps\n";
+    State cur = state_.load();
+    if (cur != State::Attached) return state_violation_(cur);
+    set_state_(State::Running);
+
+    motion_active_ = true;
+    for (int i = 1; i <= steps; ++i) {
+        if (abort_flag.load()) {
+            motion_active_ = false;
+            set_state_(State::Error);
+            return "ERR aborted\n";
         }
-        std::cout << "[TestLeg] Bwd start pos: " << cm << " cm" << std::endl;
+        std::ostringstream oss; oss << "step " << i << "/" << steps;
+        evt_(oss.str());
 
-
-        // 往後 actual_step
-        double bwd = cm - actual_step;
-        if (bwd < cfg.axis_min_cm || bwd > cfg.axis_max_cm) {
-            std::cerr << "[TestLeg] Backward target " << bwd
-                      << " cm out of range, abort." << std::endl;
-            break;
+        std::string r = do_step_down_();
+        if (r.rfind("OK", 0) != 0) {
+            motion_active_ = false;
+            set_state_(State::Error);
+            return r;
         }
-        std::cout << "[TestLeg] Move backward <- " << bwd << " cm" << std::endl;
-        axis.PR_move_cm(0, 1, cfg.axis_rpm, bwd, 100, 100);
-        Sleep(3000);
 
-        // valve 保持 ON → 下一次迴圈 FORWARD PHASE 開頭才解真空
+        // If IMU flagged a balance issue, pause and wait for confirm_balance
+        if (imu_ask_pending_.load()) pause_flag = true;
+
+        if (check_abort_()) {
+            motion_active_ = false;
+            set_state_(State::Error);
+            return "ERR aborted\n";
+        }
+    }
+    motion_active_ = false;
+    set_state_(State::Attached);
+    return "OK run_done\n";
+}
+
+std::string WashRobot::cmd_tilt_mode(bool on) {
+    State cur = state_.load();
+    if (cur == State::Error) return state_violation_(cur);
+    std::lock_guard<std::mutex> lk(motion_mtx_);
+    if (on) {
+        pqw_.controlRelay(CH_VALVE_FEET,   false);
+        pqw_.controlRelay(CH_VALVE_BODY,   false);
+        pqw_.controlRelay(CH_VALVE_CENTER, true);
+    } else {
+        pqw_.controlRelay(CH_VALVE_BODY, true);
+        sleep_ms_(VACUUM_SETTLE_MS);
+        pqw_.controlRelay(CH_VALVE_FEET, true);
+    }
+    return on ? "OK tilt_on\n" : "OK tilt_off\n";
+}
+
+std::string WashRobot::cmd_emergency_stop() {
+    abort_flag    = true;
+    pause_flag    = false;
+    motion_active_ = false;
+    for (int s = 1; s <= 9; ++s) Z_(s).emergency_stop(false);
+    crane_cmd_("emergency_stop", 2);
+    set_state_(State::Error);
+    return "OK emergency_stopped\n";
+}
+
+std::string WashRobot::cmd_shutdown() {
+    abort_flag    = true;
+    pause_flag    = false;
+    motion_active_ = false;
+    for (int s = 1; s <= 9; ++s) Z_(s).emergency_stop(false);
+    pqw_.controlRelay(CH_BRUSH,        false);
+    pqw_.controlRelay(CH_WATER_PUMP,   false);
+    pqw_.controlRelay(CH_WATER_INLET,  false);
+    pqw_.controlRelay(CH_VALVE_FEET,   false);
+    pqw_.controlRelay(CH_VALVE_BODY,   false);
+    pqw_.controlRelay(CH_VALVE_CENTER, false);
+    pqw_.controlRelay(CH_PUMP,         false);
+    return "OK shutdown\n";
+}
+
+std::string WashRobot::cmd_status() {
+    std::ostringstream oss;
+    oss << "OK state=" << state_name(state_.load());
+    oss << std::fixed << std::setprecision(1)
+        << " rail=" << rail_pos_cm_.load()
+        << " body_residual=" << body_residual_cm_.load();
+    for (int s = 1; s <= 9; ++s) {
+        int p = M_(s).read_pressure();
+        oss << " p" << s << "=" << p;
+    }
+    if (!imu_.read_error.load()) {
+        oss << std::setprecision(2)
+            << " roll=" << (imu_.x - imu_roll0_)
+            << " pitch=" << (imu_.y - imu_pitch0_);
+    }
+    oss << "\n";
+    return oss.str();
+}
+
+std::string WashRobot::cmd_vacuum(const std::string& group, bool on) {
+    State cur = state_.load();
+    if (cur == State::Error) return state_violation_(cur);
+    if (vacuum_valve_(group, on)) return "ERR vacuum_valve_fail\n";
+    return "OK\n";
+}
+
+std::string WashRobot::cmd_pusher(const std::string& group, const std::string& pos) {
+    State cur = state_.load();
+    if (cur == State::Error) return state_violation_(cur);
+    int pulse;
+    if      (pos == "extend")  pulse = PUSHER_EXTEND_PULSE;
+    else if (pos == "retract") pulse = PUSHER_RETRACT_PULSE;
+    else return "ERR expected_extend_or_retract\n";
+    auto slaves = group_slaves_(group);
+    if (slaves.empty()) return "ERR unknown_group\n";
+    if (pusher_move_many_(slaves, pulse)) return "ERR pusher_fail\n";
+    return "OK\n";
+}
+
+std::string WashRobot::cmd_move(const std::string& motor, double cm) {
+    State cur = state_.load();
+    if (cur == State::Error) return state_violation_(cur);
+    int slave;
+    if      (motor == "left_foot")  slave = DM2J_LEFT_FOOT;
+    else if (motor == "right_foot") slave = DM2J_RIGHT_FOOT;
+    else if (motor == "arm")        slave = DM2J_ARM;
+    else return "ERR unknown_motor\n";
+    if (D_(slave).PR_move_cm(0, 1, DM2J_RPM, cm, DM2J_ACC, DM2J_DEC))
+        return "ERR move_fail\n";
+    return "OK\n";
+}
+
+std::string WashRobot::cmd_confirm_balance(const std::string& ans) {
+    State cur = state_.load();
+    if (cur != State::WaitingConfirm) return state_violation_(cur);
+
+    State prev;
+    { std::lock_guard<std::mutex> lk(state_mtx_); prev = state_before_wait_; }
+
+    if (ans == "yes") {
+        set_state_(State::Balancing);
+        std::string err = do_phase5_roll_correct_();
+        imu_ask_pending_ = false;
+        pause_flag       = false;
+        if (!err.empty()) {
+            set_state_(State::Error);
+            return "ERR " + err + "\n";
+        }
+        set_state_(prev);   // restore pre-ask state (Running or Attached)
+        return "OK phase5_done\n";
+    }
+    if (ans == "no") {
+        imu_ask_pending_ = false;
+        pause_flag       = false;
+        set_state_(prev);
+        return "OK balance_skipped\n";
+    }
+    return "ERR expected_yes_or_no\n";
+}
+
+// Phase 6 — Return home (release cups, retract pushers, crane pays out to ground).
+// descent_cm: how far crane should pay out. Caller computes
+// (home_ground_cm - current_down_cm) since washrobot does not track cable length.
+std::string WashRobot::cmd_return_home(int descent_cm) {
+    if (descent_cm <= 0) return "ERR invalid_descent\n";
+    State cur = state_.load();
+    if (cur != State::Attached && cur != State::Paused && cur != State::Error)
+        return state_violation_(cur);
+    set_state_(State::ReturningHome);
+
+    std::lock_guard<std::mutex> lk(motion_mtx_);
+    abort_flag     = false;
+    motion_active_ = true;
+
+    auto fail = [this](const std::string& msg) -> std::string {
+        motion_active_ = false;
+        set_state_(State::Error);
+        return msg;
+    };
+
+    // 1. Arm rail back to zero
+    if (D_(DM2J_ARM).PR_move_cm(0, 1, DM2J_RPM, 0.0, DM2J_ACC, DM2J_DEC))
+        return fail("ERR arm_home_fail\n");
+    if (check_abort_()) return fail("ERR aborted\n");
+
+    // 2. Water system off (brush / pump / inlet valve)
+    pqw_.controlRelay(CH_BRUSH,       false);
+    pqw_.controlRelay(CH_WATER_PUMP,  false);
+    pqw_.controlRelay(CH_WATER_INLET, false);
+
+    // 3. Break suction on all three groups
+    pqw_.controlRelay(CH_VALVE_FEET,   false);
+    pqw_.controlRelay(CH_VALVE_BODY,   false);
+    pqw_.controlRelay(CH_VALVE_CENTER, false);
+
+    // 4. Wait for cups to fully release
+    sleep_ms_(RETURN_VACUUM_RELEASE_MS);
+    if (check_abort_()) return fail("ERR aborted\n");
+
+    // 5. Verify all 9 cups detached (pressure risen back near atmosphere).
+    //    Retracting pushers while still attached would damage the LEYG25 rods.
+    std::vector<int> still_attached;
+    for (int s = 1; s <= 9; ++s) {
+        int p = M_(s).read_pressure();
+        if (p < DETACH_THRESHOLD_X10) still_attached.push_back(s);
+    }
+    if (!still_attached.empty()) {
+        std::string msg = "ERR detach_fail slaves=";
+        for (size_t i = 0; i < still_attached.size(); ++i) {
+            if (i) msg += ",";
+            msg += std::to_string(still_attached[i]);
+        }
+        msg += "\n";
+        return fail(msg);
     }
 
-    // ── 結束：關真空閥 + 停真空馬達 ──────────────────────────
-    rly.controlRelay(cfg.valve_ch, false);
-    if (cfg.vacuum_motor_ch != 0)
-        rly.controlRelay(cfg.vacuum_motor_ch, false);
+    // 6. Retract all 9 pushers
+    std::vector<int> all9 = {ZDT_LF1, ZDT_LF2, ZDT_LB1, ZDT_LB2,
+                             ZDT_RF1, ZDT_RF2, ZDT_RB1, ZDT_RB2, ZDT_C};
+    if (pusher_move_many_(all9, PUSHER_RETRACT_PULSE))
+        return fail("ERR pusher_retract_fail\n");
+    if (check_abort_()) return fail("ERR aborted\n");
 
-    std::cout << "[TestLeg] Done." << std::endl;
+    // 7. Vacuum pump off
+    pqw_.controlRelay(CH_PUMP, false);
+
+    // 8-9. Crane pays out descent_cm to lower robot to ground.
+    //      Long operation — use 300s timeout.
+    std::ostringstream oss;
+    oss << "pay_out " << descent_cm;
+    std::string reply = crane_cmd_(oss.str(), 300);
+    if (reply.rfind("OK", 0) != 0) return fail("ERR crane_pay_out_fail\n");
+
+    motion_active_ = false;
+    set_state_(State::Idle);
+    return "OK return_home_done\n";
+}
+
+std::string WashRobot::cmd_reset() {
+    State cur = state_.load();
+    if (cur != State::Error) return state_violation_(cur);
+    abort_flag       = false;
+    pause_flag       = false;
+    motion_active_   = false;
+    imu_ask_pending_ = false;
+    set_state_(State::Idle);
+    return "OK reset\n";
+}
+
+std::string WashRobot::cmd_ping() {
+    return "OK pong\n";
+}
+
+std::string WashRobot::cmd_pause() {
+    State cur = state_.load();
+    if (cur != State::Running && cur != State::Balancing)
+        return state_violation_(cur);
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+        state_before_pause_ = cur;
+    }
+    pause_flag = true;
+    set_state_(State::Paused);
+    return "OK paused\n";
+}
+
+std::string WashRobot::cmd_resume() {
+    State cur = state_.load();
+    if (cur != State::Paused) return state_violation_(cur);
+    State prev;
+    { std::lock_guard<std::mutex> lk(state_mtx_); prev = state_before_pause_; }
+    pause_flag = false;
+    set_state_(prev);
+    return "OK resumed\n";
 }

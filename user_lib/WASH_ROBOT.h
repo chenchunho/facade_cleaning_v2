@@ -1,250 +1,325 @@
-#ifndef WASH_REBOT_H
-#define WASH_REBOT_H
+#ifndef WASH_ROBOT_H
+#define WASH_ROBOT_H
 
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <unistd.h>
-#define Sleep(ms) usleep((ms) * 1000)
-#endif
+#include <string>
+#include <vector>
+#include <deque>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <functional>
+#include <cstdint>
 
 #include "TCP_client.h"
+#include "DM2J_RS570.h"
 #include "ZDT_motor_control.h"
 #include "JC_100_METER.h"
-#include "DM2J_RS570.h"
 #include "PQW_IO_16O_RLY.h"
+#include "Serial_port.h"
+#include "WT901BC_TTL.h"
 
-#include <vector>
-#include <string>
-#include <limits>
-#include <iomanip>
-
-// ============================================================
-//  ★ Robot Hardware Config — 修改此區域以對應實際接線 ★
+// ============================================================================
+//  WashRobot — vertical window-washing robot controller
 //
-//  腳位索引（陣列下標）：
-//    [0]=上-左-1  [1]=上-左-2  [2]=上-右-1  [3]=上-右-2
-//    [4]=下-左-1  [5]=下-左-2  [6]=下-右-1  [7]=下-右-2
-// ============================================================
-namespace RobotConfig {
-
-    // ── ZDT 無刷馬達 Slave ID（SMC 推桿，8 腳）─────────────
-    constexpr int ZDT_SLAVE[8] = {
-        2, 3,    // 上-左-1, 上-左-2
-        4, 5,    // 上-右-1, 上-右-2
-        6, 7,    // 下-左-1, 下-左-2
-        8, 9     // 下-右-1, 下-右-2
-    };
-
-    // ── JC_100 壓力感測器 Slave ID（8 腳）──────────────────
-    constexpr int JC100_SLAVE[8] = {
-        10, 11,  // 上-左-1, 上-左-2
-        12, 13,  // 上-右-1, 上-右-2
-        14, 15,  // 下-左-1, 下-左-2
-        16, 17   // 下-右-1, 下-右-2
-    };
-
-    // ── DM2J 步進馬達 Slave ID（左/右滑桿）─────────────────
-    constexpr int SLIDER_LEFT_SLAVE  = 1;
-    constexpr int SLIDER_RIGHT_SLAVE = 2;
-
-    // ── 繼電器：抽真空馬達通道（每腳獨立，0 = 未使用）──────
-    constexpr int RELAY_VACUUM_MOTOR[8] = {
-        1, 2,    // 上-左-1, 上-左-2
-        3, 4,    // 上-右-1, 上-右-2
-        5, 6,    // 下-左-1, 下-左-2
-        7, 8     // 下-右-1, 下-右-2
-    };
-
-    // ── 繼電器：真空閥通道（每腳獨立）──────────────────────
-    constexpr int RELAY_VALVE[8] = {
-        9,  10,  // 上-左-1, 上-左-2
-        11, 12,  // 上-右-1, 上-右-2
-        13, 14,  // 下-左-1, 下-左-2
-        15, 16   // 下-右-1, 下-右-2
-    };
-
-    // ── 動作參數 ─────────────────────────────────────────────
-    constexpr int    PRESSURE_THRESHOLD = -50;   // 吸附閾值 (x0.1 kPa)，< 此值視為吸好
-    constexpr int    ADJUST_BACK_CM     = 5;     // 吸附失敗後退距離 (cm)
-    constexpr double SLIDER_MAX_CM      = 38.0;  // 滑桿行程上限 (cm)
-    constexpr double SLIDER_MIN_CM      = -38.0; // 滑桿行程下限 (cm)
-    constexpr int    SLIDER_RPM         = 300;   // 滑桿移動速度 (rpm)
-
-}  // namespace RobotConfig
-
-// ============================================================
-//  Leg  ─ 單腳：馬達 + 壓力感測器 + 動作參數
+//  Owns all hardware drivers, background threads, and motion logic.
+//  main.cpp owns only the TCP command server and dispatch layer.
 //
-//  縮回分兩段：
-//    Phase 1：移動至中間位置 (retract_pulses != 0 才執行)
-//    Phase 2：等待 settle_ms 後歸零
-// ============================================================
-struct Leg {
-    ZDT_motor_control* motor;
-    JC_100_METER*      sensor;
-    DM2J_RS570*        axis;
-    PQW_IO_16O_RLY*    relay;
-    int                valve_ch;         // 真空閥繼電器通道
-    int                vacuum_motor_ch;  // 抽真空馬達繼電器通道（0 = 不控制）
-
-    int enable_rpm;
-    int enable_pulses;
-    int retract_rpm;
-    int retract_pulses;
-    int zero_rpm;
-};
-
-// ============================================================
-//  LegGroupConfig  ─ 腳組共用設定
-// ============================================================
-struct LegGroupConfig {
-    PQW_IO_16O_RLY* relay;
-    int             valve_channel;
-    int             settle_ms;   // 兩段縮回之間的等待時間 (ms)
-};
-
-// ============================================================
-//  LegGroup  ─ 一組腳
-// ============================================================
-struct LegGroup {
-    std::vector<Leg> legs;
-    LegGroupConfig   cfg;
-};
-
-// ============================================================
-//  LinearAxis  ─ 線性步進軸（DM2J）
-// ============================================================
-struct LinearAxis {
-    DM2J_RS570* drv;
-    int         id;
-    double      min_cm;
-    double      max_cm;
-    int         max_rpm;
-};
-
-// ============================================================
-//  SingleLegTestConfig  ─ 單腳測試設定
+//  Return convention (matches project-wide rule): false = success, true = error.
 //
-//  ★ 在 main.cpp 裡修改這個 struct 的值以對應實際接線 ★
-// ============================================================
-struct SingleLegTestConfig {
-    // ── 網路連線 ──────────────────────────────────────────
-    std::string tcp_ip   = "10.0.0.42";
-    int         tcp_port = 4001;
-
-    // ── Slave ID ──────────────────────────────────────────
-    int zdt_slave        = 7;   // ZDT 無刷馬達（SMC 推桿）
-    int jc100_slave      = 9;   // JC100 壓力感測器（0 = 不使用）
-    int dm2j_slave       = 2;   // DM2J 步進馬達（線性軸）
-    int relay_slave      = 1;   // PQW 繼電器
-
-    // ── 繼電器通道 ────────────────────────────────────────
-    int valve_ch         = 2;   // 真空閥通道
-    int vacuum_motor_ch  = 0;   // 抽真空馬達通道（0 = 不控制）
-
-    // ── 推桿動作參數 ──────────────────────────────────────
-    int enable_rpm       = 1000;
-    int enable_pulses    = 144000;
-    int retract_rpm      = 500;
-    int retract_pulses   = 72000;
-    int zero_rpm         = 1000;
-
-    // ── 線性軸參數 ────────────────────────────────────────
-    int    axis_rpm      = 300;
-    double axis_min_cm   = -38.0;
-    double axis_max_cm   =  38.0;
-
-    // ── 吸附判斷 ──────────────────────────────────────────
-    int pressure_threshold = -50;  // < 此值視為吸好 (x0.1 kPa)
-    int adjust_back_cm     = 5;    // 吸附失敗後退距離 (cm)
-};
-
-// ============================================================
-//  WashRobot  ─ 洗窗機器人主控制類別
-//
-//  主清洗腳組：
-//    body_group  ─ 上部分 4 腳（m[0]~m[3]）
-//    foot_group  ─ 下部分 4 腳（m[4]~m[7]）
-//
-//  滑桿：
-//    axes[0] = 左滑桿 (drv[0], SLIDER_LEFT_SLAVE)
-//    axes[1] = 右滑桿 (drv[1], SLIDER_RIGHT_SLAVE)
-// ============================================================
+//  cmd_*() methods return "OK ...\n" or "ERR ...\n" strings for the TCP client.
+// ============================================================================
 class WashRobot {
 public:
     WashRobot();
     ~WashRobot();
 
+    // EVT broadcast callback — injected by main.cpp.
+    // Called from background threads; must be thread-safe (TCP_server::broadcast is).
+    std::function<void(const std::string&)> evt_cb;
+
+    // Publicly writable by dispatch (pause/resume/stop commands)
+    std::atomic<bool> abort_flag;
+    std::atomic<bool> pause_flag;
+
+    //=========== init ===========
+
+    // Connect to all hardware, init drivers, start background threads.
+    // false = success, true = fatal error.
     bool init();
 
-    // ── 腳組操作 ──────────────────────────────────────────
-    void enableGroup (LegGroup& g);
-    void disableGroup(LegGroup& g);
+    // Stop background threads and join them. Call before destroying or on process exit.
+    void stop();
 
-    void enableLeft  ();  void disableLeft  ();
-    void enableRight ();  void disableRight ();
-    void enableCenter();  void disableCenter();
-    void enableAll   ();  void disableAll   ();
-    int  adjustLegPos(Leg& leg);
-    void moveRight();
+    //=========== commands ===========
 
-    // ── 線性軸移動 ─────────────────────────────────────────
-    // axis_id: 1~4 對應 drv[0]~drv[3]
-    void move    (int axis_id, int rpm, double cm);
-    void moveSync(int rpm, double cm);  // 左右滑桿同步
+    std::string cmd_init();
+    std::string cmd_attach();
+    std::string cmd_detach();
+    std::string cmd_step_down();
+    std::string cmd_run(int steps);
+    std::string cmd_arm_sweep();  // public: acquires motion_mtx_
+    std::string cmd_tilt_mode(bool on);
+    std::string cmd_emergency_stop();
+    std::string cmd_shutdown();
+    std::string cmd_status();
+    std::string cmd_vacuum(const std::string& group, bool on);
+    std::string cmd_pusher(const std::string& group, const std::string& pos);
+    std::string cmd_move(const std::string& motor, double cm);
+    std::string cmd_confirm_balance(const std::string& ans);
+    std::string cmd_return_home(int descent_cm);
+    std::string cmd_reset();
+    std::string cmd_ping();
+    std::string cmd_pause();
+    std::string cmd_resume();
 
-    // ── 高階流程 ───────────────────────────────────────────
-    void doInit    ();
-    void doShutdown();
+    //=========== state ===========
 
-    // ── 主清洗流程 ─────────────────────────────────────────
-    // step_cm: 每次滑桿移動公分數
-    void startCleaningAll(int step_cm);
+    enum class State {
+        Idle,            // post-init, awaiting cmd_init (Phase 2)
+        Ready,           // Phase 2 done, awaiting attach
+        Attached,        // Phase 3 done, 9 cups holding
+        Running,         // Phase 4 step_down / run in progress
+        WaitingConfirm,  // balance_ask fired, awaiting confirm_balance
+        Paused,          // user-paused during Running / Balancing
+        Balancing,       // Phase 5 roll correction running
+        ReturningHome,   // Phase 6 return_home running
+        Error            // hard fault — only status / ping / reset / return_home allowed
+    };
 
-    // ── 單腳測試：來回洗窗 ─────────────────────────────────
-    // cfg    : 單腳硬體設定（在 main.cpp 定義並修改）
-    // cycles : 來回次數
-    // step_cm: 每次前進公分數
-    void testSingleLegWash(const SingleLegTestConfig& cfg, int cycles, int step_cm);
-
-    // ── 壓力讀取 ───────────────────────────────────────────
-    // leg_index: 0~7 對應 meter[0]~meter[7]
-    int readPressure(int leg_index);
+    State get_state() const { return state_.load(); }
+    static const char* state_name(State s);
 
 private:
-    TCP_client cli_20;
-    TCP_client cli_21;
+    //=========== constants ===========
 
-    ZDT_motor_control  m[8];      // slave ID 由 RobotConfig::ZDT_SLAVE 決定
-    JC_100_METER       meter[8];  // slave ID 由 RobotConfig::JC100_SLAVE 決定
-    DM2J_RS570         drv[4];    // drv[0]=左滑桿, drv[1]=右滑桿
+    static constexpr const char* IP_485_1   = "192.168.1.20";
+    static constexpr const char* IP_485_2   = "192.168.1.21";
+    static constexpr const char* IP_485_3   = "192.168.1.22";
+    static constexpr int         PORT_485   = 4001;
 
-    PQW_IO_16O_RLY relay;
-    PQW_IO_16O_RLY relay_2;
+    static constexpr const char* CRANE_IP   = "192.168.1.101";
+    static constexpr int         CRANE_PORT = 5002;
 
-    // ── 主清洗腳組 ─────────────────────────────────────────
-    LegGroup body_group;   // 上部分 4 腳
-    LegGroup foot_group;   // 下部分 4 腳
+    // PQW relay channels (slave 12, 8CH)
+    static constexpr int PQW_SLAVE       = 12;
+    static constexpr int PQW_TOTAL_CH    = 8;
+    static constexpr int CH_PUMP         = 1;  // dp0105 vacuum pump (always ON while running)
+    static constexpr int CH_VALVE_FEET   = 2;  // VT307 feet suction cups
+    static constexpr int CH_VALVE_BODY   = 3;  // VT307 body suction cups
+    static constexpr int CH_VALVE_CENTER = 4;  // VT307 center suction cup
+    static constexpr int CH_BRUSH        = 5;  // arm roller brush motor
+    static constexpr int CH_WATER_PUMP   = 6;  // water tank pump (spray)
+    static constexpr int CH_WATER_INLET  = 7;  // water inlet ball valve (tank refill from rooftop)
 
-    // ── 舊測試腳組（保留供 enable/disable 指令使用）────────
-    LegGroup right_group;
-    LegGroup left_group;
-    LegGroup center_group;
+    // ZDT pusher slave IDs
+    static constexpr int ZDT_LF1 = 1, ZDT_LF2 = 2;  // left foot
+    static constexpr int ZDT_LB1 = 3, ZDT_LB2 = 4;  // left body
+    static constexpr int ZDT_RF1 = 5, ZDT_RF2 = 6;  // right foot
+    static constexpr int ZDT_RB1 = 7, ZDT_RB2 = 8;  // right body
+    static constexpr int ZDT_C   = 9;                // center
 
-    LinearAxis axes[4];    // axes[0]=左滑桿, axes[1]=右滑桿
+    // DM2J rail/arm slave IDs
+    static constexpr int DM2J_LEFT_FOOT   = 1;
+    static constexpr int DM2J_LEFT_WHEEL  = 2;
+    static constexpr int DM2J_RIGHT_FOOT  = 3;
+    static constexpr int DM2J_RIGHT_WHEEL = 4;
+    static constexpr int DM2J_ARM         = 5;
 
-    // 舊繼電器通道（保留供舊指令相容）
-    static const int COMPAT_RELAY_VACUUM_MOTOR  = 11;
-    static const int COMPAT_RELAY_VALVE_LEFT    = 12;
-    static const int COMPAT_RELAY_VALVE_CENTER  = 13;
-    static const int COMPAT_RELAY_VALVE_RIGHT   = 14;
+    // Pusher motion
+    static constexpr int PUSHER_EXTEND_PULSE  = 144000;
+    static constexpr int PUSHER_RETRACT_PULSE = 0;
+    static constexpr int PUSHER_RPM           = 1000;
+    static constexpr int PUSHER_ACC           = 255;
+    static constexpr int PUSHER_SETTLE_MS     = 1500;
 
-    bool initConnections();
-    bool initDevices();
-    void setupGroups();
-    bool checkAxis(const LinearAxis& axis, int rpm, double cm);
-    void extendGroupMotors(LegGroup& g);
+    // Step parameters
+    static constexpr int STEP_CM          = 30;
+    static constexpr int STEP_MARGIN_CM   = 15;   // crane extra slack before feet move
+    static constexpr int TOTAL_DISTANCE_CM = 30;  // TODO: set actual building height
+
+    // Crane watchdog
+    static constexpr int HEARTBEAT_INTERVAL_MS = 500;
+    static constexpr int WATCHDOG_TIMEOUT_MS   = 2000;
+
+    // IMU
+    static constexpr const char* IMU_PORT           = "/dev/ttyUSB0";  // TODO confirm
+    static constexpr int         IMU_BAUD           = 115200;
+    static constexpr double      IMU_ASK_DEG        = 15.0;
+    static constexpr double      IMU_EMERGENCY_DEG  = 45.0;
+    static constexpr int         IMU_BASELINE_SEC   = 3;
+    static constexpr double      IMU_HYSTERESIS_DEG = 1.0;
+    static constexpr double      ROLL_CORRECT_CM_PER_DEG  = 1.0;
+    static constexpr int         ROLL_CORRECT_RETRY_MAX   = 5;
+
+    // DM2J motion
+    static constexpr int DM2J_RPM = 700;
+    static constexpr int DM2J_ACC = 100;
+    static constexpr int DM2J_DEC = 100;
+
+    // Arm sweep
+    static constexpr int ARM_SWEEP_CM  = 30;
+    static constexpr int ARM_SWEEP_RPM = 500;
+
+    // Vacuum
+    static constexpr int VACUUM_RETRY_MAX     = 5;
+    static constexpr int VACUUM_THRESHOLD_X10 = -500;  // 0.1 kPa; -50 kPa — below = attached
+    static constexpr int DETACH_THRESHOLD_X10 = -100;  // 0.1 kPa; -10 kPa — above = detached
+    static constexpr int VACUUM_SETTLE_MS     = 2000;
+    static constexpr int POLL_INTERVAL_MS     = 50;
+    static constexpr double VACUUM_BACKUP_CM  = 5.0;   // rail backup on each vacuum retry
+
+    static constexpr int RETURN_VACUUM_RELEASE_MS = 5000;  // wait after valves off before retracting pushers
+
+    //=========== hardware ===========
+
+    TCP_client cli_20_, cli_21_, cli_22_;
+    TCP_client crane_cli_;
+
+    DM2J_RS570        dm2j_[5];   // index 0..4 → slave 1..5
+    ZDT_motor_control zdt_[9];   // index 0..8 → slave 1..9
+    JC_100_METER      meter_[9]; // index 0..8 → slave 1..9
+    PQW_IO_16O_RLY    pqw_;
+
+    Serial_port  imu_serial_;
+    WT901BC_TTL  imu_;
+
+    //=========== state ===========
+
+    std::atomic<bool>    motion_active_;
+    std::mutex           motion_mtx_;
+
+    std::mutex           crane_mtx_;
+    std::atomic<bool>    crane_wd_running_;
+    std::atomic<int64_t> crane_last_ok_ms_;
+    std::thread          crane_wd_thread_;
+
+    double               imu_roll0_;
+    double               imu_pitch0_;
+    std::atomic<bool>    imu_ask_pending_;
+    std::atomic<bool>    imu_mon_running_;
+    std::thread          imu_mon_thread_;
+
+    std::atomic<State>   state_;
+    State                state_before_pause_;  // remembered on cmd_pause, restored on cmd_resume
+    State                state_before_wait_;   // remembered on balance_ask, restored on confirm_balance / hysteresis clear
+    std::mutex           state_mtx_;           // serializes non-atomic prev-state fields
+
+    // Rail / vacuum-retry tracking (diagnostic — actual control uses DM2J absolute positioning)
+    std::atomic<double>  rail_pos_cm_;         // current absolute rail position (feet +, body -)
+    std::atomic<double>  body_residual_cm_;    // previous body under-retract (auto-absorbed by next feet phase via absolute target)
+    double               actual_feet_cm_;      // last feet-phase actual DM2J move (used by body phase logging)
+
+    //=========== utility ===========
+
+    DM2J_RS570&        D_(int slave) { return dm2j_[slave - 1]; }
+    ZDT_motor_control& Z_(int slave) { return zdt_[slave - 1]; }
+    JC_100_METER&      M_(int slave) { return meter_[slave - 1]; }
+
+    static int64_t now_ms_();
+    static void    sleep_ms_(int ms);
+    void           evt_(const std::string& msg);
+    bool           dm2j_wait_done_(int slave, int timeout_ms = 10000);
+    bool           check_abort_();
+
+    void        set_state_(State s);   // atomic + EVT state_changed
+    std::string state_violation_(State cur) const;
+    std::string do_step_down_();        // internal: no state guard, caller handles transition
+
+    //=========== crane ===========
+
+    bool        crane_connect_if_needed_();
+    std::string crane_cmd_(const std::string& line, int timeout_sec = 30);
+    void        crane_watchdog_loop_();
+
+    //=========== IMU ===========
+
+    bool        imu_take_baseline_();
+    std::string do_phase5_roll_correct_();
+    void        imu_monitor_loop_();
+
+    //=========== arm ===========
+
+    std::string do_arm_sweep_();  // internal: caller must hold motion_mtx_
+
+    //=========== pusher / vacuum ===========
+
+    bool             pusher_move_(int slave, int pulse);
+    bool             pusher_move_many_(const std::vector<int>& slaves, int pulse);
+    static std::vector<int> group_slaves_(const std::string& group);
+    static int              group_valve_ch_(const std::string& group);
+    bool             vacuum_valve_(const std::string& group, bool on);
+    std::vector<int> vacuum_check_(const std::string& group);
+
+    // Core motion cycle — template body must be visible at call site (defined below)
+    template <typename PreCycle, typename Backup>
+    std::string cycle_group_(const std::string& group,
+                             PreCycle  pre_cycle,
+                             Backup    backup,
+                             int&      out_retry_count);
 };
 
-#endif // WASH_REBOT_H
+// ---- cycle_group_ template definition ----
+// Phase 4 vacuum attach cycle with backup-on-retry.
+//
+//   pre_cycle : () -> string   called ONCE before first attempt (crane + DM2J large move)
+//   backup    : () -> string   called BEFORE each retry (DM2J small 5cm reverse move)
+//
+// Flow:
+//   pre_cycle()                       e.g. feet: crane pay_out + DM2J abs STEP_CM + crane retract
+//   for attempt = 0 .. VACUUM_RETRY_MAX:
+//     if attempt > 0:
+//       release valve + retract pushers + backup()
+//     extend pushers + valve ON + verify
+//     if OK: out_retry_count = attempt; return ""
+//   return "vacuum_retry_exceeded <group>"
+//
+template <typename PreCycle, typename Backup>
+std::string WashRobot::cycle_group_(const std::string& group,
+                                    PreCycle  pre_cycle,
+                                    Backup    backup,
+                                    int&      out_retry_count) {
+    const int  valve_ch = group_valve_ch_(group);
+    const auto slaves   = group_slaves_(group);
+
+    // 1. Pre-cycle (once): crane + DM2J large move
+    {
+        std::string perr = pre_cycle();
+        if (!perr.empty()) return perr;
+    }
+    if (check_abort_()) return "aborted";
+
+    for (int attempt = 0; attempt <= VACUUM_RETRY_MAX; ++attempt) {
+        if (attempt > 0) {
+            // Retry: release valve + retract pushers + small backup
+            if (pqw_.controlRelay(valve_ch, false)) return "valve_off_fail";
+            sleep_ms_(300);
+            if (pusher_move_many_(slaves, PUSHER_RETRACT_PULSE)) return "pusher_retract_fail";
+            if (check_abort_()) return "aborted";
+
+            std::string berr = backup();
+            if (!berr.empty()) return berr;
+            if (check_abort_()) return "aborted";
+        }
+
+        // Extend + valve ON + settle + verify
+        if (pusher_move_many_(slaves, PUSHER_EXTEND_PULSE)) return "pusher_extend_fail";
+        if (pqw_.controlRelay(valve_ch, true))              return "valve_on_fail";
+        sleep_ms_(VACUUM_SETTLE_MS);
+
+        auto fails = vacuum_check_(group);
+        if (fails.empty()) {
+            out_retry_count = attempt;
+            return "";
+        }
+
+        std::string msg = "vacuum_fail " + group + " attempt=" + std::to_string(attempt) + " slaves=";
+        for (size_t i = 0; i < fails.size(); ++i) {
+            if (i) msg += ",";
+            msg += std::to_string(fails[i]);
+        }
+        evt_(msg);
+    }
+    return "vacuum_retry_exceeded " + group;
+}
+
+#endif // WASH_ROBOT_H

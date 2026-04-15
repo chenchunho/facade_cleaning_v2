@@ -31,7 +31,7 @@ bool ZDT_motor_control::init(TCP_client& extClient, int ID, bool debug) {
 	this->client = &extClient;
 	is_external_client = true;
 	if (debug_mode) std::cout << "[INIT] External Client bound to ID: " << ID << "\n";
-	return true;
+	return false;
 }
 
 bool ZDT_motor_control::set_zero() {
