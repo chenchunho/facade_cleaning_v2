@@ -1,5 +1,28 @@
 # Work Log
 
+## 2026-04-16 — 多人協作機制強化
+
+> **規範權威：** `CLAUDE.md`「多人協作紀律」節（含開 session 須知 / 角色定義 / 介面契約）
+
+### 已完成
+- **協作者角色定義表** — CLAUDE.md 新增 5 角色表格（架構/washrobot 實機/crane 實機/前端/測試工具），Jim 已填，其他待協作者自行填入後 commit
+- **介面契約（彈性版）** — `user_lib/*.h` public API 為契約，原則上架構方改；協作者遇阻塞 bug 可先在自己 branch 熱修，但 PR 必須標 `[跨界: user_lib]` 等架構方 review
+- **協作信箱 `.claude/mailbox.md`** — 跨分工邊界的需求/通知/問題；按角色分區 + 阻塞程度標記（🔴🟡🟢）；已處理條目保留作為決策紀錄
+- **開 session 須知** — CLAUDE.md 新增流程：(1) 告知角色 (2) 掃 mailbox (3) 讀 work_log
+- **全域決策畢業** — `agent_ai/.claude/work_log.md` 移除「架構決策」段（內容已在 CLAUDE.md 規範裡，work_log 保持純進度追蹤）
+
+---
+
+## 2026-04-15 — Commit `6dbbe22` pushed（log 統一 + Web Backend 搬家 + 協作紀律）
+
+### Commit 內容
+- `refactor+docs: unify user_lib logging + web backend relocation spec`
+- 32 files, +993/-1097（log 統一實際減少行數）
+- `d7e4132..6dbbe22  main -> main` — 已 push 到 origin
+- 涵蓋本日三項工作（下方分條列出）
+
+---
+
 ## 2026-04-15 — user_lib 統一 log 格式
 
 > **規範權威：** `CLAUDE.md` 的「Log 格式規範」節 + `user_lib/log_utils.h` 檔頭 comment
