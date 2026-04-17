@@ -5,7 +5,6 @@
 #include <string>
 #include <memory>
 #include <chrono>
-#include <iostream>
 
 class TCP_client;
 
@@ -30,7 +29,8 @@ private:
 	TCP_client* client = nullptr;
 	std::unique_ptr<TCP_client> owned_client;
 	int deviceID = 6;
-	bool debug = false;
+	bool debug_mode = false;
+	std::string _log_tag;
 
 	// 通訊核心
 	bool sendAndReceive(const std::vector<uint8_t>& request, std::vector<uint8_t>& response);

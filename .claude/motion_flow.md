@@ -493,18 +493,24 @@ balance_deg = max( |roll - roll0|, |pitch - pitch0| )
 [Browser (Web GUI, Vue/React)]
               │ WebSocket
               ▼
-[Node.js Web Backend]  ← 跑在 washrobot RPi @ 192.168.1.100:8080
-       │                  ↑（未來有需求再移到獨立主機）
+[Node.js Web Backend]  ← 跑在 crane RPi @ 192.168.1.101:8080
+       │                  （刻意放在救援側：washrobot 在半空中掛掉時
+       │                    GUI 仍可控 crane 手動收繩回收機體）
        │ TCP text
        ├──────────────────────────┐
        ▼                          ▼
 [Washrobot C++ TCP server]   [Crane C++ TCP server]
-  192.168.1.100:5001           <crane_RPi_IP>:5002
+  192.168.1.100:5001           192.168.1.101:5002 (localhost)
        ▲
        │ TCP text（僅自動模式下 washrobot 連 crane 放繩）
        ▼
 [Crane :5002]
 ```
+
+> **部署位置決策（2026-04-15）：** Web Backend 從原本 .100 搬到 .101。
+> 理由：washrobot RPi 是控制機體吸附與下移的主角，風險高（卡死、過載、網路異常都可能）；
+> 若 GUI 與 washrobot 同台，washrobot 掛掉 = 失去所有遠端控制能力（機體懸吊半空）。
+> 搬到 crane 側後，即便 washrobot 完全失聯，操作員仍能透過 GUI → crane 手動收繩救援。
 
 ### Port 分配
 
@@ -519,12 +525,13 @@ balance_deg = max( |roll - roll0|, |pitch - pitch0| )
 
 ### 元件職責
 
-**Web Backend（Node.js，跑在 washrobot RPi）**
+**Web Backend（Node.js，跑在 crane RPi @ 192.168.1.101）**
 - 提供靜態網頁資源（HTML/CSS/JS）
-- 維持兩條 TCP client 連線（對 washrobot :5001 + crane :5002）
+- 維持兩條 TCP client 連線（對 washrobot 192.168.1.100:5001 + crane localhost:5002）
 - WebSocket server 接多個瀏覽器 client
 - 雙向轉發：Browser ws 訊息 → 對應裝置 TCP；裝置 TCP 訊息 → broadcast 給所有 browser
 - 管理連線狀態與自動重連
+- 透過 `{src:"status", washrobot:bool, crane:bool}` 廣播兩側連線狀態，供前端判定進入失聯模式
 
 **Washrobot C++（TCP server :5001）**
 - 接受多 client 同時連線
@@ -609,6 +616,38 @@ EVT imu_emergency balance=<deg>          # balance_deg > IMU_EMERGENCY_DEG，已
 | `OK <data>\n` | 指令成功（附回傳）| `OK weight=42.3 length=300` |
 | `ERR <msg>\n` | 指令失敗 | `ERR vacuum_insufficient feet` |
 | `EVT <type> <data>\n` | 主動事件推播（非回應）| `EVT vacuum_fail feet retry=3` |
+
+### 失聯模式（Degraded Mode）UI 行為
+
+前端依 `status` broadcast 的兩個 bool 分成四種模式：
+
+| washrobot | crane | 模式 | UI 表現 |
+|---|---|---|---|
+| ✅ | ✅ | 正常 | 全區塊可用 |
+| ✅ | ❌ | Crane 失聯 | Crane 區塊灰掉鎖住 + 紅 banner「CRANE 失聯，禁止啟動自動下移」；washrobot 仍可用但**阻擋 `run` / `step_down` 等會下移的指令** |
+| ❌ | ✅ | **Washrobot 失聯（救援模式）** | washrobot 區塊整塊灰掉鎖住 + 橘 banner「⚠ WASHROBOT 失聯，僅 crane 可控 — 請確認機體是否懸吊在外並手動收繩回收」；**緊急收繩區塊保持可用** |
+| ❌ | ❌ | 全斷 | 紅 banner「全線失聯，請檢查網路」，所有控制鎖住 |
+
+切換進入失聯模式時，前端要**自動送一次 `stop`** 給仍存活的那一側（避免殘留動作繼續跑）。
+
+### 緊急收繩按鈕（救援模式專用）
+
+GUI 在 crane 區塊提供獨立的「🆘 緊急收繩」分區，**即使 washrobot 失聯也能用**（它只依賴 crane 連線）：
+
+- **互動方式：按住持續收（press-and-hold）**
+  - `mousedown` / `touchstart` → 同時送 `retract_left on` + `retract_right on`
+  - `mouseup` / `touchend` / `mouseleave` → 同時送 `retract_left off` + `retract_right off`
+  - 另補送一次 `stop` 做保險（避免瀏覽器崩潰時繼電器卡在 ON）
+  - 設計理由：防誤觸（點一下就收會危險）；按著才動、放開就停是最安全的人因邏輯
+- **視覺：** 大紅按鈕、獨立區塊、文字「按住收繩」；按下中顯示秒數計時
+- **不走 SD76 自動停：** 緊急模式下不信任自動邏輯，完全由操作員眼睛判定何時放開
+- **張力保護仍在：** Crane C++ 端的 `tension_alarm` safety monitor 不受 GUI 模式影響，超張力照樣強制停 + 回 EVT
+
+**失聯模式下，下列 crane 手動指令也保持可用**（操作員或許需要調整姿態才能收）：
+- `pay_out_left/right <on|off>`、`retract_left/right <on|off>`、`middle_set`、`roll_correct`、`stop`
+
+**不建議 / 鎖住的 crane 指令**（失聯模式下）：
+- `pay_out <cm>` / `retract <cm>` — 自動量化版本預設走 SD76 閉環，救援時不見得能信任；如要用需雙重確認 modal
 
 ---
 

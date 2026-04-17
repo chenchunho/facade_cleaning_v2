@@ -1,13 +1,16 @@
-﻿#include "SD76_length_meters.h"
-#include <stdio.h>
+#include "SD76_length_meters.h"
+#include "log_utils.h"
 #include <string.h>
+
+//=========== init ===========
 
 SD76_length_meters::SD76_length_meters()
 {
 	client = nullptr;
 	owns = false;
 	deviceID = 1;
-	debugPrint = false;
+	debug_mode = false;
+	_log_tag = "SD76:?";
 }
 
 SD76_length_meters::~SD76_length_meters()
@@ -21,11 +24,15 @@ bool SD76_length_meters::init(const std::string& ip, int port, int id, bool debu
 	client = new TCP_client();
 	owns = true;
 
-	if (!client->connectToServer(ip, port))
-		return true;
-
 	deviceID = id;
-	debugPrint = debug;
+	debug_mode = debug;
+	_log_tag = "SD76:" + std::to_string(id);
+
+	if (!client->connectToServer(ip, port)) {
+		LOG_ERR(_log_tag, "connect failed %s:%d", ip.c_str(), port);
+		return true;
+	}
+
 	return false;
 }
 
@@ -34,13 +41,13 @@ bool SD76_length_meters::init(TCP_client& extClient, int id, bool debug)
 	client = &extClient;
 	owns = false;
 	deviceID = id;
-	debugPrint = debug;
+	debug_mode = debug;
+	_log_tag = "SD76:" + std::to_string(id);
 	return false;
 }
 
-//
-// CRC
-//
+//=========== utility: CRC ===========
+
 uint16_t SD76_length_meters::crc16(const uint8_t* buf, int len)
 {
 	uint16_t crc = 0xFFFF;
@@ -53,35 +60,26 @@ uint16_t SD76_length_meters::crc16(const uint8_t* buf, int len)
 	return crc;
 }
 
-//
-// TX/RX
-//
+//=========== utility: TX/RX ===========
+
 bool SD76_length_meters::sendModbus(const uint8_t* req, int reqLen,
 	uint8_t* resp, int& respLen)
 {
-	if (debugPrint) {
-		printf("[TX] ");
-		for (int i = 0; i < reqLen; i++) printf("%02X ", req[i]);
-		printf("\n");
-	}
+	LOG_HEX(_log_tag, "TX", req, reqLen);
 
 	if (!client->sendData((const char*)req, reqLen, 200))
 		return true;
 
 	respLen = client->receiveData((char*)resp, 256, 300);
 
-	if (debugPrint && respLen > 0) {
-		printf("[RX] ");
-		for (int i = 0; i < respLen; i++) printf("%02X ", resp[i]);
-		printf("\n");
-	}
+	if (respLen > 0)
+		LOG_HEX(_log_tag, "RX", resp, respLen);
 
 	return respLen <= 0;
 }
 
-//
-// Read register
-//
+//=========== utility: Read register ===========
+
 bool SD76_length_meters::readRegister(uint16_t addr, uint16_t count, uint8_t* raw)
 {
 	uint8_t req[8];
@@ -109,20 +107,17 @@ bool SD76_length_meters::readRegister(uint16_t addr, uint16_t count, uint8_t* ra
 	int byteCount = resp[2];
 	memcpy(raw, &resp[3], byteCount);
 
-	if (debugPrint) {
-		printf("[REG 0x%04X] ", addr);
-		for (int i = 0; i < byteCount; i++) printf("%02X ", raw[i]);
-		printf("\n");
+	if (debug_mode) {
+		char note[32];
+		std::snprintf(note, sizeof(note), "REG 0x%04X", addr);
+		LOG_HEX(_log_tag, note, raw, byteCount);
 	}
 
 	return false;
 }
 
-//
-// 6-digit BCD decode + sign (your meter format)
-// raw[] = S b1 b2 b3
-// S = sign bit7, b1,b2,b3 = BCD bytes
-//
+//=========== utility: 6-digit BCD decode + sign ===========
+
 int SD76_length_meters::decodeSignedBCD6(const uint8_t raw[4])
 {
 	bool neg = (raw[0] & 0x80) != 0;
@@ -139,9 +134,8 @@ int SD76_length_meters::decodeSignedBCD6(const uint8_t raw[4])
 	return neg ? -absVal : absVal;
 }
 
-//
-// 單讀上排（0x0001~0x0002）
-//
+//=========== read ===========
+
 bool SD76_length_meters::readUpperDisplayValue(int& value)
 {
 	uint8_t raw[4];
@@ -153,9 +147,6 @@ bool SD76_length_meters::readUpperDisplayValue(int& value)
 	return false;
 }
 
-//
-// 讀取上下兩排（0x0001~0x0004）
-//
 bool SD76_length_meters::readUpperLowerDisplayValue(int& upper, int& lower)
 {
 	uint8_t raw[8];
@@ -169,10 +160,6 @@ bool SD76_length_meters::readUpperLowerDisplayValue(int& upper, int& lower)
 	return false;
 }
 
-//
-// Read status register (0x0000)
-// High byte = work mode, low byte = alarm status
-//
 bool SD76_length_meters::readStatus(uint8_t& workMode, uint8_t& alarmStatus)
 {
 	uint8_t raw[2];
@@ -185,9 +172,6 @@ bool SD76_length_meters::readStatus(uint8_t& workMode, uint8_t& alarmStatus)
 	return false;
 }
 
-//
-// Read upper display as signed int32 (0x0021~0x0022)
-//
 bool SD76_length_meters::readUpperInteger(int32_t& value)
 {
 	uint8_t raw[4];
@@ -200,9 +184,6 @@ bool SD76_length_meters::readUpperInteger(int32_t& value)
 	return false;
 }
 
-//
-// Read lower display as signed int32 (0x0023~0x0024)
-//
 bool SD76_length_meters::readLowerInteger(int32_t& value)
 {
 	uint8_t raw[4];
@@ -215,33 +196,25 @@ bool SD76_length_meters::readLowerInteger(int32_t& value)
 	return false;
 }
 
-//
-// Control: reset both displays = write 0x0003 to reg 0x0000
-//
+//=========== control ===========
+
 bool SD76_length_meters::resetAll()
 {
 	return writeSingleRegister(0x0000, 0x0003);
 }
 
-//
-// Control: pause meter = write 0x0004 to reg 0x0000
-//
 bool SD76_length_meters::pauseMeter()
 {
 	return writeSingleRegister(0x0000, 0x0004);
 }
 
-//
-// Control: resume meter = write 0x0008 to reg 0x0000
-//
 bool SD76_length_meters::resumeMeter()
 {
 	return writeSingleRegister(0x0000, 0x0008);
 }
 
-//
-// Modbus 06 寫單一寄存器
-//
+//=========== utility: Modbus write single register (0x06) ===========
+
 bool SD76_length_meters::writeSingleRegister(uint16_t addr, uint16_t value)
 {
 	uint8_t req[8];

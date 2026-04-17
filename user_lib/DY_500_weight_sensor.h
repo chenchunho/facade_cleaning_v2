@@ -98,8 +98,9 @@ private:
 	 ***********************/
 	TCP_client  ownedClient;  // 由本類建立連線時使用
 	TCP_client* client;       // 指向 ownedClient 或外部傳入的物件
-	bool debugMode;
+	bool debug_mode;
 	uint8_t slaveID;
+	std::string _log_tag;
 
 	/***********************
 	 * get_weight_float 狀態

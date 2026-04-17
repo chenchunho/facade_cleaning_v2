@@ -1,36 +1,45 @@
-﻿#include "QX_DO24.h"
+#include "QX_DO24.h"
 #include "TCP_client.h"
-#include <cstdio>
+#include "log_utils.h"
 #include <cmath>
-#include <iostream>
 #include <chrono>
 
-QX_DO24::QX_DO24() {}
+//=========== init ===========
+
+QX_DO24::QX_DO24() {
+	_log_tag = "QX:?";
+}
 
 QX_DO24::~QX_DO24() {
 	if (owned_client) owned_client->close();
 }
 
-bool QX_DO24::init(const std::string& ip, int port, int ID, bool debugMode) {
-	// 解決 Linux 下 std::make_unique 問題 (C++11 相容)
+bool QX_DO24::init(const std::string& ip, int port, int ID, bool debug) {
+	// C++11 compat for Linux (no std::make_unique)
 	owned_client = std::unique_ptr<TCP_client>(new TCP_client());
-	if (!owned_client->connectToServer(ip, port)) return false;
-	client = owned_client.get();
 	deviceID = ID;
-	debug = debugMode;
+	debug_mode = debug;
+	_log_tag = "QX:" + std::to_string(ID);
+	if (!owned_client->connectToServer(ip, port)) {
+		LOG_ERR(_log_tag, "connect failed %s:%d", ip.c_str(), port);
+		return false;
+	}
+	client = owned_client.get();
 	return true;
 }
 
-bool QX_DO24::init(TCP_client& extClient, int ID, bool debugMode) {
+bool QX_DO24::init(TCP_client& extClient, int ID, bool debug) {
 	client = &extClient;
 	deviceID = ID;
-	debug = debugMode;
+	debug_mode = debug;
+	_log_tag = "QX:" + std::to_string(ID);
 	return true;
 }
 
-// 綜合設定：依序設定 Duty -> Freq -> Control
+//=========== control: composite setChannel ===========
+
 bool QX_DO24::setChannel(int channel, double duty, int freq, uint16_t control) {
-	if (debug) std::cout << "[QX_DO24] --- Setting Channel " << channel << " ---" << std::endl;
+	LOG_DBG(_log_tag, "--- Setting Channel %d ---", channel);
 
 	if (!setPWM_Duty(channel, duty)) return false;
 	if (!setPWM_Freq(channel, freq)) return false;
@@ -39,11 +48,12 @@ bool QX_DO24::setChannel(int channel, double duty, int freq, uint16_t control) {
 	return true;
 }
 
-// 1. 設定佔空比 (0x06) - 支援小數點並自動計算 CRC
+//=========== control: PWM Duty (0x06) ===========
+
+// 1. set duty ratio — supports fractional (3.8 -> 38 = 0x26)
 bool QX_DO24::setPWM_Duty(int channel, double duty_percent) {
 	if (!client || channel < 0 || channel > 23) return false;
 
-	// 將 3.8% 轉為 38 (0x26)。如果要得到 0x25 (37)，請輸入 3.7
 	uint16_t val = static_cast<uint16_t>(std::round(duty_percent * 10.0));
 	uint16_t addr = 0x0000 + channel;
 
@@ -57,11 +67,12 @@ bool QX_DO24::setPWM_Duty(int channel, double duty_percent) {
 	req.push_back(crc & 0xFF); req.push_back(crc >> 8);
 
 	std::vector<uint8_t> res;
-	// 必須收到回傳且內容完全一致 (Echo)
+	// must receive echo exactly matching
 	return (sendAndReceive(req, res) && res == req);
 }
 
-// 2. 設定頻率 (0x10) - 32-bit 暫存器寫入
+//=========== control: PWM Frequency (0x10, 32-bit register write) ===========
+
 bool QX_DO24::setPWM_Freq(int channel, int freq) {
 	if (!client || channel < 0 || channel > 23) return false;
 	uint16_t addr = 0x0004 + (channel * 2);
@@ -75,11 +86,12 @@ bool QX_DO24::setPWM_Freq(int channel, int freq) {
 
 	std::vector<uint8_t> res;
 	if (!sendAndReceive(req, res)) return false;
-	// FC 0x10 的標準回傳為 8 bytes
+	// FC 0x10 std reply is 8 bytes
 	return (res.size() >= 8 && res[1] == 0x10 && res[3] == (addr & 0xFF));
 }
 
-// 3. 設定控制值 (0x06)
+//=========== control: PWM Control (0x06) ===========
+
 bool QX_DO24::setPWM_Control(int channel, uint16_t val) {
 	if (!client || channel < 0 || channel > 23) return false;
 	uint16_t addr = 0x000C + channel;
@@ -95,14 +107,12 @@ bool QX_DO24::setPWM_Control(int channel, uint16_t val) {
 	return (sendAndReceive(req, res) && res == req);
 }
 
-// 核心發送與接收邏輯 (限時 500ms)
+//=========== utility: send/receive (500ms window) ===========
+
 bool QX_DO24::sendAndReceive(const std::vector<uint8_t>& request, std::vector<uint8_t>& response) {
 	if (!client) return false;
-	if (debug) {
-		printf("[QX_DO24] TX: ");
-		for (uint8_t b : request) printf("%02X ", b);
-		printf("\n");
-	}
+
+	LOG_HEX(_log_tag, "TX", request.data(), (int)request.size());
 
 	if (!client->sendData(reinterpret_cast<const char*>(request.data()), (int)request.size(), 500)) return false;
 
@@ -121,17 +131,15 @@ bool QX_DO24::sendAndReceive(const std::vector<uint8_t>& request, std::vector<ui
 		if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() > 500) break;
 	}
 
-	if (debug) {
-		printf("[QX_DO24] RX (%d bytes): ", (int)response.size());
-		for (uint8_t b : response) printf("%02X ", b);
-		printf("\n");
-	}
+	LOG_HEX(_log_tag, "RX", response.data(), (int)response.size());
 
 	if (response.size() < 5) return false;
 	uint16_t calc_crc = modbusCRC(response.data(), (int)response.size() - 2);
 	uint16_t recv_crc = response[response.size() - 2] | (response[response.size() - 1] << 8);
 	return (calc_crc == recv_crc);
 }
+
+//=========== utility: Modbus CRC ===========
 
 uint16_t QX_DO24::modbusCRC(const uint8_t* data, int len) {
 	uint16_t crc = 0xFFFF;

@@ -77,6 +77,7 @@ private:
 	bool is_external_client = false;
 	uint8_t slave_id = 1;
 	bool debug_mode = false;
+	std::string _log_tag;
 
 	uint16_t modbusCRC(const uint8_t* data, int len);
 	std::vector<uint8_t> build_write_single_register(uint16_t reg_addr, uint16_t value);

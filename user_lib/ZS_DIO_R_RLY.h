@@ -59,7 +59,8 @@ private:
 	TCP_client internal_client;
 	TCP_client* ext_client = nullptr;
 	bool use_external_client = false;
-	bool debugEnabled = false;
+	bool debug_mode = false;
+	std::string _log_tag;
 
 	uint8_t slave_id = 0x01;
 	int relay_count = 16;
@@ -79,9 +80,6 @@ private:
 
 	// send command and receive response
 	std::vector<uint8_t> sendAndReceive(const std::vector<uint8_t>& cmd, int timeout_ms = 200);
-
-	// debug hex dump
-	void printHex(const std::vector<uint8_t>& data, const std::string& tag);
 
 	// parse bit-based response (0x01/0x02)
 	bool parseBitResponse(const std::vector<uint8_t>& resp, int count, std::vector<bool>& states);

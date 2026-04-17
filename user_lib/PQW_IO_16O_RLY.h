@@ -106,8 +106,9 @@ private:
 	bool owns_client = false;
 
 	int relay_count = 16;
-	bool debug_mode = true;
+	bool debug_mode = false;
 	uint8_t slave_id = 0x01;
+	std::string _log_tag;
 
 	uint16_t modbusCRC(const uint8_t* data, int len);
 
