@@ -19,7 +19,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **決策 / 規範 / 架構變動一律寫進 git 追蹤的 .md 檔**（CLAUDE.md / motion_flow.md / work_log.md），不要只留在對話或個人 Claude memory
 - **規範文件與程式改動放在同一個 PR**（不要只 commit 程式、.md 留到下次）；reviewer 會在 PR 看到規範 diff，討論後才合併
 - **work_log 每筆重要決策要標「規範權威」指標**，指向該決策落在哪個權威文件（CLAUDE.md 某節 / motion_flow.md §X），方便協作者跳去確認完整規範
-- **分工邊界：** 流程架構 + `user_lib/` 由 Jim 維護；`washrobot_new_PI/main.cpp` / `Crane_control_PI/main.cpp` / `web_backend/` / 實機部署由其他協作者負責。動工前請確認要改的檔屬於誰的範圍，跨界改動要先開 PR 討論
+
+### 開 session 須知（所有協作者必看）
+
+1. **告訴 Claude 你的角色**：「我是 Jim」/「我是協作者A」等，Claude 會根據角色自動遵守分工邊界
+2. **若角色表中你的欄位還是 `_（待填）_`**，請填上姓名後 commit + push，讓其他協作者也看到
+3. **掃一眼 `.claude/mailbox.md`** — 看有沒有給你的訊息或待處理需求
+4. **讀 `.claude/work_log.md`** — 了解最新進度
+
+### 協作者角色定義
+
+| 角色 | 負責人 | 負責範圍 | 不碰的範圍 |
+|------|--------|---------|-----------|
+| **架構** | Jim | `user_lib/`、`CLAUDE.md`、`motion_flow.md`、`.claude/` 文件 | `main.cpp` 實作邏輯 |
+| **washrobot 實機** | _（待填）_ | `washrobot_new_PI/main.cpp`、實機部署測試 | `user_lib/` API 設計 |
+| **crane 實機** | _（待填）_ | `Crane_control_PI/main.cpp`、吊機實機部署 | `user_lib/` API 設計 |
+| **前端** | _（待填）_ | `web_backend/`、GUI 頁面 | `user_lib/`、`main.cpp` |
+| **測試 / 工具** | _（待填）_ | `Linux_test/`、`windows_test/` | 生產程式碼 |
+
+> **備註：** 一人可兼多個角色。協作者加入時自行填上姓名與負責範圍，commit 進 git。
+> 動工前請確認要改的檔屬於誰的範圍，**跨界改動要先開 PR 討論**。
+
+### 介面契約（user_lib 邊界）
+
+**原則：** `user_lib/*.h` 的 public API 簽名是跨模組契約。
+
+- **誰能改 user_lib/？** 原則上只有架構方（Jim）
+- **協作者發現 bug？** 在 `.claude/mailbox.md` 提報，描述重現步驟。
+  嚴重到阻塞工作的 bug → 可以先在自己的 branch 熱修，
+  但必須開 PR 標 `[跨界: user_lib]`，等架構方 review 後才合併
+- **協作者需要新功能？** 在 mailbox 提需求，描述「我需要什麼行為」，
+  不要描述「幫我加什麼 method」— 讓架構方決定 API 設計
+- **新增 class（新硬體驅動）？** 架構方負責，協作者提供硬體文件即可
+- **不改 public API 簽名的內部改動**（private method、實作邏輯 bug fix）
+  → 協作者可以修，但 PR 必須標 `[跨界: user_lib]`
 
 ## Project Overview
 
