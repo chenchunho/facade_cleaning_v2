@@ -15,6 +15,160 @@
 
 <!-- 日誌從下方開始 -->
 
+## 2026-04-20k — Claude Code — easy crane 第三輪提速（SUSTAIN=0 + all_off 最佳化）
+
+### 修改檔案
+- `Crane_easy_PI/main.cpp` — `WEIGHT_SUSTAIN_MS: 50 → 0`；`all_off()` 用 `atomic::exchange` 跳過已關閉的繼電器寫入
+- `.claude/work_log.md` — 頂部 2026-04-20k
+
+### 原因
+Sadie 要求再快。j 輪降到 ~50-80ms，k 輪再砍 30-50ms：第 1 個 bad reading 就觸發（移除 sustain）+ 省一次冗餘 relay OFF Modbus 寫入。剩下的延遲全在 Modbus 物理層。
+
+## 2026-04-20j — Claude Code — easy crane weight_loop 二輪提速
+
+### 修改檔案
+- `Crane_easy_PI/main.cpp` —
+  - 常數：`WEIGHT_POLL_MS = 50` → 移除；新增 `WEIGHT_YIELD_MS = 1`（僅 CPU yield）
+  - `WEIGHT_SUSTAIN_MS: 100 → 50`
+  - `weight_loop` 用 `std::chrono::steady_clock` 實測時間累計 over_ms / fail_ms（原本假設固定間隔不準）
+- `.claude/work_log.md` — 頂部 2026-04-20j 條目
+
+### 原因
+i 輪優化把停機從 ~800ms 降到 ~150ms，Sadie 回報仍不夠快。主因 50ms sleep 佔一半循環時間。移除 sleep 並用實測時間累計後預估 ~50-80ms 停機。
+
+## 2026-04-20i — Claude Code — Easy crane 停機延遲優化 + 門檻 input live
+
+### 修改檔案
+- `Crane_easy_PI/main.cpp` — `weight_loop` 安全檢查改用 raw `w` 不用平均 `g_weight`（節省 ~500ms 平均延遲）；`WEIGHT_SUSTAIN_MS` 300→100；結構調整把安全檢查移進 read OK 分支
+- `web_backend/public/index.html` — 移除「set」按鈕，改成純 input（中間文字「（目前: X kg）」顯示 server 值）
+- `web_backend/public/app.js` — input `input` event 直接送 `set_up_stop_kg`，150ms debounce 防中間狀態
+- `.claude/work_log.md` — 頂部新增 2026-04-20i 條目
+
+### 原因
+Sadie 實測發現停機太慢（~800ms 最差），來不及避免打到門檻。根因是 safety 用了 10 樣本平均 + 300ms sustain。改用 raw 讀值 + 2 樣本 sustain 降到 ~150ms。順便把 set 按鈕去掉改為 live input 以減少操作步驟。
+
+## 2026-04-20h — Claude Code — Easy crane AUTO / HOLD 雙模式
+
+### 修改檔案
+- `web_backend/public/index.html` — easy crane panel 新增「模式」row + AUTO toggle 按鈕；hint 列點加 2 條解釋兩模式
+- `web_backend/public/app.js` — 整段 easy crane 重寫：
+  - 移除 bindHold 依賴 + 500ms ping heartbeat（與 50ms status poll 重複）
+  - 新增 `easyAutoMode` / `easyUpActive` / `easyDownActive` 狀態
+  - `easyStartUp/StopUp/StartDown/StopDown` + `updateEasyButtonLabels`
+  - AUTO 按鈕 handler（關閉時自動停所有動作）
+  - UP/DOWN onPress/onRelease mode-aware：HOLD 按住才動、AUTO 點擊 toggle
+  - `onEasyCraneLine` 新增 server state sync（解析 `up=` / `down=` 校正客戶端）
+- `web_backend/public/style.css` — `.btn-auto` + `.btn-auto.active` 樣式（橙色、box-shadow）
+- `.claude/work_log.md` — 頂部新增 2026-04-20h 條目
+
+### 原因
+Sadie 要求加 auto 模式：點擊 UP/DOWN 持續動作，再點一次停，遇門檻/watchdog/讀失敗仍自動停。設計關鍵：50ms status poll 本身就是 heartbeat，因此 AUTO 模式不需要額外心跳；客戶端狀態用 status 回傳的 `up=` / `down=` 持續校正，避免任何顯示與 server 實際狀態不一致。
+
+## 2026-04-20g — Claude Code — Easy crane 可調 UP 門檻 + DY500 讀取失敗防呆
+
+### 修改檔案
+- `Crane_easy_PI/main.cpp` —
+  - `WEIGHT_UP_STOP_KG` (constexpr) → `g_up_stop_kg` (atomic<float>)，預設 `DEFAULT_UP_STOP_KG = -20.0f`
+  - 新增 `g_weight_valid` (atomic<bool>)、常數 `READ_FAIL_STOP_MS = 500`
+  - `weight_loop` 雙檢：(a) 讀失敗累計超 500ms 且動作中 → all_off + EVT `weight_read_fail`；(b) UP 且 weight < g_up_stop_kg 持續 300ms → all_off + EVT `weight_limit`
+  - `cmd_up` / `cmd_down` pre-flight：`!g_weight_valid` 直接 `ERR weight_read_fail`；`cmd_up` 同時檢查門檻
+  - 新 `cmd_set_up_stop_kg` + dispatch 新增 `set_up_stop_kg <kg>`
+  - `cmd_status` 回傳加 `up_stop_kg` + `weight_valid`
+- `web_backend/public/index.html` — easy crane panel 新「收繩停止門檻」input + set 按鈕 + 目前值顯示；hint 列點從 3 條擴到 4 條
+- `web_backend/public/app.js` — `onEasyCraneLine` 解析 `up_stop_kg=`、新增 EVT `weight_read_fail` 觸發 `releaseAllEasyHolds()`；`btn-easy-set-stop` 送 `set_up_stop_kg <v>`
+- `.claude/runbook.md` — C2b easy crane 指令集加 `set_up_stop_kg`、防呆從 3 層更新為 4 層
+- `.claude/work_log.md` — 頂部新增 2026-04-20g 條目
+
+### 原因
+Sadie 要求：(a) 網頁 input 可設門檻（避免 hard-code 重編）；(b) DY500 讀不到重量時強制停機且拒絕新指令。設計上 UP 門檻 runtime 可設 + pre-flight 檢查 + 持續監測三重保險。
+
+## 2026-04-20f — Claude Code — 新增 Crane_easy_PI 子專案（獨立簡易吊車）
+
+### 修改檔案
+- `Crane_easy_PI/main.cpp` — **新檔**：獨立吊車 TCP server (:5003)，指令集 `up/down <on|off> / stop / status / ping`，含 weight monitor thread + watchdog thread + weight-limit safety
+- `Crane_easy_PI/Crane_easy_PI.vcxproj` — **新檔**：MSBuild 專案檔（GUID `{909DCE76-3882-475C-8853-EB344B428FF6}`），引用 user_lib 的 TCP_client/server、ZS_DIO_R_RLY、DY_500_weight_sensor
+- `washrobot_new_PI.sln` — 加入新專案 + 8 configuration mappings
+- `crane_control_PI_easy_ver/` — **刪除整個資料夾**（user_lib/ 副本重複、main.cpp 被重寫的版本取代）
+- `web_backend/server.js` — 加第 3 條 bridge `easy_crane`（env `EASY_CRANE_IP` 預設 `192.168.5.26:5003`），3-state status broadcast
+- `web_backend/public/index.html` — 頂部第 3 顆 dot、新 panel「easy crane」（重量顯示 + 拉繩/釋放繩 press-and-hold + refresh/STOP）
+- `web_backend/public/app.js` — 新 `bindHold()` 通用 helper（emergency retract 按鈕也改走 helper），`easy_crane` press-and-hold + 500ms ping heartbeat，自動 2 秒 poll `status` 更新重量顯示，EVT `watchdog_timeout` / `weight_limit` 收到時本地釋放按鈕狀態
+- `web_backend/public/style.css` — `.panel-easy_crane` + `.btn-hold` + `.btn-hold.active` 樣式
+- `.claude/runbook.md` — 啟動順序加第 3 步 Pi、GUI 按鈕表加 easy crane、C2b 指令表 + 三層防呆說明、緊急處置表新增 2 條
+- `.claude/work_log.md` — 頂部新增 2026-04-20f 條目
+
+### 原因
+Sadie 丟來獨立的簡易吊車程式碼（交互式 terminal 版），要求整理成主 workspace 的子專案、加到 Web GUI、並做網路失聯防呆（防止 UP 方向繩縮到最上卡壞）。採取三層防呆設計：server watchdog（2s 無 inbound 自動停）+ 重量門檻（`WEIGHT_UP_STOP_KG` placeholder `-20kg`）+ 前端 press-and-hold 500ms heartbeat。
+
+## 2026-04-20e — Claude Code — CLAUDE.md 交接指引加 runbook [跨界: CLAUDE.md]
+
+### 修改檔案
+- `CLAUDE.md` — 「給 Claude CLI 的交接指引」節新增 item 3 指向 `.claude/runbook.md`，原 item 3 順延為 4
+
+### 原因
+runbook 定義「怎麼用系統」，對新接手 session / 協作者而言與 work_log / motion_flow 同等重要，加進 onboarding 清單。規範文件屬 Jim 範圍，標 `[跨界: CLAUDE.md]`。
+
+## 2026-04-20d — Claude Code — 新增 runbook.md
+
+### 修改檔案
+- `.claude/runbook.md` — 新增：啟動順序（crane → washrobot → browser）/ Web GUI 按鈕對應 / washrobot + crane raw command 指令集 / EVT 主動事件 / 典型流程表（Phase 1~6）/ 緊急處置表 / 失聯模式四態對照
+
+### 原因
+Sadie 要求整理一份「從冷開機到操控」的操作文件，涵蓋啟動順序、按鈕 → 指令對應、典型流程、緊急處置。放進 `.claude/` 讓協作者都看得到。規範權威仍以 motion_flow.md 為準，runbook 只說「怎麼用」不重複定義。
+
+## 2026-04-20c — Claude Code — Web 前端五件套
+
+### 修改檔案
+- `web_backend/public/app.js` — 整檔重寫：mode 切換、auto-stop 邏輯、home_status pending resolver、balance_ask EVT 解析、press-and-hold 緊急收繩、2 個 modal
+- `web_backend/public/index.html` — 新增 `#banner` + 各 panel 加 `panel-washrobot` / `panel-crane` / `panel-emergency` class、2 個 modal、鋼索歸零按鈕、召回按鈕、reset 按鈕；修正 STOP (robot) 送 `emergency_stop`
+- `web_backend/public/style.css` — append banner / panel-disabled / primary button / emergency panel+button / modal 樣式
+- `.claude/work_log.md` — 頂部新增 2026-04-20c 條目
+
+### 原因
+motion_flow §8 已規範失聯模式 UI + 緊急收繩按住邏輯，但 `app.js` 舊版只有基本命令送出、`index.html` 無對應元素。本次實作 5 件套：失聯模式灰化 + banner、緊急收繩 press-and-hold、Phase 6 召回兩步驟流程（home_status → remaining → return_home）、鋼索歸零、balance_ask EVT 彈窗。
+
+未動 `server.js`（既有 bridge 已足夠）。
+
+## 2026-04-20b — Claude Code — Phase 2 補收輪 + 程式碼同步 [跨界: motion_flow]
+
+### 修改檔案
+- `.claude/motion_flow.md` —
+  - §2 RS485_1 表 slave 2/4：「Phase 1 only」→「Phase 1 放輪爬牆；Phase 2 收輪」
+  - §4 Phase 2 新增 step 8「DM2J slave 2, 4 → 0（收輪）」+ 說明機械原理 + 前置假設，原 step 8~11 順延
+- `user_lib/WASH_ROBOT.cpp cmd_init()` — 在繼電器 OFF 後、`pusher_move_many_` 前插入左右輪 retract（`PR_move_cm(0, 1, DM2J_RPM, 0.0, DM2J_ACC, DM2J_DEC)`）
+- `.claude/work_log.md` — 頂部新增 2026-04-20b 條目
+
+### 原因
+輪子裝於靠牆面，Phase 1 展開供爬牆；Phase 2 推桿伸出前必須先收輪，否則吸盤碰不到玻璃。放在 cmd_init() 統一觸發：單一 entry point + 防呆。Phase 6 召回不放輪（輪子無地面緩衝作用）。
+
+## 2026-04-20 — Claude Code — Phase 3 補 VACUUM_SETTLE_MS 規格 [跨界: motion_flow]
+
+### 修改檔案
+- `.claude/motion_flow.md` —
+  - §4 Phase 3 新增 step 5「等 VACUUM_SETTLE_MS（預設 2000 ms）讓壓力穩定」，原 step 5 順延為 6
+  - §6 可調參數表新增 `VACUUM_SETTLE_MS = 2000 ms`（列於 VACUUM_THRESHOLD_KPA 之後）
+- `.claude/work_log.md` — 頂部新增 2026-04-20 條目
+
+### 原因
+`cmd_attach()` 實際已有 `sleep_ms_(VACUUM_SETTLE_MS)` 在 CH4 ON 後、讀 JC-100 前；規格漏列。補進規格讓 spec/code 對齊。程式碼無需變動。
+
+## 2026-04-17b — Claude Code — 角色表釐清 Jim/Sadie 分工
+
+### 修改檔案
+- `CLAUDE.md` — 角色表從 5 列改 4 列：「規範 + 裝置驅動 = Jim」「應用層實作 = Sadie」「前端 = Sadie」「測試 / 工具 = Sadie」。`介面契約` 節完全不動（保留抽象代名詞「架構方」/「協作方」）
+- `.claude/work_log.md` — 2026-04-17 條目的「Jim 一度以為」→「Sadie 一度以為」（該條目紀錄的是本次對話，user 是 Sadie）
+
+### 原因
+Sadie 本次 session 自我介紹並釐清分工：Jim 負責規範文件 + user_lib/ 裝置驅動；Sadie 負責應用層（WASH_ROBOT 編排、main.cpp、web_backend、測試工具）。原 5 列角色表把 user_lib/ 完整掛在 Jim 名下、其他 4 列為空，與實況不符。
+
+## 2026-04-17 — Claude Code — work_log 備忘 TCP 拓撲釐清
+
+### 修改檔案
+- `.claude/work_log.md` — 頂部新增 2026-04-17 條目，記錄「washrobot↔crane TCP 方向現狀已符合 Jim 的救援設計，無需更動」
+
+### 原因
+Jim 對話中一度以為 washrobot 是 crane 連線的 server 端，想翻轉；翻代碼確認現狀 crane 已是 server、washrobot 是 client，救援路徑已健全。純備忘，避免未來協作者/session 再誤會。
+
+
 ## 2026-04-15i — Claude Code — Phase 4 真空失敗後退 5cm 重試機制
 
 ### 修改檔案

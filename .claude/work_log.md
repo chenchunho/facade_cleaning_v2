@@ -1,5 +1,257 @@
 # Work Log
 
+## 2026-04-20k — easy crane 第三輪提速（SUSTAIN=0 + all_off 最佳化）
+
+### 改動
+- `WEIGHT_SUSTAIN_MS: 50 → 0` — 第一次讀到低於門檻即觸發（原本要 2 個讀週期 ~60ms 才算數）。代價是對單次雜訊敏感，但 DY500 driver 本身有 NaN / ±5000kg / 0x00000000 / 0xFFFFFFFF 的 validity check 擋住明顯壞值
+- `all_off()` 用 `atomic::exchange` 跳過已經 OFF 的繼電器寫入 — UP 安全觸發時只需 Modbus 寫 PIN_UP off，不再冗餘寫 PIN_DOWN（省 ~30ms）
+
+### 預估總停機延遲
+- j 輪：~50-80ms
+- **k 輪（本次）：~30-50ms**（主要是 Modbus RTT 一次 read + 一次 relay off）
+
+### 瓶頸剩餘
+- Modbus RTT 本身（gateway → 485 → DY500/ZS_DIO → 回）— 物理層，軟體無法再壓
+- 若還不夠，選項：
+  - DY500 driver `receiveData` 400ms → 100ms timeout（跨 Jim）
+  - 換掉 TCP gateway、Pi 直接走 USB→RS485（規劃外）
+
+### 修改檔案
+- `Crane_easy_PI/main.cpp` — 2 行常數 + `all_off()` 4 行改法
+
+---
+
+## 2026-04-20j — easy crane weight_loop 第二輪提速
+
+### 問題
+Sadie 回報 2026-04-20i 的優化仍然不夠快。根因：`WEIGHT_POLL_MS = 50ms` 的 sleep 佔了一半以上循環時間（Modbus 讀 ~30-50ms + sleep 50ms = 總 80-100ms）。
+
+### 改動
+- **移除 50ms sleep**，改成 `WEIGHT_YIELD_MS = 1ms`（只為讓 CPU yield，實際速率由 Modbus RTT 決定）
+- **改用 `std::chrono::steady_clock` 實測時間累計** over_ms / fail_ms（原本假設固定 50ms 間隔，錯估 sustain）
+- **`WEIGHT_SUSTAIN_MS: 100 → 50`**（配合更快輪詢，1 樣本就觸發）
+
+### 預估停機延遲
+- 之前：~150ms
+- 現在：~50-80ms（取決於 Modbus RTT + 繼電器 OFF 時間）
+
+### 修改檔案
+- `Crane_easy_PI/main.cpp` — 常數調整 + weight_loop 加 steady_clock 時間測量
+
+### 如果還不夠快
+- 進階選項：`user_lib/DY_500_weight_sensor.cpp:126` 的 `receiveData` 改 400ms → 100ms timeout（跨界 Jim，須另開 PR）
+- 或：單樣本零 sustain（`WEIGHT_SUSTAIN_MS = 0`）但要承受雜訊誤觸發
+
+---
+
+## 2026-04-20i — easy crane 停機延遲優化 + 門檻 input 去掉 set 按鈕
+
+### 問題
+Sadie 實測發現：調門檻後收繩觸發停機太慢，來不及避免打到門檻。根因：
+- 安全檢查用的是 10 樣本平均 `g_weight`（500ms 落後）
+- 外加 `WEIGHT_SUSTAIN_MS = 300ms` 持續要求
+- **最差停機延遲 ~800ms**
+
+### 改動
+- **main.cpp** `weight_loop`：安全檢查改用 raw 單次讀值 `w`（不套平均），平均值 `g_weight` 僅用於 GUI 顯示。`WEIGHT_SUSTAIN_MS: 300 → 100`（2 樣本）
+- **預估最差停機延遲降到 ~150ms**（read ~50ms + sustain 100ms + relay off）
+- **index.html**：移除 set 按鈕，改成純 input
+- **app.js**：input `input` event 直接送 `set_up_stop_kg`，debounce 150ms 避免打字中間狀態觸發
+
+### 修改檔案
+- `Crane_easy_PI/main.cpp` — weight_loop 重構（raw safety check）+ SUSTAIN_MS 300→100
+- `web_backend/public/index.html` — 移除 `btn-easy-set-stop` 按鈕
+- `web_backend/public/app.js` — 改用 input event + debounce
+
+---
+
+## 2026-04-20h — easy crane 加 AUTO / HOLD 雙模式
+
+### 已完成
+- 新增 `AUTO` 切換按鈕，兩模式：
+  - **HOLD**（預設，原行為）：按住動作、放開立即停
+  - **AUTO**：點擊 UP / DOWN = toggle 開關，再點一次停
+- 切換到 OFF 時自動停止所有動作（避免遺留 motion）
+- 狀態同步：app.js 從每 50ms status 回傳解析 `up=` / `down=`，以 server 為權威即時修正客戶端顯示狀態
+- 移除原 500ms `ping` heartbeat（與 50ms 的 status poll 重複，status poll 本身就是 heartbeat）
+- 動態按鈕 label：模式切換時 UP/DOWN 按鈕文字自動更新提示
+
+### 修改檔案
+- `web_backend/public/index.html` — easy crane panel 多一個「模式」row + AUTO 按鈕；hint 列點擴充為 5 條（2 條解釋兩模式）
+- `web_backend/public/app.js` — 整段 easy crane 重寫：拿掉 bindHold + 500ms heartbeat，改成自訂 start/stop + mode-aware onPress/onRelease；新增 server state sync 讓客戶端總是跟 server 對齊
+- `web_backend/public/style.css` — `.btn-auto` + `.btn-auto.active`（橙色 / 亮邊）樣式
+
+### 安全面檢查
+- 網路 watchdog: 50ms status poll 當 heartbeat，AUTO 模式不需額外維持心跳 ✓
+- 重量門檻 weight_limit: 後端 weight_loop 不變，EVT 收到時 `releaseAllEasyHolds()` ✓
+- DY500 讀失敗: 同上 ✓
+- 意外狀態漂移: server state sync（解析 `up=` / `down=`）修正客戶端 ✓
+
+---
+
+## 2026-04-20g — Crane_easy_PI 新增可調門檻 + 讀取失敗防呆
+
+### 已完成
+- **Runtime 可調 UP 停止門檻**：`WEIGHT_UP_STOP_KG` 常數改為 `g_up_stop_kg` atomic<float>（預設 `-20.0f`）
+- **新指令 `set_up_stop_kg <kg>`**：前端用 input + set 按鈕送，立刻生效（不需重編）
+- **`status` 回傳擴充**：加 `up_stop_kg=<值>` + `weight_valid=<0|1>`，前端自動解析更新顯示
+- **DY500 讀取失敗防呆（第 3 層）**：
+  - 連續讀失敗超過 `READ_FAIL_STOP_MS (500ms)` → `g_weight_valid = false`
+  - 若當時 motion_active → `all_off` + EVT `weight_read_fail duration_ms=N`
+  - `cmd_up` / `cmd_down` pre-flight：若 `!g_weight_valid` 直接回 `ERR weight_read_fail`
+- **前端**：
+  - 新增「收繩停止門檻」input row + set 按鈕 + 目前值顯示
+  - `onEasyCraneLine` 解析 `up_stop_kg=` 更新顯示、新增 `EVT weight_read_fail` 也觸發 `releaseAllEasyHolds()`
+  - hint 列點擴充到 4 條
+- runbook.md C2b 節更新成 4 層防呆 + 新指令
+
+### 修改檔案
+- `Crane_easy_PI/main.cpp` — atomic + weight_loop 雙重檢查 + 3 個 cmd_* 更新 + 新 cmd_set_up_stop_kg + dispatch 新增
+- `web_backend/public/index.html` — 新 row + hint 4 條
+- `web_backend/public/app.js` — 解析 up_stop_kg、EVT weight_read_fail trigger、set 按鈕 handler
+- `.claude/runbook.md` — C2b 節更新
+
+---
+
+## 2026-04-20f — 新增獨立簡易吊車子專案 Crane_easy_PI
+
+> **規範權威：** 本節（之前沒有；之後若需要移到 motion_flow.md 再搬）
+
+### 背景
+Sadie 丟來一份 `crane_control_PI_easy_ver/` 資料夾 — 一隻獨立的簡易吊車 C++ 程式，跟主 crane 是完全不同的硬體（relay slave 16 / DY500 slave 3，兩個不同 gateway 21/22），走互動式 cin/cout。要求：
+1. 放進主 workspace 當子專案、整理程式碼
+2. Web 加 2 顆按鈕（拉繩 / 釋放繩）
+3. 網路防呆（防止繩縮到最上面卡壞）
+
+### 硬體
+- 獨立 RPi @ **192.168.5.26**（跟主系統不同網段）
+- TCP server @ **:5003**
+- Modbus gateways: `192.168.1.21`（relay）+ `192.168.1.22`（DY500 重量感測）— Pi 應有第二片 NIC 在 .1.x 網段
+- 繼電器 CH8 = 拉繩（UP）、CH7 = 釋放繩（DOWN）
+- DY500 @ slave 3 讀張力（kg，帶負號表示受力）
+
+### 已完成
+- **新專案 `Crane_easy_PI/`**（取代原 `crane_control_PI_easy_ver/`）
+  - `main.cpp` — 重寫成 TCP server + 後端 watchdog + 重量 loop，對齊主 crane 架構
+  - `Crane_easy_PI.vcxproj` — MSBuild 檔（GUID `{909DCE76-...}`）
+  - `washrobot_new_PI.sln` — 加入新專案節點 + 8 種配置映射
+  - **刪除** 原 `crane_control_PI_easy_ver/` 整個資料夾（user_lib/ 是重複檔）
+- **指令集**（精簡）：`up <on|off>` / `down <on|off>` / `stop` / `status` / `ping`
+- **三層防呆**：
+  1. Server watchdog — `motion_active` 且 > `WATCHDOG_TIMEOUT_MS (2000ms)` 沒 inbound → `all_off` + EVT
+  2. 重量門檻 — UP 過程 `weight < WEIGHT_UP_STOP_KG (-20kg placeholder)` 持續 `WEIGHT_SUSTAIN_MS (300ms)` → `all_off` + EVT
+  3. 前端 press-and-hold + 500ms `ping` heartbeat（網路掉線 2 秒內必觸發 (1)）
+- **Web Backend 三端橋接**：
+  - `server.js` — 新增 `easy_crane` bridge（env `EASY_CRANE_IP` 預設 `.5.26`）+ 3-state status broadcast
+  - `index.html` — 頂部第 3 顆 dot、新 panel「easy crane」（重量顯示 + 拉繩/釋放繩/stop/refresh）
+  - `app.js` — 重構 `bindHold()` 通用 helper（emergency retract 也改走 helper）、`easy_crane` hold + heartbeat、自動每 2 秒 poll `status` 顯示即時重量、EVT `watchdog_timeout` / `weight_limit` 收到時本地解除按鈕狀態
+  - `style.css` — `panel-easy_crane` + `btn-hold` 樣式
+- `runbook.md` 更新：啟動順序加第 3 步、GUI 按鈕表加 easy crane、C2b 指令表、緊急處置表新增 2 條
+
+### 參數待實測
+- 🟡 `WEIGHT_UP_STOP_KG = -20.0f` 先放 placeholder，上機測實際卡住時的張力值再調
+- 🟡 Gateway IP `192.168.1.21` / `.22` 跟主系統相同，確認 Pi 第二片 NIC 走這個網段
+
+### 規範邊界備註
+本子專案屬 Sadie 範圍（應用層 + 前端 + 部署），不跨界。原 `user_lib/` 驅動完全沒改。
+
+---
+
+## 2026-04-20c — Web 前端五件套（失聯模式 / 緊急收繩 / Phase 6 召回 / 鋼索歸零 / 平衡校正 modal）
+
+> **規範權威：** `.claude/motion_flow.md` §8 系統通訊架構（失聯模式 UI + 緊急收繩按鈕 + 指令協定）
+
+### 已完成
+- **失聯模式 UI** — `applyMode()` 依 `status` broadcast 的 washrobot/crane 兩個 bool 切 4 態：
+  - 兩邊活 → banner 隱藏、區塊全可用
+  - washrobot 失聯 → 橘 banner「救援模式」，所有 `.panel-washrobot` 灰化鎖住；crane + 緊急收繩保留可用
+  - crane 失聯 → 紅 banner「禁止下移」，所有 `.panel-crane` 灰化鎖住；washrobot 可用
+  - 全斷 → 紅 banner「全線失聯」
+  - **切入失聯自動送 stop**：兩邊活 → 單邊掉時，自動送 `stop` 給 crane 或 `emergency_stop` 給 washrobot
+- **緊急收繩按鈕** — 獨立紅框 panel，`mousedown/touchstart` → `retract_left on` + `retract_right on`；`mouseup/touchend/mouseleave` → `retract_*_off` + 補送一次 `stop` 保險；按下中顯示秒數計時
+- **Phase 6 召回流程** — 「召回回地面」按鈕：先送 `crane home_status` → 解析 `remaining=<N>` → 彈 modal 確認 → 送 `washrobot return_home <N>`；timeout 3s、remaining ≤ 0 拒絕執行
+- **鋼索歸零按鈕** — crane panel 新增「鋼索歸零（地面起點）」`zero_meters ground` + 「鋼索歸零（洗窗起點）」`zero_meters top`
+- **平衡校正 modal** — 監聽 `EVT balance_ask roll=<x> pitch=<y>` → 彈 modal 顯示兩角度 → Yes/No 對應 `confirm_balance yes|no`
+- **Bug 修正** — 原 HTML `STOP (robot)` 按鈕送 `stop`（washrobot 不支援），改為 `emergency_stop`
+
+### 修改檔案
+- `web_backend/public/app.js` — 整檔重寫（112 → 225 行）：新增 mode 切換、modal、緊急收繩 press-and-hold、home_status pending resolver、EVT balance_ask 解析
+- `web_backend/public/index.html` — 加 `#banner` + 各 panel 加 `panel-washrobot` / `panel-crane` class 供灰化、加 `panel-emergency` + 兩個 modal（balance / return_home）+ 鋼索歸零按鈕 + 召回按鈕 + `reset` 按鈕
+- `web_backend/public/style.css` — append banner / panel-disabled / primary / emergency / modal 樣式（~90 行）
+- **未動 `server.js`** — 既有 WebSocket ↔ TCP bridge 已足夠；broadcast `status` / `{src, line}` 機制不需變更
+
+### 待完成 / 待測
+- 🟡 上機驗證：失聯模式 banner 切換、緊急收繩按住節拍、home_status 回傳解析、balance_ask 彈窗
+- 🟡 `.101` 部署（裝 Node.js、搬 web_backend、systemd）
+- 🟡 停用 `.100` 舊 web_backend
+- 🔴 攝影機 grid（方案 A — ffmpeg + HLS）尚未做
+
+### 規範邊界備註
+`web_backend/` 屬 Sadie 的「前端」範圍，本次不跨界。
+
+---
+
+## 2026-04-20b — Phase 2 補「收輪」步驟 + 程式碼同步 [跨界: motion_flow]
+
+> **規範權威：** `.claude/motion_flow.md` §4 Phase 2 + §2 RS485_1 表
+
+### 背景
+原 motion_flow §4 Phase 2 只寫推桿伸出到 10 cm，沒有收輪步驟；`WASH_ROBOT.cpp cmd_init()` 也完全沒碰 DM2J slave 2/4。§7 Open Q5 就是在問輪子如何驅動。
+
+Sadie 釐清機械：**輪子裝於靠牆面**，Phase 1 展開供吊機把機器人沿玻璃拉上樓。Phase 2 要先收輪，ZDT 推桿才能把吸盤送到玻璃面。
+
+**決策：** 收輪步驟放在 Phase 2（不是 Phase 1 末尾），實作上放在 `cmd_init()` 推桿伸出之前。理由：
+- 單一 entry point — 操作員按 `init` 一鍵搞定
+- 防呆 — 就算 Phase 1 忘了收輪也會自動處理
+
+Phase 6 召回確認**不需放輪**（輪子在牆面側，落地無緩衝作用）。
+
+### 已完成
+- `motion_flow.md` §2 RS485_1 表 slave 2/4 欄位：「Phase 1 only」→「Phase 1 放輪爬牆；Phase 2 收輪」
+- `motion_flow.md` §4 Phase 2 新增 step 8「DM2J slave 2, 4 → 0」，原 step 8~11 順延為 9~12
+- `user_lib/WASH_ROBOT.cpp cmd_init()` 在繼電器 OFF 後、`pusher_move_many_` 前插入左右輪 retract（PR_move_cm mode=1 absolute，目標 0 cm）
+
+### 規範邊界備註
+motion_flow.md 屬 Jim 範圍，標 `[跨界: motion_flow]`。
+
+---
+
+## 2026-04-20 — Phase 3 補 VACUUM_SETTLE_MS 規格 [跨界: motion_flow]
+
+> **規範權威：** `.claude/motion_flow.md` §4 Phase 3 + §6 可調參數表
+
+### 背景
+`WASH_ROBOT.cpp cmd_attach()` 在 CH4 ON 後有 `sleep_ms_(VACUUM_SETTLE_MS)`（2000 ms）再讀 JC-100，讓電磁閥通氣 + 吸盤壓力穩定。原規格 Phase 3 直接從「CH4 ON」跳到「檢查 JC-100」，沒寫這段等待。補規格讓 spec/code 對齊。
+
+### 已完成
+- `motion_flow.md` §4 Phase 3 新增 step 5「等 VACUUM_SETTLE_MS 讓壓力穩定」，原 step 5「檢查 JC-100」順延為 step 6
+- `motion_flow.md` §6 可調參數表新增 `VACUUM_SETTLE_MS = 2000 ms`
+
+### 規範邊界備註
+程式碼未動（`cmd_attach()` 既有行為即為補進規格的內容）。本次純規格同步，標 `[跨界: motion_flow]` 送 Jim review。
+
+---
+
+## 2026-04-17 — 釐清：washrobot↔crane TCP 方向無需更動
+
+> **規範權威：** `.claude/motion_flow.md` §8 網路拓撲 + 元件職責
+
+### 釐清事項
+Sadie 一度以為目前是「washrobot 當 server、crane 當 client」，想翻轉為「crane server / washrobot client」以利 washrobot 失聯時 Web Backend 仍能救援。實際翻代碼後確認**現狀已經是使用者想要的架構**：
+
+- washrobot `:5001` TCP server — 給 Web Backend 連（保留）
+- crane `:5002` TCP server — 同時接 Web Backend + washrobot 兩個 client
+- washrobot 作為 **TCP client** 連 crane `:5002` 下 `pay_out` / `ping`（見 `user_lib/WASH_ROBOT.cpp:198` `crane_connect_if_needed_()`）
+- Web Backend 在 .101，連 `.100:5001` + 本機 `:5002`
+- washrobot 掛掉時：Web Backend → crane :5002 的救援路徑完全不經 washrobot ✅
+
+**結論：不改任何東西**。motion_flow §8 已寫明拓撲，此條純粹備忘，避免未來又誤會。
+
+### 待完成（不變）
+（略，接續下方 2026-04-15 條目）
+
+---
+
 ## 2026-04-15 — Crane_control_PI 重寫（Step 1 + Step 2）
 
 ### 已完成

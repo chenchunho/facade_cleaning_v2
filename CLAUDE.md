@@ -8,9 +8,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 1. 讀 **`.claude/work_log.md`** — 最新進度 + 待完成項目（最新紀錄在最上方）；每個決策條目上方會標示「**規範權威：** xxx」告訴你該決策落在哪份規範文件
 2. 讀 **`.claude/motion_flow.md`** — 完整運動流程規格（硬體表、phase、狀態機、指令協定、參數常數）
-3. 本 CLAUDE.md 的硬體架構圖可能**落後於 motion_flow.md**，以 motion_flow.md §2 為準
+3. 讀 **`.claude/runbook.md`** — 啟動順序、Web GUI 按鈕對應、raw command 指令集、典型流程、緊急處置（知道「怎麼用」系統）
+4. 本 CLAUDE.md 的硬體架構圖可能**落後於 motion_flow.md**，以 motion_flow.md §2 為準
 
-待完成工作、已討論但尚未實作的設計決策，都在上述兩份 `.claude/` 文件中。
+待完成工作、已討論但尚未實作的設計決策，都在上述 `.claude/` 文件中。
 
 ## 多人協作紀律（重要）
 
@@ -31,13 +32,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | 角色 | 負責人 | 負責範圍 | 不碰的範圍 |
 |------|--------|---------|-----------|
-| **架構** | Jim | `user_lib/`、`CLAUDE.md`、`motion_flow.md`、`.claude/` 文件 | `main.cpp` 實作邏輯 |
-| **washrobot 實機** | _（待填）_ | `washrobot_new_PI/main.cpp`、實機部署測試 | `user_lib/` API 設計 |
-| **crane 實機** | _（待填）_ | `Crane_control_PI/main.cpp`、吊機實機部署 | `user_lib/` API 設計 |
-| **前端** | _（待填）_ | `web_backend/`、GUI 頁面 | `user_lib/`、`main.cpp` |
-| **測試 / 工具** | _（待填）_ | `Linux_test/`、`windows_test/` | 生產程式碼 |
+| **規範 + 裝置驅動** | Jim | `CLAUDE.md` / `motion_flow.md` / `.claude/` 文件 + `user_lib/` 硬體驅動 class（DM2J / ZDT / JC100 / WT901 / TCP_client / TCP_server / CLV900 / ZS_DIO / SD76 / PQW / DY500 等）| 應用層 `main.cpp` 實作、`WASH_ROBOT.{h,cpp}` |
+| **應用層實作** | Sadie | `user_lib/WASH_ROBOT.{h,cpp}`（機器人編排層）、`washrobot_new_PI/main.cpp`、`Crane_control_PI/main.cpp` | `user_lib/` 裝置驅動、規範文件 |
+| **前端** | Sadie | `web_backend/`、GUI 頁面 | `user_lib/`、`main.cpp` |
+| **測試 / 工具** | Sadie | `Linux_test/`、`windows_test/` | 生產程式碼 |
 
-> **備註：** 一人可兼多個角色。協作者加入時自行填上姓名與負責範圍，commit 進 git。
+> **備註：** 一人可兼多個角色。新協作者加入時自行填上姓名與負責範圍，commit 進 git。
 > 動工前請確認要改的檔屬於誰的範圍，**跨界改動要先開 PR 討論**。
 
 ### 介面契約（user_lib 邊界）

@@ -120,12 +120,13 @@ int main() {
         cmd_server.broadcast(line.c_str(), (int)line.size());
     };
 
+    // 初始化所有tcp連線和設備
     if (robot.init()) {
         std::cerr << "[FATAL] WashRobot init failed\n";
         return 1;
     }
 
-    // Command TCP server
+    // Command TCP server(接收來自web的指令並執行)
     cmd_server.setReceiveCallback(on_receive);
     if (!cmd_server.start(CMD_PORT, false)) {
         std::cerr << "[FATAL] TCP server :" << CMD_PORT << " fail\n";

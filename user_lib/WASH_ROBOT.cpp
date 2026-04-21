@@ -477,6 +477,13 @@ std::string WashRobot::cmd_init() {
     if (pqw_.controlRelay(CH_WATER_PUMP,   false)) return "ERR water_pump_off_fail\n";
     if (pqw_.controlRelay(CH_WATER_INLET,  false)) return "ERR water_inlet_off_fail\n";
 
+    // Retract wheels (Phase 1 climb → Phase 2 prep) before pushers extend.
+    // Assumes Phase 1 zeroed wheels at retracted position before deploy.
+    if (D_(DM2J_LEFT_WHEEL ).PR_move_cm(0, 1, DM2J_RPM, 0.0, DM2J_ACC, DM2J_DEC))
+        return "ERR left_wheel_retract_fail\n";
+    if (D_(DM2J_RIGHT_WHEEL).PR_move_cm(0, 1, DM2J_RPM, 0.0, DM2J_ACC, DM2J_DEC))
+        return "ERR right_wheel_retract_fail\n";
+
     std::vector<int> feet_body = {ZDT_LF1, ZDT_LF2, ZDT_LB1, ZDT_LB2,
                                   ZDT_RF1, ZDT_RF2, ZDT_RB1, ZDT_RB2};
     if (pusher_move_many_(feet_body, PUSHER_EXTEND_PULSE)) return "ERR pusher_extend_fail\n";

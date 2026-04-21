@@ -11,11 +11,14 @@
   <div id="status">
     <span class="dot" id="dot-washrobot"></span>washrobot
     <span class="dot" id="dot-crane"></span>crane
+    <span class="dot" id="dot-easy-crane"></span>easy
   </div>
 </header>
 
+<div id="banner" class="banner banner-hidden"></div>
+
 <main>
-  <section class="panel">
+  <section class="panel panel-washrobot">
     <h2>auto cycle (washrobot)</h2>
     <div class="row">
       <button data-tgt="washrobot" data-cmd="init">init</button>
@@ -29,17 +32,21 @@
       <button id="btn-run">run</button>
       <button data-tgt="washrobot" data-cmd="pause">pause</button>
       <button data-tgt="washrobot" data-cmd="resume">resume</button>
-      <button class="danger" data-tgt="washrobot" data-cmd="stop">STOP (robot)</button>
+      <button class="danger" data-tgt="washrobot" data-cmd="emergency_stop">STOP (robot)</button>
     </div>
     <div class="row">
       <button data-tgt="washrobot" data-cmd="status">status</button>
+      <button data-tgt="washrobot" data-cmd="reset">reset</button>
       <button data-tgt="washrobot" data-cmd="shutdown">shutdown</button>
       <button data-tgt="washrobot" data-cmd="tilt_mode on">tilt ON</button>
       <button data-tgt="washrobot" data-cmd="tilt_mode off">tilt OFF</button>
     </div>
+    <div class="row">
+      <button id="btn-return-home" class="primary">↩ 召回回地面 (Phase 6)</button>
+    </div>
   </section>
 
-  <section class="panel">
+  <section class="panel panel-washrobot">
     <h2>manual — vacuum</h2>
     <div class="row">
       <span class="label">feet:</span>
@@ -63,7 +70,7 @@
     </div>
   </section>
 
-  <section class="panel">
+  <section class="panel panel-washrobot">
     <h2>manual — pusher</h2>
     <div class="row">
       <span class="label">feet:</span>
@@ -82,7 +89,7 @@
     </div>
   </section>
 
-  <section class="panel">
+  <section class="panel panel-washrobot">
     <h2>manual — DM2J move (cm, absolute)</h2>
     <div class="row">
       <label>motor:
@@ -97,14 +104,20 @@
     </div>
   </section>
 
-  <section class="panel">
+  <section class="panel panel-crane">
     <h2>crane</h2>
     <div class="row">
       <label>cm: <input type="number" id="crane-cm" value="30" min="1"></label>
       <button id="btn-payout">pay_out</button>
       <button id="btn-retract">retract</button>
       <button data-tgt="crane" data-cmd="status">status</button>
+      <button data-tgt="crane" data-cmd="home_status">home_status</button>
       <button class="danger" data-tgt="crane" data-cmd="stop">STOP (crane)</button>
+    </div>
+    <div class="row">
+      <span class="label">zero:</span>
+      <button data-tgt="crane" data-cmd="zero_meters ground">鋼索歸零（地面起點）</button>
+      <button data-tgt="crane" data-cmd="zero_meters top">鋼索歸零（洗窗起點）</button>
     </div>
     <div class="row">
       <span class="label">left:</span>
@@ -120,6 +133,50 @@
       <button data-tgt="crane" data-cmd="retract_right on">retract ON</button>
       <button data-tgt="crane" data-cmd="retract_right off">OFF</button>
     </div>
+  </section>
+
+  <section class="panel panel-emergency">
+    <h2>🆘 緊急收繩（救援模式）</h2>
+    <ul class="hint">
+      <li>按住按鈕 = 左右繩同時收</li>
+      <li>放開立即停</li>
+      <li>依賴 crane 連線，washrobot 失聯也能用</li>
+    </ul>
+    <button id="btn-emergency" class="btn-emergency">🆘 按住收繩</button>
+  </section>
+
+  <section class="panel panel-easy_crane">
+    <h2>easy crane（獨立簡易吊車）</h2>
+    <div class="row">
+      <span class="label">重量:</span>
+      <span id="easy-weight" class="hl">?</span>
+      <span class="label">kg</span>
+      <button data-tgt="easy_crane" data-cmd="status">refresh</button>
+      <button class="danger" data-tgt="easy_crane" data-cmd="stop">STOP</button>
+    </div>
+    <div class="row">
+      <span class="label">收繩停止門檻:</span>
+      <input type="number" id="easy-up-stop-input" value="-20" step="0.5">
+      <span class="label">kg</span>
+      <span class="label">（目前:</span>
+      <span id="easy-up-stop-current" class="hl">?</span>
+      <span class="label">kg）</span>
+    </div>
+    <div class="row">
+      <span class="label">模式:</span>
+      <button id="btn-easy-auto" class="btn-auto">AUTO: OFF（按住模式）</button>
+    </div>
+    <div class="row">
+      <button id="btn-easy-up"   class="btn-hold primary">↑ 拉繩（按住）</button>
+      <button id="btn-easy-down" class="btn-hold primary">↓ 釋放繩（按住）</button>
+    </div>
+    <ul class="hint">
+      <li>HOLD 模式：按住持續動作，放開立即停</li>
+      <li>AUTO 模式：點擊 UP 或 DOWN = 開始，再點一次 = 停止</li>
+      <li>網路掉線 2 秒內自動停（server watchdog）</li>
+      <li>收繩時重量低於「收繩停止門檻」自動停</li>
+      <li>讀不到重量（DY500 失聯）時自動停所有動作 + 拒絕新的 UP/DOWN 指令</li>
+    </ul>
   </section>
 
   <section class="panel">
@@ -139,6 +196,36 @@
     <pre id="log"></pre>
   </section>
 </main>
+
+<div id="modal-balance" class="modal modal-hidden">
+  <div class="modal-content">
+    <h3>平衡偏移警告</h3>
+    <p>偵測到傾斜：roll = <span id="modal-balance-roll">?</span>°，pitch = <span id="modal-balance-pitch">?</span>°</p>
+    <p>是否執行 Phase 5 平衡校正（僅 Roll，吊機左右鋼索差動）？</p>
+    <div class="modal-btns">
+      <button id="btn-balance-yes" class="primary">Yes — 校正</button>
+      <button id="btn-balance-no">No — 忽略繼續</button>
+    </div>
+  </div>
+</div>
+
+<div id="modal-return" class="modal modal-hidden">
+  <div class="modal-content">
+    <h3>確認召回回地面</h3>
+    <p>吊機將放繩 <span id="modal-return-cm" class="hl">?</span> cm 讓機器人下降到地面。</p>
+    <p>執行前請確認：</p>
+    <ul>
+      <li>機體已停止所有下移動作</li>
+      <li>地面無人員或障礙物</li>
+      <li>`zero_meters top` 已正確執行（home_ground_cm 有效）</li>
+    </ul>
+    <p class="warn">此動作會破真空、收推桿、放繩，過程約數分鐘。</p>
+    <div class="modal-btns">
+      <button id="btn-return-confirm" class="danger">確認召回</button>
+      <button id="btn-return-cancel">取消</button>
+    </div>
+  </div>
+</div>
 
 <script src="app.js"></script>
 </body>

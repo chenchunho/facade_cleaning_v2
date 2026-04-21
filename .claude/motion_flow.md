@@ -25,9 +25,9 @@
 | Slave | 用途 | 走路循環 |
 |---|---|---|
 | 1 | 左腳（linear rail: 腳 ↔ 身體相對位置）| ✓ |
-| 2 | 左輪 | Phase 1 only（地面→貼牆）|
+| 2 | 左輪（裝於靠牆面）| Phase 1: 放輪爬牆；Phase 2: 收輪 |
 | 3 | 右腳 | ✓ |
-| 4 | 右輪 | Phase 1 only |
+| 4 | 右輪（裝於靠牆面）| Phase 1: 放輪爬牆；Phase 2: 收輪 |
 | 5 | 上滑台（機械手臂平台，左右清洗動作）| ✓ |
 
 ### RS485_2 @ 192.168.1.21 — ZDT 閉環步進 × 9（SMC LEYG25 推桿）
@@ -154,11 +154,15 @@
 5. CH5 = OFF  （刷子停）
 6. CH6 = OFF  （水泵停）
 7. CH7 = OFF  （進水閥關）
-8. ZDT 1~8 → 10 cm（腳 + 身體推桿都伸出預備吸附）
+8. DM2J slave 2, 4 → 0（收回左右輪）
+   輪子裝於靠牆面；Phase 1 展開讓吊機把機器人沿玻璃拉上樓。
+   進 Phase 2 要先收輪，ZDT 推桿才能把吸盤伸出到玻璃面。
+   前置假設：Phase 1 展開前輪子已 zero 於「完全收回」位置。
+9. ZDT 1~8 → 10 cm（腳 + 身體推桿都伸出預備吸附）
    ZDT 9（中心）暫不伸出
-9. 上滑台（DM2J slave 5）回零
-10. WT901BC 姿態儀 baseline 採樣 3 秒 → 得 roll0 / pitch0
-11. 輸出「Init 完成，等待貼牆」
+10. 上滑台（DM2J slave 5）回零
+11. WT901BC 姿態儀 baseline 採樣 3 秒 → 得 roll0 / pitch0
+12. 輸出「Init 完成，等待貼牆」
 ```
 
 ### Phase 3 — 吸附啟動（人工貼牆後下指令）
@@ -168,7 +172,8 @@
 2. CH2 = ON
 3. CH3 = ON
 4. CH4 = ON
-5. 檢查 JC-100 (1~9) 全部達閥值 → 回報 OK
+5. 等 VACUUM_SETTLE_MS（預設 2000 ms）讓電磁閥通氣、9 顆吸盤壓力穩定
+6. 檢查 JC-100 (1~9) 全部達閥值 → 回報 OK
    任一失敗 → 回報人工，不進入 Phase 4
 ```
 
@@ -416,6 +421,7 @@ balance_deg = max( |roll - roll0|, |pitch - pitch0| )
 | `TOTAL_DISTANCE_CM` | TBD | 總下移距離（一次洗到底）|
 | `VACUUM_RETRY_MAX` | 5 | 吸附重試上限 |
 | `VACUUM_THRESHOLD_KPA` | -50 | 真空度成功閥值（實測最佳 -70，最差 -50，取最差值當門檻）|
+| `VACUUM_SETTLE_MS` | 2000 | 閥開後等電磁閥通氣 + 吸盤壓力穩定的時間（Phase 3 吸附、Phase 4 cycle_group）|
 | `DM2J_RPM` | 700 | 腳移動速度 |
 | `ZDT_SPEED` | 1000 | 推桿速度（RPM）|
 | `ARM_SWEEP_RANGE_CM` | TBD | 上滑台清洗行程 |

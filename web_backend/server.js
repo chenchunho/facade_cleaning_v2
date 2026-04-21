@@ -1,14 +1,15 @@
 // ============================================================================
 // washrobot web_backend
 //
-// Bridges browser WebSocket clients to two C++ TCP command servers:
-//   washrobot @ 192.168.1.100:5001
-//   crane     @ 192.168.1.101:5002
+// Bridges browser WebSocket clients to three C++ TCP command servers:
+//   washrobot  @ 192.168.1.100:5001
+//   crane      @ 192.168.1.101:5002
+//   easy_crane @ 192.168.5.26:5003   (independent simple crane)
 //
 // Browser ↔ backend protocol (JSON over WebSocket):
-//   → {target: "washrobot"|"crane", cmd: "<line>"}     send command
-//   ← {src: "washrobot"|"crane", line: "OK ..."}       reply or EVT from device
-//   ← {src: "status", washrobot: bool, crane: bool}    connection state
+//   → {target: "washrobot"|"crane"|"easy_crane", cmd: "<line>"}   send command
+//   ← {src:    "washrobot"|"crane"|"easy_crane", line: "OK ..."} reply / EVT
+//   ← {src: "status", washrobot: bool, crane: bool, easy_crane: bool}   connection state
 // ============================================================================
 
 const express = require('express');
@@ -19,11 +20,13 @@ const { WebSocketServer } = require('ws');
 
 //=========== config ===========
 
-const HTTP_PORT    = process.env.HTTP_PORT  || 8080;
-const WASHROBOT_IP = process.env.WROBOT_IP  || '192.168.1.100';
-const WASHROBOT_PORT = 5001;
-const CRANE_IP     = process.env.CRANE_IP   || '192.168.1.101';
-const CRANE_PORT   = 5002;
+const HTTP_PORT       = process.env.HTTP_PORT    || 8080;
+const WASHROBOT_IP    = process.env.WROBOT_IP    || '192.168.1.100';
+const WASHROBOT_PORT  = 5001;
+const CRANE_IP        = process.env.CRANE_IP     || '192.168.1.101';
+const CRANE_PORT      = 5002;
+const EASY_CRANE_IP   = process.env.EASY_CRANE_IP || '192.168.5.26';
+const EASY_CRANE_PORT = 5003;
 
 const RECONNECT_MS = 3000;
 
@@ -98,14 +101,16 @@ function makeBridge(name, ip, port) {
     return { name, send, isConnected: () => state.connected };
 }
 
-const washrobot = makeBridge('washrobot', WASHROBOT_IP, WASHROBOT_PORT);
-const crane     = makeBridge('crane',     CRANE_IP,     CRANE_PORT);
+const washrobot  = makeBridge('washrobot',  WASHROBOT_IP,  WASHROBOT_PORT);
+const crane      = makeBridge('crane',      CRANE_IP,      CRANE_PORT);
+const easy_crane = makeBridge('easy_crane', EASY_CRANE_IP, EASY_CRANE_PORT);
 
 function broadcastStatus() {
     broadcast({
         src: 'status',
-        washrobot: washrobot.isConnected(),
-        crane:     crane.isConnected()
+        washrobot:  washrobot.isConnected(),
+        crane:      crane.isConnected(),
+        easy_crane: easy_crane.isConnected()
     });
 }
 
@@ -114,8 +119,9 @@ function broadcastStatus() {
 wss.on('connection', (ws) => {
     ws.send(JSON.stringify({
         src: 'status',
-        washrobot: washrobot.isConnected(),
-        crane:     crane.isConnected()
+        washrobot:  washrobot.isConnected(),
+        crane:      crane.isConnected(),
+        easy_crane: easy_crane.isConnected()
     }));
 
     ws.on('message', (data) => {
@@ -123,8 +129,9 @@ wss.on('connection', (ws) => {
         try { msg = JSON.parse(data.toString()); }
         catch { return ws.send(JSON.stringify({ src: 'error', line: 'invalid_json' })); }
 
-        const target = msg.target === 'washrobot' ? washrobot
-                     : msg.target === 'crane'     ? crane
+        const target = msg.target === 'washrobot'  ? washrobot
+                     : msg.target === 'crane'      ? crane
+                     : msg.target === 'easy_crane' ? easy_crane
                      : null;
         if (!target) return ws.send(JSON.stringify({ src: 'error', line: 'unknown_target' }));
         if (typeof msg.cmd !== 'string' || !msg.cmd.length)
@@ -139,6 +146,7 @@ wss.on('connection', (ws) => {
 
 server.listen(HTTP_PORT, () => {
     console.log(`[web_backend] listening http://0.0.0.0:${HTTP_PORT}`);
-    console.log(`[web_backend] washrobot target = ${WASHROBOT_IP}:${WASHROBOT_PORT}`);
-    console.log(`[web_backend] crane     target = ${CRANE_IP}:${CRANE_PORT}`);
+    console.log(`[web_backend] washrobot  target = ${WASHROBOT_IP}:${WASHROBOT_PORT}`);
+    console.log(`[web_backend] crane      target = ${CRANE_IP}:${CRANE_PORT}`);
+    console.log(`[web_backend] easy_crane target = ${EASY_CRANE_IP}:${EASY_CRANE_PORT}`);
 });
