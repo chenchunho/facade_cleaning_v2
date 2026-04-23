@@ -19,6 +19,10 @@
 #include <string>
 #include <sstream>
 
+#ifndef _WIN32
+#include <signal.h>
+#endif
+
 #include "TCP_server.h"
 #include "WASH_ROBOT.h"
 
@@ -113,6 +117,13 @@ static void on_receive(socket_t sock, const char* data, int len) {
 // ============ Main ============
 
 int main() {
+#ifndef _WIN32
+    // Ignore SIGPIPE so send() on a dead peer returns -1/EPIPE instead of killing the process.
+    // user_lib TCP_client/TCP_server use send(..., 0) without MSG_NOSIGNAL; any peer drop
+    // (web backend, crane, RS485 gateway) would otherwise terminate this process.
+    signal(SIGPIPE, SIG_IGN);
+#endif
+
     std::cout << "[washrobot_new_PI] starting...\n";
 
     // Wire EVT broadcast before calling init (background threads may fire events during init)

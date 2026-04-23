@@ -31,6 +31,10 @@
 #include <atomic>
 #include <chrono>
 
+#ifndef _WIN32
+#include <signal.h>
+#endif
+
 #include "TCP_client.h"
 #include "TCP_server.h"
 #include "ZS_DIO_R_RLY.h"
@@ -303,6 +307,11 @@ static void on_receive(socket_t sock, const char* data, int len) {
 //=========== main ===========
 
 int main() {
+#ifndef _WIN32
+    // Ignore SIGPIPE so send() on a dead peer returns -1/EPIPE instead of killing the process.
+    signal(SIGPIPE, SIG_IGN);
+#endif
+
     std::cout << "[Crane_easy_PI] starting...\n";
 
     if (!cli_21.connectToServer(GW_21_IP, GW_PORT))
@@ -315,8 +324,9 @@ int main() {
     else
         std::cout << "[OK] gateway " << GW_22_IP << "\n";
 
-    relay.init(cli_21, RELAY_SLAVE, 16, false);   // total_relay=16, debug=false
-    dy.init(cli_22, DY500_SLAVE, false);
+    // [TEST MODE 2026-04-21] debug=true for on-site troubleshooting; revert to false post-test.
+    relay.init(cli_21, RELAY_SLAVE, 16, true);    // total_relay=16, debug=true (was false)
+    dy.init(cli_22, DY500_SLAVE, true);           // debug=true (was false)
 
     // Safe startup: both relays off
     relay.controlRelay(PIN_UP,   false);

@@ -166,23 +166,25 @@ function onEasyCraneLine(line) {
         const el = document.getElementById('easy-up-stop-current');
         if (el) el.textContent = parseFloat(ms[1]).toFixed(2);
     }
-    // Sync button state from server (server is authoritative — if safety tripped,
-    // server's up/down cleared while client may still think it's active)
+    // Sync button state from server — one-way: only clear stale local claims when
+    // server cleared the relay (safety tripped / external stop). We don't flip
+    // local ON state from server ON, to avoid races right after a click.
+    // UP=0 resets both easyUpActive (HOLD) and easyAutoActive (AUTO), since both
+    // drive the same physical relay.
     const mu = line.match(/up=(\d)/);
     const md = line.match(/down=(\d)/);
     if (mu && md && typeof releaseAllEasyHolds !== 'undefined') {
         const serverUp   = mu[1] === '1';
         const serverDown = md[1] === '1';
-        if (serverUp !== easyUpActive) {
-            easyUpActive = serverUp;
-            btnEasyUp.classList.toggle('active', serverUp);
-            updateEasyButtonLabels();
+        if (!serverUp) {
+            if (easyUpActive)   { easyUpActive   = false; btnEasyUp.classList.remove('active');   }
+            if (easyAutoActive) { easyAutoActive = false; btnEasyAuto.classList.remove('active'); }
         }
-        if (serverDown !== easyDownActive) {
-            easyDownActive = serverDown;
-            btnEasyDown.classList.toggle('active', serverDown);
-            updateEasyButtonLabels();
+        if (!serverDown && easyDownActive) {
+            easyDownActive = false;
+            btnEasyDown.classList.remove('active');
         }
+        updateEasyButtonLabels();
     }
     // Any safety EVT: locally release button state to match server-side all_off
     if (line.startsWith('EVT watchdog_timeout') ||
@@ -352,49 +354,42 @@ bindHold(btnEmergency,
     }
 );
 
-//=========== easy crane (HOLD / AUTO dual-mode) ===========
-
-// Two modes:
-//   HOLD (default): mousedown starts motion, mouseup/leave/touchend stops it.
-//   AUTO: first click toggles motion ON, second click toggles OFF.
-// Server-side safeties (watchdog, weight threshold, DY500 read-fail) still apply
-// and EVT replies trigger local release regardless of mode.
-// Heartbeat: the 50ms status poll already serves as watchdog heartbeat while
-// easy_crane is connected, so AUTO mode does not need a separate heartbeat.
+//=========== easy crane buttons ===========
+//
+// Three buttons:
+//   ↑ UP   — press-and-hold: `up on` on press, `up off` + `stop` on release
+//   ↓ DOWN — press-and-hold: `down on` on press, `down off` + `stop` on release
+//   🤖 AUTO — click toggle: click 1 starts `up on` and lets server auto-stop when
+//     weight < up_stop_kg (server-side weight_loop issues all_off + EVT weight_limit);
+//     click 2 = manual cancel. EVT weight_limit / watchdog_timeout / weight_read_fail
+//     all reset AUTO button state via releaseAllEasyHolds().
+//
+// Server is authoritative on all three buttons — status poll (every 50ms) parses
+// up=/down= and resets stale local state if a safety tripped between clicks.
 
 const btnEasyAuto = document.getElementById('btn-easy-auto');
 const btnEasyUp   = document.getElementById('btn-easy-up');
 const btnEasyDown = document.getElementById('btn-easy-down');
 
-let easyAutoMode   = false;
-let easyUpActive   = false;
-let easyDownActive = false;
+let easyUpActive   = false;   // held via UP button (HOLD)
+let easyDownActive = false;   // held via DOWN button (HOLD)
+let easyAutoActive = false;   // started via AUTO button (click toggle)
 
 function updateEasyButtonLabels() {
-    const modeHint = easyAutoMode ? '點擊' : '按住';
-    btnEasyUp.textContent   = easyUpActive
-        ? (easyAutoMode ? '↑ 拉繩中…（再點擊停止）' : '↑ 拉繩中…')
-        : `↑ 拉繩（${modeHint}）`;
-    btnEasyDown.textContent = easyDownActive
-        ? (easyAutoMode ? '↓ 釋放繩中…（再點擊停止）' : '↓ 釋放繩中…')
-        : `↓ 釋放繩（${modeHint}）`;
-    btnEasyAuto.textContent = easyAutoMode
-        ? 'AUTO: ON（點擊切換模式）'
-        : 'AUTO: OFF（按住模式）';
+    btnEasyUp.textContent   = easyUpActive   ? '↑ 拉繩中…'         : '↑ 拉繩（按住）';
+    btnEasyDown.textContent = easyDownActive ? '↓ 釋放繩中…'       : '↓ 釋放繩（按住）';
+    btnEasyAuto.textContent = easyAutoActive ? '🤖 AUTO 拉繩中…（點擊停止）' : '🤖 AUTO 拉到上限（點擊）';
 }
 
-function easyStartUp() {
+// Press-and-hold UP
+function easyStartUpHold() {
     if (easyUpActive) return;
-    if (easyDownActive) {
-        easyDownActive = false;
-        btnEasyDown.classList.remove('active');
-    }
     easyUpActive = true;
     btnEasyUp.classList.add('active');
     send('easy_crane', 'up on');
     updateEasyButtonLabels();
 }
-function easyStopUp() {
+function easyStopUpHold() {
     if (!easyUpActive) return;
     easyUpActive = false;
     btnEasyUp.classList.remove('active');
@@ -402,18 +397,16 @@ function easyStopUp() {
     send('easy_crane', 'stop');
     updateEasyButtonLabels();
 }
-function easyStartDown() {
+
+// Press-and-hold DOWN
+function easyStartDownHold() {
     if (easyDownActive) return;
-    if (easyUpActive) {
-        easyUpActive = false;
-        btnEasyUp.classList.remove('active');
-    }
     easyDownActive = true;
     btnEasyDown.classList.add('active');
     send('easy_crane', 'down on');
     updateEasyButtonLabels();
 }
-function easyStopDown() {
+function easyStopDownHold() {
     if (!easyDownActive) return;
     easyDownActive = false;
     btnEasyDown.classList.remove('active');
@@ -422,25 +415,41 @@ function easyStopDown() {
     updateEasyButtonLabels();
 }
 
-function releaseAllEasyHolds() {
-    easyStopUp();
-    easyStopDown();
+// AUTO toggle — click to start UP motion, server auto-stops at weight threshold
+function easyStartAuto() {
+    if (easyAutoActive) return;
+    easyAutoActive = true;
+    btnEasyAuto.classList.add('active');
+    send('easy_crane', 'up on');
+    updateEasyButtonLabels();
+}
+function easyStopAuto() {
+    if (!easyAutoActive) return;
+    easyAutoActive = false;
+    btnEasyAuto.classList.remove('active');
+    send('easy_crane', 'up off');
+    send('easy_crane', 'stop');
+    updateEasyButtonLabels();
 }
 
-// AUTO toggle: on OFF→ON just flip mode. On ON→OFF, stop any running motion
-// (operator shouldn't be left with motion running after exiting auto mode).
-btnEasyAuto.addEventListener('click', () => {
-    easyAutoMode = !easyAutoMode;
-    btnEasyAuto.classList.toggle('active', easyAutoMode);
-    if (!easyAutoMode) releaseAllEasyHolds();
+// Called on EVT weight_limit / watchdog_timeout / weight_read_fail — server already
+// did all_off; this just resyncs client-side button state.
+function releaseAllEasyHolds() {
+    if (easyUpActive)   { easyUpActive   = false; btnEasyUp.classList.remove('active'); }
+    if (easyDownActive) { easyDownActive = false; btnEasyDown.classList.remove('active'); }
+    if (easyAutoActive) { easyAutoActive = false; btnEasyAuto.classList.remove('active'); }
     updateEasyButtonLabels();
+}
+
+btnEasyAuto.addEventListener('click', () => {
+    easyAutoActive ? easyStopAuto() : easyStartAuto();
 });
 
-// UP/DOWN event wiring — behavior branches on easyAutoMode.
-function onUpPress(e)   { if (e) e.preventDefault(); if (easyAutoMode) (easyUpActive ? easyStopUp() : easyStartUp()); else easyStartUp(); }
-function onUpRelease(e) { if (e) e.preventDefault(); if (!easyAutoMode) easyStopUp(); }
-function onDownPress(e)   { if (e) e.preventDefault(); if (easyAutoMode) (easyDownActive ? easyStopDown() : easyStartDown()); else easyStartDown(); }
-function onDownRelease(e) { if (e) e.preventDefault(); if (!easyAutoMode) easyStopDown(); }
+// UP/DOWN event wiring — pure press-and-hold.
+function onUpPress(e)     { if (e) e.preventDefault(); easyStartUpHold(); }
+function onUpRelease(e)   { if (e) e.preventDefault(); easyStopUpHold(); }
+function onDownPress(e)   { if (e) e.preventDefault(); easyStartDownHold(); }
+function onDownRelease(e) { if (e) e.preventDefault(); easyStopDownHold(); }
 
 btnEasyUp.addEventListener('mousedown',    onUpPress);
 btnEasyUp.addEventListener('touchstart',   onUpPress,   { passive: false });

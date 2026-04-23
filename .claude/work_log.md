@@ -1,5 +1,362 @@
 # Work Log
 
+## 2026-04-21i — web_backend reconnect exponential-spawn bug 修復（OOM killer 炸過）
+
+### 現象
+Sadie 啟動 backend 一段時間後被 `Killed`（OOM）。`ss -tnp` 顯示 fd 跳到 87787，大量 SYN-SENT 累積連向 .1.100 + .1.101（那兩個還沒啟動的 target）。
+
+### 根因
+`server.js makeBridge()` 的 reconnect 邏輯雙重觸發 bug：
+```js
+sock.on('error', (err) => onClose(err.message));
+sock.on('close', () => onClose('close'));
+```
+
+Node.js socket 失敗會同時 fire `error` **與** `close`，兩者都呼叫 `onClose` 都 schedule `setTimeout(connect, 3000)`。所以每次連線失敗：
+- 第 1 輪：2 個 reconnect 排隊
+- 第 2 輪：各再失敗再各排 2 個 → 4
+- 第 N 輪：2^N
+
+10 分鐘內 socket 數量炸開 → 記憶體 / fd 耗盡 → OOM kill。Sadie 的配置中 washrobot (.1.100) + shim (.1.101) 都不存在（shim 在 .5.26 且 env var 沒設），所以兩個 bridge 同時爆。
+
+### 修法
+`server.js makeBridge()`：
+1. **去重 reconnect**：加 `state.reconnectTimer` flag，已排過就不重排
+2. **清理舊 socket**：`connect()` 進入時 `destroy()` 掉 `state.sock` 舊的，防止 fd leak
+3. **事件處理重構**：`error` 只 log 不觸發 reconnect；讓 `close`（Node 保證 error 後一定跟著 close）單獨驅動 reconnect
+
+### 修改檔案
+- `web_backend/server.js` — `makeBridge()` 重構（~60 行）
+- `.claude/work_log.md` — 本條目
+- `.claude/changelog.md` — 追加
+
+### 部署
+```bash
+scp web_backend/server.js nexuni@192.168.5.26:/home/nexuni/washrobot_web_backend/
+# .5.26 上
+cd /home/nexuni/washrobot_web_backend
+CRANE_IP=127.0.0.1 EASY_CRANE_IP=127.0.0.1 WROBOT_IP=<washrobot.5.x> node server.js
+```
+
+（Sadie 上次啟動沒帶 `CRANE_IP` / `EASY_CRANE_IP` env var → 預設連 .1.101 + .5.26，其中 .1.101 沒人 listen 所以 bridge 一直失敗 → 觸發上述 bug；正確做法是 env 指到 shim 跟 easy 實際位置）
+
+### 規範邊界備註
+`web_backend/` 屬 Sadie 前端範圍，不跨界。
+
+---
+
+## 2026-04-21g — easy crane 按鈕語意重構：HOLD × 3 → HOLD × 2 + AUTO 單鍵
+
+### 背景
+Sadie 要簡化 easy crane 操作：
+- **UP / DOWN 按鈕** → 純 press-and-hold（按住拉/放，放開停）
+- **AUTO 按鈕** → 單鍵啟動 `up on`，讓 server-side weight loop 自動停在 `up_stop_kg` 門檻（再按一次也能手動停）
+
+原 04-20h 的 HOLD/AUTO **mode 切換**設計被廢除 — 三顆按鈕現在各自有獨立語意。
+
+### 改動
+**index.html：**
+- 拿掉「模式」那排 row（原 `AUTO: OFF（按住模式）`）
+- AUTO 按鈕移到 UP/DOWN 下方獨立一排
+- hint list 從 5 條維持 5 條，內容改成對應新行為
+
+**app.js：**
+- 廢除 `easyAutoMode` flag + 所有 branching
+- 新增 `easyAutoActive` flag（與 `easyUpActive` / `easyDownActive` 同級）
+- UP/DOWN：純 hold，mousedown → `up on` / `down on`，mouseup/leave/touchend → `off` + `stop`
+- AUTO：click toggle，click 1 = `up on`，click 2 或 EVT weight_limit = `up off` + `stop`
+- **server state sync 重寫成單向**：原本 `if (serverUp !== easyUpActive)` 會在 client 剛按下的 race window 把 local state 誤回 false；改為「僅在 server 清掉時才重置 local」，並同時重置 `easyUpActive` 和 `easyAutoActive`（因為兩者驅動同一個物理 relay）
+- `releaseAllEasyHolds()` 擴充包含 AUTO 按鈕重置
+
+### 流程示意
+```
+UP  HOLD:  mousedown → up on → ... → mouseup → up off + stop
+           (途中 weight<threshold → server all_off + EVT → 重置 active)
+
+AUTO:      click → up on → ... → (自動) weight<threshold
+                                  → server all_off + EVT weight_limit
+                                  → client 同步重置 easyAutoActive
+           OR:                  (手動) click → up off + stop → 重置
+```
+
+### 修改檔案
+- `web_backend/public/index.html` — easy crane panel row 重排 + hint 5 條更新
+- `web_backend/public/app.js` — 整段 easy crane button 區塊重寫（~80 → ~100 行）+ onEasyCraneLine 的 sync 邏輯改單向
+- `.claude/work_log.md` — 本條目
+- `.claude/changelog.md` — 追加
+
+### 部署
+只要 scp 前端三檔到 .5.26 的 web_backend/public/（`index.html`、`app.js`；CSS 無改動），瀏覽器 Ctrl+Shift+R。
+
+### 規範邊界備註
+`web_backend/public/` 屬 Sadie 前端範圍，不跨界。
+
+---
+
+## 2026-04-21f — GUI 效能調整：拿掉 backdrop-filter + aurora blob 等 GPU heavy ops
+
+### 背景
+Sadie 回報：2026-04-21b 的深空極光主題很漂亮但 **Pi Chromium 上有點卡**。
+
+### 根因
+原設計用了幾項 GPU 重的效果，Pi Chromium 渲染吃力：
+1. `backdrop-filter: blur(16px) saturate(140%)` 在**每個 panel** — 最大殺手
+2. `backdrop-filter: blur(20~24px)` 在 header / banner / modal
+3. Aurora drift blob × 2（500/620px + `filter: blur(90px)` + 32s/42s 無限動畫）
+4. Banner pulse 動畫
+5. 每個按鈕 hover 的 `box-shadow` glow
+6. log 每一行 `text-shadow`（debug=true 時 log 量大）
+
+### 處理
+- **完全拿掉 `backdrop-filter`** — 改成實色 panel（`#1a1533` 紫調底），視覺仍「有紫色感」但零 GPU blur cost
+- **拿掉 aurora blob** — body::before/::after 整段刪除；body bg 保留兩層靜態 radial gradient（一次性計算，不重繪）
+- **拿掉 banner pulse 動畫** — 靜態底色
+- **簡化按鈕 hover** — 只剩 bg + border color 切換，不做 box-shadow glow
+- **拿掉 log text-shadow** — log 量大時累積重繪
+- **保留便宜效果：** dot 脈動改 opacity fade（比 box-shadow 便宜）、panel 頂部漸層線（CSS gradient 靜態）、gradient header 文字、input focus border
+
+### 預期效能改善
+- Panel 滾動 / 拖拉視窗 / hover 掃過按鈕 — 不再跳幀
+- log 狂噴時（debug=true）瀏覽器不再 CPU 滿載
+- dot pulse 保留，視覺科技感不掉
+
+### 修改檔案
+- `web_backend/public/style.css` — 全面精簡（~380 行 → ~290 行）
+- `.claude/work_log.md` — 本條目
+- `.claude/changelog.md` — 追加
+
+### 部署
+Sadie 只需 scp `web_backend/public/style.css` 到 `.5.26`，瀏覽器 Ctrl+Shift+R 強制 reload。
+
+### 規範邊界備註
+`web_backend/public/` 屬 Sadie 前端範圍，不跨界。
+
+---
+
+## 2026-04-21e — 測試配置：WASH_ROBOT CRANE_IP 改 .5.26（shim 與 easy 共 Pi）[跨界: user_lib]
+
+### 背景
+Sadie 的測試配置：crane_shim.py + Crane_easy_PI + web_backend **全部跑在 .5.26 同一台 Pi**；washrobot 之後也進 `.5.x` 網段（DHCP）。原 `WASH_ROBOT.h:100 CRANE_IP = "192.168.1.101"` 連不到。
+
+### 修法
+`WASH_ROBOT.h:100` 加 `[TEST MODE 2026-04-21]` 標記，改為 `"192.168.5.26"`。同步更新 `.claude/easy_crane_test_mode.md §9a` 撤除清單第一條。
+
+### 啟動配置（上機用）
+shim + backend 都 localhost：
+```bash
+# .5.26
+python3 crane_shim.py --easy-host 127.0.0.1 --rate-down 3 --rate-up 3
+CRANE_IP=127.0.0.1 EASY_CRANE_IP=127.0.0.1 WROBOT_IP=<washrobot.5.x> node server.js
+```
+
+### 修改檔案
+- `user_lib/WASH_ROBOT.h:100` — `CRANE_IP: "192.168.1.101" → "192.168.5.26"` + 4 行 `[TEST MODE]` 註解
+- `.claude/easy_crane_test_mode.md §9a` — 撤除清單第一行加 `CRANE_IP` 還原項；其他行號因 .h 加註解而 +5 調整
+- `.claude/work_log.md` — 本條目
+- `.claude/changelog.md` — 追加
+
+### 需要動作
+- **Sadie：重 build washrobot** 新 binary（ARM Release）→ scp 到 washrobot Pi
+- backend 啟動時帶 env var 把三個 target 都指回 `127.0.0.1` + washrobot 實際 IP
+
+### 規範邊界備註
+`WASH_ROBOT.h` 屬 Jim 範圍，標 `[跨界: user_lib]`。
+
+---
+
+## 2026-04-21d — web_backend 加 TCP keepalive + 10s ping 心跳（easy crane 閒置掉線修復）
+
+### 現象
+Sadie 回報：web GUI 開著沒動一陣子，easy crane dot 轉紅、連不到，但 `Crane_easy_PI` 實際還開著。
+
+### 根因
+`server.js` 的 `makeBridge()` 建的 TCP socket 沒開 `setKeepAlive`。加上 easy crane 在 `192.168.5.26` 跨網段（`.1.x` ↔ `.5.x`）中間有 router/NAT，NAT 閒置 15~60 分鐘會偷殺 TCP session。backend 這邊 `state.connected` 還是 true，直到下次 write 才 RST → onClose → 3s 後重連。但在此之前 GUI 已經顯示斷線。
+
+另一條助長線索：app.js `setInterval(..., 50ms)` 把 easy `status` 狂 poll 當隱性心跳 — 但瀏覽器 tab 背景化時 setInterval 被 throttle 到 1s+，甚至完全停；瀏覽器關掉更不用說。backend 就靠它維繫，不對。
+
+### 修法
+`server.js` `makeBridge()` 兩層 keepalive：
+1. **OS 層**：`sock.setKeepAlive(true, 30000)` — 閒置 30s 後發 probe，peer 掛了 ~60s 內 OS 殺 socket，觸發 `onClose` → 重連
+2. **App 層**：每 10s backend 自己對每個 bridge 送 `ping\n`，不依賴瀏覽器活動。washrobot / crane-shim / easy_crane 三邊的 `ping` 指令都支援
+
+新常數 `BRIDGE_PING_MS = 10000`。
+
+### 副作用
+- 每個 bridge 每 10s 回一次 ping ack，GUI log 會看到：
+  - `[washrobot] OK`
+  - `[crane] OK shim_pong`（shim）或 `OK pong`（正式 crane）
+  - `[easy_crane] OK pong`
+- 若覺得太吵可在 app.js 加 mute，下一輪處理
+
+### 修改檔案
+- `web_backend/server.js` — 加 `BRIDGE_PING_MS` 常數 + `sock.setKeepAlive(true, 30000)` + `setInterval(send('ping'), 10s)`
+- `.claude/work_log.md` — 本條目
+- `.claude/changelog.md` — 追加
+
+### 部署
+Sadie 需要：
+- crane Pi `.101` scp 新 `server.js` 覆蓋 `/home/nexuni/washrobot_web_backend/`
+- Ctrl-C 舊的 `node server.js` → 重啟
+
+### 規範邊界備註
+`web_backend/` 屬 Sadie 前端/部署範圍，不跨界。
+
+---
+
+## 2026-04-21c — 測試模式程式改動：watchdog 60s + 全驅動 debug [跨界: user_lib]
+
+> **規範權威：** `.claude/easy_crane_test_mode.md` §9（新增撤除清單）
+
+### 背景
+下午上機前 code review 發現 blocker：`WASH_ROBOT.h:142 WATCHDOG_TIMEOUT_MS = 2000` 太短，shim 的 `pay_out 45cm @ 3cm/s = 15s` 會讓 `crane_mtx_` 鎖住 15 秒 → watchdog 看 elapsed > 2s → `motion_active_=true` 時自動 `abort_flag=true` → `step_down` 每次都會 mid-motion abort。
+
+Sadie 決策：
+1. 把 watchdog 暫調到 60000ms（夠單 step 用，單次 return_home 短於 3m 也夠）
+2. 所有驅動 debug 都打開（on-site troubleshoot 用）
+3. 全部改動都在程式碼加 `[TEST MODE 2026-04-21]` 註解，撤除清單寫進 `easy_crane_test_mode.md §9`
+
+### 修改檔案
+
+| 檔案 | 改動 |
+|---|---|
+| `user_lib/WASH_ROBOT.h:142` | `WATCHDOG_TIMEOUT_MS: 2000 → 60000` + 6 行 `[TEST MODE]` 註解 |
+| `user_lib/WASH_ROBOT.cpp:58,66,74,81` | DM2J / ZDT / JC-100 / PQW `.init(..., false)` → `true` |
+| `user_lib/WASH_ROBOT.cpp:96` | IMU `.init(&imu_serial_, false)` → `true` + 單行 `[TEST MODE]` 註解 |
+| `Crane_easy_PI/main.cpp:318,319` | relay / dy500 `.init(..., false)` → `true` + `[TEST MODE]` 註解 |
+| `.claude/easy_crane_test_mode.md` §9 | 「撤除測試模式 ⚠️ 必看清單」— 9a 程式改動表 / 9b 執行環境 / 9c 功能驗證 / 9d 保留清單 |
+| `.claude/work_log.md` | 本條目 |
+| `.claude/changelog.md` | 追加 |
+
+### ⚠️ 主 crane 到位時必做（grep `TEST MODE` 找所有點）
+
+```bash
+grep -rn "TEST MODE" user_lib/ Crane_easy_PI/ washrobot_new_PI/
+```
+
+然後照 `easy_crane_test_mode.md §9a` 表把所有值改回去，重 build + deploy。
+
+### 副作用預警
+- **debug=true 會噴大量 Modbus hex dump**（5 DM2J + 9 ZDT + 9 JC-100 + PQW + IMU 每次 I/O 都印）— terminal + GUI log panel 會被淹沒
+- Sadie 可視情況把輸出 redirect 到檔：`./washrobot_new_PI 2>/tmp/wr.log`
+
+### 需要動作
+- **重 build washrobot 新 binary**（Windows VS，ARM Release）→ scp 到 .100
+- **重 build Crane_easy_PI 新 binary**（Windows VS，ARM Release）→ scp 到 .5.26
+- shim 無需改（Python 即改即用）
+
+### 規範邊界備註
+`user_lib/WASH_ROBOT.{h,cpp}` 是 Jim 範圍；`Crane_easy_PI/main.cpp` 是 Sadie 範圍。本條目標 `[跨界: user_lib]`，撤除時 Jim 要 review 還原值是否回到 2000/false。
+
+---
+
+## 2026-04-21b — Web GUI 主題重做：深空極光（glassmorphism + neon）
+
+### 背景
+Sadie 想把 GUI 從現有的終端風（黑底 + monospace + 平面 panel）改成有「夢幻 + 科技感」的外觀。提了 A/B/C 三個方向（深空 glass / cyberpunk HUD / 柔和 aurora），Sadie 選 A。
+
+### 設計要點
+- **主色系：** 深藍紫漸層底（`#0a0e27 → #1a0f3a → #0f1530`）+ 霓虹 accent（青 `#00e5ff` / 紫 `#a855f7` / 粉 `#ec4899`）
+- **Panel：** Glassmorphism — `backdrop-filter: blur(16px) saturate(140%)` + 半透明紫底 + 紫色 subtle border；頂部漸層線裝飾（青→紫→透明）
+- **Aurora 光暈：** body `::before` / `::after` 兩個大圓漸層 blob（紫 + 青），各自 30s/40s 緩慢漂移動畫
+- **狀態 dot：** 脈動光暈（ok=綠、err=紅/粉），箱陰影 1.8~2s 循環
+- **Header：** gradient 標題文字（青→紫→粉）`background-clip: text`
+- **按鈕：**
+  - 預設：半透明 + hover 時 cyan 邊光
+  - `.primary`：青紫漸層底 + cyan glow
+  - `.danger`：粉紅調 + hover 紅光暈
+  - `.btn-emergency`：粉紅大按鈕 + 壓住時深紅 + 內發光
+  - `.btn-hold.active`：青紫漸層 + inset glow
+  - `.btn-auto.active`：琥珀漸層
+- **Log panel：** 保留深色終端底以保除錯可讀性，但外層仍 glass frame；log colors 加 text-shadow 發光
+- **Input focus：** cyan 邊 + 3px glow ring
+- **Modal：** backdrop 毛玻璃 + modal 本身 24px blur + 紫色 outer glow
+- **Banner：** 退化模式 banner 加 pulse 動畫，顏色保持語意（warn 琥珀、err 紅）
+
+### 字體
+- **Google Fonts：** Inter + JetBrains Mono（`display=swap`）— Pi 離線時自動 fallback 到 system-ui / Consolas
+- **UI 標題用 Inter，數值 / 按鈕 / log 用 JetBrains Mono** — 工程感保留
+
+### 實作原則
+- **app.js 零改動** — 所有 class / id hook 完全保留
+- **index.html 只加 font link 3 行** — 沒動任何 id / class / 結構
+- **style.css 全面重寫** — 從 266 行擴到 ~380 行（加設計 token、動畫、pseudo-element 裝飾）
+
+### 修改檔案
+- `web_backend/public/style.css` — 全面重寫
+- `web_backend/public/index.html` — `<head>` 加 3 行 Google Fonts link
+- `.claude/work_log.md` — 本條目
+- `.claude/changelog.md` — 追加
+
+### 待驗證（🟡 未上機測）
+- [ ] Pi 實機瀏覽器渲染效果（Chrome/Safari 都該支援 backdrop-filter）
+- [ ] Aurora blob 動畫在 Pi 上會不會過重（如卡頓，降 blur 值或 disable @prefers-reduced-motion）
+- [ ] Google Fonts 在 Pi 有網 / 無網兩種情境都 degrade graceful
+- [ ] 所有 banner / modal / disabled panel 在新主題下仍語意清楚
+- [ ] 行動瀏覽器（若要用手機遠端）排版
+
+### 規範邊界
+`web_backend/public/` 屬 Sadie 前端範圍，純視覺改，不跨界。
+
+---
+
+## 2026-04-21 — crane_shim（測試模式：讓 washrobot 自動下洗搭配簡易吊車）
+
+> **規範權威：** `.claude/easy_crane_test_mode.md`（本次新增）
+
+### 背景
+主吊車硬體未到位（缺 `DSZL_107` 張力感測 + 中間絞盤變頻器），但 washrobot 狀態機 + `step_down` / `run` 已經完備。Sadie 想用 `Crane_easy_PI`（簡易吊車，:5003）暫代主吊車跑受控短距離測試。
+
+兩邊協定不相容：
+- 主 crane `:5002`：`pay_out <cm>` / `retract <cm>` 距離型
+- Easy crane `:5003`：`up on/off` / `down on/off` 時間型 press-and-hold
+- 短期改 washrobot 硬編 IP/port 會污染主協定
+
+### 決策
+新增「shim 層」：一個跑在 crane Pi (.101) 的 Python 小程式，偽裝成 `Crane_control_PI` 監聽 :5002，把 `pay_out <cm>` 翻譯成 easy `down on → sleep(cm/rate) → down off + stop`。**washrobot + web_backend + Crane_easy_PI 都不用改。**
+
+評估過另兩條路線（1. 加 `CRANE_MOCK` flag 讓 washrobot 跳過 crane / 2. 改 washrobot 直講 easy 協定）都拒絕：前者違反 motion_flow §8 失聯安全鎖，後者破壞協定權威。
+
+### 已完成
+- **新增 `crane_shim/crane_shim.py`** — 單檔 Python stdlib，~330 行
+  - TCP server :5002（多 client、line-based）
+  - Easy 連線單一 socket + mutex 序列化寫入
+  - `pay_out`/`retract` 走 motion_lock，motion 中每 500ms 送 `ping` 餵 easy 2s watchdog
+  - `stop`/`emergency_stop` 不拿 motion_lock，直接 set abort flag + 轉發 easy `stop`，進行中的 motion 下個 tick 結束
+  - `ping` 不經 easy（shim 直接回應，避免 washrobot 2s ping timeout 誤觸 crane_watchdog）
+  - SIGINT/SIGTERM 收到會自動送 easy `stop`
+  - CLI flag：`--rate-down` / `--rate-up`（cm/s，預設 3.0 placeholder）
+- **指令對照：**
+  - `pay_out <cm>` / `retract <cm>` → easy timed motion
+  - `pay_out_left/right` / `retract_left/right <on|off>` → easy `down/up <on|off>`（易吊無左右分）
+  - `stop` / `emergency_stop` / `status` / `ping` → 轉發或本地處理
+  - `home_status` → **`ERR shim_no_home_use_manual_easy_crane`**（擋 Phase 6 自動召回按鈕）
+  - `roll_correct` → **`ERR shim_no_roll_correct`**（Phase 5 平衡校正跳過）
+  - `zero_meters` / `middle_set` → `OK shim_noop`
+- **新增 `crane_shim/README.md`** — 啟動、CLI flag、速率校正流程、故障排除
+- **新增 `.claude/easy_crane_test_mode.md`** — 測試模式權威規範：適用時機、架構、完整指令對照、功能落差、可用測試流程（6a 單步 / 6b 連續 / 6c 救援）、安全守則 8 條、開工 checklist、撤除步驟
+- **更新 `.claude/runbook.md` §A** 加「1-alt 測試模式」分支啟動指令
+
+### 限制（使用者要知道）
+- 🟡 速率 `--rate-down / --rate-up` 目前 3.0 cm/s **佔位值**，上機後要實測校正（`STEP_MARGIN_CM=15` 吃 ±50% 誤差）
+- 🟡 距離限 ≤ 3 m（中間水管電線無主動放線、DSZL_107 未裝）
+- 🟡 Phase 5（平衡校正）/ Phase 6（自動召回）在測試模式下被 shim 擋掉，要手動
+- 🟡 `pay_out_left` / `pay_out_right` 都 map 同一條 easy 繩，無法做左右差動
+
+### 規範邊界備註
+- `crane_shim/` 為**新增頂層資料夾**，不動 `user_lib/`（Jim 範圍）、不動 `washrobot_new_PI/main.cpp` / `Crane_easy_PI/main.cpp` / `web_backend/`（皆 Sadie 範圍內）、不動 motion_flow.md
+- 測試模式專屬規範獨立放 `.claude/easy_crane_test_mode.md`，不污染 motion_flow.md 正式協定
+- 本條目由 Sadie 執行（Claude 協作），範圍內無跨界
+
+### 修改檔案
+- `crane_shim/crane_shim.py` — 新增
+- `crane_shim/README.md` — 新增
+- `.claude/easy_crane_test_mode.md` — 新增
+- `.claude/runbook.md` — §A 加「1-alt 測試模式」
+- `.claude/work_log.md` — 本條目
+- `.claude/changelog.md` — 追加
+
+---
+
 ## 2026-04-20k — easy crane 第三輪提速（SUSTAIN=0 + all_off 最佳化）
 
 ### 改動

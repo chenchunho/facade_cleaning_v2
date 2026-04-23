@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <title>washrobot control</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -163,18 +166,17 @@
       <span class="label">kg）</span>
     </div>
     <div class="row">
-      <span class="label">模式:</span>
-      <button id="btn-easy-auto" class="btn-auto">AUTO: OFF（按住模式）</button>
-    </div>
-    <div class="row">
       <button id="btn-easy-up"   class="btn-hold primary">↑ 拉繩（按住）</button>
       <button id="btn-easy-down" class="btn-hold primary">↓ 釋放繩（按住）</button>
     </div>
+    <div class="row">
+      <button id="btn-easy-auto" class="btn-auto">🤖 AUTO 拉到上限（點擊）</button>
+    </div>
     <ul class="hint">
-      <li>HOLD 模式：按住持續動作，放開立即停</li>
-      <li>AUTO 模式：點擊 UP 或 DOWN = 開始，再點一次 = 停止</li>
+      <li>↑ / ↓ 按住拉/釋放，放開立即停</li>
+      <li>AUTO：一鍵啟動拉繩，到「收繩停止門檻」自動停；也可再按一次手動停</li>
       <li>網路掉線 2 秒內自動停（server watchdog）</li>
-      <li>收繩時重量低於「收繩停止門檻」自動停</li>
+      <li>收繩時重量低於「收繩停止門檻」自動停（AUTO 即靠這個）</li>
       <li>讀不到重量（DY500 失聯）時自動停所有動作 + 拒絕新的 UP/DOWN 指令</li>
     </ul>
   </section>

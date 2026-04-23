@@ -98,11 +98,18 @@
     <ClInclude Include="..\user_lib\WASH_ROBOT.h" />
     <ClInclude Include="..\user_lib\WT901BC_TTL.h" />
     <ClInclude Include="..\user_lib\ZDT_motor_control.h" />
+    <ClInclude Include="..\user_lib\log_utils.h" />
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>D:\washrobot_new_PI\user_lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\user_lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
+  </ItemDefinitionGroup>
+  <!-- Unconditional: std::thread requires pthread at link time. Applies to all configs. -->
+  <ItemDefinitionGroup>
+    <Link>
+      <LibraryDependencies>pthread</LibraryDependencies>
+    </Link>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

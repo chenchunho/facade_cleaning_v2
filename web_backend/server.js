@@ -30,6 +30,18 @@ const EASY_CRANE_PORT = 5003;
 
 const RECONNECT_MS = 3000;
 
+// Backend-driven keepalive for each TCP bridge.
+// Reason: easy_crane is on a different subnet (.5.x) from the backend (.1.x), so the
+// TCP session crosses a router/NAT that silently kills idle sessions after ~15-60 min.
+// Without keepalive, backend never sees the drop until the next write fails. This
+// is especially bad when the browser tab is backgrounded — setInterval throttles to
+// 1s+ and eventually stops feeding the 50ms status poll, leaving the TCP idle.
+//
+// Belt + suspenders:
+//   (1) OS-level TCP keepalive on every bridge socket (setKeepAlive)
+//   (2) App-level `ping\n` every BRIDGE_PING_MS from backend itself (not dep. on browser)
+const BRIDGE_PING_MS = 10000;
+
 //=========== app + http ===========
 
 const app = express();
@@ -51,13 +63,33 @@ function broadcast(obj) {
 //=========== TCP bridge ===========
 
 function makeBridge(name, ip, port) {
-    const state = { sock: null, connected: false, buf: '' };
+    const state = { sock: null, connected: false, buf: '', reconnectTimer: null };
+
+    function scheduleReconnect() {
+        // Dedupe: Node sockets fire 'error' AND 'close' for the same failure, and without
+        // this guard each failed connect would schedule 2 retries → exponential pile-up
+        // of SYN-SENT sockets → OOM kill within minutes when a target is unreachable.
+        if (state.reconnectTimer) return;
+        state.reconnectTimer = setTimeout(() => {
+            state.reconnectTimer = null;
+            connect();
+        }, RECONNECT_MS);
+    }
 
     function connect() {
+        // Destroy any lingering old socket to prevent fd leak on repeated failures.
+        if (state.sock && !state.sock.destroyed) {
+            try { state.sock.destroy(); } catch (e) {}
+        }
+
         const sock = new net.Socket();
         state.sock = sock;
+        state.buf = '';
 
         sock.setNoDelay(true);
+        // OS-level TCP keepalive — probe after 30s idle, kills socket if peer unreachable.
+        sock.setKeepAlive(true, 30000);
+
         sock.connect(port, ip, () => {
             state.connected = true;
             console.log(`[${name}] connected ${ip}:${port}`);
@@ -76,14 +108,17 @@ function makeBridge(name, ip, port) {
             }
         });
 
-        const onClose = (why) => {
-            if (state.connected) console.log(`[${name}] disconnect (${why})`);
+        // Swallow 'error' so it doesn't crash the process; 'close' always follows and
+        // drives the reconnect. (Previously both events each scheduled a retry.)
+        sock.on('error', (err) => {
+            if (state.connected) console.log(`[${name}] error: ${err.message}`);
+        });
+        sock.on('close', () => {
+            if (state.connected) console.log(`[${name}] disconnect`);
             state.connected = false;
             broadcastStatus();
-            setTimeout(connect, RECONNECT_MS);
-        };
-        sock.on('error', (err) => onClose(err.message));
-        sock.on('close', () => onClose('close'));
+            scheduleReconnect();
+        });
     }
 
     function send(cmd) {
@@ -96,6 +131,11 @@ function makeBridge(name, ip, port) {
             return false;
         }
     }
+
+    // App-level keepalive — send `ping\n` every BRIDGE_PING_MS regardless of browser
+    // activity. Guarantees the NAT stays open and write-path failures surface fast.
+    // ping is idempotent and supported by all three targets (washrobot / crane-shim / easy_crane).
+    setInterval(() => { send('ping'); }, BRIDGE_PING_MS);
 
     connect();
     return { name, send, isConnected: () => state.connected };

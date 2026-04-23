@@ -97,7 +97,11 @@ private:
     static constexpr const char* IP_485_3   = "192.168.1.22";
     static constexpr int         PORT_485   = 4001;
 
-    static constexpr const char* CRANE_IP   = "192.168.1.101";
+    // [TEST MODE 2026-04-21] CRANE_IP changed from "192.168.1.101" → "192.168.5.26"
+    // because crane_shim.py is co-located on the easy crane Pi (.5.26) during testing.
+    // REVERT to "192.168.1.101" when main crane (Crane_control_PI) deploys to its own Pi.
+    // See .claude/easy_crane_test_mode.md §9a 撤除清單.
+    static constexpr const char* CRANE_IP   = "192.168.5.26";
     static constexpr int         CRANE_PORT = 5002;
 
     // PQW relay channels (slave 12, 8CH)
@@ -112,10 +116,14 @@ private:
     static constexpr int CH_WATER_INLET  = 7;  // water inlet ball valve (tank refill from rooftop)
 
     // ZDT pusher slave IDs
-    static constexpr int ZDT_LF1 = 1, ZDT_LF2 = 2;  // left foot
-    static constexpr int ZDT_LB1 = 3, ZDT_LB2 = 4;  // left body
-    static constexpr int ZDT_RF1 = 5, ZDT_RF2 = 6;  // right foot
-    static constexpr int ZDT_RB1 = 7, ZDT_RB2 = 8;  // right body
+    // Slave IDs updated 2026-04-23 per actual wiring on robot
+    //   feet:  left = 3,4 / right = 1,2
+    //   body:  left = 6,8 / right = 5,7
+    //   center = 9
+    static constexpr int ZDT_LF1 = 3, ZDT_LF2 = 4;  // left foot
+    static constexpr int ZDT_LB1 = 6, ZDT_LB2 = 8;  // left body
+    static constexpr int ZDT_RF1 = 1, ZDT_RF2 = 2;  // right foot
+    static constexpr int ZDT_RB1 = 5, ZDT_RB2 = 7;  // right body
     static constexpr int ZDT_C   = 9;                // center
 
     // DM2J rail/arm slave IDs
@@ -139,7 +147,12 @@ private:
 
     // Crane watchdog
     static constexpr int HEARTBEAT_INTERVAL_MS = 500;
-    static constexpr int WATCHDOG_TIMEOUT_MS   = 2000;
+    // [TEST MODE 2026-04-21] bumped 2000 → 60000 because crane_shim.py on :5002 does
+    // open-loop timed pay_out/retract (e.g. 45cm @ 3cm/s = 15s) which holds crane_mtx_
+    // longer than the normal 2s watchdog. Main crane (Crane_control_PI) is fast enough
+    // that 2000ms is correct. REVERT to 2000 when main crane is online.
+    // See .claude/easy_crane_test_mode.md §9 撤除清單.
+    static constexpr int WATCHDOG_TIMEOUT_MS   = 60000;
 
     // IMU
     static constexpr const char* IMU_PORT           = "/dev/ttyUSB0";  // TODO confirm

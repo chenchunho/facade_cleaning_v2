@@ -15,6 +15,392 @@
 
 <!-- 日誌從下方開始 -->
 
+## 2026-04-23d — Claude Code — Linux_test 加選項 9 (SD76 計米器) + 10 (ZS_DIO 捲揚機)
+
+### 修改檔案
+- `Linux_test/main.cpp` —
+  - include `SD76_length_meters.h` + `ZS_DIO_R_RLY.h`
+  - 新增 `test_sd76()`（選項 9）：提示 gateway IP (.30) + slave (2/3/4)，持續 live-read `readUpperInteger()` + `readStatus()`，互動指令 r/p/s（reset / pause / resume）/ q
+  - 新增 `test_zsdio()`（選項 10）：提示 gateway IP + slave + total_relay，互動 `on N / off N / r N / a / o / q`。註解標示 main crane (.30) 跟 easy crane (.21) 的 channel 對應
+  - 選單加兩項；main 分派加兩分支
+
+### 原因
+Sadie 要單獨測試計米器（SD76）和捲揚機繼電器（ZS_DIO）硬體是否正常。兩者都掛在吊車側，SD76 只有 main crane 有（slave 2,3,4），ZS_DIO 兩端都有但 channel 用法不同。測試工具涵蓋兩種配置。
+
+## 2026-04-23c — Claude Code — 更新 ZDT slave ID 映射 + 選項 7 retry 改 rail-backup [跨界: user_lib]
+
+### 修改檔案
+- `user_lib/WASH_ROBOT.h:119-123` — ZDT slave ID 常數更新（跨界）：
+  - `ZDT_LF1, LF2: 1,2 → 3,4`（左腳）
+  - `ZDT_LB1, LB2: 3,4 → 6,8`（左身體）
+  - `ZDT_RF1, RF2: 5,6 → 1,2`（右腳）
+  - `ZDT_RB1, RB2: 7,8 → 5,7`（右身體）
+  - `ZDT_C: 9`（中心，不變）
+- `Linux_test/main.cpp` —
+  - 選項 7/8 的 `feet_slaves` 改 `{1,2,3,4}`、`body_slaves` 改 `{5,6,7,8}`、`body_center_slaves` 改 `{5,6,7,8,9}`
+  - print 字串從 "ZDT 1,2,5,6" → "ZDT 1,2,3,4"、"ZDT 3,4,7,8,9" → "ZDT 5,6,7,8,9"
+  - **選項 7 retry 策略改 rail-backup（Strategy B）**：新增 `retry_grip_rail()` lambda + `RAIL_BACKUP_CM=5.0` 常數。Feet retry → rail -5cm；Body retry → rail +5cm。每次 retry 累積（3 次 retry = ±15cm）。跟 WASH_ROBOT `feet_backup`/`body_backup` 一致
+  - 選項 8 保持原 `retry_grip`（純 pusher back-off，因無滑桿）
+- `CLAUDE.md` 架構圖 — ZDT slave 對應表更新；PQW CH2/CH3 備註的 slave 清單從 `1,2,5,6 / 3,4,7,8` 改 `1,2,3,4 / 5,6,7,8`
+
+### 原因
+Sadie 確認實機接線：feet 左 3,4 / 右 1,2、body 左 6,8 / 右 5,7。原本 WASH_ROBOT.h 的常數跟實機對不上。修掉後 do_step_down_ / do_attach 等函式自然用新 ID（因為都用 `ZDT_LF1` 等常數）。另外選項 7 retry 改 rail-backup 更貼近 WASH_ROBOT 原生行為，能嘗試不同貼附位置。
+
+### 規範邊界備註
+`WASH_ROBOT.h` 屬 Jim 範圍，標 `[跨界: user_lib]`。Sadie 已確認 slave ID 就是這個新映射。
+
+## 2026-04-23b — Claude Code — Linux_test 加選項 8「無滑桿的步伐測試」
+
+### 修改檔案
+- `Linux_test/main.cpp` — 新增 `test_full_step_no_rail()`：選項 7 的子集，去掉 DM2J rail 移動，只跑「腳組 detach → retract → extend → attach → 驗真空」+「身+中心同流程」+ retry grip。選單加第 8 項
+
+### 原因
+Sadie 要一個純 push/vacuum 循環測試，不動滑桿。適用場景：
+- DM2J 還沒好
+- 在平台上測（rail 會撞東西）
+- 單純驗證推桿同步 + 真空重吸邏輯
+
+## 2026-04-23 — Claude Code — Linux_test 加選項 7「完整步伐測試」
+
+### 修改檔案
+- `Linux_test/main.cpp` —
+  - 新增常數：slave 映射（feet 1,2,5,6 / body 3,4,7,8 / center 9 / DM2J rail 1,3 / PQW slave 12）、`PUSHER_BACKOFF_PULSE`（16mm back-off 用於重吸）、`VACUUM_SETTLE_MS`(2s) / `VACUUM_RELEASE_MS`(300ms)
+  - 新增三個 helper：
+    - `zdt_group_move_sync()` — queue N 個 ZDT 用 sync=1 + broadcast trigger + poll 到 pos_reached（沿用 option 6 的硬體同步模式）
+    - `vacuum_verify()` — 讀 JC-100 一批，印每顆壓力 + 判斷是否都 ≤ threshold
+    - `dm2j_pair_rail_move()` — 左右滑桿 queue + `PR_move_cm_trigger_all` 廣播 + 分別確認 done
+  - 新增 `test_full_step()`：IP × 3（.20/.21/.22）+ 步距 + 步數 + 壓力門檻 + retry 數，循環跑：
+    - Phase A（腳組）：釋放 CH2 → 腳推桿 retract → 滑桿 +cm → 腳推桿 extend → CH2 ON → 讀 JC-100 1/2/5/6 → 失敗觸發 retry_grip（back-off + re-extend + re-engage）
+    - Phase B（身體+中心）：釋放 CH3+CH4 → 身+中推桿 retract → 滑桿 -cm → extend → ON → JC-100 3/4/7/8/9 → retry
+  - 選單加第 7 項
+
+### 原因
+Sadie 要一個整合測試把 8 支推桿（腳 4 + 身 4）+ 滑桿（DM2J）+ 真空壓力驗證 + retry 全部串起來跑，不經 washrobot 主程式。相當於 `do_step_down_` 精簡成 Linux_test。預設小步距（10cm）+ 可調 retry，方便現場調參。
+
+
+
+### 修改檔案
+- `Linux_test/main.cpp` `test_zdt_group()`：`send_pos` lambda 把 `motion_control_pos_mode` 換成 `motion_control_pos_mode_nowait`
+
+### 原因
+2026-04-22i 的 patch 把 sync 改成 1（暫存模式），但觀察到「都不會動」。根因：`user_lib/ZDT_motor_control.cpp:361-369` 的 `motion_control_pos_mode` 內部在送完指令後會 blocking 呼叫 `wait_until_pos_reached()` 等到位。sync=1 下 ZDT 不啟動馬達（等廣播觸發才動），所以 `wait_until_pos_reached()` 永遠等不到 pos_reached → 每顆 slave 都 timeout → 被標 `aborted/send_fail` → 到 Phase 1b 時已無可 trigger 的 slave → 整組不動。
+
+`motion_control_pos_mode_nowait` 是現成的 user_lib API（相同簽名、不 wait），送完即返回，剛好適合 queue-then-broadcast 的模式。換成 nowait 後 Phase 1 能正確 queue，Phase 1b broadcast 才會真的觸發 8 顆同步啟動。
+
+### 規範權威
+無（測試工具行為；未改 user_lib）。
+
+## 2026-04-22i — Claude Code — 選項 6 改用 ZDT 硬體同步觸發
+
+### 修改檔案
+- `Linux_test/main.cpp` `test_zdt_group()`：
+  - `send_pos()` lambda 加 `sync_flag` 參數
+  - Phase 1 把 `pos_mode` 的 sync 從 `0`（立即）改為 `1`（暫存不執行）
+  - 新增 Phase 1b：對任一已 queue 成功的 slave 呼叫 `trigger_sync_move()`（廣播 slave 0x00, Reg 0x00FF），所有暫存指令的 ZDT 同時執行
+  - Stall recovery 的 resend 仍用 `sync=0`（立即），因為此時其他顆早已在動或到位，不該等廣播
+
+### 原因
+Sadie 回報選項 6 的推桿「一支接一支伸出」，不是真同步。根因：RS485 bus 是半雙工序列化，原本 `sync=0` 指令一送到就立刻執行，導致第 1 顆比第 8 顆早 ~300ms 動作。ZDT 本身支援多軸硬體同步（Reg 0x00FF 廣播觸發），用這機制後 8 顆會同一瞬間啟動。
+
+### 規範權威
+無（測試工具行為；ZDT API 本來就有，未改 user_lib）。
+
+## 2026-04-22h — Claude Code — Linux_test 新增選項 6「ZDT multi-pusher group」
+
+### 修改檔案
+- `Linux_test/main.cpp`
+  - 頂部新增 `#include <vector>` `#include <set>`
+  - 新增 `test_zdt_group()`：對 slave 1~9 下達統一 target pulse，支援 skip list（預設 `9`，因主體只裝 8 支推桿）
+  - 流程：Phase 1 逐顆 `release_stall_flag` + `motion_control_driver_EN(true)` + `motion_control_pos_mode`；Phase 2 統一 poll 每 200ms 讀所有未完成 slave 的 status
+  - Per-slave 堵轉自動 recovery（延用選項 3 的邏輯：`emergency_stop` → `release_stall_flag` → re-enable → re-send，最多 3 次）
+  - 單顆失敗不阻斷其他顆；結束印 SUMMARY 列每顆狀態（reached / aborted + 原因）
+  - 主選單新增選項 `6`，dispatcher 加 `else if (line == "6")`
+
+### 原因
+Sadie 需求：主體目前只裝 slave 1~8 SMC 推桿（slave 9 中心未裝），想單元測試「8 支同時動作」驗證機械同步性與堵轉處理。選項 3 僅能單顆測，選項 6 填補批次驗證需求，不改 user_lib、不改 WASH_ROBOT 自動流程。
+
+### 規範權威
+無（測試工具行為，不動規範）。
+
+## 2026-04-22g — Claude Code — 修 Linux SIGPIPE 讓主程式被殺
+
+### 修改檔案
+- `washrobot_new_PI/main.cpp` — `main()` 最前面加 `signal(SIGPIPE, SIG_IGN)`（`#ifndef _WIN32` 守衛）
+- `Crane_control_PI/main.cpp` — 同上
+- `Crane_easy_PI/main.cpp` — 同上
+- `.claude/mailbox.md` — 留訊息給 Jim，請評估 user_lib `TCP_client::sendData` / `TCP_server::sendToClient` 改用 `MSG_NOSIGNAL`
+
+### 原因
+Sadie 回報 washrobot 跑到一半印 `Broken pipe` 被 shell 殺掉。根因：`TCP_client.cpp:175` / `TCP_server.cpp:175` 都用 `send(sock, buf, len, 0)` 不帶 `MSG_NOSIGNAL`，Linux 下對已關閉對端的 socket 寫入會送 SIGPIPE，預設處置 terminate → 整個 process 死。任何一端斷（web 後端、crane、RS485 gateway、Linux_test 退出）都會踩到。
+
+`signal(SIGPIPE, SIG_IGN)` 在 main 最前面一次設定即可 process-wide 生效，之後 `send()` 對死 socket 會回 -1 + `errno=EPIPE`，交由呼叫端 return false 處理，不會殺 process。Windows 不受影響（Winsock 沒 SIGPIPE 概念）。
+
+長期建議由 Jim 把 user_lib 的 send 改用 `MSG_NOSIGNAL`（更完整、Linux_test 等也受益），已留 mailbox。
+
+### 規範權威
+無（build/runtime 修復，不動規範或 API）。
+
+## 2026-04-22f — Claude Code — 修 `WashRobot::IMU_BASELINE_SEC` undefined reference
+
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` — 頂部新增類外定義 `constexpr int WashRobot::IMU_BASELINE_SEC;`
+
+### 原因
+連結錯誤 `undefined reference to WashRobot::IMU_BASELINE_SEC`。根因：C++14 下 `static constexpr` 類別成員**只是宣告**不是定義，一旦被 ODR-use（如 `WASH_ROBOT.cpp:266` 傳進 `std::chrono::seconds(const Rep&)`，參數是 const reference）linker 就要找類外定義。最小修復為加一行類外定義；長期應升 C++17（`static constexpr` 成員自動 inline variable 則無此坑）。
+
+### 規範權威
+無（build 層修復，不動規範或 API）。
+
+## 2026-04-22e — Claude Code — Linux_test ZDT 測試加堵轉自動排除
+
+### 修改檔案
+- `Linux_test/main.cpp` — `test_zdt()` 把原本的 `drv.wait_until_pos_reached(10000, 200)` 換成自寫 poll loop：
+  - 每 200ms 讀一次 `get_system_status()`
+  - `pos_reached=1` → 成功 break
+  - `stall_flag=1` → 印 `[STALL] at real_pos=... attempt N/3`，執行 recovery 序列（`emergency_stop(true)` → `release_stall_flag` → `motion_control_driver_EN(true)` → 重送 `motion_control_pos_mode`），最多重試 3 次
+  - 10 秒無 stall 也沒到位 → `[WARN] attempt timeout`
+  - 成功時印 `[OK] reached target (stall retries=N)` 讓使用者看到有沒有觸發過 recovery
+
+### 原因
+Sadie 測 slave 2 遇到 `pos_reached=0 stall=1` final 狀態，`wait_until_pos_reached` 只會報 timeout 不會告訴你是 stall，也不會嘗試排除。現在 Linux_test 能在偵測到堵轉時自動 release + 重試，用於排除偶發堵轉；連續 3 次 stall 時會 ABORT 並印最後位置，方便判斷是「穩定機械卡」還是「偶發 encoder 雜訊」。
+
+### 規範權威
+無（測試工具行為，不動 motion_flow 規範；user_lib API 未改）。
+
+## 2026-04-22d — Claude Code — PQW all ON/OFF 從 [OK] 改 [SENT]（更誠實）
+
+### 修改檔案
+- `Linux_test/main.cpp` —
+  - `test_pqw()` 裡 `all ON` / `all OFF` 改印 `[SENT] ... echo-len OK, content NOT verified → check LEDs physically`。因為 `controlAll` 只檢查 echo 長度 ≥ 8，內容不驗，garbage 也算 success
+  - 在 PQW 測試開頭加 note 提醒：Modbus echo check 在有些 PQW 韌體不穩，實體 LED 驗證才是可靠
+
+### 原因
+Sadie 回報：按 `all ON` 看到 `[OK]`，但實體 relay 沒動。根因：driver 的 `controlAll` 邏輯太寬（echo.size() >= 8 就當成功），而不是驗證 echo 內容是否跟 TX 對應。Linux_test 不改 user_lib 邏輯，只改訊息誠實化：現在顯示 `[SENT]` 表示「送出去了，但不能保證真的開」，叫使用者看 LED。
+
+## 2026-04-22c — Claude Code — Linux_test 避免 readback 誤報誤判（PQW / ZDT）
+
+### 修改檔案
+- `Linux_test/main.cpp` —
+  - `test_pqw()` `controlRelay` / `controlAll(true)` / `controlAll(false)` 的錯誤改 `[WARN] readback mismatch — check LED physically`，不再報 ERR 中斷
+  - 三處都採 optimistic 更新本地 state（信任寫入，忽略 readback 解析失敗）
+  - `test_zdt()` `wait_until_pos_reached` timeout 改 `[WARN]` 並提示實體檢查位置
+  - `motion_control_pos_mode` send 失敗仍是 ERR（這是真的送不出去，不是 readback）
+
+### 原因
+Sadie 實測 PQW `on 1` 時 TX 有發出、RX 回非標準 Modbus 框架，`parseReadResponse` 解析失敗→ 全回 false → `states[0] != true` → driver return error。實際上 relay 可能已經物理吸合。改 ERR→WARN 讓現場操作員憑實體 LED / 咔聲判定，而不是被假錯誤打斷。
+
+## 2026-04-22b — Claude Code — Linux_test 加 TCP quick-probe 避免 2 分鐘 connect 卡死
+
+### 修改檔案
+- `Linux_test/main.cpp` —
+  - 新增 `quick_tcp_probe(ip, port, timeout_ms=2000)`：用 non-blocking connect + select 做 2 秒快速可達性檢查（跨平台 Linux/Windows）
+  - 4 個 TCP 測試（DM2J / ZDT / JC-100 / PQW）在 `TCP_client::connectToServer` 之前先 probe，不可達直接 2 秒內回錯誤（原本要 ~130 秒 Linux SYN retry 耗盡才會回）
+
+### 原因
+Sadie 回報無法連線的等待太久。`TCP_client::connectToServer` 用 blocking connect 沒設 timeout，Linux 預設要跑完所有 SYN 重試。不動 user_lib（Jim 範圍），只在 Linux_test 層加 pre-probe 處理。
+
+## 2026-04-22 — Claude Code — Linux_test 重構：5 個單物件測試 + menu 迴圈
+
+### 修改檔案
+- `Linux_test/main.cpp` — 整個重寫結構：
+  - 拿掉多-slave 的 `test_dm2j_scan()` + `test_zdt_pusher()`（violates "single object per test" 原則）
+  - 保留 5 個獨立測試：IMU / DM2J / ZDT / JC-100 / PQW，每個自問 IP / slave / 參數
+  - `main()` 改 menu loop（原本測完就結束；現在測完回選單、直到輸入 `q` 才退出）
+  - 每個測試函式都清理資源後 `return`（ZDT/PQW 自動 disable / all_off，TCP 自動 close）
+
+### 原因
+Sadie 要求：每個物件都能輸入 slave id + ip 單獨測，且測完回主視窗選下一個。原設計單次執行單次測試後即退出，切換設備要重跑執行檔很煩。移除 scan/cycle 這兩個不是「單物件」的選項也讓介面更一致。
+
+## 2026-04-21s — Claude Code — Linux_test ZDT 測試結束自動 disable 馬達
+
+### 修改檔案
+- `Linux_test/main.cpp` —
+  - `test_zdt_single()` (option 5) 結束前加 `motion_control_driver_EN(false)` 自動關使能
+  - `test_zdt_pusher()` (option 4) 'q' 退出前 loop slave 1..9 全部 disable
+
+### 原因
+Sadie 回報 ZDT 測試完馬達「關不掉」— 原流程只 enable 不 disable，馬達保持通電卡位置 + 持續發熱。現在測完自動 disable。跟 PQW 的 exit-all-off 同策略。
+
+## 2026-04-21r — Claude Code — Linux_test PQW 改明確 on/off 語法（不再 toggle）
+
+### 修改檔案
+- `Linux_test/main.cpp` — `test_pqw()` 互動 loop 改成：`on N` 開指定通道、`off N` 關、`a` 全開、`o` 全關、`s` 看 state、`q` 退出。原 toggle 模式拿掉（避免跟硬體實際狀態不同步造成誤解）
+
+### 原因
+Sadie 要明確「開 relay」的動作而不是 toggle。改成 verb 明確的語法後意圖清楚，重複按同指令也不會誤翻狀態。
+
+## 2026-04-21q — Claude Code — Linux_test 選項 6 簡化（拿掉 scan，直接問 slave）
+
+### 修改檔案
+- `Linux_test/main.cpp` — `test_jc100()` 移除 scan 1..9 階段，改成線性流程：`IP → Slave ID → live-read` 跟選項 2/5 統一風格
+- 選單 line 改成 `JC-100 pressure — slave + live read`
+
+### 原因
+Sadie 要所有測試都可直接輸 slave id 跑，不要中間 scan 干擾。選項 7 PQW 已經是線性流程沒動。
+
+## 2026-04-21p — Claude Code — Linux_test 加選項 6/7（JC-100 + PQW）
+
+### 修改檔案
+- `Linux_test/main.cpp` —
+  - 新增 `test_jc100()`：掃 slave 1~9 印 pressure，然後可選一顆 live-read（每 200ms 刷新，按 Enter 停）
+  - 新增 `test_pqw()`：連 gateway → init PQW 8CH → 互動 toggle（1~8 切換 / 'a' 全開 / 'o' 全關 / 's' 看 state / 'q' 退出），退出時自動 all off
+  - 內含 washrobot 的 CH1~8 對照表（泵浦/腳閥/身閥/中心閥/刷洗/水泵/水閥/保留）
+  - 選單加選項 6、7
+
+### 原因
+Sadie 要在 Linux_test 裡測試 JC-100 真空表跟 PQW 繼電器，讓現場可以不經 washrobot 單獨驗這兩個硬體。PQW 測試退出時自動 all_off 避免泵浦 / 閥留啟動狀態。
+
+## 2026-04-21o — Claude Code — Linux_test 加選項 5「ZDT single move」（簡單版）
+
+### 修改檔案
+- `Linux_test/main.cpp` — 新增 `test_zdt_single()`：提示 gateway IP / slave / target pulse，release_stall + enable + motion_control_pos_mode + wait_until_pos_reached + 印最終狀態。選單加第 5 項
+
+### 原因
+Sadie 覺得選項 4（scan+cycle）太複雜，要一個像 option 2 (test_dm2j) 那樣簡單線性的版本：給 slave + 目標 pulse 就 go。保留 option 4 給掃描需求。
+
+## 2026-04-21n — Claude Code — Linux_test 加 ZDT SMC 推桿測試（選項 4）
+
+### 修改檔案
+- `Linux_test/main.cpp` —
+  - 加 SMC 推桿常數（與 `WASH_ROBOT.h PUSHER_*` 對齊：EXTEND=144000, RETRACT=0, RPM=1000, ACC=255）
+  - 新增 `test_zdt_pusher()`：連 .21 gateway → 掃 slave 1~9 印每顆 `enabled / pos_reached / stall / home_ok` → 互動式選 slave → `release_stall_flag` + `motion_control_driver_EN(true)` + 伸 → 等 `wait_until_pos_reached` → 縮 → 等 → 報告 → 回到選單
+  - 支援 `e`（只 enable）/ `d`（只 disable）/ `q`（退出）
+  - main 選單加第 4 項
+
+### 原因
+Sadie 想現場測 SMC 推桿（ZDT 驅動卡 × 9）是否活著 + 動得了。比單一 slave 方便，掃完直接選要 cycle 哪顆。含 enable 保險（DM2J 那邊的 ENABLE 問題同樣可能發生在 ZDT）。
+
+## 2026-04-21m — Claude Code — Linux_test main.cpp：debug=true + 加 DM2J slave scan 選項
+
+### 修改檔案
+- `Linux_test/main.cpp` —
+  - `test_imu()` IMU init debug `false → true`
+  - `test_dm2j()` DM2J init debug `false → true`（現場 diagnostic 用途）
+  - 新增 `test_dm2j_scan()` — 掃 slave 1~10，每個呼叫 `read_pulse_per_rev()`，回報 OK/no_response/init_fail
+  - main 選單加第 3 項「DM2J slave scan」
+
+### 原因
+Sadie 跑 test_dm2j 報 `PPR read failed` — slave ID 不對或硬體狀態不明。加 scan 功能讓現場可一鍵掃出哪些 slave 活著、PPR 多少；debug=true 印 Modbus TX/RX hex 幫助判斷是哪一段沒回應。
+
+## 2026-04-21l — Claude Code — Linux_test.vcxproj 同樣修法（log_utils + 相對路徑 + pthread）
+
+### 修改檔案
+- `Linux_test/Linux_test.vcxproj` —
+  - `<ClInclude>` 群組加 `..\user_lib\log_utils.h`
+  - `AdditionalIncludeDirectories` 從 `D:\washrobot_new_PI\user_lib` 改相對 `..\user_lib`
+  - 加 unconditional Link 依賴 `pthread`
+
+### 原因
+Sadie 跑 Linux_test build 時報 `log_utils.h: No such file or directory`，跟 washrobot_new_PI 是同樣三個老問題（log_utils.h 漏列 + 絕對路徑 + pthread）。一併修好。
+
+## 2026-04-21k — Claude Code — 兩個 vcxproj 加 pthread linker dependency
+
+### 修改檔案
+- `washrobot_new_PI/washrobot_new_PI.vcxproj` — 加 unconditional ItemDefinitionGroup 帶 `<Link><LibraryDependencies>pthread</LibraryDependencies></Link>`
+- `Crane_easy_PI/Crane_easy_PI.vcxproj` — 同上
+
+### 原因
+Sadie build 時 link 階段報 `undefined reference to pthread_create`。std::thread 在 Linux g++ 下需要 `-lpthread`，VS Linux project 要透過 `<LibraryDependencies>pthread</LibraryDependencies>` 指定（MSBuild 翻譯為 `-lpthread`）。兩個 vcxproj 都漏了；加 unconditional ItemDefinitionGroup 讓所有 config 都吃到。
+
+## 2026-04-21j — Claude Code — washrobot_new_PI.vcxproj 修 log_utils.h 遺漏 + 絕對路徑改相對
+
+### 修改檔案
+- `washrobot_new_PI/washrobot_new_PI.vcxproj` —
+  - `<ClInclude>` 群組加 `..\user_lib\log_utils.h`（原本漏了，Crane_easy_PI 有）
+  - `AdditionalIncludeDirectories` 從硬編 `D:\washrobot_new_PI\user_lib` 改成相對 `..\user_lib`（跟 Crane_easy_PI 對齊）
+
+### 原因
+Sadie build washrobot_new_PI 時報 `log_utils.h: No such file or directory`。根因：VS Linux project 靠 `<ClInclude>` 列表決定 sync 哪些 header 到 Pi，washrobot vcxproj 當初沒把 log_utils.h 列進去 → VS 不 sync → g++ 找不到。Crane_easy_PI 當初有加。順便把同檔的硬編 Windows 絕對路徑改相對，避免換 drive letter / 換機器壞掉。
+
+## 2026-04-21i — Claude Code — web_backend reconnect exponential-spawn bug fix（OOM 元兇）
+
+### 修改檔案
+- `web_backend/server.js` — `makeBridge()` 重構：reconnect 去重（`state.reconnectTimer` flag）、進 connect() 先 destroy 舊 socket、`error` 事件只 log 不觸發 reconnect（讓 `close` 獨占驅動）
+- `.claude/work_log.md` — 頂部 2026-04-21i 條目
+
+### 原因
+Sadie 回報 backend 被 `Killed`（OOM），ss 顯示 fd 87787 + 大量 SYN-SENT。根因是 Node socket 失敗會同時 fire error+close 兩事件，原碼兩個 handler 各自 schedule 重連 → 每次失敗 reconnect 數量翻倍 → 10 分鐘內 socket 指數爆炸。修去重 + 清理 + 事件單一驅動。
+
+## 2026-04-21h — Claude Code — easy_crane_test_mode.md §5 補 shim 不聽 EVT 限制
+
+### 修改檔案
+- `.claude/easy_crane_test_mode.md` §5 功能落差表 — 加一行「shim 監聽 easy EVT ❌」，說明 easy 自我保護觸發時繩物理會停但 shim 回假 OK、累積位置誤差；現場發現狀態不一致時查 shim stderr + easy log
+
+### 原因
+Sadie 問收繩時碰到 weight_limit 或 DY500 read_fail 會不會停。確認：物理層 easy 會 all_off 停，但 shim 是開環睡覺不訂閱 EVT，會繼續回 OK 給 washrobot。現階段不改 shim（retract 15cm 太短不易觸發），只補文件提醒。
+
+## 2026-04-21g — Claude Code — easy crane 按鈕語意重構（HOLD×2 + AUTO 單鍵）
+
+### 修改檔案
+- `web_backend/public/index.html` — 拿掉「模式」切換 row；AUTO 按鈕移到獨立 row（🤖 AUTO 拉到上限）；hint 更新
+- `web_backend/public/app.js` — 廢除 `easyAutoMode` 雙模式切換，改成三顆按鈕獨立語意：UP/DOWN 純 hold、AUTO click toggle。server state sync 改單向（僅在 server 清零時重置 local，避免剛按下的 race window）；`releaseAllEasyHolds()` 擴充包含 AUTO 重置
+
+### 原因
+Sadie 要更直覺的按鈕語意：AUTO = 一鍵拉到重量門檻（靠 server-side weight_loop 自動停）、UP/DOWN = 純按住。原 HOLD/AUTO mode toggle 混淆。後端不動（cmd_up / weight_loop 既有行為已足夠），純前端重構。
+
+## 2026-04-21f — Claude Code — GUI 效能調整（拿掉 backdrop-filter + aurora blob）
+
+### 修改檔案
+- `web_backend/public/style.css` — 全面精簡，拿掉 `backdrop-filter`（原每 panel / header / banner / modal 都有 blur）、aurora drift 動畫、banner pulse、按鈕 hover box-shadow glow、log text-shadow；保留靜態 bg gradient、dot 脈動（改 opacity fade）、panel 頂部漸層線、gradient header、input focus border
+- `.claude/work_log.md` — 頂部 2026-04-21f 條目
+
+### 原因
+Sadie 回報 Pi Chromium 渲染原 04-21b 主題有點卡。主因是 `backdrop-filter: blur(16px)` 用在每個 panel，加上兩顆 aurora 漂移 blob（`blur(90px)` + 無限動畫）GPU 吃很兇。拆掉最重的幾項，保 aesthetic 核心（霓虹色、gradient 標題、脈動 dot、漸層 bg）。CSS 行數 380 → ~290。
+
+## 2026-04-21e — Claude Code — WASH_ROBOT CRANE_IP 改 .5.26（shim/easy 共 Pi）[跨界: user_lib]
+
+### 修改檔案
+- `user_lib/WASH_ROBOT.h:100` — `CRANE_IP: "192.168.1.101" → "192.168.5.26"` + `[TEST MODE 2026-04-21]` 4 行註解
+- `.claude/easy_crane_test_mode.md §9a` — 撤除清單加 CRANE_IP 第一行；其他行號因前面加註解而位移 +5
+- `.claude/work_log.md` — 頂部 2026-04-21e 條目
+
+### 原因
+Sadie 測試配置：crane_shim + Crane_easy_PI + web_backend 全在 .5.26 同一台 Pi，washrobot 將進 .5.x 網段。原硬編 .101 連不到。加 TEST MODE 註解，主 crane 到位時 revert。
+
+## 2026-04-21d — Claude Code — web_backend TCP keepalive + 10s ping（easy crane 閒置掉線修復）
+
+### 修改檔案
+- `web_backend/server.js` — `makeBridge()` 加 `sock.setKeepAlive(true, 30000)` + 每 10s 對每個 bridge 送 `ping\n`；新常數 `BRIDGE_PING_MS = 10000`
+- `.claude/work_log.md` — 頂部 2026-04-21d 條目
+
+### 原因
+Sadie 回報 GUI 閒置一陣子後 easy crane 轉紅。根因：easy crane 跨網段（.5.x），中間 NAT 閒置 15~60min 殺 TCP session，backend 沒啟 keepalive 沒察覺。Browser 50ms status poll 在 tab 背景化時被 setInterval throttle 無法保連。兩層修：OS 層 `setKeepAlive` + backend 自己 10s `ping`。副作用：log 每 10s 多 3 行 OK 回應，若吵下一輪處理。
+
+## 2026-04-21c — Claude Code — 測試模式程式改動：watchdog 60s + 全驅動 debug [跨界: user_lib]
+
+### 修改檔案
+- `user_lib/WASH_ROBOT.h:142` — `WATCHDOG_TIMEOUT_MS: 2000 → 60000`（+ 6 行 [TEST MODE] 註解）
+- `user_lib/WASH_ROBOT.cpp:58,66,74,81` — DM2J / ZDT / JC-100 / PQW init debug `false → true`（+ 區塊 [TEST MODE] 註解）
+- `user_lib/WASH_ROBOT.cpp:96` — IMU init debug `false → true`（+ 單行 [TEST MODE] 註解）
+- `Crane_easy_PI/main.cpp:318,319` — relay / dy500 init debug `false → true`（+ [TEST MODE] 註解）
+- `.claude/easy_crane_test_mode.md` §9 — 新增「撤除測試模式 ⚠️ 必看清單」
+- `.claude/work_log.md` — 頂部 2026-04-21c 條目
+
+### 原因
+下午上機前 code review 發現 `WATCHDOG_TIMEOUT_MS=2000` 會讓 shim `pay_out 45cm @ 3cm/s = 15s` 期間 crane_mtx_ 鎖死 → `motion_active_=true` 時自動 abort。Sadie 決策：調 60000ms + 所有驅動 debug=true 方便 on-site troubleshoot。所有改動旁都有 `[TEST MODE 2026-04-21]` 註解，grep 可快速找到撤除點。主 crane 到位時照 §9 清單還原。
+
+## 2026-04-21b — Claude Code — Web GUI 主題重做（深空極光 glassmorphism）
+
+### 修改檔案
+- `web_backend/public/style.css` — 全面重寫，加設計 token（深空紫藍底 + 霓虹青紫粉 accent）、aurora bg blobs（body ::before/::after 漂移動畫）、glass panel（backdrop-filter blur + 紫 border + 頂部漸層線）、脈動 status dot、gradient 標題、cyan-glow input focus、發光 log 顏色、pulse banner、modal glass
+- `web_backend/public/index.html` — `<head>` 加 Google Fonts 3 行（Inter + JetBrains Mono，display=swap，Pi 離線自動 fallback system-ui/Consolas）
+- `.claude/work_log.md` — 頂部 2026-04-21b 條目
+
+### 原因
+Sadie 要「夢幻 + 科技感」，從 A/B/C 三方向選了 A（深空 glass）。保留所有 class/id hook，app.js 零改動。待上機驗證：backdrop-filter 在 Pi 瀏覽器的渲染效能、blur 過重可能要降、Google Fonts 離線 fallback。
+
+## 2026-04-21 — Claude Code — crane_shim 測試模式（簡易吊車 + washrobot 自動下洗）
+
+### 修改檔案
+- `crane_shim/crane_shim.py` — 新增（Python stdlib，TCP server :5002 偽裝 Crane_control_PI，翻譯 pay_out/retract → easy crane :5003 timed on/off；motion_lock + abort flag + easy watchdog keepalive）
+- `crane_shim/README.md` — 新增（啟動、CLI flag、速率校正、故障排除）
+- `.claude/easy_crane_test_mode.md` — 新增（測試模式規範：指令對照、安全守則、可用流程、checklist）
+- `.claude/runbook.md` — §A 加「1-alt 測試模式」啟動分支
+- `.claude/work_log.md` — 頂部 2026-04-21 條目
+
+### 原因
+Sadie 想在主吊車（Crane_control_PI + DSZL_107 + 中間絞盤變頻器）到位前，用簡易吊車（Crane_easy_PI @ .5.26:5003）跑 washrobot 的 `run` / `step_down` 自動循環做短距離受控測試。兩協定不相容（距離型 vs 時間型），用 shim 層轉譯最不侵入。Phase 5/6 / home_status / roll_correct 在 shim 內明確拒絕以擋 GUI 自動按鈕。速率 rate_down/rate_up 目前 3.0 cm/s placeholder，上機實測後校正。
+
 ## 2026-04-20k — Claude Code — easy crane 第三輪提速（SUSTAIN=0 + all_off 最佳化）
 
 ### 修改檔案

@@ -13,6 +13,13 @@
 #include <cmath>
 
 // ============================================================
+//  Out-of-class definitions for static constexpr members
+//  (required under C++14 when ODR-used, e.g. passed by const ref
+//  to std::chrono::seconds)
+// ============================================================
+constexpr int WashRobot::IMU_BASELINE_SEC;
+
+// ============================================================
 //  Constructor / Destructor
 // ============================================================
 
@@ -53,9 +60,12 @@ bool WashRobot::init() {
     }
     std::cout << "[OK] USR .20 / .21 / .22 connected\n";
 
+    // [TEST MODE 2026-04-21] debug=true on all drivers for on-site troubleshooting.
+    // Revert to false when main crane is online. See .claude/easy_crane_test_mode.md §9.
+
     // DM2J slave 1..5
     for (int i = 1; i <= 5; ++i) {
-        if (D_(i).init(cli_20_, i, false)) {
+        if (D_(i).init(cli_20_, i, true)) {
             std::cerr << "[FATAL] DM2J slave " << i << " init fail\n"; return true;
         }
     }
@@ -63,7 +73,7 @@ bool WashRobot::init() {
 
     // ZDT slave 1..9
     for (int i = 1; i <= 9; ++i) {
-        if (Z_(i).init(cli_21_, i, false)) {
+        if (Z_(i).init(cli_21_, i, true)) {
             std::cerr << "[FATAL] ZDT slave " << i << " init fail\n"; return true;
         }
     }
@@ -71,14 +81,14 @@ bool WashRobot::init() {
 
     // JC-100 slave 1..9
     for (int i = 1; i <= 9; ++i) {
-        if (M_(i).init(cli_22_, i, false)) {
+        if (M_(i).init(cli_22_, i, true)) {
             std::cerr << "[FATAL] JC-100 slave " << i << " init fail\n"; return true;
         }
     }
     std::cout << "[OK] JC-100 1~9\n";
 
     // PQW 8CH relay
-    if (pqw_.init(cli_22_, PQW_SLAVE, PQW_TOTAL_CH, false)) {
+    if (pqw_.init(cli_22_, PQW_SLAVE, PQW_TOTAL_CH, true)) {
         std::cerr << "[FATAL] PQW slave " << PQW_SLAVE << " init fail\n"; return true;
     }
     std::cout << "[OK] PQW slave " << PQW_SLAVE << "\n";
@@ -93,7 +103,7 @@ bool WashRobot::init() {
     if (!imu_serial_.init(IMU_PORT, IMU_BAUD)) {
         std::cerr << "[FATAL] IMU serial " << IMU_PORT << " open fail\n"; return true;
     }
-    imu_.init(&imu_serial_, false);
+    imu_.init(&imu_serial_, true);   // [TEST MODE] debug=true; revert to false with main crane
     sleep_ms_(500);
     if (imu_.read_error.load())
         std::cerr << "[WARN] IMU read error on startup\n";

@@ -25,6 +25,20 @@ node server.js
 # 或用 systemd unit 背景跑
 ```
 
+#### 1-alt. 測試模式：用 crane_shim 取代 Crane_control_PI
+
+若主吊車硬體尚未上線、想用簡易吊車（Crane_easy_PI @ .5.26）跑自動下洗測試：
+
+```bash
+# Terminal 1 改跑 shim（取代 Crane_control_PI）
+cd ~/washrobot_new_PI/crane_shim
+python3 crane_shim.py --rate-down 3.0 --rate-up 3.0
+# → 印出 "[shim] ready :5002"
+# Terminal 2 (web_backend) 照跑不變
+```
+
+**⚠️ 限制：** 開環估算放繩時間、無左右差動、無自動召回、距離限 ≤ 3m、人員需現場。完整規範 + 指令對照 + 安全守則見 `.claude/easy_crane_test_mode.md`。
+
 ### 2. Washrobot RPi (192.168.1.100)
 
 ```bash

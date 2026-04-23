@@ -38,6 +38,10 @@
 #include <cstdlib>
 #include <cmath>
 
+#ifndef _WIN32
+#include <signal.h>
+#endif
+
 #include "TCP_client.h"
 #include "TCP_server.h"
 #include "ZS_DIO_R_RLY.h"
@@ -468,6 +472,11 @@ static void on_receive(socket_t sock, const char* data, int len) {
 // ============ Main ============
 
 int main() {
+#ifndef _WIN32
+    // Ignore SIGPIPE so send() on a dead peer returns -1/EPIPE instead of killing the process.
+    signal(SIGPIPE, SIG_IGN);
+#endif
+
     std::cout << "[Crane_control_PI] starting..." << std::endl;
 
     if (!cli_30.connectToServer(USR_IP, USR_PORT)) {
