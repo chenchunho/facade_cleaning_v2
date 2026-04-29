@@ -72,6 +72,10 @@ public:
 	bool wait_until_pos_reached(int timeout_ms = 10000, int poll_interval_ms = 500);  // 輪詢直到位置到達或超時
 	MotorSystemStatus status;
 
+	// Runtime debug-mode toggle (used by upper layer to silence high-frequency
+	// poll loops without losing hex dump on ad-hoc commands). 2026-04-24.
+	void set_debug(bool v) { debug_mode = v; }
+
 private:
 	TCP_client* client = nullptr;
 	bool is_external_client = false;

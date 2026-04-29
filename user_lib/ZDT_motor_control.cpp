@@ -179,14 +179,20 @@ bool ZDT_motor_control::get_system_status() {
 	// Emm bulk read has no temperature
 	this->status.temperature = 0;
 
-	return true;
+	// Project convention: false = success, true = error. All prior return paths
+	// above (send fail / short response) return true=error. Successful parse
+	// must return false. Previously this was `return true` which made every
+	// caller's `if (get_system_status())` treat success as failure.
+	return false;
 }
 
 bool ZDT_motor_control::wait_until_pos_reached(int timeout_ms, int poll_interval_ms) {
 	auto start = std::chrono::steady_clock::now();
 	while (true) {
-		if (get_system_status() && status.pos_reached) {
-			return true;
+		// get_system_status now returns false on success; invert check and
+		// return false (success) when position is reached.
+		if (!get_system_status() && status.pos_reached) {
+			return false;
 		}
 		auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
 			std::chrono::steady_clock::now() - start).count();

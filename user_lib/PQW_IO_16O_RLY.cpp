@@ -176,18 +176,22 @@ bool PQW_IO_16O_RLY::controlRelay(int id, bool status)
 	auto cmd = buildSingleRelayCmd(id, status);
 	printHex(cmd, "TX single relay");
 
-	client->sendData((char*)cmd.data(), cmd.size(), 50);
+	// Send the relay command. Genuine TCP send failure (gateway down) → real
+	// error reported via return true.
+	if (!client->sendData((char*)cmd.data(), cmd.size(), 50))
+		return true;
 
+	// Drain echo for log-only diagnostic. PQW firmware echo format is
+	// non-standard (TX `... 05 ...` echoed as RX `... 00 ...`) so we DO NOT
+	// parse it for verification — physical relay LED is the source of truth.
+	// The previous read-back-then-compare path triggered intermittent false
+	// failures (e.g. step_down body_valve_off_fail) that trapped the robot
+	// mid-sequence with no recoverable path. See work_log 2026-04-23
+	// "PQW relay module 回應格式異常" + 2026-04-27 trap on step_down feet rail.
 	auto echo = readEcho();
 	printHex(echo, "RX echo");
 
-	auto readcmd = buildReadCmd();
-	client->sendData((char*)readcmd.data(), readcmd.size(), 50);
-
-	auto resp = readEcho();
-	auto states = parseReadResponse(resp);
-
-	return (states[id - 1] != status);
+	return false;
 }
 
 //=========== control: all relay ===========

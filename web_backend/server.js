@@ -42,6 +42,14 @@ const RECONNECT_MS = 3000;
 //   (2) App-level `ping\n` every BRIDGE_PING_MS from backend itself (not dep. on browser)
 const BRIDGE_PING_MS = 10000;
 
+// WebSocket-level heartbeat (browser ↔ backend).
+// Without this, a backgrounded/inactive tab can keep the ws open while its
+// setInterval / setTimeout are throttled to 1s+ or frozen entirely — NAT or
+// middlebox may silently drop the idle TCP under it, and neither side notices
+// until the user tries to interact. By pinging at WS level and terminating
+// any client that hasn't ponged, dead connections are cut within ~2 intervals.
+const WS_PING_INTERVAL_MS = 30000;
+
 //=========== app + http ===========
 
 const app = express();
@@ -157,6 +165,9 @@ function broadcastStatus() {
 //=========== ws event ===========
 
 wss.on('connection', (ws) => {
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
+
     ws.send(JSON.stringify({
         src: 'status',
         washrobot:  washrobot.isConnected(),
@@ -181,6 +192,24 @@ wss.on('connection', (ws) => {
             ws.send(JSON.stringify({ src: 'error', line: `${target.name}_not_connected` }));
     });
 });
+
+//=========== ws heartbeat ===========
+// Every WS_PING_INTERVAL_MS send a ws ping to each connected client. The
+// browser's ws implementation auto-replies with pong (transparent to app.js).
+// If no pong arrives between two ticks, terminate the client so the browser's
+// onclose handler fires and triggers app.js reconnect.
+const wsHeartbeat = setInterval(() => {
+    wss.clients.forEach((ws) => {
+        if (ws.isAlive === false) {
+            console.log('[ws] terminating unresponsive client');
+            return ws.terminate();
+        }
+        ws.isAlive = false;
+        try { ws.ping(); } catch (e) {}
+    });
+}, WS_PING_INTERVAL_MS);
+
+wss.on('close', () => clearInterval(wsHeartbeat));
 
 //=========== start ===========
 

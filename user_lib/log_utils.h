@@ -12,11 +12,19 @@
 // already receive errors via the bool return convention (true = error).
 // Turn debug_mode on to observe internal behaviour at any severity.
 //
+// LOG_HEX (TX/RX hex dumps) has an additional secondary gate:
+//   - default: OFF (hex dumps suppressed even when debug_mode is on)
+//   - enable via env var USER_LIB_HEX_LOG=1 (re-read lazily on first call)
+//   - rationale: hex dumps flood stdout when many devices run concurrently
+//                (25+ drivers × every Modbus frame), drowning the useful
+//                decoded messages (status, completion, errors). Kept as
+//                opt-in for low-level wire-level debugging.
+//
 // Usage (inside a driver method):
 //   LOG_ERR(_log_tag, "PPR read failed");
 //   LOG_INF(_log_tag, "target %.3f cm -> %d pulses", pos_cm, pulses);
 //   LOG_DBG(_log_tag, "status=0x%08X", st);
-//   LOG_HEX(_log_tag, "TX", buf, len);
+//   LOG_HEX(_log_tag, "TX", buf, len);        // opt-in via env var
 //
 // Driver class must expose:
 //   std::string _log_tag;   // e.g. "ZDT:3", "DM2J:1", "TCP"
@@ -28,6 +36,7 @@
 // ============================================================================
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <chrono>
 #include <ctime>
@@ -54,6 +63,17 @@ inline std::string now_ts() {
     return oss.str();
 }
 
+// Secondary gate for LOG_HEX — default OFF, opt-in via env USER_LIB_HEX_LOG=1.
+// Read once lazily; subsequent calls return cached value (env changes at runtime
+// not observed — fine for our startup-only config model).
+inline bool hex_log_enabled() {
+    static bool v = []{
+        const char* e = std::getenv("USER_LIB_HEX_LOG");
+        return (e && e[0] == '1');
+    }();
+    return v;
+}
+
 } // namespace user_lib_log
 
 #define ULOG_IMPL(level, tag, ...) do {                                     \
@@ -70,9 +90,11 @@ inline std::string now_ts() {
 #define LOG_INF(tag, ...)  do { if (debug_mode) ULOG_IMPL("INF", tag, __VA_ARGS__); } while (0)
 #define LOG_DBG(tag, ...)  do { if (debug_mode) ULOG_IMPL("DBG", tag, __VA_ARGS__); } while (0)
 
-// hex dump helper (DBG-gated). `note` is a short string such as "TX" / "RX".
+// hex dump helper. Gated by BOTH `debug_mode` (driver-level master switch) AND
+// ::user_lib_log::hex_log_enabled() (env USER_LIB_HEX_LOG=1, default OFF).
+// `note` is a short string such as "TX" / "RX".
 #define LOG_HEX(tag, note, data, len) do {                                  \
-    if (debug_mode) {                                                       \
+    if (debug_mode && ::user_lib_log::hex_log_enabled()) {                  \
         std::fprintf(stderr, "[%s] [DBG] [%s] %s ",                         \
                      ::user_lib_log::now_ts().c_str(),                      \
                      std::string(tag).c_str(),                              \

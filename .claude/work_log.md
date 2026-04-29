@@ -1,5 +1,179 @@
 # Work Log
 
+## 2026-04-24 — DM2J driver 真相大白（Status bit / Enable 機制 / Summary 重寫）
+
+> **規範權威：** `.claude/summaries/DM2J_RS_MODBUS_SUMMARY.md`（已在此 session 依實機手冊重寫）
+
+### 發現源頭
+
+Sadie 在跑 menu 7 時看到一個反直覺現象 — DM2J rails 物理上明明有動到目標位置，但 `PR_move_cm_trigger_all` 一路回 `[ABORT] rail move timed out`，status register 永遠停在 `0x00320000`。
+
+順著這個 bug 挖下去，讀了 `D:\洗窗戶機器人\電控設備資料\DM2J-RS\DM2J-RS.V1.pdf` V1.0 原廠手冊（用 `pdftotext -enc UTF-8` 抽繁中文字），對照發現**之前的 summary 幾乎整篇錯誤**。
+
+### 核心真相（取代舊 summary）
+
+**1. Status register 0x1003 是單一 16-bit register，不是跨 0x1003+0x1004 的 32-bit**
+
+| Bit | 含義 |
+|---|---|
+| 0 | 故障 FAULT |
+| 1 | 使能 ENABLE |
+| 2 | 運行 RUN |
+| 3 | (unused) |
+| 4 | 指令完成 CMD_DONE |
+| 5 | 路徑完成 PATH_DONE |
+| 6 | **回零完成 HOME_DONE（不是 bit 16！）** |
+
+上電預設：bit 4 + bit 5 = 1；故障或未使能時 bit 4/5 自動清掉。
+
+**2. Enable 有兩種機制**
+- **硬體**：DI1 出廠預設 = SRV-ON、**常閉 (NC)** → 驅動器上電自動 enable
+- **軟體強制**：寫 `1` 到 **`0x000F`（Pr0.07）**，優先順序高於 DI1
+
+**3. 0x1801 控制字表（舊 summary 標「0x1111=enable」全錯）**
+
+| Value | 真實含義 |
+|---|---|
+| 0x1111 | **復位當前報警**（不是 enable） |
+| 0x1122 | 復位歷史報警 |
+| 0x2211 | 儲存所有參數到 EEPROM |
+| 0x2222 | 參數初始化 |
+| 0x2233 | 所有參數恢復出廠值（不是 disable） |
+| 0x2244 | 映射參數存 EEPROM |
+| 0x4001/4002 | JOG 左/右 |
+
+**4. PR Mode 欄位（bit 0-3）實際值**
+- `mode=0` 送下去 drive 視為「路徑未配置」→ 馬達**完全不動、ENABLE 維持 0**（這就是 menu 7 的 bug）
+- `mode=1` = 絕對位置（menu 2 用這個會動）
+- `mode=2` = 相對位置
+- `mode=3` = 速度模式
+
+**⚠ 舊 driver 註解「0=relative / 1=absolute」跟手冊相反，實際是 `1=absolute / 2=relative`。**
+
+### 重新解讀過去的 log
+
+| 觀察到的 status | register 0x1003 值 | 真實含義 |
+|---|---|---|
+| `0x00010000`（舊 log，slave 2）| `0x0001` = bit 0 | **FAULT 狀態**（不是 HOME_DONE — 之前誤判） |
+| `0x00320000`（menu 7 實測）| `0x0032` = bits 1+4+5 | **ENABLE + CMD_DONE + PATH_DONE** = 動作完成 ✓ |
+
+### 連帶發現：`user_lib/DM2J_RS570` 多處 bug（待修）
+
+1. `read_status()` 讀 2 個 register → 應讀 1 個
+2. `read_status()` 組 32-bit 後，完工檢查查 LOW word (`& 0x0010`) 但實際值在 HIGH word → 永遠抓不到完成 → 所有 `PR_move_cm` 內部 poll 都 timeout
+3. `print_status()` HOME_DONE 查 `& 0x10000`，應查 `& 0x0040` (bit 6)
+4. `motor_enable()` / `motor_disable()` / `save_params()` 只宣告沒實作；而且 header 註解給的指令全錯：
+   - 「enable = 0x1111 → 0x1801」錯 → 應 `0x000F = 1`
+   - 「disable = 0x2233 → 0x1801」錯 → 應 `0x000F = 0`
+   - 「save = 0x2222 → 0x1801」錯 → 應 `0x2211 → 0x1801`
+
+### 當下 workaround
+
+Menu 7 的 `dm2j_pair_rail_move` 改成用**位置穩定偵測** (`dm2j_pair_poll_done`) 而非 status bit：每 150ms 讀位置、連續 3 次穩定且接近 target 就算完成。這個 workaround 跟 ZDT firmware quirks memory 的 pattern 相同，不依賴 bit layout 推論。
+
+### 待辦（Sadie 要接手修 user_lib）
+
+- 修 `user_lib/DM2J_RS570.cpp`：`read_status` 改 1 register、`print_status` HOME_DONE mask、實作 `motor_enable/disable/save_params`
+- 修 `user_lib/DM2J_RS570.h`：三個未實作 API 的註解
+- （可選）把 `reset_alarm()` 獨立出來（寫 0x1111 → 0x1801 的正確用途）
+- 清 `Linux_test/main.cpp` 裡的 `dm2j_manual_enable` helper（那段寫 `0x1111` 實際是在 reset alarm，不是 enable；碰巧因為 DI1 NC 預設 auto-enable 所以 fault 一清就能動）
+
+### 影響範圍
+
+- ✅ `.claude/summaries/DM2J_RS_MODBUS_SUMMARY.md` — 已整篇重寫
+- ⬜ `user_lib/DM2J_RS570.{h,cpp}` — 待修（Sadie）
+- ⬜ `Linux_test/main.cpp` 的 `dm2j_manual_enable` helper — 待修/重命名
+- ⬜ 其他呼叫 `read_status` 的地方 — 修完後會自動變對
+
+---
+
+## 2026-04-23 — Session 總結（Linux_test 大擴充 + 硬體校準 + TEST MODE）
+
+> 本 session changelog 有 ~45 筆 04-22 / 04-23 條目，細節見 changelog。這裡只記 session 級別的軌跡、硬體發現、未解問題。
+
+### 主軸 1：Linux_test 從 2 option 擴到 12 option
+
+現在選單：
+| # | 名稱 | 用途 |
+|---|---|---|
+| 1 | IMU | 看 WT901BC 讀值 |
+| 2 | DM2J | 單 slave 移動 cm |
+| 3 | ZDT single | 單 slave target pulse |
+| 4 | JC-100 | 單 slave 壓力即時讀 |
+| 5 | PQW 8CH | 繼電器 on/off |
+| 6 | ZDT group | 1-9 skip list 齊步 |
+| 7 | Full step seq | rail + verify + retry + ABORT |
+| 8 | Step no-rail | report only（不動 rail）|
+| 9 | SD76 meter | 計米器讀值 |
+| 10 | ZS_DIO winch | 吊機繼電器 |
+| 11 | Step no-rail +v | no-rail + verify + retry + FAIL-continue |
+| 12 | Full step report | rail + report only |
+
+新輔助：TCP quick-probe（2s 取代預設 130s）、zdt_group_move_sync 三層完成偵測、staged extend（half → 1s → full）、vacuum_report / vacuum_verify 區分。
+
+### 主軸 2：ZDT slave ID 實機重新映射 [跨界: user_lib]
+- feet 左 3,4 / 右 1,2（不是原本 1,2/5,6）
+- body 左 6,8 / 右 5,7（不是原本 3,4/7,8）
+- center 9（不變）
+- `WASH_ROBOT.h:119-123` 已更新，`CLAUDE.md` 架構圖 + `motion_flow.md §4` 同步
+
+### 主軸 3：TEST MODE 常數（主 crane 上線要還原）
+`grep -rn "TEST MODE" user_lib/ Crane_easy_PI/` 可找到：
+- `WASH_ROBOT.h:100` `CRANE_IP = "192.168.5.26"`（原 "192.168.1.101"）
+- `WASH_ROBOT.h:147` `WATCHDOG_TIMEOUT_MS = 60000`（原 2000）
+- `WASH_ROBOT.cpp:61,69,77,84,99` 所有驅動 debug=true（原 false）
+- `Crane_easy_PI/main.cpp:318,319` debug=true（原 false）
+
+撤除清單：`.claude/easy_crane_test_mode.md §9a`。
+
+### 主軸 4：硬體實測校準
+- **SMC LEYG25 pusher pulse/cm 不是 7200/cm**（原推算）— 實測：
+  - 腳組 20000 pulses ≈ 7 cm → ~2857 pulses/cm
+  - 身體組 30000 pulses ≈ 10 cm → ~3000 pulses/cm
+  - 144000 pulses 實際不是 20 cm（可能 > 30 cm 或打到實體止動）
+- 選項 8/11/12 extend 值已用實測硬編
+
+### 主軸 5：攝影機避障功能（另一 session 進行中）
+- `.claude/camera_obstacle_plan.md` 完整規劃
+- `frame_capture.py` 已寫（RTSP → /tmp/cam_latest.jpg）
+- `detect_server.py` 已現成在 `/home/nexuni/window_detect/`（Hailo NPU, UDP :5040）
+- 下一步：C++ FrameAnalyzer class + washrobot 整合 + GUI toggle
+
+### 關鍵 debug 發現
+
+1. **ZDT `pos_reached` bit 不可靠** — 馬達物理停但 bit 不 set。加三層 fallback：stall_flag / 速度回零 (|RPM|≤20 連 3 次) / 位置不變 (|Δpos|≤0.15° 連 3 次)
+2. **`trigger_sync_move()` 的 "send failure" 是 Modbus broadcast 的正常行為** — slave 0x00 依規範無 reply，driver 看 readEcho 空就回 true。Linux_test 層 ignore 這個返回值
+3. **ZDT enable / pos_mode 偶發失敗** — RS485 over TCP gateway 的 frame 對齊問題。加 per-slave 3 次 retry + back-off + skip 失敗 slave 不中斷群組
+4. **Staged extend 避免吸盤接觸衝擊** — 先伸一半、停 1 秒、再伸全段。stage 2 **必須無條件執行**（stage 1 timeout 不能 short-circuit）
+5. **Valve-before-extend 比 extend-before-valve 穩** — 吸盤碰牆瞬間已有負壓 → 立即 seal
+6. **PQW relay module 回應格式異常** — TX `0C 05 00 00 FF 00 ...` 卻 RX `0C 00 00 00 FE 00 ...`（function code 0x00 非標準）。可能是 gateway Modbus-TCP↔RTU 模式設錯，或 PQW 韌體非標準。Linux_test 選項 5 改 `[SENT] check LED` 語意
+7. **DM2J slave 3/5 沒 ENABLE 位元** — status 只有 HOME_DONE。需要 `motor_enable()` 呼叫或硬體 dip switch 設 auto-enable
+8. **Modbus RTU over TCP gateway 連續指令要留 delay** — 否則 TCP buffer 殘留 echo 干擾下一次 read
+
+### 未解問題（現場 debug 留給下一 session）
+
+| 問題 | 現況 |
+|---|---|
+| PQW 寫 relay 不成功 | Sadie 需查 gateway .22 web 設定（baud / mode）+ PQW 實體介面（是 RS485 還是 TCP 版）|
+| DM2J slave ENABLE bit 沒亮 | 需硬體 dip switch 或軟體加 motor_enable() |
+| ZDT slave 6 堵轉 | 可能機械卡 / 方向反 / 個別 slave 問題 |
+| 推桿距離還要再細調 | 20000/30000 是粗估，精確值待實測 |
+| 攝影機避障 FrameAnalyzer C++ 還沒寫 | 另一 session 規劃完成待實作 |
+
+### 未 commit 狀態
+
+上次 commit：`655882a`（04-21 09:23）。之後 45+ 筆改動全部**未 commit**，等實機驗證。
+
+`git status` 會看到：
+- 改動：`user_lib/WASH_ROBOT.{h,cpp}`、`Crane_easy_PI/main.cpp`、`Linux_test/main.cpp`、`web_backend/*`、`.claude/*`、vcxproj 系列、`washrobot_new_PI.vcxproj`
+- 新增：`crane_shim/`、`.claude/easy_crane_test_mode.md`、`.claude/camera_obstacle_plan.md`、`frame_capture/`
+
+### 規範邊界備註
+- `user_lib/WASH_ROBOT.{h,cpp}` 跨界 Jim（標 `[跨界: user_lib]`：04-21c watchdog + debug / 04-23c CRANE_IP + slave IDs）
+- `Linux_test/main.cpp`、`Crane_easy_PI/main.cpp`、`crane_shim/`、`web_backend/`、`frame_capture/`、`.claude/` 都屬 Sadie 範圍
+
+---
+
 ## 2026-04-21i — web_backend reconnect exponential-spawn bug 修復（OOM killer 炸過）
 
 ### 現象

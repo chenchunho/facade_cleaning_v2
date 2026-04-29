@@ -57,10 +57,11 @@ public:
 	void home_start();
 	void home_set_current_pos_zero();
 
-	// 使能 / 儲存
-	bool motor_enable();                   // 0x1801 = 0x1111
-	bool motor_disable();                  // 0x1801 = 0x2233
-	bool save_params();                    // 0x1801 = 0x2222
+	// 使能 / 儲存 / 清警報（真實指令以手冊 §5.3.2/5.3.3 為準，舊版註解有誤）
+	bool motor_enable();                   // 0x000F (Pr0.07) = 1: 軟體強制使能
+	bool motor_disable();                  // 0x000F (Pr0.07) = 0: 解除強制 (交回 DI1)
+	bool save_params();                    // 0x1801 = 0x2211: 儲存所有參數到 EEPROM
+	bool reset_alarm();                    // 0x1801 = 0x1111: 復位當前報警
 
 	// 讀取資訊
 	bool read_version(uint16_t& ver1, uint16_t& ver2);

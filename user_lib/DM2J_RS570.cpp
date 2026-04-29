@@ -132,7 +132,7 @@ bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int ac
 	PR_move_set(pr_num, mode, rpm, pos_pulse, acc, dec);
 	PR_trigger(pr_num);
 
-	const int timeout_ms = 10000;
+	const int timeout_ms = 20000;
 	int elapsed = 0;
 
 	uint32_t st = 0;
@@ -198,7 +198,7 @@ bool DM2J_RS570::PR_move_cm_trigger_all(int pr_num)
 {
 	PR_trigger_sync(pr_num);
 
-	const int timeout_ms = 10000;
+	const int timeout_ms = 20000;
 	int elapsed = 0;
 
 	while (elapsed < timeout_ms)
@@ -343,6 +343,15 @@ bool DM2J_RS570::read_version(uint16_t& ver1, uint16_t& ver2)
 
 bool DM2J_RS570::read_status(uint32_t& status)
 {
+	// 0x1003 is a SINGLE 16-bit status register per DM2J-RS V1.0 manual §5.3.2:
+	//   Bit0=FAULT  Bit1=ENABLE  Bit2=RUN  Bit4=CMD_DONE  Bit5=PATH_DONE  Bit6=HOME_DONE
+	// Previous code read 2 registers and packed as (hi<<16)|lo, putting the real
+	// flags into bits 16-22 of the returned uint32_t. Callers then masked with
+	// 0x0010 / 0x0020 / 0x0001 (low 16 bits) and never saw any flag — every
+	// PR_move_cm / dm2j_wait_done_ poll timed out.
+	// Now: read only 0x1003, store 16-bit value in low 16 bits of uint32_t.
+	// Legacy bit masks (0x0001 / 0x0002 / 0x0004 / 0x0010 / 0x0020) are now correct.
+	// HOME_DONE mask changed from 0x10000 (never set) to 0x0040 — see print_status.
 	uint8_t tx[8];
 
 	tx[0] = slaveID;
@@ -350,7 +359,7 @@ bool DM2J_RS570::read_status(uint32_t& status)
 	tx[2] = 0x10;     // 0x1003
 	tx[3] = 0x03;
 	tx[4] = 0x00;
-	tx[5] = 0x02;     // read 2 registers (32-bit for Bit16 HOME_DONE)
+	tx[5] = 0x01;     // read 1 register (16-bit) — manual says status is single reg
 
 	uint16_t crc = crc16(tx, 6);
 	tx[6] = crc & 0xFF;
@@ -363,13 +372,11 @@ bool DM2J_RS570::read_status(uint32_t& status)
 	uint8_t rx[32] = { 0 };
 	int len = client->receiveData((char*)rx, 32, 200);
 
-	if (len < 9) return true;  // need 9 bytes for 2 registers
+	if (len < 7) return true;  // 7 bytes for 1 register: slave+fn+bc+2data+2crc
 
 	LOG_HEX(_log_tag, "RX read_status", rx, len);
 
-	uint16_t hi = (rx[3] << 8) | rx[4];
-	uint16_t lo = (rx[5] << 8) | rx[6];
-	status = ((uint32_t)hi << 16) | lo;
+	status = ((uint32_t)rx[3] << 8) | rx[4];
 	return false;
 }
 
@@ -383,7 +390,7 @@ void DM2J_RS570::print_status(uint32_t status)
 	if (status & 0x0004)  std::strncat(flags, "[RUN] ",       sizeof(flags) - std::strlen(flags) - 1);
 	if (status & 0x0010)  std::strncat(flags, "[CMD_DONE] ",  sizeof(flags) - std::strlen(flags) - 1);
 	if (status & 0x0020)  std::strncat(flags, "[PATH_DONE] ", sizeof(flags) - std::strlen(flags) - 1);
-	if (status & 0x10000) std::strncat(flags, "[HOME_DONE] ", sizeof(flags) - std::strlen(flags) - 1);
+	if (status & 0x0040)  std::strncat(flags, "[HOME_DONE] ", sizeof(flags) - std::strlen(flags) - 1);
 
 	LOG_DBG(_log_tag, "status=0x%08X %s", status, flags);
 }
@@ -436,6 +443,38 @@ bool DM2J_RS570::read_save_status(uint16_t& saveStatus)
 
 	saveStatus = (rx[3] << 8) | rx[4];
 	return false;
+}
+
+//=========== control: enable / alarm / save ===========
+//
+// Per DM2J-RS V1.0 manual:
+//   Pr0.07 (0x000F) software force-enable: 1 = ON (override DI1), 0 = OFF
+//   0x1801 control word: 0x1111 = reset current alarm, 0x2211 = save params to EEPROM
+// (Older header comments claiming 0x1801 = 0x1111/0x2233/0x2222 for enable/disable/save
+//  were wrong — corrected here.)
+
+bool DM2J_RS570::motor_enable()
+{
+	LOG_INF(_log_tag, "motor_enable (Pr0.07 = 1, force enable)");
+	return writeSingle(0x000F, 0x0001);
+}
+
+bool DM2J_RS570::motor_disable()
+{
+	LOG_INF(_log_tag, "motor_disable (Pr0.07 = 0, release to DI1)");
+	return writeSingle(0x000F, 0x0000);
+}
+
+bool DM2J_RS570::save_params()
+{
+	LOG_INF(_log_tag, "save_params (0x1801 = 0x2211, save to EEPROM)");
+	return writeSingle(0x1801, 0x2211);
+}
+
+bool DM2J_RS570::reset_alarm()
+{
+	LOG_INF(_log_tag, "reset_alarm (0x1801 = 0x1111, clear current fault)");
+	return writeSingle(0x1801, 0x1111);
 }
 
 bool DM2J_RS570::read_motor_position(int32_t& pos)

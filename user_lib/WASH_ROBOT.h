@@ -55,22 +55,30 @@ public:
     std::string cmd_init();
     std::string cmd_attach();
     std::string cmd_detach();
-    std::string cmd_step_down();
-    std::string cmd_run(int steps);
+    std::string cmd_step_down(int cm = 0);   // cm = 0 → use current step_cm_; cm > 0 → validate 5..60, override
+    std::string cmd_run(int steps, int cm = 0);
     std::string cmd_arm_sweep();  // public: acquires motion_mtx_
     std::string cmd_tilt_mode(bool on);
     std::string cmd_emergency_stop();
     std::string cmd_shutdown();
     std::string cmd_status();
     std::string cmd_vacuum(const std::string& group, bool on);
+    std::string cmd_pump(bool on);                       // dp0105 vacuum pump (PQW CH1)
     std::string cmd_pusher(const std::string& group, const std::string& pos);
+    std::string cmd_zdt_zero(const std::string& group);   // "feet"|"body"|"center"|"all" — set current ZDT pos as new zero (manual 3.1.3)
     std::string cmd_move(const std::string& motor, double cm);
+    std::string cmd_wheels(const std::string& action);   // "retract" = abs 0, "lower" = abs -7
+    std::string cmd_dm2j_group(const std::string& group, double cm);   // "feet" | "wheels", abs cm
+    std::string cmd_dm2j_zero(const std::string& group);                // "feet" | "wheels" | "arm" — set current pos as new zero
     std::string cmd_confirm_balance(const std::string& ans);
     std::string cmd_return_home(int descent_cm);
     std::string cmd_reset();
     std::string cmd_ping();
     std::string cmd_pause();
     std::string cmd_resume();
+    std::string cmd_continue();   // resume from PausedOnError = retry the failed op
+    std::string cmd_skip();       // resume from PausedOnError = skip (assume manual fix)
+    std::string cmd_crane_attached(bool on);   // toggle whether washrobot drives the crane
 
     //=========== state ===========
 
@@ -81,10 +89,13 @@ public:
         Running,         // Phase 4 step_down / run in progress
         WaitingConfirm,  // balance_ask fired, awaiting confirm_balance
         Paused,          // user-paused during Running / Balancing
+        PausedOnError,   // auto-flow op failed; awaiting cmd_continue (retry) / cmd_skip / cmd_emergency_stop
         Balancing,       // Phase 5 roll correction running
         ReturningHome,   // Phase 6 return_home running
         Error            // hard fault — only status / ping / reset / return_home allowed
     };
+
+    enum class PauseAction { None = 0, Retry = 1, Skip = 2, Abort = 3 };
 
     State get_state() const { return state_.load(); }
     static const char* state_name(State s);
@@ -97,8 +108,10 @@ private:
     static constexpr const char* IP_485_3   = "192.168.1.22";
     static constexpr int         PORT_485   = 4001;
 
-    // [TEST MODE 2026-04-21] CRANE_IP changed from "192.168.1.101" → "192.168.5.26"
-    // because crane_shim.py is co-located on the easy crane Pi (.5.26) during testing.
+    // [TEST MODE 2026-04-21 / updated 2026-04-24] CRANE_IP history:
+    //   192.168.1.101 → 192.168.5.26 (shim was on easy crane Pi)
+    //   192.168.5.26 → 127.0.0.1     (shim moved to .5.19 same machine as washrobot)
+    // Shim now runs locally with `--easy-host 192.168.5.26` to reach the real easy crane.
     // REVERT to "192.168.1.101" when main crane (Crane_control_PI) deploys to its own Pi.
     // See .claude/easy_crane_test_mode.md §9a 撤除清單.
     static constexpr const char* CRANE_IP   = "192.168.5.26";
@@ -134,14 +147,19 @@ private:
     static constexpr int DM2J_ARM         = 5;
 
     // Pusher motion
-    static constexpr int PUSHER_EXTEND_PULSE  = 144000;
-    static constexpr int PUSHER_RETRACT_PULSE = 0;
-    static constexpr int PUSHER_RPM           = 1000;
+    static constexpr int PUSHER_EXTEND_PULSE       = 30000;    // center / fallback ~10 cm (對齊 body，2026-04-24)
+    static constexpr int PUSHER_EXTEND_FEET_PULSE  = 23000;    // feet group ~8 cm (2026-04-28 從 7 cm 加長)
+    static constexpr int PUSHER_EXTEND_BODY_PULSE  = 28500;    // body group ~9.5 cm (2026-04-29 從 10 cm 縮短)
+    static constexpr int PUSHER_RETRACT_PULSE      = 0;
+    static constexpr int PUSHER_RPM           = 500;     // extend 用（2026-04-28: 1000 → 500）
+    static constexpr int PUSHER_RPM_RETRACT   = 100;     // retract 用（2026-04-28: extend 500 → retract 100，現場實測太硬故再降）
     static constexpr int PUSHER_ACC           = 255;
     static constexpr int PUSHER_SETTLE_MS     = 1500;
 
     // Step parameters
-    static constexpr int STEP_CM          = 30;
+    static constexpr int STEP_CM_DEFAULT  = 30;   // initial value of step_cm_ (settable via cmd_set_step_cm)
+    static constexpr int STEP_CM_MIN      = 5;
+    static constexpr int STEP_CM_MAX      = 60;
     static constexpr int STEP_MARGIN_CM   = 15;   // crane extra slack before feet move
     static constexpr int TOTAL_DISTANCE_CM = 30;  // TODO: set actual building height
 
@@ -165,23 +183,28 @@ private:
     static constexpr int         ROLL_CORRECT_RETRY_MAX   = 5;
 
     // DM2J motion
-    static constexpr int DM2J_RPM = 700;
-    static constexpr int DM2J_ACC = 100;
-    static constexpr int DM2J_DEC = 100;
+    static constexpr int DM2J_RPM = 200;
+    static constexpr int DM2J_ACC = 500;
+    static constexpr int DM2J_DEC = 500;
 
     // Arm sweep
     static constexpr int ARM_SWEEP_CM  = 30;
-    static constexpr int ARM_SWEEP_RPM = 500;
+    static constexpr int ARM_SWEEP_RPM = 200;
 
     // Vacuum
     static constexpr int VACUUM_RETRY_MAX     = 5;
-    static constexpr int VACUUM_THRESHOLD_X10 = -500;  // 0.1 kPa; -50 kPa — below = attached
-    static constexpr int DETACH_THRESHOLD_X10 = -100;  // 0.1 kPa; -10 kPa — above = detached
+    // JC-100 read_pressure() returns raw int in kPa unit on this hardware
+    // (despite driver comment saying 0.1 kPa — actual readings show kPa scale,
+    // see 2026-04-27u). below = attached / above = detached.
+    static constexpr int VACUUM_THRESHOLD_KPA = -50;   // kPa
+    static constexpr int DETACH_THRESHOLD_KPA = -10;   // kPa
     static constexpr int VACUUM_SETTLE_MS     = 2000;
+    static constexpr int VACUUM_RELEASE_WAIT_MS = 4000;  // wait after valve OFF before pusher retract (cup adhesion + line vent)
+    static constexpr int RETRACT_HALF_WAIT_MS  = 1000;   // wait between half-retract and full-retract (two-stage retract)
     static constexpr int POLL_INTERVAL_MS     = 50;
     static constexpr double VACUUM_BACKUP_CM  = 5.0;   // rail backup on each vacuum retry
 
-    static constexpr int RETURN_VACUUM_RELEASE_MS = 5000;  // wait after valves off before retracting pushers
+    static constexpr int RETURN_VACUUM_RELEASE_MS = 5000;  // wait after valves off before retracting pushers (return_home only)
 
     //=========== hardware ===========
 
@@ -195,6 +218,11 @@ private:
 
     Serial_port  imu_serial_;
     WT901BC_TTL  imu_;
+
+    // Tracks the per-driver debug flag passed at init() so high-frequency poll
+    // loops (e.g. zdt_wait_motion_done_) can temporarily silence hex dumps and
+    // restore to the correct value. Set from WR_DRIVER_DEBUG env var.
+    bool driver_dbg_ = false;
 
     //=========== state ===========
 
@@ -222,6 +250,21 @@ private:
     std::atomic<double>  body_residual_cm_;    // previous body under-retract (auto-absorbed by next feet phase via absolute target)
     double               actual_feet_cm_;      // last feet-phase actual DM2J move (used by body phase logging)
 
+    // Per-step rail travel (cm). Settable per cmd_step_down / cmd_run call.
+    // Default STEP_CM_DEFAULT (30); valid range STEP_CM_MIN..STEP_CM_MAX (5..60).
+    std::atomic<int>     step_cm_;
+
+    // PauseOnError mechanism — set by cmd_continue / cmd_skip while state is
+    // PausedOnError. await_user_intervention_ blocks until non-None.
+    std::atomic<int>     pause_action_;
+
+    // GUI-toggleable: whether washrobot should send commands to the crane.
+    // Default true (normal operation). When false: crane_cmd_ becomes a no-op
+    // returning "OK skipped"; crane_watchdog_loop_ skips the ping + abort path.
+    // Use case: bench testing without crane present, or when crane is in
+    // manual-only mode.
+    std::atomic<bool>    crane_attached_;
+
     //=========== utility ===========
 
     DM2J_RS570&        D_(int slave) { return dm2j_[slave - 1]; }
@@ -231,8 +274,37 @@ private:
     static int64_t now_ms_();
     static void    sleep_ms_(int ms);
     void           evt_(const std::string& msg);
-    bool           dm2j_wait_done_(int slave, int timeout_ms = 10000);
+    bool           dm2j_wait_done_(int slave, int timeout_ms = 20000);
+
+    // Synchronized pair-motion helper for mechanically-coupled DM2J slaves.
+    // Used by feet rails {1, 3} (PR1) and can be reused for wheels {2, 4} (PR2).
+    // Broadcast trigger → simultaneous start; parallel status poll → both waited
+    // together (no sequential blocking). Logs before/after positions + travel.
+    // Bystanders' PR[pr_num] must be safe (rpm=0, set in cmd_init) so broadcast
+    // doesn't drive them.
+    bool           dm2j_pair_move_abs_(int slave_a, int slave_b, int pr_num,
+                                        double target_cm, int timeout_ms = 20000);
+    bool           dm2j_pair_poll_done_(int slave_a, int slave_b, int timeout_ms);
     bool           check_abort_();
+
+    // Block until user resolves the error pause via cmd_continue / cmd_skip /
+    // emergency_stop. Returns the user's chosen action.
+    PauseAction    await_user_intervention_(const std::string& context);
+
+    // Wrap any "bool fn() returning true=error" call so that on failure the
+    // flow pauses (PausedOnError state), then retries / skips / aborts based
+    // on user input. Returns true if user chose Abort, false otherwise
+    // (success on first try OR after retries OR explicit Skip).
+    template <typename Fn>
+    bool try_or_pause_(Fn fn, const std::string& context) {
+        while (true) {
+            if (!fn()) return false;             // success
+            PauseAction action = await_user_intervention_(context);
+            if (action == PauseAction::Abort) return true;
+            if (action == PauseAction::Skip)  return false;
+            // Retry: loop and call fn() again
+        }
+    }
 
     void        set_state_(State s);   // atomic + EVT state_changed
     std::string state_violation_(State cur) const;
@@ -256,8 +328,9 @@ private:
 
     //=========== pusher / vacuum ===========
 
-    bool             pusher_move_(int slave, int pulse);
-    bool             pusher_move_many_(const std::vector<int>& slaves, int pulse);
+    bool             pusher_move_(int slave, int pulse, int rpm = PUSHER_RPM);
+    bool             pusher_move_many_(const std::vector<int>& slaves, int pulse, int rpm = PUSHER_RPM);
+    bool             zdt_wait_motion_done_(int slave, int timeout_ms = 15000);
     static std::vector<int> group_slaves_(const std::string& group);
     static int              group_valve_ch_(const std::string& group);
     bool             vacuum_valve_(const std::string& group, bool on);
@@ -269,19 +342,27 @@ private:
                              PreCycle  pre_cycle,
                              Backup    backup,
                              int&      out_retry_count);
+
+    // Internal impl — the real init logic. Public cmd_init() wraps this so it
+    // can broadcast an EVT init_complete regardless of success/failure.
+    std::string cmd_init_impl_();
 };
 
 // ---- cycle_group_ template definition ----
 // Phase 4 vacuum attach cycle with backup-on-retry.
 //
-//   pre_cycle : () -> string   called ONCE before first attempt (crane + DM2J large move)
-//   backup    : () -> string   called BEFORE each retry (DM2J small 5cm reverse move)
+//   pre_cycle : () -> string             called ONCE before first attempt (crane + DM2J large move)
+//   backup    : (bool dry_run) -> string called BEFORE each retry (DM2J small 5cm reverse move)
+//                                        dry_run=true: feasibility check ONLY, no side effects
+//                                        dry_run=false: perform actual backup motion
 //
 // Flow:
 //   pre_cycle()                       e.g. feet: crane pay_out + DM2J abs STEP_CM + crane retract
 //   for attempt = 0 .. VACUUM_RETRY_MAX:
 //     if attempt > 0:
-//       release valve + retract pushers + backup()
+//       backup(dry_run=true)          ← feasibility check FIRST (no valve/pusher side effects yet)
+//       release valve + retract pushers
+//       backup(dry_run=false)         ← actual reverse motion
 //     extend pushers + valve ON + verify
 //     if OK: out_retry_count = attempt; return ""
 //   return "vacuum_retry_exceeded <group>"
@@ -303,28 +384,60 @@ std::string WashRobot::cycle_group_(const std::string& group,
 
     for (int attempt = 0; attempt <= VACUUM_RETRY_MAX; ++attempt) {
         if (attempt > 0) {
-            // Retry: release valve + retract pushers + small backup
-            if (pqw_.controlRelay(valve_ch, false)) return "valve_off_fail";
-            sleep_ms_(300);
-            if (pusher_move_many_(slaves, PUSHER_RETRACT_PULSE)) return "pusher_retract_fail";
+            // [step 1/3] Feasibility check BEFORE doing any cleanup. If backup
+            // can't proceed (rail would exceed [0, step_cm] safe range), abort
+            // retries early so we don't release vacuum / retract pushers for
+            // nothing — leave system in current attached state.
+            std::string check_err = backup(true);
+            if (!check_err.empty()) return check_err;
+
+            // [step 2/3] Cleanup: release valve + retract pushers (rail can't move
+            // backward while mechanism is locked to wall).
+            // Wrapped in try_or_pause_ — on op fail, pause for user manual fix
+            // then retry / skip / abort (vs. previous immediate Error state).
+            if (try_or_pause_([this, valve_ch]() { return pqw_.controlRelay(valve_ch, false); },
+                              "cycle_" + group + "_valve_off_retry")) return "aborted";
+            sleep_ms_(VACUUM_RELEASE_WAIT_MS);
+
+            // Two-stage retract (all groups): half → wait → full. Avoids ZDT
+            // stall when cup adhesion lingers after valve OFF.
+            const int half_pulse = (group == "feet") ? PUSHER_EXTEND_FEET_PULSE / 2
+                                 : (group == "body") ? PUSHER_EXTEND_BODY_PULSE / 2
+                                 :                     PUSHER_EXTEND_PULSE / 2;   // center / fallback
+            if (try_or_pause_([this, &slaves, half_pulse]() { return pusher_move_many_(slaves, half_pulse, PUSHER_RPM_RETRACT); },
+                              "cycle_" + group + "_pusher_retract_half_retry")) return "aborted";
+            sleep_ms_(RETRACT_HALF_WAIT_MS);
+            if (try_or_pause_([this, &slaves]() { return pusher_move_many_(slaves, PUSHER_RETRACT_PULSE, PUSHER_RPM_RETRACT); },
+                              "cycle_" + group + "_pusher_retract_full_retry")) return "aborted";
             if (check_abort_()) return "aborted";
 
-            std::string berr = backup();
+            // [step 3/3] Actual backup motion (crane pay_out + DM2J reverse move).
+            std::string berr = backup(false);
             if (!berr.empty()) return berr;
             if (check_abort_()) return "aborted";
         }
 
-        // Extend + valve ON + settle + verify
-        if (pusher_move_many_(slaves, PUSHER_EXTEND_PULSE)) return "pusher_extend_fail";
-        if (pqw_.controlRelay(valve_ch, true))              return "valve_on_fail";
+        // Valve ON BEFORE extend (pre-engage vacuum — cup pulls air as pusher
+        // contacts wall → instant seal). Aligned with Linux_test menu 7 and
+        // memory project_vacuum_seal_patterns.md. Previously extend-then-valve
+        // risks cup contacting wall with atmospheric pressure inside → poor seal.
+        // Pick extend target per group: feet=7cm, body=10cm, others=full stroke.
+        const int extend_pulse = (group == "feet") ? PUSHER_EXTEND_FEET_PULSE
+                               : (group == "body") ? PUSHER_EXTEND_BODY_PULSE
+                               :                     PUSHER_EXTEND_PULSE;
+        if (try_or_pause_([this, valve_ch]() { return pqw_.controlRelay(valve_ch, true); },
+                          "cycle_" + group + "_valve_on")) return "aborted";
+        if (try_or_pause_([this, &slaves, extend_pulse]() { return pusher_move_many_(slaves, extend_pulse); },
+                          "cycle_" + group + "_pusher_extend")) return "aborted";
         sleep_ms_(VACUUM_SETTLE_MS);
 
+        // Vacuum verify (JC-100 per cup). On any failure: retry up to
+        // VACUUM_RETRY_MAX times — outer for-loop runs backup() then re-extends.
         auto fails = vacuum_check_(group);
         if (fails.empty()) {
             out_retry_count = attempt;
             return "";
         }
-
         std::string msg = "vacuum_fail " + group + " attempt=" + std::to_string(attempt) + " slaves=";
         for (size_t i = 0; i < fails.size(); ++i) {
             if (i) msg += ",";

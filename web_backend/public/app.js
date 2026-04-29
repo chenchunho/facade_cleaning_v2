@@ -17,6 +17,14 @@ let pendingHomeStatus = null; // { resolve, timeoutId }
 
 //=========== connection ===========
 
+function _onVisibilityChange() {
+    if (document.visibilityState !== 'visible') return;
+    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        logSys('tab visible — force reconnect (skipping 2s retry timer)');
+        connectWs();
+    }
+}
+
 function connectWs() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${proto}://${location.host}`);
@@ -31,6 +39,13 @@ function connectWs() {
         setTimeout(connectWs, 2000);
     };
     ws.onerror = () => logSys('ws error');
+
+    // Backgrounded tabs have their setTimeout throttled (Chrome 1s+) or frozen
+    // entirely. When the user returns, we don't want to wait for the 2s retry
+    // timer — force an immediate reconnect if the socket is dead.
+    // (Handler attached once at script load; re-attaching per connectWs() is safe
+    // because connectWs is usually called from within this same handler.)
+    document.addEventListener('visibilitychange', _onVisibilityChange);
     ws.onmessage = (e) => {
         let m;
         try { m = JSON.parse(e.data); } catch { return; }
@@ -146,12 +161,105 @@ function onCraneLine(line) {
     }
 }
 
+let washrobotState = 'unknown';
+let lastPauseContext = '';
+
 function onWashrobotLine(line) {
     if (line.startsWith('EVT balance_ask')) {
         const r = line.match(/roll=(\S+)/);
         const p = line.match(/pitch=(\S+)/);
         showBalanceModal(r ? r[1] : '?', p ? p[1] : '?');
     }
+
+    // Track washrobot state from:
+    //   - cmd_status reply: "OK state=<name> ..."
+    //   - state change EVT: "EVT state_changed <old> <new>"  ← new state is 2nd arg
+    const sm = line.match(/\bstate=(\S+)/)
+            || line.match(/EVT\s+state_changed\s+\S+\s+(\S+)/);
+    if (sm) {
+        washrobotState = sm[1];
+        updateErrorPauseUI();
+    }
+
+    // Capture the failure context when entering PausedOnError
+    if (line.startsWith('EVT error_pause')) {
+        const cm = line.match(/context=(\S+)/);
+        lastPauseContext = cm ? cm[1] : '?';
+        updateErrorPauseUI();
+    }
+
+    // Update vacuum readings panel from any line containing pN=value
+    parseVacuumValues(line);
+
+    // Sync crane_attached toggle status from cmd_status reply or EVT
+    const am = line.match(/\bcrane_attached=?\s*(on|off)/);
+    if (am) {
+        const on = (am[1] === 'on');
+        const txt = document.getElementById('crane-attached-status');
+        if (txt) txt.textContent = `(currently: ${am[1]})`;
+        // Mirror to the prominent badge in crane panel
+        const badge = document.getElementById('crane-link-badge');
+        if (badge) {
+            badge.textContent = on ? '🟢 ATTACHED (washrobot 驅動)' : '⚪ DETACHED (skip)';
+            badge.classList.toggle('link-ok',   on);
+            badge.classList.toggle('link-down', !on);
+        }
+    }
+}
+
+function updateErrorPauseUI() {
+    const isPaused = (washrobotState === 'paused_on_error');
+    const btnC = document.getElementById('btn-continue');
+    const btnS = document.getElementById('btn-skip');
+    const status = document.getElementById('error-pause-status');
+    const label = document.getElementById('error-pause-label');
+    const ctx = document.getElementById('error-pause-context');
+    if (!btnC || !btnS || !status || !label || !ctx) return;
+
+    if (isPaused) {
+        btnC.disabled = false;
+        btnS.disabled = false;
+        status.classList.add('active');
+        label.textContent = 'STATUS: ERROR 暫停中 —';
+        ctx.textContent = lastPauseContext || '(unknown)';
+    } else {
+        btnC.disabled = true;
+        btnS.disabled = true;
+        status.classList.remove('active');
+        label.textContent = `STATUS: ${washrobotState}`;
+        ctx.textContent = '';
+    }
+}
+
+// Initialize UI on script load
+updateErrorPauseUI();
+
+//=========== vacuum readings panel ===========
+
+// Parse all pN=value occurrences from any line and update vac-N cells +
+// color-code by attachment strength.
+function parseVacuumValues(line) {
+    const re = /\bp(\d+)=(-?\d+\.?\d*)/g;
+    let m;
+    let updated = false;
+    while ((m = re.exec(line)) !== null) {
+        const id = parseInt(m[1], 10);
+        const val = parseFloat(m[2]);
+        const cell = document.getElementById(`vac-${id}`);
+        if (!cell) continue;
+        cell.textContent = `p${id} = ${val}`;
+        cell.classList.remove('vac-strong', 'vac-weak', 'vac-none');
+        if (val <= -50)      cell.classList.add('vac-strong');   // attached
+        else if (val <= -10) cell.classList.add('vac-weak');     // partial seal
+        else                 cell.classList.add('vac-none');     // detached
+        updated = true;
+    }
+    return updated;
+}
+
+const btnRefreshVacuum = document.getElementById('btn-refresh-vacuum');
+if (btnRefreshVacuum) {
+    btnRefreshVacuum.onclick = () => send('washrobot', 'status');
 }
 
 function onEasyCraneLine(line) {
@@ -196,17 +304,46 @@ function onEasyCraneLine(line) {
 
 //=========== composed commands ===========
 
+function readStepCm() {
+    const cm = parseInt(document.getElementById('step-cm').value, 10);
+    if (!(cm >= 5 && cm <= 60)) {
+        logSys(`step cm out of range: ${cm} (allowed 5-60)`);
+        return null;
+    }
+    return cm;
+}
+
+document.getElementById('btn-step-down').onclick = () => {
+    const cm = readStepCm();
+    if (cm === null) return;
+    send('washrobot', `step_down ${cm}`);
+};
+
 document.getElementById('btn-run').onclick = () => {
     const n = parseInt(document.getElementById('run-steps').value, 10);
     if (!(n > 0)) return;
-    send('washrobot', `run ${n}`);
+    const cm = readStepCm();
+    if (cm === null) return;
+    send('washrobot', `run ${n} ${cm}`);
 };
 
-document.getElementById('btn-move').onclick = () => {
-    const motor = document.getElementById('move-motor').value;
-    const cm = parseFloat(document.getElementById('move-cm').value);
+document.getElementById('btn-dm2j-group').onclick = () => {
+    const group = document.getElementById('dm2j-group').value;
+    const cm = parseFloat(document.getElementById('dm2j-group-cm').value);
     if (isNaN(cm)) return;
-    send('washrobot', `move ${motor} ${cm}`);
+    if (group === 'arm') {
+        // arm = single slave, use existing cmd_move
+        send('washrobot', `move arm ${cm}`);
+    } else {
+        // feet / wheels = group sync, use new cmd_dm2j_group
+        send('washrobot', `dm2j_group ${group} ${cm}`);
+    }
+};
+
+document.getElementById('btn-dm2j-zero').onclick = () => {
+    const group = document.getElementById('dm2j-group').value;
+    if (!confirm(`Set current position as zero for ${group}? This shifts the coordinate frame and cannot be auto-undone.`)) return;
+    send('washrobot', `dm2j_zero ${group}`);
 };
 
 document.getElementById('btn-payout').onclick = () => {

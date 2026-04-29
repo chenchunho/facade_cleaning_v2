@@ -88,6 +88,7 @@
     <ClCompile Include="..\user_lib\TCP_client.cpp" />
     <ClCompile Include="..\user_lib\TCP_server.cpp" />
     <ClCompile Include="..\user_lib\WT901BC_TTL.cpp" />
+    <ClCompile Include="..\user_lib\XKC_Y25_RS485.cpp" />
     <ClCompile Include="..\user_lib\ZDT_motor_control.cpp" />
     <ClCompile Include="..\user_lib\ZS_DIO_R_RLY.cpp" />
     <ClCompile Include="main.cpp" />
@@ -102,6 +103,7 @@
     <ClInclude Include="..\user_lib\TCP_client.h" />
     <ClInclude Include="..\user_lib\TCP_server.h" />
     <ClInclude Include="..\user_lib\WT901BC_TTL.h" />
+    <ClInclude Include="..\user_lib\XKC_Y25_RS485.h" />
     <ClInclude Include="..\user_lib\ZDT_motor_control.h" />
     <ClInclude Include="..\user_lib\ZS_DIO_R_RLY.h" />
     <ClInclude Include="..\user_lib\log_utils.h" />

@@ -233,6 +233,74 @@
 - 任意時刻人工按停止鍵 → 安全停機（當前動作完成後停）
 ```
 
+**E. 步伐補償規則（Canonical — 所有 inchworm 流程皆套用此邏輯）**
+
+> 這是本專案「走路」的標準規範。Linux_test `test_full_step()` 已實作；`WASH_ROBOT.cpp`、任何新的 inchworm 流程都遵循此規則。
+> 用戶定義術語：「步伐補償」= 此邏輯。
+
+**Invariant：** 每個 step 結束時，DM2J 鐵軌位置回到 `rail_baseline`（= 進入 step 迴圈前記錄的起始位置）。
+
+**動態 target 計算：**
+```
+進 step 迴圈前：
+  rail_baseline_L/R = DM2J.read_position_cm()   // 讀一次，整個 cycle 的零點
+
+每個 step：
+  rail_cur_L/R = DM2J.read_position_cm()
+  offset = avg((rail_cur_L - baseline_L), (rail_cur_R - baseline_R))
+          // offset > 0 代表上輪 Phase B 沒吸好留下的 body shortfall
+
+  # Phase A (腳組下移)
+  phase_a_target = STEP_CM - offset     // 若 offset > 0，縮小 Phase A
+  if phase_a_target <= 0: abort         // 累積 offset 已超過一步，異常
+  rail += phase_a_target → Phase A 流程（valve off / 收推桿 / 伸推桿 / verify）
+
+  # Phase A retry（真空不足時）
+  每次 retry 退 rail_backup_cm
+  動態 skip：若 cumulative_backoff + rail_backup_cm > phase_a_target，跳過該 retry
+  （retry 最多退到本 Phase A 的起點，不 dig 到上輪 offset）
+
+  # Phase A 結束
+  rail_after_A = DM2J.read_position_cm()
+  phase_b_target = avg(baseline - rail_after_A)   // 負值，關 rail 到 baseline
+
+  # Phase B (身體組下移)
+  rail += phase_b_target → Phase B 流程
+  # 注意：|phase_b_target| 可能 > STEP_CM（上輪的 offset 由本輪 body 補走）
+
+  # Phase B retry
+  每次 retry 進 |rail_backup_cm|（反方向，body 退回）
+  動態 skip：若 cumulative_backoff + rail_backup_cm > |phase_b_target|，跳過該 retry
+
+  # 下一 step 自動延續補償
+  若 Phase B 沒完全關回 baseline → 下一 step 的 offset > 0 → phase_a_target 自動縮小
+  直到某一 step 的 Phase B 不 retry → offset = 0 → 回到正常 STEP_CM 節奏
+```
+
+**數值範例（STEP_CM=10, rail_backup=5, retry=3）：**
+
+| Step | offset | phase_a_target | Phase A 實際 | phase_b_target | Phase B 實際 | rail_end |
+|------|--------|----------------|--------------|----------------|--------------|----------|
+| 1 | 0 | 10 | 10 (無 retry) | -10 | -5 (retry 1 次) | 5 |
+| 2 | 5 | **10-5=5** | 5 (無 retry) | **-10 (關到 baseline)** | -10 (無 retry) | 0 |
+| 3 | 0 | 10 | 10 | -10 | -10 | 0 |
+
+**Retry skip 範例（STEP_CM=4, rail_backup=2, retry=3）：**
+- phase_a_target = 4
+- retry 1: rail -2, cum=2/4 ✓ 執行
+- retry 2: rail -2, cum=4/4 ✓ 執行（rail 剛好回到 Phase A 起點）
+- retry 3: cum 6 > 4 → **skipped**（不執行）
+
+**關鍵性質**
+- `phase_a_target` 動態隨 offset 調整，Phase A 永遠不超過 `STEP_CM`
+- `|phase_b_target|` 可能 > STEP_CM（補上輪 body 虧欠時）
+- Retry 動態 skip 保證 rail 不會跑出 `[baseline, rail_after_A]` 範圍
+- 只有 **Phase B retry** 會留下持續 offset；**Phase A retry** 不會（Phase B 會吃掉）
+
+**呼叫端檢查 rail_baseline 位置**
+- 對 Phase 4 而言，rail_baseline 是進入 Phase 4 **自動循環** 前的鐵軌位置（Phase 3 吸附啟動結束的位置）
+- 若 Phase 4 被人工中斷又恢復，rail_baseline 要重讀一次
+
 ### Phase 5 — 平衡校正模式（Roll 軸，吊機左右鋼索差動）
 
 **觸發條件：** `balance_deg > IMU_ASK_DEG` (15°) 且使用者回覆 Yes 同意執行。

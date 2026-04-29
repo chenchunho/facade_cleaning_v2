@@ -24,11 +24,15 @@
   <section class="panel panel-washrobot">
     <h2>auto cycle (washrobot)</h2>
     <div class="row">
+      <label>step cm: <input type="number" id="step-cm" value="30" min="5" max="60" step="1"></label>
+      <span class="label">(5-60，套用到 step_down / run)</span>
+    </div>
+    <div class="row">
       <button data-tgt="washrobot" data-cmd="init">init</button>
       <button data-tgt="washrobot" data-cmd="attach">attach</button>
       <button data-tgt="washrobot" data-cmd="detach">detach</button>
       <button data-tgt="washrobot" data-cmd="arm_sweep">arm_sweep</button>
-      <button data-tgt="washrobot" data-cmd="step_down">step_down</button>
+      <button id="btn-step-down">step_down</button>
     </div>
     <div class="row">
       <label>run steps: <input type="number" id="run-steps" value="1" min="1"></label>
@@ -36,6 +40,14 @@
       <button data-tgt="washrobot" data-cmd="pause">pause</button>
       <button data-tgt="washrobot" data-cmd="resume">resume</button>
       <button class="danger" data-tgt="washrobot" data-cmd="emergency_stop">STOP (robot)</button>
+    </div>
+    <div class="row error-pause-row">
+      <div class="error-pause-status" id="error-pause-status">
+        <span class="error-pause-label" id="error-pause-label">STATUS: unknown</span>
+        <span class="error-pause-context" id="error-pause-context"></span>
+      </div>
+      <button id="btn-continue" data-tgt="washrobot" data-cmd="continue" class="primary error-action" disabled>繼續 (重試)</button>
+      <button id="btn-skip" data-tgt="washrobot" data-cmd="skip" class="error-action" disabled>略過此步</button>
     </div>
     <div class="row">
       <button data-tgt="washrobot" data-cmd="status">status</button>
@@ -51,6 +63,11 @@
 
   <section class="panel panel-washrobot">
     <h2>manual — vacuum</h2>
+    <div class="row">
+      <span class="label">pump (CH1):</span>
+      <button data-tgt="washrobot" data-cmd="pump on">ON</button>
+      <button data-tgt="washrobot" data-cmd="pump off">OFF</button>
+    </div>
     <div class="row">
       <span class="label">feet:</span>
       <button data-tgt="washrobot" data-cmd="vacuum feet on">ON</button>
@@ -74,6 +91,32 @@
   </section>
 
   <section class="panel panel-washrobot">
+    <h2>manual — vacuum readings <button id="btn-refresh-vacuum">refresh</button></h2>
+    <div class="row">
+      <span class="label">feet:</span>
+      <span class="vac-cell" id="vac-1">p1 = ?</span>
+      <span class="vac-cell" id="vac-2">p2 = ?</span>
+      <span class="vac-cell" id="vac-3">p3 = ?</span>
+      <span class="vac-cell" id="vac-4">p4 = ?</span>
+    </div>
+    <div class="row">
+      <span class="label">body:</span>
+      <span class="vac-cell" id="vac-5">p5 = ?</span>
+      <span class="vac-cell" id="vac-6">p6 = ?</span>
+      <span class="vac-cell" id="vac-7">p7 = ?</span>
+      <span class="vac-cell" id="vac-8">p8 = ?</span>
+    </div>
+    <div class="row">
+      <span class="label">center:</span>
+      <span class="vac-cell" id="vac-9">p9 = ?</span>
+    </div>
+    <ul class="hint">
+      <li>單位 kPa；attached 門檻 ≤ -50（綠）/ 弱 -50~-10（黃）/ 脫離 ≥ -10（紅）</li>
+      <li>refresh 送 status 指令；step_down / status 等任何含 pN= 的回應也會自動更新</li>
+    </ul>
+  </section>
+
+  <section class="panel panel-washrobot">
     <h2>manual — pusher</h2>
     <div class="row">
       <span class="label">feet:</span>
@@ -90,25 +133,61 @@
       <button data-tgt="washrobot" data-cmd="pusher center extend">EXTEND</button>
       <button data-tgt="washrobot" data-cmd="pusher center retract">RETRACT</button>
     </div>
+    <div class="row">
+      <span class="label">zero（當前位置 = 0）:</span>
+      <button data-tgt="washrobot" data-cmd="zdt_zero feet">feet</button>
+      <button data-tgt="washrobot" data-cmd="zdt_zero body">body</button>
+      <button data-tgt="washrobot" data-cmd="zdt_zero center">center</button>
+      <button data-tgt="washrobot" data-cmd="zdt_zero all">all</button>
+    </div>
+    <ul class="hint">
+      <li>set_zero 把當前位置設為新原點（ZDT manual 3.1.3，Reg 0x000A）</li>
+      <li>正確時機：pushers 完全縮回到底時按，之後 abs 0 = 真實縮底</li>
+      <li>半伸/全伸時按 → 後續 retract → 0 不會回真實底，可能 over-extend 或漏縮</li>
+    </ul>
   </section>
 
   <section class="panel panel-washrobot">
-    <h2>manual — DM2J move (cm, absolute)</h2>
+    <h2>manual — wheels</h2>
     <div class="row">
-      <label>motor:
-        <select id="move-motor">
-          <option>left_foot</option>
-          <option>right_foot</option>
-          <option selected>arm</option>
+      <span class="label">slave 2, 4（平行同動）:</span>
+      <button data-tgt="washrobot" data-cmd="wheels retract">收輪 (abs 0)</button>
+      <button data-tgt="washrobot" data-cmd="wheels lower">放輪 (abs -7)</button>
+    </div>
+  </section>
+
+  <section class="panel panel-washrobot">
+    <h2>manual — DM2J group sync (cm, absolute)</h2>
+    <div class="row">
+      <label>group:
+        <select id="dm2j-group">
+          <option value="feet" selected>feet (slave 1, 3)</option>
+          <option value="wheels">wheels (slave 2, 4)</option>
+          <option value="arm">arm (slave 5)</option>
         </select>
       </label>
-      <label>cm: <input type="number" id="move-cm" value="0" step="0.5"></label>
-      <button id="btn-move">move</button>
+      <label>cm: <input type="number" id="dm2j-group-cm" value="0" step="0.5"></label>
+      <button id="btn-dm2j-group">move</button>
+      <button id="btn-dm2j-zero">set zero (current = 0)</button>
     </div>
   </section>
 
   <section class="panel panel-crane">
     <h2>crane</h2>
+    <div class="row">
+      <span class="label">crane 驅動狀態:</span>
+      <span class="link-badge" id="crane-link-badge">? unknown</span>
+    </div>
+    <div class="row">
+      <span class="label">washrobot 是否驅動 crane:</span>
+      <button data-tgt="washrobot" data-cmd="crane_attached on">attached ON</button>
+      <button data-tgt="washrobot" data-cmd="crane_attached off">attached OFF</button>
+      <span class="label" id="crane-attached-status">(currently: ?)</span>
+    </div>
+    <ul class="hint">
+      <li>ON：step_down 等流程會送 pay_out / retract 到 crane；watchdog timeout 會 abort 動作</li>
+      <li>OFF：crane_cmd_ 變 no-op、watchdog 暫停（bench 測試 / crane 離線時用）</li>
+    </ul>
     <div class="row">
       <label>cm: <input type="number" id="crane-cm" value="30" min="1"></label>
       <button id="btn-payout">pay_out</button>
