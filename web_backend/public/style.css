@@ -230,6 +230,16 @@ button.primary:hover {
     color: #fff;
 }
 
+/* balance calibration: 收斂後等 user RECORD/ABORT 時的閃爍提醒 (2026-06-02 v7) */
+button.balcal-pulse {
+    animation: balcal-pulse-anim 1.0s ease-in-out infinite;
+    box-shadow: 0 0 14px rgba(255, 94, 94, 0.85);
+}
+@keyframes balcal-pulse-anim {
+    0%, 100% { transform: scale(1.0); box-shadow: 0 0 8px rgba(255, 94, 94, 0.6); }
+    50%      { transform: scale(1.06); box-shadow: 0 0 20px rgba(255, 94, 94, 1.0); }
+}
+
 /* ========== input / select ========== */
 input, select {
     background: #0e1130;
@@ -261,6 +271,7 @@ select {
 
 /* ========== log panel ========== */
 .panel-log { grid-column: 1 / -1; }
+.panel-raw { grid-column: 1 / -1; }   /* raw command — full-width row */
 #log {
     margin: 0;
     max-height: 42vh;
@@ -315,6 +326,27 @@ select {
     opacity: 0.35;
     pointer-events: none;
     filter: grayscale(0.6);
+}
+
+/* ========== crane busy / init banner ========== */
+/* Sits at top of .panel-crane; visible only when init not done OR motion active.
+   active class toggled by app.js updateCraneButtonStates(). */
+.crane-busy-row {
+    display: none;
+    margin: 0 0 12px 0;
+    padding: 10px 14px;
+    border-radius: var(--r-md);
+    background: linear-gradient(90deg,
+        rgba(168, 85, 247, 0.18),
+        rgba(0, 229, 255, 0.18));
+    border: 1px solid rgba(168, 85, 247, 0.45);
+}
+.crane-busy-row.active { display: block; }
+.crane-busy-label {
+    font-weight: 700;
+    color: var(--cyan);
+    letter-spacing: 1px;
+    font-size: 14px;
 }
 
 /* ========== emergency panel ========== */
@@ -587,6 +619,57 @@ button.error-action:disabled:hover {
     background: rgba(255, 59, 107, 0.10);
 }
 
+/* ========== IMU panel ========== */
+.imu-cell {
+    display: inline-block;
+    min-width: 76px;
+    padding: 4px 10px;
+    margin-right: 12px;
+    border-radius: var(--r-sm);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 700;
+    background: var(--panel-bg-strong);
+    border: 1px solid var(--panel-border);
+    text-align: center;
+    color: var(--fg-dim);
+}
+.imu-cell.imu-green   { color: var(--ok);   border-color: rgba(16, 240, 144, 0.5); background: rgba(16, 240, 144, 0.10); }
+.imu-cell.imu-yellow  { color: var(--warn); border-color: rgba(251, 191, 36, 0.5); background: rgba(251, 191, 36, 0.10); }
+.imu-cell.imu-orange  { color: #ffb86c;     border-color: rgba(255, 184, 108, 0.5); background: rgba(255, 184, 108, 0.10); }
+.imu-cell.imu-red     { color: var(--err);  border-color: rgba(255, 59, 107, 0.5); background: rgba(255, 59, 107, 0.10); }
+
+/* Roll/pitch bar — center marker + fill that grows from center */
+.imu-bar-wrap {
+    display: inline-block;
+    position: relative;
+    width: 260px;
+    height: 12px;
+    background: var(--panel-bg-strong);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    vertical-align: middle;
+    margin-left: 8px;
+    overflow: hidden;
+}
+.imu-bar-center {
+    position: absolute;
+    left: 50%;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: rgba(0, 229, 255, 0.6);
+}
+.imu-bar-fill {
+    position: absolute;
+    top: 1px;
+    bottom: 1px;
+    left: 50%;
+    width: 0;
+    background: linear-gradient(90deg, rgba(16, 240, 144, 0.35), rgba(0, 229, 255, 0.5));
+    transition: left 100ms linear, width 100ms linear;
+}
+
 /* ========== crane link badge ========== */
 .link-badge {
     display: inline-block;
@@ -609,4 +692,416 @@ button.error-action:disabled:hover {
     border-color: rgba(255, 59, 107, 0.55);
     background: rgba(255, 59, 107, 0.12);
     animation: pulse-err 1.5s ease-in-out infinite;
+}
+
+/* ========== camera panel (deep-space-aurora theme) ========== */
+.panel-camera {
+    /* same width as the other panels in the main grid */
+    min-width: 320px;
+}
+.panel-camera h2          { color: var(--cyan); }
+.panel-camera h2::before  { color: var(--cyan); }
+.panel-camera::before {
+    /* override the default top-stripe to lean cyan instead of mixed */
+    background: linear-gradient(90deg, transparent, var(--cyan) 30%, var(--cyan) 70%, transparent);
+    opacity: 0.7;
+}
+
+/* All cameras share one panel, split into equal-width columns. auto-fit keeps
+   每個 cell 等比例：2 台 → 各 50%，3 台 → 各 33%…；窄畫面時自動換行堆疊。 */
+.cam-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 14px;
+}
+.cam-cell {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;   /* let the cell shrink below the image's intrinsic width */
+}
+.cam-cell-head {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 1px;
+    color: var(--cyan);
+    margin-bottom: 6px;
+}
+
+.cam-stage {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background: #000;
+    border: 1px solid rgba(0, 229, 255, 0.35);
+    border-radius: var(--r-md);
+    overflow: hidden;
+    margin-bottom: 10px;
+}
+.cam-video {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+}
+.cam-overlay-offline {
+    display: none;
+    position: absolute;
+    inset: 0;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    background: rgba(10, 14, 39, 0.85);
+    color: var(--err);
+    font-family: var(--font-mono);
+    font-size: 14px;
+    letter-spacing: 2px;
+}
+.cam-overlay-offline small {
+    color: var(--fg-dim);
+    font-size: 11px;
+    letter-spacing: 1px;
+}
+.cam-overlay-offline.visible { display: flex; }
+
+.cam-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+.cam-btn {
+    background: rgba(0, 229, 255, 0.12);
+    border: 1px solid rgba(0, 229, 255, 0.45);
+    color: var(--cyan);
+    padding: 6px 12px;
+    border-radius: var(--r-sm);
+    font-family: var(--font-ui);
+    font-size: 12px;
+    letter-spacing: 1px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+.cam-btn:hover {
+    background: rgba(0, 229, 255, 0.22);
+    border-color: rgba(0, 229, 255, 0.75);
+}
+.cam-btn:active { transform: translateY(1px); }
+.cam-status {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--fg-dim);
+    letter-spacing: 1px;
+}
+.cam-status.live   { color: var(--ok); }
+.cam-status.offline { color: var(--err); }
+
+/* ========== left sidebar nav + page switching ========== */
+#sidebar {
+    position: fixed;
+    left: 0; top: 0; bottom: 0;
+    width: 76px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 14px 8px;
+    background: rgba(10, 14, 39, 0.94);
+    border-right: 1px solid rgba(0, 229, 255, 0.25);
+    z-index: 60;
+}
+.nav-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 11px 4px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--r-sm);
+    color: var(--fg-dim);
+    font-family: var(--font-ui);
+    font-size: 11px;
+    letter-spacing: 1px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+/* themed dot icon — hollow cyan ring, fills + glows when the page is active */
+.nav-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    border: 1.5px solid rgba(0, 229, 255, 0.55);
+    background: transparent;
+    transition: background 0.15s, box-shadow 0.15s, border-color 0.15s;
+}
+.nav-btn.active .nav-dot {
+    background: var(--cyan);
+    border-color: var(--cyan);
+    box-shadow: 0 0 8px 1px rgba(0, 229, 255, 0.7);
+}
+.nav-btn:hover    { background: rgba(0, 229, 255, 0.10); color: var(--fg); }
+.nav-btn.active {
+    background: rgba(0, 229, 255, 0.16);
+    border-color: rgba(0, 229, 255, 0.5);
+    color: var(--cyan);
+}
+
+/* shift the main content clear of the fixed sidebar */
+header, #banner, main { margin-left: 76px; }
+
+/* page switching — hide panels that don't belong to the active page.
+   If <body> has no data-page (JS failed) nothing is hidden — safe fallback. */
+body[data-page="home"]     .panel:not([data-page="home"]),
+body[data-page="manual"]   .panel:not([data-page="manual"]),
+body[data-page="camera"]   .panel:not([data-page="camera"]),
+body[data-page="settings"] .panel:not([data-page="settings"]) {
+    display: none;
+}
+
+/* --- Settings panel: 2-col grid of label + input + default hint --- */
+.panel-settings h3 {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    letter-spacing: 1px;
+    color: var(--cyan);
+    margin: 1.2em 0 0.5em 0;
+    border-bottom: 1px dashed rgba(0, 229, 255, 0.25);
+    padding-bottom: 0.2em;
+}
+.settings-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    gap: 8px 16px;
+}
+.settings-grid label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--fg);
+}
+.settings-grid label input[type="number"] {
+    width: 100px;
+    margin-left: auto;
+}
+.settings-grid .default {
+    font-size: 11px;
+    color: rgba(200, 200, 220, 0.55);
+    white-space: nowrap;
+    min-width: 80px;
+}
+/* dirty highlight: input value differs from saved/applied — pulse cyan */
+.settings-grid input.dirty {
+    border-color: var(--cyan);
+    box-shadow: 0 0 6px 1px rgba(0, 229, 255, 0.4);
+}
+#settings-status {
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
+/* ========== [2026-06-05] scripted run panel ========== */
+.panel-script .script-csv-label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 100%;
+    color: var(--fg-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.panel-script #script-csv {
+    width: 100%;
+    min-height: 44px;
+    padding: 8px 10px;
+    background: #1a1530;
+    color: var(--fg);
+    border: 1px solid var(--panel-border);
+    border-radius: var(--r-sm);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    letter-spacing: 0.5px;
+    resize: vertical;
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+.panel-script #script-csv:focus {
+    outline: none;
+    border-color: var(--cyan);
+    box-shadow: 0 0 8px 1px rgba(0, 229, 255, 0.25);
+}
+.panel-script .script-preview-row {
+    margin-top: 0;
+    margin-bottom: 4px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+.panel-script .script-preview-dim { color: var(--fg-muted); }
+.panel-script .script-preview-ok  { color: var(--ok); }
+.panel-script .script-preview-err { color: var(--err); }
+
+.panel-script .script-saved-row {
+    align-items: flex-start;
+}
+.saved-scripts-list {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+.saved-script-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    background: rgba(168, 85, 247, 0.06);
+    border: 1px solid rgba(168, 85, 247, 0.18);
+    border-radius: var(--r-sm);
+}
+.saved-script-row:hover {
+    background: rgba(168, 85, 247, 0.12);
+    border-color: rgba(168, 85, 247, 0.4);
+}
+.saved-script-name {
+    flex: 1;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--fg);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.saved-script-row button {
+    padding: 4px 8px;
+    font-size: 10px;
+}
+.saved-script-delete {
+    min-width: 28px;
+    padding: 4px 6px;
+}
+
+.panel-script .script-progress-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    padding: 8px;
+    background: rgba(0, 229, 255, 0.05);
+    border: 1px solid rgba(0, 229, 255, 0.2);
+    border-radius: var(--r-sm);
+}
+.script-progress-info {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+.script-progress-text { color: var(--cyan); }
+.script-progress-cm   { color: var(--fg-dim); font-size: 11px; }
+.script-progress-cm.script-progress-mode-transit {
+    color: var(--purple);
+    font-style: italic;
+}
+.script-progress-bar {
+    height: 6px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 3px;
+    overflow: hidden;
+}
+.script-progress-fill {
+    height: 100%;
+    width: 0;
+    background: linear-gradient(90deg, var(--cyan), var(--purple), var(--pink));
+    transition: width 0.3s ease-out;
+}
+.script-progress-fill.script-progress-fail {
+    background: var(--err);
+}
+
+/* ========== [2026-06-09] water_inlet interactive panel ========== */
+.water-inlet-row {
+    align-items: center;
+}
+.water-inlet-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: var(--r-sm);
+    background: rgba(168, 85, 247, 0.06);
+    border: 1px solid var(--panel-border);
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+.water-inlet-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--fg-muted);
+    transition: background 0.2s, box-shadow 0.2s;
+}
+.water-inlet-dot-off {
+    background: var(--fg-muted);
+}
+.water-inlet-dot-on {
+    background: var(--ok);
+    box-shadow: 0 0 8px 2px rgba(16, 240, 144, 0.5);
+    animation: water-inlet-pulse 1.5s ease-in-out infinite;
+}
+.water-inlet-dot-pending {
+    background: var(--warn);
+    box-shadow: 0 0 6px 1px rgba(251, 191, 36, 0.5);
+    animation: water-inlet-pulse 0.6s ease-in-out infinite;
+}
+.water-inlet-dot-error {
+    background: var(--err);
+    box-shadow: 0 0 10px 2px rgba(255, 59, 107, 0.6);
+}
+@keyframes water-inlet-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.45; }
+}
+.water-inlet-state {
+    color: var(--fg);
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    min-width: 36px;
+}
+.water-inlet-timers {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: rgba(0, 229, 255, 0.05);
+    border: 1px solid rgba(0, 229, 255, 0.2);
+    border-radius: var(--r-sm);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--cyan);
+}
+.water-inlet-elapsed {
+    color: var(--fg);
+}
+.water-inlet-sep {
+    color: var(--fg-muted);
+}
+.water-inlet-countdown {
+    color: var(--warn);
+}
+.water-inlet-watchdog-row {
+    background: rgba(255, 59, 107, 0.08);
+    border: 1px solid rgba(255, 59, 107, 0.4);
+    border-radius: var(--r-sm);
+    padding: 8px 12px;
+    gap: 10px;
+}
+.water-inlet-watchdog-text {
+    flex: 1;
+    color: var(--err);
+    font-family: var(--font-mono);
+    font-size: 12px;
 }

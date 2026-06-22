@@ -1,5 +1,399 @@
 # Work Log
 
+## 2026-06-09 — 📌 SESSION HANDOFF（下次接手讀這條）
+
+> **規範權威：** `changelog.md` 2026-06-05k~o + 2026-06-09a~b（這一週累積的程式改動）
+
+### 這次 session 做了什麼（按時間序）
+
+**全部後端 + GUI 改動都已寫進 changelog，但都還沒實機驗證**。
+
+#### 1. Scripted Run 功能（2026-06-05k~n、6-05o 部分相關）
+- ✅ 新增 `cmd_run_script <csv>` + 5 個 saved-script 管理 cmd（save/load/list/delete/run_saved）
+- ✅ CSV 文法：`<int>[n][*<count>]` — `n` 後綴 = transit (不刷洗)、預設 = sweep
+- ✅ 持久化到 `./scripts.json` (key=value 格式)
+- ✅ pipeline 模式照抄 `cmd_run`（sweep + step overlap，pre-loop sweep / iter k after_hook launch）
+- ✅ GUI panel 完整（CSV preview、saved scripts row、進度條、EVT 訂閱）
+- 檔案：`WASH_ROBOT.h/.cpp` (~285 行新增) / `main.cpp` (6 dispatch) / `web_backend/public/*`
+- ❌ 還沒實機跑過：`30*3` 全 sweep / `30,30n,30` 混合 / `30n*3` 全 transit
+
+#### 2. Snowball 防護 A+B+C（2026-06-05o）
+- ✅ **A**：`pusher_extend_with_disable_seal_` 結尾 record_seal_pulse_ 加 `if (weak_seal[i]) continue;`
+- ✅ **B**：`feet_max_overextend_cm_()` cap 在 `FEET_MAX_OVER_CAP_CM = 4.5cm`
+- ✅ **C**：新增 `feet_target_capped_(slave)` helper，cap 在 `preset + FEET_TARGET_OVER_CAP_CM = 5cm`
+- 邏輯：feet last_seal 自然 snowball → cap 後撞不到牆 → WEAK_SEAL → A 不記錄 → realign 拉回 preset
+- ❌ 還沒實機驗證：要看 `[snowball]` log 出現頻率、body 還會不會撞 end-stop
+
+#### 3. Water Inlet 防漏（2026-06-09a + 09b）
+- ✅ `set_water_inlet_(bool)` 加 retry 3 次 / 500ms gap
+- ✅ Background watchdog thread：valve 開超過 `WATER_INLET_OPEN_MAX_MS = 5 min` 強制關 + EVT
+- ✅ `cmd_emergency_stop` / `stop()` 兜底 force close
+- ✅ GUI panel：狀態燈 (灰/綠 pulse/黃 pending/紅 error) + 計時 + auto-OFF 60s + watchdog toast
+- 檔案：`WASH_ROBOT.h/.cpp` 後端 / `web_backend/public/*` 前端
+- ❌ 還沒實機驗證：故意拔 crane Ethernet 看 retry log + watchdog 行為
+
+#### 4. 純討論沒實作（user 決定先不動）
+- arm_sweep_monitor SUSTAINED 0.2→0.4（避免 false positive）— **待 user 確認後做**
+- DM2J:1,3 feet rail obstacle detect — **user 接受我建議不做**（ROI 低）
+- arm_cmd_ INIT recv timeout 真因 — 沒查清楚（看起來 motor_api 端會卡）
+- TCP_client SO_ERROR 驗證缺失 — **未修**（影響 reconnect 邊界 case）
+- vacuum_check 重複跑兩次浪費 30s — **未修**（提了 α + δ 方案）
+
+### 下次開機要做的事（按順序）
+
+1. **build + deploy washrobot_new_PI**
+   - VS MSBuild `washrobot_new_PI.vcxproj` (ARM64 Debug)
+   - scp 到 192.168.1.100，重啟 washrobot 程式
+   - **crane / Linux_test 不用編**（沒動）
+   - 瀏覽器 **Ctrl+F5 強制 reload**（GUI panel / JS / CSS 都改了）
+
+2. **快速 sanity check**
+   ```
+   washrobot console 啟動時應該看到：
+     [OK] water-inlet watchdog started (max open 300s)
+   ```
+
+3. **實機驗證（按 ROI 序）**
+   - **A. Scripted run pipeline**：跑 `run_script 30*3`、對照 `run 3 30 down`，sweep round 數應該都是 4
+   - **B. Snowball 防護**：連跑 5 個 step 看 `[snowball]` log 出現頻率、body 還會不會撞 end-stop
+   - **C. Water inlet GUI**：按 ON → 60s 自動 OFF；按 ON 後拔 crane Ethernet → 燈轉紅
+   - **D. Watchdog**：暫時把 `WATER_INLET_OPEN_MAX_MS` 改 30000 試 watchdog force-close 路徑
+
+### 待 user 決策的事
+
+| 題目 | 我傾向 | 等 user 確認 |
+|---|---|---|
+| arm_sweep_monitor SUSTAINED 0.2→0.4 | 做 | 看 user 是否同意防 false positive 的犧牲（可能漏接弱接觸 obstacle） |
+| arm_cmd_ INIT 60s timeout 是否還要拉長 | 看實機 | 60s 已給足 INIT (~10s)，recv timeout 真因要再查 |
+| TCP_client SO_ERROR 驗證 | 該補 | user_lib 邊界，影響所有 client；要值得 review |
+| vacuum_check skip if just SEALED (α 方案) | 該做（省 30s/attach）| 但 attach 路徑改動較大 |
+
+### 重要狀態 / 變數
+
+```
+WASH_ROBOT.h 新常數：
+  FEET_TARGET_OVER_CAP_CM      = 5.0    snowball C
+  FEET_MAX_OVER_CAP_CM         = 4.5    snowball B
+  WATER_INLET_OPEN_MAX_MS      = 300_000 (5 min)  watchdog
+
+WASH_ROBOT.h 新成員：
+  struct ScriptStep { int cm; bool sweep; };
+  saved_scripts_ map / saved_scripts_mtx_
+  water_inlet_open_ts_ms_ atomic
+  water_inlet_watchdog_running_ / _thread_
+
+WASH_ROBOT.cpp 新函式：
+  cmd_run_script / cmd_save_script / cmd_list_scripts / cmd_load_script / cmd_delete_script / cmd_run_saved
+  parse_script_csv_ / validate_script_name_ / load_saved_scripts_from_disk_ / save_saved_scripts_to_disk_
+  feet_target_capped_(int slave)
+  water_inlet_watchdog_loop_()
+
+主要新 EVT：
+  script_start total_steps=N total_cm=X sweep=A transit=B
+  script step K/N cm=Y mode=sweep|transit
+  script_complete status=ok|fail [step=K mode=X reason=...]
+  water_inlet_watchdog_force_close open_sec=N
+  weak_seal slave=N (已存在)
+```
+
+### 文件對應
+
+| 主題 | 規範權威 |
+|---|---|
+| Scripted run 設計 | `.claude/scripted_run_plan.md` |
+| Snowball 鏈條分析 | `changelog.md` 2026-06-05o |
+| Water inlet 防漏 | `changelog.md` 2026-06-09a + 09b |
+
+### Build 路徑提醒
+
+- washrobot binary 應該在 `bin/ARM64/Debug/washrobot_new_PI.out`
+- 部署到 RPi 192.168.1.100 `~/projects/washrobot_new_PI/bin/ARM64/Debug/`
+- 進水球閥控制權現在在 crane (.34 slave 12 CH4)，所以 crane 不能掛
+- bench 網段是 192.168.5.x（CRANE_IP 暫設 .5.26），production 要還原 .1.101
+
+### 前一個 SESSION HANDOFF（保留以防需要回看）
+
+---
+
+## 2026-06-03 — Camera 障礙物偵測 motion parallax 驗證（舊 handoff，已被 06-09 取代）
+
+> **規範權威：** `camera_obstacle_plan.md` + `changelog.md` 2026-06-02t
+
+### 目前在哪 — Camera 障礙物偵測（窗框避障）
+
+**驗證了什麼：**
+- ✅ Motion parallax 概念**確認可行** — bench 工作室雜亂 + 反光玻璃場景下，仍能乾淨偵測 plank
+- ✅ `frame_capture/obstacle_detector.py` 加了 `--motion-before/--motion-after` 模式
+- ✅ 一對驗證圖：plank @ 25→24cm 1cm shift → detector 抓到 obstacle conf 0.99、STOP_SHORT 19.1cm
+- ❌ 純 OpenCV（沒 motion）試三輪都失敗 — 反射 + 雜物太強
+- ❌ NPU model (`yolov8s_window_640.hef`) 對木條 0 detection — 模型認的是「真實鋁窗框」不是 bench 木條
+
+### 下次要做的 — **補拍 5 對 motion parallax 校正集**
+
+User 關機前 commitment：開機後拍齊以下 10 張：
+
+```
+方法：
+  1. 擺 plank 在距離 X 處，拍 cam3 snap → cam3_motion_Xcm_before.jpg
+  2. plank 往相機方向滑 1cm，拍 cam3 → cam3_motion_Xcm_after.jpg
+
+距離 5 對：
+  X = 10, 15, 25, 35, 45 cm
+  
+存放：D:/工作/觀賞用/ （bench 圖慣例位置）
+  cam3_motion_10cm_before.jpg + cam3_motion_10cm_after.jpg
+  cam3_motion_15cm_before.jpg + cam3_motion_15cm_after.jpg
+  ... (共 10 張)
+
+跑 (每對一次)：
+  cd D:/washrobot_new_PI/frame_capture
+  python3 obstacle_detector.py \
+      --motion-before D:/工作/觀賞用/cam3_motion_25cm_before.jpg \
+      --motion-after  D:/工作/觀賞用/cam3_motion_25cm_after.jpg \
+      --motion-cam cam3 --debug-out /tmp/m25 --pretty
+```
+
+### 接手後檢查清單
+
+1. **5 對都進來了嗎** — 看 `D:/工作/觀賞用/`
+2. **跑 5 對，整理表格：** 預期 feet_distance vs 偵測 feet_distance、誤差
+3. **如果誤差大（> 5cm）：** LUT 要校正
+   - 目前 LUT 用單張木條校正、沒 motion，可能不準
+   - motion 模式抓的是「motion 高的中心 y_px」，可能跟單張 top edge y_px 不同
+   - 從 motion 校正集重 fit LUT
+4. **如果誤差小（< 3cm）：** motion 模式可用、進下一階段
+   - 把 motion 模式整合進 frame_capture (continuous mode)
+   - 寫 C++ FrameAnalyzer 接 UDP
+   - **跨界 user_lib** — 要 PR 等 Jim review
+
+### 關鍵變數 / 檔案
+
+```
+frame_capture/obstacle_detector.py:
+  CAM3_LUT (~L86)           — 6 點 (y_px, distance_cm)，可能要重 fit
+  CAM4_LUT (~L95)           — 同上，cam4 中間 3 點是 interpolation
+  MOTION_MAG_FACTOR 2.5     — flow 高/低分界 (median × factor)
+  MOTION_MIN_MAG 1.5px      — 絕對下限 (避免雜訊)
+  OBSTACLE_MIN_LINE_LENGTH_PX 180  — line 長度門檻（motion 模式可放寬）
+
+實機 cameras：
+  cam3 = 192.168.1.112 (左下)
+  cam4 = 192.168.1.113 (右下)
+  俯角 54°（從水平算），optical axis 對準 25cm
+  
+  frame_capture.py 啟動 (要用 stream=0 主碼流，子碼流被 camera 內部 ROI 裁了)：
+    --url "rtsp://192.168.1.112:554/user=admin&password=&channel=1&stream=0.sdp?"
+    --out /tmp/cam_bottom_l.jpg --cam-id cam3 --http-port 5006
+
+NPU Pi:
+  IP: 192.168.5.25 (bench 網段)
+  ~/window_detect/detect_server.py  UDP :5040
+  Model: yolov8s_window_640.hef
+  **目前模型對木條不認** — 後續若要 ML 路線得重訓
+```
+
+### 不接手做的事
+
+- ❌ 不調 obstacle_detector.py 原本的 `--cam3/cam4` 單張模式 — 那條路驗證過走不通，留 fallback
+- ❌ 不 retrain NPU model — bench 時間先不花這
+- ❌ 不動主程式（user 明確說「不動主程式」）— toggle flag 已 ready 但 detector 還沒接 do_step_down_
+
+### Related context
+
+- `changelog.md` 2026-06-02t — motion parallax 詳細變更紀錄
+- `camera_obstacle_plan.md` — 規範文件，目前**還沒加 motion mode section**（TODO 補）
+- `D:/工作/觀賞用/` — bench 圖位置
+- 路徑含中文需用 `imread_unicode` / `imwrite_unicode`（obstacle_detector.py 已處理）
+
+---
+
+## 2026-06-02/03 — Sadie session：realign 修好 + 一連串安全/效能改動
+
+> **規範權威：** changelog `2026-06-01g/h` + `2026-06-02a/b/c/m`、`CLAUDE.md` §硬體架構（cli_22_ bus 擁塞）、memory `project_se3_07_10_two_options.md`（cli_22_ stale）
+
+### 改動（已落 commit pending 重編 deploy）
+
+| Tag | 檔案 | 內容 | 已實機驗 |
+|---|---|---|---|
+| 2026-06-01g | `WASH_ROBOT.h:814` | `try_or_pause_` loop 開頭加 `if (abort_flag.load()) return true;` — E-stop 中斷後下一個 op 不再執行 | 未 |
+| 2026-06-01h | `WASH_ROBOT.cpp` realign `run_jog` | Stage 0 JOG stall 改 NON-FATAL（emergency_stop + release_stall_flag），讓 Stage A 繼續跑 | ✅ 已驗 — log 顯示 Stage 0 高電流 + Stage A 順利完成 + slaves 回 preset |
+| 2026-06-02a | `Crane_control_PI/main.cpp:477` | `BALANCE_KP_DEFAULT` 0.6 → 1.0 Hz/cm | 未 |
+| 2026-06-02b | `WASH_ROBOT.h:350` | `ARM_CLEAN_WALL_MM` 350 → 330（嘗試修「上貼下不貼」pitch 偏）| 未 |
+| 2026-06-02c | `WASH_ROBOT.cpp` 4 處 pre_cycle | step Phase A/B 釋放某 group 真空前先 `vacuum_check_(another_group)`，4 處：do_step_down body+feet pre_cycle、do_step_up feet+body pre_cycle | 未 |
+| 2026-06-02c | `WASH_ROBOT.cpp:cmd_recover` | 取消 vacuum_check_ 註解 — recover 失敗回 `ERR recover_vacuum_fail` state 留 Error | 未 |
+| 2026-06-02m | `WASH_ROBOT.h` + `cmd_status` | JC100 fresh-read 1Hz rate-limit（`last_status_fresh_read_ms_`），GUI 多快 poll 都不再轟炸 cli_22_ | 未 |
+
+### 重要實機觀察（2026-06-02 bench log）
+
+1. **Realign Layer 1 fix 真的有效** — log 看到 Stage 0 slave 4 peakI=1294mA、slave 2 peakI=2703mA 但沒卡死，Stage A retract 完整跑完，4 顆 feet 全部回 preset (29000-30000 pulse)。漂移問題暫時解決。
+2. **wall_mm=330 還沒實機驗證** — 上次跑是 350 看到上貼下不貼
+3. **bal_cal tension_panic** — `[bal_cal] WATCHDOG tension panic L=30.35 R=24.61` 仍存在（另外 session 已修 → see changelog `2026-06-02d~l`）
+4. **JC100 timeout 仍多** — cli_22_ bus 擁塞，rate-limit 還沒實機驗。剩下的 timeout 主要來自 disable_seal 自己讀，不可避免
+
+### 待完成 / 待觀察（下次 session）
+
+**Critical（實機驗下面這些 fix 跑得對不對）：**
+1. ✅ realign Layer 1 — 已驗
+2. ⏳ wall_mm=330 — bench cleaning sweep 看 tool 是否平貼
+3. ⏳ anchor vacuum check — 看會不會誤報（JC100 偶發 timeout 可能讓 sealed cup 被誤判 unsealed → 卡 PausedOnError）
+4. ⏳ cmd_recover vacuum_check — 看 recover 失敗後 user 怎麼處理（手動修 cup vs reset 破真空）
+5. ⏳ BAL kp=1.0 — 看 oscillation 是否改善
+6. ⏳ cmd_status 1Hz rate-limit — 看 attach idle gap 期間 JC100 timeout 是否減半
+
+**High（這次沒做，下次可能要做）：**
+1. **Realign Layer 2（valve cycling）** — 如果 Stage A 仍偶發 stall，要在 Phase 2 期間 in_window mode 下 cycle valve OFF/ON。設計討論完但未實作。
+2. **DSZL scale 實機校正** — 廠商給 0.02，現在 driver 是 -0.01 placeholder。看 cell 規格（50kg / 100kg）配對。需要實機掛標準重物。
+3. **Tool 物理裝歪** — 若 wall_mm=330 還是不平貼 → 拆 tool mount 重裝。
+
+**Medium：**
+1. **PQW CH6 verify fail give up** — log 看到「gave up after 3 retries」最後沒人 catch，downstream 沒擋住。要看是不是真的有 propagation 問題。
+2. **DM2J:14 writeMulti no response** — cli_22_ contention 偶發，driver 自己 retry OK。要不要監控連續失敗率？
+3. **cmd_recover force escape** — 如果 sensor 假報故障 user 卡死。設計討論完但暫不做（先看誤報率）。
+4. **arm M1 verify_deploy delta 漸增** — RIGHT 從 0.797 漂到 0.910 (delta -0.114, tol 0.150) 接近邊緣
+
+**討論過但設計沒落地：**
+- BAL：機體本來重心偏 L → 應該追求「兩繩同步收放」而非「等張力」。kp 1.0 不夠的話可能要加 base offset 補物理差。
+- Web GUI poll：cmd_status rate-limit 比重啟背景 pressure_poll_loop_ 安全（後者 2026-05-29 已知問題）
+
+### 規範權威 cross-ref
+
+- 釋放真空前的 anchor check 邏輯：`WASH_ROBOT.cpp` body_pre_cycle / feet_pre_cycle（4 處註解 `[2026-06-02] SAFETY:`）
+- JC100 1Hz cap：`WASH_ROBOT.h:629` + `cmd_status` 註解
+- realign 設計 invariant：`WASH_ROBOT.cpp:6196-6212` 安全註解 — Phase 2 stall = PausedOnError 強制 user 介入（但 in_window 路徑 caller 把它當 non-fatal log，2026-06-01 此處改動不影響該語意）
+
+---
+
+## 2026-05-08 — bench X518 雙台 IP 設妥 + crane 啟動 FATAL（架構錯位實證）
+
+> **規範權威：** `CLAUDE.md` §架構圖（USR_C/.32、USR_D/.33 行）、`mailbox.md` 「2026-05-08 DSZL-107 driver vs X518 三選一」已升級 🔴、memory `project_x518_architecture_mismatch.md`
+
+### Bench 進度（X518 兩台都搞定）
+- 兩台 X518 已用 `Linux_test` menu 24（2026-05-08 新增的 Modbus TCP :502 直連工具）改 IP：
+  - X518 #1：`192.168.1.100` → `192.168.1.32`（左繩張力，CH1 接線；DSZL-107 cell 訊號方向反，要軟體翻號或實體調訊號線）
+  - X518 #2：`192.168.1.100` → `192.168.1.33`（右繩張力，校準同流程要重做）
+- 確認手冊「IP 編碼 = `oct1*1000 + oct2`」、「`0xA20=40` 是 SAVE 命令，所有參數修改要 follow up」、「X518 是 2 通道（不是 8）」、「unit reg 在 `0x614`（5=N 6=lb / 2=kg）」
+
+### Crane 啟動失敗（直接 FATAL）
+
+```
+[Crane_control_PI] starting...
+[OK] USR_A (left + middle) @ 192.168.1.30:4001
+[OK] USR_B (right) @ 192.168.1.31:4001
+[FATAL] connect USR_C 192.168.1.32:4001 failed (DSZL left)
+```
+
+根因：bench 把 X518 直插 switch 走 Modbus TCP :502，但 `Crane_control_PI/main.cpp` 假設 .32/.33 是 USR-TCP232 gateway 在 :4001，所以 `cli_C.connectToServer(.32, 4001)` 直接連不上。
+
+### 修「主要吊機程式」— 已熱修走路 B（changelog 2026-05-08f）
+
+決策：使用者選路 B（mailbox 推薦選項），Sadie 自行熱修 `user_lib/DSZL_107.cpp` 內部 framing。**Public API 沒動**，PR 標 `[跨界: user_lib]` 等 Jim review。
+
+**改動摘要：**
+- `DSZL_107.{h,cpp}` 內部從 Modbus RTU+CRC16 → Modbus TCP MBAP；建構子加 `txid_` 計數器；reply 重新封裝成 RTU-like layout 讓 caller 不用動
+- `Crane_control_PI/main.cpp` 把 `USR_C_IP/USR_D_IP` 改名 `DSZL_LEFT_IP/DSZL_RIGHT_IP`；新增 `DSZL_PORT=502`；connect 用新 port；header comment 改寫；FATAL/OK log 文字對應更新
+
+**待實機驗證（編譯重啟後）：**
+1. Crane 啟動應該 4 個 endpoint 都印 [OK]，不再 FATAL
+2. `tension` 指令能讀到 X518 兩台 raw + kg
+3. `zero_tension left/right/all` 能寫進去（記得 follow up SAVE — driver 目前還沒做，靠 Linux_test menu 24 `S` 命令保存，或用 `R 0xA20` + `W 0xA20 40` 模式）
+4. motion_rope 流程跑起來不會被張力安全 false-alarm（threshold `TENSION_MIN_KG=0.5 / MAX=3.0` 還是 placeholder 要實機調）
+
+**沒做（等 Jim review 路 B 決策正式落實後再動）：**
+- CLAUDE.md 架構圖還寫 USR_C/.32 + USR_D/.33 是 USR-TCP232 gateway — 規範錯，等 Jim 確認改
+- motion_flow.md 同上
+- DSZL_107.cpp `do_zero_*` 沒做 follow-up SAVE — 手冊規定校零後要寫 0xA20=40 才持久化，目前每次重啟會 lose tare（短期 workaround：用 Linux_test menu 24 配置好後 SAVE 一次就好）
+
+### 不阻塞 SE3 / SD76 / CLV900 測試（已被熱修解決）
+
+熱修後 crane 應該能完整啟動，不需要降級模式或 bypass DSZL。如果熱修後仍有問題（例如 SE3 driver / SD76 driver bug），再回來看。
+
+### 同日續做：Graceful degradation + GUI 個別 disable（changelog 2026-05-08j）
+
+回應使用者「左右吊機問題」+ 安全措施盤點，把 changelog 2026-05-08c §「2. Crane_control_PI graceful degradation（未做，已寫 plan）」實作完：
+
+**Crane main.cpp：**
+- 12 個 init fail 全改 `[WARN] continuing`，加 12 個 device atomic flag（4 gateway + 8 device）
+- 7 個 cmd handler 進入時 check 需要的 flag，缺則回 `ERR <device>_unavailable`
+- `cmd_status` 多 12 個 `dev_*` / `gw_*` 欄位、init 結束 broadcast `EVT device_state`
+
+**Web GUI：**
+- 按鈕加 `data-required` 屬性對應需要的 device
+- app.js parse `dev_*` / `gw_*`、缺裝置時自動 `el.disabled=true` + 中文 tooltip
+- crane panel 頂部 banner 顯示哪些裝置不通（中文）
+
+**對 USR_B 不通的具體效果：**
+- 啟動：`[WARN] USR_B 連不上 — 右繩 SE3+SD76 disabled`，crane 繼續起
+- GUI banner: `⚠ 裝置狀態：USR_B 閘道、右繩變頻器、右繩計米 不可用 — 相關控制已停用`
+- 按鈕：`pay_out / retract`（需 motion_full）灰掉、`↑右 / ↓右`、raw right pay_out/retract 灰掉、`emergency`（需雙 SE3）灰掉
+- 仍可用：左繩個別控制、零張力、status / home_status、middle 個別、左繩 raw
+
+**沒做：**
+- hot re-init（裝置 flag 只啟動時設一次，硬體中途修好要重啟 crane）— 留 TODO
+- 安全措施盤點裡 🔴 高優先 1+2 沒做（cmd_hold motion_active 互斥、左右長度差 abort）— 等你確認 threshold 再實作
+
+### Bench 校準資料（兩台 X518 都待實機重做）
+
+- DSZL-107 #1（cell 接 CH1，CH2 浮空）：bench 用手 4-5 kg 拉 → raw 變化約 400 counts；推測 scale ≈ 0.01125 kg/count，**符號要翻**（拉 = raw 下降）。實機接鋼索後拉的方向跟 bench 不一樣，要重校
+- DSZL-107 #2：完全沒校過
+
+---
+
+## 2026-05-07 — Crane 端大重構：DSZL / SE3 driver + 4-gateway 拓樸 + washrobot 切回正式 crane
+
+> **規範權威：** `CLAUDE.md` §架構圖（已更新 4 gateway）、changelog 2026-05-06m / 05-06p / 05-07a / 05-07b / 05-07c
+
+### 累積成果（一週）
+
+連續多個 commit 把 crane 從「test mode 用 easy crane shim」切到「正式 Crane_control_PI + 全套硬體」，**全部尚未實機驗證**。
+
+**新 driver class（跨界 user_lib，等 Jim review，mailbox 已留訊息）：**
+- `DSZL_107.{h,cpp}` — X518 採集板（讀 DSZL load cell），FC03 讀 0x0A00 area
+- `SE3_inverter.{h,cpp}` — 士林 SE3-210 變頻器，FC06 寫 0x1101 控制 / 0x1002 頻率
+
+**Crane_control_PI/main.cpp 大改：**
+- 移除 ZS_DIO_R_RLY 繼電器，改用 SE3-210 變頻器控制左右繩
+- 拓樸從 1 個 RS485 bus 改成 **4 個獨立 gateway**（每繩獨立 + DSZL 各佔 1 個）
+- 新增 hold-to-pull 命令（`up/down on/off` 6 種變化）+ 後台 `hold_loop` thread 監看張力安全
+- `cmd_status` 多回 tension_left/right、各 hold 旗標、threshold
+
+**Web GUI：**
+- crane panel 新增「鋼索張力 / 拉放繩控制」分區（6 顆 hold 按鈕 + kg 即時顯示 + 校零 + 總和門檻 input）
+- 200ms poll status 自動更新
+
+**WASH_ROBOT.{h,cpp} 連動切換：**
+- `CRANE_IP` 192.168.5.26 → 192.168.1.101
+- `WATCHDOG_TIMEOUT_MS` 60000 → 2000
+- `read_rope_weight_max_kg_` primary 走 `crane_cmd_("tension")`，fallback 保留 easy crane
+- `crane_cmd_` 加 EVT filter（防 EVT 被當 reply）
+- EVT tension_alarm/total_limit → washrobot 自動進 PausedOnError
+
+**Realign（do_feet_realign_）：**
+- Phase 0 重讀 ZDT 位置同步 last_seal_pulse_
+- 雙向修正（短 cup 補伸到 preset 走 RPM=20 慢速）
+- 兩段式 retract（破黏附 50 RPM + 完成 60 RPM/ACC=50）
+- sweep_stalls 加 retry + sanity bound
+- Phase 2 stall → PausedOnError + 嚴重度判別（feet 組接近 preset 視為 minor）
+
+**Bug fix:** `await_user_intervention_` nested PausedOnError 卡死（cmd_continue/skip 失效）— 加 guard 不覆寫 state_before_pause_
+
+### ⚠️ 未完待辦 / 不可直接 deploy 的原因
+
+詳見 memory `project_deployment_state_2026_05_07.md`，重點：
+
+1. **DSZL_107 scale factor = 0.01 是猜的**，要實機已知重量校正
+2. **SE3 方向約定 `pay_out=runForward` 是猜的**，第一次跑要看繩子方向
+3. **4 個 gateway IP** (.30/.31/.32/.33) 對應硬體要設好
+4. **SE3 keypad 預設**（站號、波特率、Modbus 控制源、watchdog timeout）
+5. **CLV900 RPM↔Hz 公式** 等馬達極數確認
+6. 各種 placeholder 常數（`UP_STOP_TOTAL_KG_DEFAULT=50`、`SE3_HOLD_HZ=20` 等）
+
+### 部署測試順序
+
+照 changelog 2026-05-07b 的「部署 checklist」+ 我寫過的「9 步驟順序」（不要直接跳 step 7）：
+1 status → 2 kg 顯示 → 3 校零 → 4 個別 raw on/off 確認方向 → 5 hold 按鈕 → 6 門檻自動停 → 7 motion_rope → 8 safety 觸發 → 9 接 washrobot
+
+---
+
 ## 2026-04-24 — DM2J driver 真相大白（Status bit / Enable 機制 / Summary 重寫）
 
 > **規範權威：** `.claude/summaries/DM2J_RS_MODBUS_SUMMARY.md`（已在此 session 依實機手冊重寫）

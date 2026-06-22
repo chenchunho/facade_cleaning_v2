@@ -9,7 +9,7 @@
 ## 1. 系統架構
 
 ```
-┌─ washrobot Pi (192.168.1.100) ─────────────────────────────┐
+┌─ washrobot Pi (192.168.1.1100) ─────────────────────────────┐
 │                                                            │
 │  frame_capture.py (持續跑) ◀──RTSP──  camera (.1.10:554)  │
 │  └─ atomic write /tmp/cam_latest.jpg                      │
@@ -31,16 +31,17 @@
 
 | 參數 | 當前值 | 說明 | 變動機率 |
 |---|---|---|---|
-| `CAMERA_IP` | `192.168.1.10` | 廠商預設 | 低 |
+| `CAMERA_IP` | `192.168.1.110` (cam1) / `192.168.1.111` (cam2) | bench 實測（2026-05-21 nmap 掃出）| 低 |
 | `CAMERA_PORT` | `554` | RTSP 標準 | 低 |
 | `CAMERA_USER` | `admin` | 原廠預設 | 中（可能改密碼）|
 | `CAMERA_PASS` | `` (空) | 原廠預設 | 中 |
-| `RTSP_MAIN_URL` | `rtsp://192.168.1.10:554/user=admin&password=&channel=1&stream=0.sdp?` | 1080p 主碼流 | 低 |
-| `RTSP_SUB_URL` | `rtsp://192.168.1.10:554/user=admin&password=&channel=1&stream=1.sdp?` | 流暢子碼流（實際使用）| 低 |
+| `RTSP_MAIN_URL` | `rtsp://192.168.1.110:554/user=admin&password=&channel=1&stream=0.sdp?` | 1080p 主碼流 | 低 |
+| `RTSP_SUB_URL` | `rtsp://192.168.1.110:554/user=admin&password=&channel=1&stream=1.sdp?` | 流暢子碼流（實際使用）| 低 |
 | `CAMERA_VENDOR` | Xiongmai H264DVR | 雄邁 | — |
-| **`CAM_TO_WALL_CM`** | **15** | 機器貼牆時相機到牆距離 | **高（未實測）** |
-| `CAMERA_POSITION` | _（待填）_ | 相機裝在機器哪個部位 | — |
-| `CAMERA_ORIENTATION` | _（待填）_ | 朝向（朝下看 / 朝牆 / 其他）| — |
+| **`CAM_TO_WALL_CM`** | **18** | feet cup 伸出 9.7cm + camera 8.5cm offset = 18.2cm（2026-06-01 量測） | 中 |
+| **`CAM_TO_FEET_OFFSET_CM`** | **13.5** | camera 比 feet 位置「往前/上」偏移；偵測 distance 要 -13.5 才是 feet 實際距離。2026-06-04 從 6.5 改到 13.5（吸盤伸出時 cup tip 比 camera 更靠前，原 6.5 沒算到 cup 伸出 body 那段） | 中 |
+| `CAMERA_POSITION` | 機體底部 | cam3 .112 左下、cam4 .113 右下 | — |
+| `CAMERA_ORIENTATION` | 下俯 54°（從水平算）| optical axis 對準 25cm 距離點 | 已實測 |
 
 ### 2b. 網路 / Server 協定
 
@@ -231,10 +232,45 @@ EVT frame_blocked reason=<too_close|too_wide|server_err>
 
 ### ✅ 已確認
 - Server port 5040、request 純路徑字串、response JSON（上表）
-- 使用子碼流 (`stream=1`)
+- 使用**主碼流 (`stream=0`)** — 子碼流被 camera 內部 ROI 裁切，**不能用**（2026-06-01 發現）
 - 相機 RTSP URL + 帳密
-- `CAM_TO_WALL_CM = 15`（假設值）
+- `CAM_TO_WALL_CM = 18`（2026-06-01 量測：feet cup 9.7cm + offset 8.5cm）
+- `CAM_TO_FEET_OFFSET_CM = 6.5`（camera 在 feet 前方 5-8cm）
+- 鏡頭俯角 54°（從水平），cam3 + cam4 雙裝
 - `MAX_STEP_CM = 60`（暫定）
+
+### 📊 校正資料 LUT (2026-06-01)
+
+每個 cam 獨立 LUT：image_y → camera_distance_cm。
+piecewise linear interpolation 即可。
+
+```python
+# cam3 (.112) bottom-left
+CAM3_LUT = [
+    (410, 10),   # plank 中心 y_px, distance cm
+    (340, 15),
+    (220, 25),
+    (135, 35),
+    ( 70, 45),
+    ( 40, 50),
+]
+
+# cam4 (.113) bottom-right (微差，獨立校正)
+CAM4_LUT = [
+    (390, 10),
+    (330, 15),   # interpolated
+    (210, 25),
+    (125, 35),   # interpolated
+    ( 65, 45),   # interpolated
+    ( 50, 50),
+]
+```
+
+**邊界：** 有效偵測 camera_distance 10~50cm。超出範圍：
+- < 10cm → 太近（也可能已在畫面 outside）→ 視為 "too_close" emergency
+- > 50cm → 太遠（畫面外）→ 視為「沒障礙物」
+
+**feet 換算：** 所有 decision 邏輯用 `feet_distance = camera_distance - CAM_TO_FEET_OFFSET_CM`。
 
 ### 🟡 待確認
 - 相機安裝位置 / 朝向（影響 server 的投影模型是否適用，若 server 假設固定姿態要對齊）

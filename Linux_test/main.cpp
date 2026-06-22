@@ -15,6 +15,7 @@
 #include "XKC_Y25_RS485.h"
 #include "SD76_length_meters.h"
 #include "ZS_DIO_R_RLY.h"
+#include "SE3_inverter.h"
 #include "TCP_client.h"
 
 #include <iostream>
@@ -22,6 +23,7 @@
 #include <chrono>
 #include <thread>
 #include <limits>
+#include <cctype>   // std::isspace, std::tolower
 #include <sstream>
 #include <atomic>
 #include <vector>
@@ -130,6 +132,48 @@ static constexpr int PQW_CH_VALVE_BODY   = 3;
 static constexpr int PQW_CH_VALVE_CENTER = 4;
 static constexpr int VACUUM_SETTLE_MS    = 2000;
 static constexpr int VACUUM_RELEASE_MS   = 300;
+
+// ZDT pulse-to-cm conversion (matches WASH_ROBOT — 3000 pulses/cm at current
+// driver microstep). Used by ZDT pusher prompts that accept "Ncm" suffix.
+static constexpr int ZDT_PULSES_PER_CM = 3000;
+
+// Parse user input as either "Ncm" / "N.NNcm" (cm × ZDT_PULSES_PER_CM) or
+// plain "N" (pulses, integer). Returns parsed pulse count, or `default_pulse`
+// on empty / malformed input.
+//   "9"       → 9 pulses
+//   "9cm"     → 27000 pulses
+//   "9.5 cm"  → 28500 pulses
+//   ""        → default_pulse
+static int parse_pulse_or_cm(const std::string& input, int default_pulse) {
+    if (input.empty()) return default_pulse;
+    std::string s = input;
+    // Trim whitespace (front + back)
+    while (!s.empty() && std::isspace((unsigned char)s.front())) s.erase(s.begin());
+    while (!s.empty() && std::isspace((unsigned char)s.back()))  s.pop_back();
+    if (s.empty()) return default_pulse;
+    // Detect "cm" / "CM" suffix
+    bool is_cm = false;
+    if (s.size() >= 2) {
+        char c1 = (char)std::tolower((unsigned char)s[s.size()-2]);
+        char c2 = (char)std::tolower((unsigned char)s[s.size()-1]);
+        if (c1 == 'c' && c2 == 'm') {
+            is_cm = true;
+            s.erase(s.size() - 2);
+            // Trim any whitespace between number and "cm"
+            while (!s.empty() && std::isspace((unsigned char)s.back())) s.pop_back();
+        }
+    }
+    try {
+        if (is_cm) {
+            double cm = std::stod(s);
+            return (int)(cm * ZDT_PULSES_PER_CM);
+        }
+        return std::stoi(s);
+    } catch (...) {
+        cerr << "  [WARN] cannot parse '" << input << "' — using default " << default_pulse << "\n";
+        return default_pulse;
+    }
+}
 
 
 //=========== 1. IMU (WT901BC) ===========
@@ -302,9 +346,9 @@ static void test_zdt() {
     string s; getline(cin, s);
     int slave = s.empty() ? 1 : stoi(s);
 
-    cout << "Target pulse [144000=full extend / 0=full retract / 200mm=144000 pulses]: ";
+    cout << "Target [pulses or 'Ncm', 30000=10cm full / 0=retract] [30000]: ";
     string p; getline(cin, p);
-    int target_pulse = p.empty() ? 144000 : stoi(p);
+    int target_pulse = parse_pulse_or_cm(p, 30000);
 
     if (!quick_tcp_probe(ip, 4001)) {
         cerr << "[ERR] " << ip << ":4001 unreachable (2s timeout)\n"; return;
@@ -330,7 +374,9 @@ static void test_zdt() {
     }
     this_thread::sleep_for(chrono::milliseconds(200));
 
-    cout << "  → move to " << target_pulse << " pulses @ " << PUSHER_RPM << " rpm\n";
+    cout << "  → move to " << target_pulse << " pulses (~"
+         << fixed << setprecision(2) << (target_pulse / (double)ZDT_PULSES_PER_CM)
+         << " cm) @ " << PUSHER_RPM << " rpm\n";
     if (!drv.motion_control_pos_mode(0, PUSHER_ACC, PUSHER_RPM, target_pulse, 1, 0, 1)) {
         cerr << "  [ERR] move command send failed\n";
     } else {
@@ -498,7 +544,7 @@ static void test_pqw() {
          << "  CH4: VT307 中心電磁閥\n"
          << "  CH5: 刷洗滾筒馬達\n"
          << "  CH6: 水箱泵浦\n"
-         << "  CH7: 水箱進水球閥\n"
+         << "  CH7: 保留 (was 水箱進水球閥, 2026-06-05 搬到 crane PQW .34 slave 12 CH4)\n"
          << "  CH8: 保留\n"
          << "\n"
          << "Note: Modbus echo check is unreliable on some PQW firmware.\n"
@@ -645,6 +691,254 @@ static void test_zdt_positions() {
 }
 
 
+//=========== 20. ZDT release stall (all 9 slaves) ===========
+static void test_zdt_release_stall() {
+    cout << "\n--- ZDT release stall (all 9 slaves) ---\n";
+    string ip;
+    cout << "Gateway IP [192.168.1.21]: ";
+    getline(cin, ip);
+    if (ip.empty()) ip = "192.168.1.21";
+
+    if (!quick_tcp_probe(ip, 4001)) {
+        cerr << "[ERR] " << ip << ":4001 unreachable (2s timeout)\n"; return;
+    }
+    TCP_client cli;
+    if (!cli.connectToServer(ip, 4001, false)) {
+        cerr << "[ERR] Cannot connect to " << ip << ":4001\n"; return;
+    }
+
+    ZDT_motor_control drv[10];
+    bool init_ok[10] = {false};
+    for (int s = 1; s <= 9; ++s) {
+        if (!drv[s].init(cli, s, false)) init_ok[s] = true;
+        else cerr << "[WARN] ZDT slave " << s << " init fail (will skip)\n";
+    }
+
+    int ok_cnt = 0, fail_cnt = 0, skip_cnt = 0;
+    for (int s = 1; s <= 9; ++s) {
+        if (!init_ok[s]) { ++skip_cnt; continue; }
+        bool err = drv[s].release_stall_flag();
+        if (err) {
+            cout << "  slave " << s << ": release_stall_flag FAIL\n";
+            ++fail_cnt;
+        } else {
+            cout << "  slave " << s << ": released\n";
+            ++ok_cnt;
+        }
+    }
+    cout << "\nSummary: ok=" << ok_cnt << " fail=" << fail_cnt
+         << " skip=" << skip_cnt << "\n";
+
+    cli.close();
+}
+
+
+//=========== 21. ZDT driver enable / disable ===========
+//
+// Manual enable/disable of driver_EN on chosen ZDT slaves. Recovers from
+// emergency_stop / shutdown / latent fault that left drivers disabled —
+// without driver_EN=true, ZDT firmware silently rejects pos_mode writes
+// (Modbus exception 0x03). Supports per-slave selection or all 1~9.
+static void test_zdt_driver_enable() {
+    cout << "\n--- ZDT driver enable / disable ---\n";
+    string ip;
+    cout << "Gateway IP [192.168.1.21]: ";
+    getline(cin, ip);
+    if (ip.empty()) ip = "192.168.1.21";
+
+    if (!quick_tcp_probe(ip, 4001)) {
+        cerr << "[ERR] " << ip << ":4001 unreachable (2s timeout)\n"; return;
+    }
+    TCP_client cli;
+    if (!cli.connectToServer(ip, 4001, false)) {
+        cerr << "[ERR] Cannot connect to " << ip << ":4001\n"; return;
+    }
+
+    ZDT_motor_control drv[10];
+    bool init_ok[10] = {false};
+    for (int s = 1; s <= 9; ++s) {
+        if (!drv[s].init(cli, s, false)) init_ok[s] = true;
+        else cerr << "[WARN] ZDT slave " << s << " init fail (will skip)\n";
+    }
+
+    while (true) {
+        cout << "\nCommands:\n"
+             << "  e <N>   enable slave N (1..9)\n"
+             << "  d <N>   disable slave N (1..9)\n"
+             << "  ea      enable all 1..9\n"
+             << "  da      disable all 1..9\n"
+             << "  q       back to main menu\n"
+             << "Input: ";
+        string line;
+        if (!getline(cin, line)) break;
+        if (line == "q" || line == "Q") break;
+        if (line.empty()) continue;
+
+        // Parse first token
+        size_t sp = line.find(' ');
+        string cmd = (sp == string::npos) ? line : line.substr(0, sp);
+        string arg = (sp == string::npos) ? ""   : line.substr(sp + 1);
+
+        auto apply = [&](int s, bool on) {
+            if (s < 1 || s > 9) { cout << "  [!] slave out of range 1..9\n"; return; }
+            if (!init_ok[s])    { cout << "  slave " << s << " init failed — skip\n"; return; }
+            bool err = drv[s].motion_control_driver_EN(on);
+            cout << "  slave " << s << " driver_EN(" << (on ? "true" : "false") << ") "
+                 << (err ? "FAIL" : "OK") << "\n";
+        };
+
+        if (cmd == "e" || cmd == "d") {
+            if (arg.empty()) { cout << "  [!] usage: " << cmd << " <slave>\n"; continue; }
+            int s = 0;
+            try { s = stoi(arg); } catch (...) { cout << "  [!] bad slave number\n"; continue; }
+            apply(s, cmd == "e");
+        } else if (cmd == "ea") {
+            for (int s = 1; s <= 9; ++s) apply(s, true);
+        } else if (cmd == "da") {
+            for (int s = 1; s <= 9; ++s) apply(s, false);
+        } else {
+            cout << "  [!] unknown command\n";
+        }
+    }
+
+    cli.close();
+}
+
+
+//=========== 22. ZDT vacuum-seal auto fine-tune (per-slave fix) ===========
+//
+// For chosen group (feet/body): for each slave, read JC-100 pressure;
+// if not sealed (>= -50 kPa), incrementally extend the pusher by
+// FINE_TUNE_INCREMENT_PULSE and recheck, up to FINE_TUNE_MAX_ITERS or
+// FINE_TUNE_MAX_OVEREXTEND total. Stops as soon as cup seals.
+//
+// PRECONDITION: vacuum valve for the chosen group must already be ON, and pump
+// running. This menu does NOT touch valves — purely ZDT extend nudge + read.
+static void test_vacuum_seal_fix() {
+    cout << "\n--- ZDT vacuum-seal auto fine-tune ---\n";
+
+    string ip21, ip22;
+    cout << "ZDT gateway IP[192.168.1.21]: ";    getline(cin, ip21);
+    if (ip21.empty()) ip21 = "192.168.1.21";
+    cout << "JC-100 gateway IP[192.168.1.22]: "; getline(cin, ip22);
+    if (ip22.empty()) ip22 = "192.168.1.22";
+
+    cout << "Group [feet / body]: ";
+    string group; getline(cin, group);
+    if (group != "feet" && group != "body") {
+        cerr << "[ERR] expected 'feet' or 'body'\n";
+        return;
+    }
+
+    if (!quick_tcp_probe(ip21, 4001)) { cerr << "[ERR] " << ip21 << ":4001 unreachable\n"; return; }
+    if (!quick_tcp_probe(ip22, 4001)) { cerr << "[ERR] " << ip22 << ":4001 unreachable\n"; return; }
+
+    TCP_client cli21, cli22;
+    if (!cli21.connectToServer(ip21, 4001, false)) { cerr << "[ERR] " << ip21 << " connect fail\n"; return; }
+    if (!cli22.connectToServer(ip22, 4001, false)) { cerr << "[ERR] " << ip22 << " connect fail\n"; cli21.close(); return; }
+
+    vector<int> slaves = (group == "feet") ? vector<int>{1, 2, 3, 4} : vector<int>{5, 6, 7, 8};
+
+    ZDT_motor_control zdt[10];
+    JC_100_METER      jc[10];
+    for (int s : slaves) {
+        if (zdt[s].init(cli21, s, false)) { cerr << "[ERR] ZDT slave " << s << " init fail\n"; cli21.close(); cli22.close(); return; }
+        if (jc[s].init(cli22, s, false))  { cerr << "[ERR] JC slave "  << s << " init fail\n"; cli21.close(); cli22.close(); return; }
+    }
+
+    // Mirror WASH_ROBOT.h fine-tune defaults (2026-04-30 values)
+    constexpr int    VACUUM_THRESHOLD_KPA      = -50;
+    constexpr int    FINE_TUNE_INCREMENT_PULSE = 2000;     // ~7 mm
+    constexpr int    FINE_TUNE_MAX_ITERS       = 3;
+    constexpr int    FINE_TUNE_MAX_OVEREXTEND  = 6000;     // ~2 cm absolute cap
+    constexpr int    FINE_TUNE_SETTLE_MS       = 800;
+    constexpr int    EXTEND_RPM                = 500;
+    constexpr int    EXTEND_ACC                = 200;
+    constexpr double PULSES_PER_DEG            = 51200.0 / 360.0;   // ~142.22 (any group, microstep=51200/rev)
+
+    cout << "\n[!] PRECONDITION: pump ON, " << group << " valve ON, pushers already roughly extended.\n";
+    cout << "    This menu only nudges per-slave further; it does NOT open valves.\n";
+    cout << "Press Enter to start, 'q' to abort: ";
+    string ack; getline(cin, ack);
+    if (ack == "q" || ack == "Q") { cli21.close(); cli22.close(); return; }
+
+    cout << "\nThreshold=" << VACUUM_THRESHOLD_KPA << " kPa, max iters=" << FINE_TUNE_MAX_ITERS
+         << ", max overextend=" << FINE_TUNE_MAX_OVEREXTEND << " pulses\n\n";
+
+    int sealed_cnt = 0, fail_cnt = 0;
+    for (int s : slaves) {
+        cout << "[slave " << s << "]\n";
+
+        // Initial pressure
+        int p = jc[s].read_pressure();
+        cout << "  initial pressure: " << p << " kPa";
+        if (p <= VACUUM_THRESHOLD_KPA) {
+            cout << " (already sealed, skip)\n\n";
+            ++sealed_cnt;
+            continue;
+        }
+        cout << " (need fine-tune)\n";
+
+        // Read current ZDT position to use as base
+        if (zdt[s].get_system_status()) {
+            cerr << "  [ERR] get_system_status fail, skip\n\n";
+            ++fail_cnt;
+            continue;
+        }
+        const double base_deg   = zdt[s].status.real_pos;
+        const int    base_pulse = (int)(base_deg * PULSES_PER_DEG);
+        cout << "  base position: " << base_deg << " deg = " << base_pulse << " pulses\n";
+
+        // Pre-clear any latent stall flag (motion_control_pos_mode rejects when set)
+        zdt[s].release_stall_flag();
+
+        bool sealed = false;
+        int  total_added = 0;
+        for (int it = 1; it <= FINE_TUNE_MAX_ITERS; ++it) {
+            if (total_added + FINE_TUNE_INCREMENT_PULSE > FINE_TUNE_MAX_OVEREXTEND) {
+                cout << "  iter " << it << ": +" << FINE_TUNE_INCREMENT_PULSE
+                     << " would exceed max overextend " << FINE_TUNE_MAX_OVEREXTEND << ", give up\n";
+                break;
+            }
+            total_added += FINE_TUNE_INCREMENT_PULSE;
+            const int target_pulse = base_pulse + total_added;
+            cout << "  iter " << it << ": extend to " << target_pulse
+                 << " (+" << total_added << " from base)\n";
+
+            // false=success per project convention
+            if (zdt[s].motion_control_pos_mode(0, EXTEND_ACC, EXTEND_RPM, target_pulse, 1, 0, 1)) {
+                cerr << "  [ERR] pos_mode failed (stall? comm?), break\n";
+                break;
+            }
+
+            this_thread::sleep_for(chrono::milliseconds(FINE_TUNE_SETTLE_MS));
+
+            p = jc[s].read_pressure();
+            cout << "  -> pressure: " << p << " kPa";
+            if (p <= VACUUM_THRESHOLD_KPA) {
+                cout << " (sealed!)\n";
+                sealed = true;
+                break;
+            }
+            cout << " (still not sealed)\n";
+        }
+
+        if (sealed) ++sealed_cnt;
+        else {
+            ++fail_cnt;
+            cout << "  [FAIL] could not seal after " << FINE_TUNE_MAX_ITERS << " iters\n";
+        }
+        cout << "\n";
+    }
+
+    cout << "Summary: sealed=" << sealed_cnt << "/" << slaves.size()
+         << ", fail=" << fail_cnt << "/" << slaves.size() << "\n";
+
+    cli21.close();
+    cli22.close();
+}
+
+
 //=========== 6. ZDT group (multi-pusher at once) ===========
 static void test_zdt_group() {
     cout << "\n--- ZDT multi-pusher group ---\n";
@@ -667,9 +961,9 @@ static void test_zdt_group() {
         }
     }
 
-    cout << "Target pulse [144000=extend / 0=retract]: ";
+    cout << "Target [pulses or 'Ncm', 30000=10cm full / 0=retract] [30000]: ";
     string p; getline(cin, p);
-    int target_pulse = p.empty() ? 144000 : stoi(p);
+    int target_pulse = parse_pulse_or_cm(p, 30000);
 
     vector<int> actives;
     for (int i = 1; i <= 9; ++i)
@@ -678,7 +972,8 @@ static void test_zdt_group() {
 
     cout << "[INFO] controlling slaves:";
     for (int s : actives) cout << " " << s;
-    cout << " → " << target_pulse << " pulses\n";
+    cout << " → " << target_pulse << " pulses (~"
+         << fixed << setprecision(2) << (target_pulse / (double)ZDT_PULSES_PER_CM) << " cm)\n";
 
     if (!quick_tcp_probe(ip, 4001)) {
         cerr << "[ERR] " << ip << ":4001 unreachable (2s timeout)\n"; return;
@@ -1213,10 +1508,14 @@ static bool dm2j_pair_rail_move_abs_sync(DM2J_RS570& left, DM2J_RS570& right,
     return dm2j_pair_poll_done(left, right, target_cm, target_cm);
 }
 
-// Set bystander slaves' PR<pr_num> to rpm=0 (safe no-op for broadcast-sync use)
+// Set bystander slaves' PR<pr_num> to mode=0 (UNCONFIGURED) -- a genuine
+// broadcast no-op. (Do NOT use "mode=1, rpm=0": that is a *configured* path
+// "go to absolute 0 at speed 0" -- if the bystander is not already at abs 0
+// the broadcast jams it forever in a zero-speed limbo. mode=0 = unconfigured
+// -> the driver ignores the trigger cleanly.)
 static void dm2j_set_safe_pr(std::vector<DM2J_RS570*>& slaves, int pr_num) {
     for (auto* d : slaves) {
-        d->PR_move_set(pr_num, 1 /*absolute*/, 0 /*rpm=0*/, 0, 50, 100);
+        d->PR_move_set(pr_num, 0 /*mode=0 unconfigured*/, 0, 0, 0, 0);
     }
 }
 
@@ -1791,18 +2090,29 @@ static void test_sd76() {
         cerr << "[ERR] SD76 slave " << slave << " init fail\n"; cli.close(); return;
     }
 
-    cout << "[SD76:" << slave << "] commands: r=reset  p=pause  s=resume  q=quit\n";
+    cout << "[SD76:" << slave << "] commands:\n"
+         << "  r          resetAll (zero counter)\n"
+         << "  p          pauseMeter\n"
+         << "  s          resumeMeter\n"
+         << "  e          read effective scale + raw SCAL + raw DP\n"
+         << "  m <mult>   set effective multiplier (preserves DP; e.g. 'm 5.5')\n"
+         << "  b <ratio>  scaleByRatio: SCAL × ratio (e.g. 'b 5.555' to fix 5.5x undercount)\n"
+         << "  w <s> <d>  raw writeScale(SCAL, DP, write_dp=true) — diagnostic for mode latch\n"
+         << "  q          quit\n";
     cout << "Live reading (press Enter for menu):\n";
 
     atomic<bool> stop_flag(false);
-    atomic<char> cmd_flag{0};
+    std::mutex cmd_mtx;
+    string pending_cmd;
+    bool has_cmd = false;
     thread input_thread([&]() {
         string line;
         while (!stop_flag.load() && getline(cin, line)) {
             if (line.empty()) continue;
-            char c = line[0];
-            if (c == 'q' || c == 'Q') { stop_flag = true; break; }
-            cmd_flag = c;
+            if (line[0] == 'q' || line[0] == 'Q') { stop_flag = true; break; }
+            std::lock_guard<std::mutex> lk(cmd_mtx);
+            pending_cmd = line;
+            has_cmd = true;
         }
     });
 
@@ -1823,16 +2133,67 @@ static void test_sd76() {
         }
         cout.flush();
 
-        char c = cmd_flag.exchange(0);
-        if (c == 'r' || c == 'R') {
-            cout << "\n  → resetAll()\n";
-            drv.resetAll();
-        } else if (c == 'p' || c == 'P') {
-            cout << "\n  → pauseMeter()\n";
-            drv.pauseMeter();
-        } else if (c == 's' || c == 'S') {
-            cout << "\n  → resumeMeter()\n";
-            drv.resumeMeter();
+        // Pull pending command (full line — first char = op, rest = args).
+        string c;
+        {
+            std::lock_guard<std::mutex> lk(cmd_mtx);
+            if (has_cmd) { c = pending_cmd; has_cmd = false; }
+        }
+        if (!c.empty()) {
+            char op = c[0];
+            if (op == 'r' || op == 'R') {
+                cout << "\n  → resetAll()\n";
+                drv.resetAll();
+            } else if (op == 'p' || op == 'P') {
+                cout << "\n  → pauseMeter()\n";
+                drv.pauseMeter();
+            } else if (op == 's' || op == 'S') {
+                cout << "\n  → resumeMeter()\n";
+                drv.resumeMeter();
+            } else if (op == 'e' || op == 'E') {
+                double M = 0.0;
+                uint32_t raw_s = 0; uint8_t raw_dp = 0;
+                bool e1 = drv.getEffectiveScale(M);
+                bool e2 = drv.readScale(raw_s, raw_dp);
+                cout << "\n  → effective M=" << (e1 ? std::string("ERR") : std::to_string(M))
+                     << "  raw SCAL=" << (e2 ? std::string("ERR") : std::to_string(raw_s))
+                     << "  raw DP="   << (e2 ? std::string("ERR") : std::to_string((unsigned)raw_dp))
+                     << "\n";
+            } else if (op == 'm' || op == 'M') {
+                double M = strtod(c.c_str() + 1, nullptr);
+                if (!(M > 0.0)) {
+                    cout << "\n  ! usage: m <multiplier>  (positive double, e.g. 'm 5.5')\n";
+                } else {
+                    cout << "\n  → setEffectiveScale(" << M << ")...\n";
+                    bool e = drv.setEffectiveScale(M);
+                    cout << (e ? "  ERR (see driver log; likely DP too small/large for this M)\n"
+                               : "  OK (DP preserved; verify with 'e')\n");
+                }
+            } else if (op == 'b' || op == 'B') {
+                double r = strtod(c.c_str() + 1, nullptr);
+                if (!(r > 0.0)) {
+                    cout << "\n  ! usage: b <ratio>  (positive double, e.g. 'b 5.555')\n";
+                } else {
+                    cout << "\n  → scaleByRatio(" << r << ")...\n";
+                    bool e = drv.scaleByRatio(r);
+                    cout << (e ? "  ERR (see driver log)\n"
+                               : "  OK (verify with 'e')\n");
+                }
+            } else if (op == 'w' || op == 'W') {
+                std::istringstream iss(c.substr(1));
+                long scal_in = -1; int dp_in = -1;
+                iss >> scal_in >> dp_in;
+                if (scal_in < 1 || scal_in > 999999 || dp_in < 0 || dp_in > 5) {
+                    cout << "\n  ! usage: w <SCAL> <DP>  (SCAL 1..999999, DP 0..5)\n";
+                } else {
+                    cout << "\n  → writeScale(SCAL=" << scal_in << ", DP=" << dp_in << ", write_dp=true)...\n";
+                    bool e = drv.writeScale((uint32_t)scal_in, (uint8_t)dp_in, true);
+                    cout << (e ? "  ERR (write failed at Modbus layer)\n"
+                               : "  OK (Modbus accepted; DP may still be silently rejected by SD76 firmware in 通訊模式 — verify with 'e')\n");
+                }
+            } else {
+                cout << "\n  ! unknown command '" << c << "' (try r/p/s/e/m/b/w/q)\n";
+            }
         }
 
         this_thread::sleep_for(chrono::milliseconds(300));
@@ -2413,7 +2774,7 @@ static void test_water_tank() {
     cout << "\nChannel map:\n"
          << "  CH5: 刷洗滾筒馬達 (brush)\n"
          << "  CH6: 水箱泵浦 (pump)\n"
-         << "  CH7: 水箱進水球閥 (inlet valve)\n"
+         << "  CH7: 保留 (was inlet valve, moved to crane PQW .34 slave 12 CH4 on 2026-06-05)\n"
          << "\nNote: Modbus echo check is unreliable on some PQW firmware —\n"
          << "      always verify via physical LED / water flow / motor sound.\n";
 
@@ -2779,8 +3140,8 @@ static void test_dm2j_group_sync() {
     // Initialize safe PR state on ALL 5 slaves: PR1 and PR2 both rpm=0
     cout << "  → init safe PR state (PR1, PR2 = rpm=0 on all 5 slaves)\n";
     for (int s = 1; s <= 5; ++s) {
-        drv[s].PR_move_set(1, 1 /*absolute*/, 0 /*rpm=0*/, 0, 50, 100);
-        drv[s].PR_move_set(2, 1,              0,           0, 50, 100);
+        drv[s].PR_move_set(1, 0 /*mode=0 unconfigured*/, 0, 0, 0, 0);
+        drv[s].PR_move_set(2, 0,                         0, 0, 0, 0);
     }
 
     auto wait_done = [](DM2J_RS570& d, int timeout_ms) -> bool {
@@ -2848,7 +3209,7 @@ static void test_dm2j_group_sync() {
         // Reset target PR slot back to safe (prevent stale-trigger next time)
         cout << "  → reset PR" << pr_slot << " to safe on all 5 slaves\n";
         for (int s = 1; s <= 5; ++s) {
-            drv[s].PR_move_set(pr_slot, 1, 0, 0, 50, 100);
+            drv[s].PR_move_set(pr_slot, 0 /*mode=0 unconfigured*/, 0, 0, 0, 0);
         }
 
         // Report final positions
@@ -2864,8 +3225,8 @@ static void test_dm2j_group_sync() {
     // Cleanup: reset all PR slots + disable all motors
     cout << "\n[CLEANUP] reset all PR slots + disable 5 motors\n";
     for (int s = 1; s <= 5; ++s) {
-        drv[s].PR_move_set(1, 1, 0, 0, 50, 100);
-        drv[s].PR_move_set(2, 1, 0, 0, 50, 100);
+        drv[s].PR_move_set(1, 0, 0, 0, 0, 0);
+        drv[s].PR_move_set(2, 0, 0, 0, 0, 0);
         drv[s].motor_disable();
     }
 
@@ -3016,12 +3377,15 @@ static void test_cleanup() {
 //   s  單次讀
 //   i  改 slave ID（會發 0x06 寫 reg 0x0004，sensor LED 應閃爍代表成功；
 //      改完之後 sensor 用新 ID 回應，自己要重新進 menu 用新 ID 連）
+//   b  改 baud rate（寫 reg 0x0005，sensor LED 應閃；當下連線會斷，必須先改
+//      gateway baud 才能重連 — 會打斷 bus 上其他 device 通訊）
 //   f  出廠還原（broadcast 0xFF，sensor 重置為 slave=1 / 9600 baud）
 //   q  退出
 //
 // 警告：
-//   - 共用 RS485 bus 上的 baud rate 必須跟 gateway 一致。本 menu 不開放改 baud
-//     避免拆掉整條 bus。需要改 baud 請手動操作 gateway 設定後再改 sensor。
+//   - 共用 RS485 bus 上的 baud rate 必須跟 gateway 一致。改 sensor baud (b) 會
+//     讓 bus 上其他 device（同 baud）的通訊中斷直到 gateway 跟著改、或 sensor
+//     設回原 baud。bench 操作時請確認你接受這個副作用。
 //   - 出廠還原是 broadcast，bus 上所有 sensor 都會收到。XKC_Y25 sensor 會吃這個
 //     指令、其他型號 sensor 多半會 ignore（reg 0x0004 對應的功能不同）。
 //      但仍建議在僅接 XKC sensor 的 bus 操作。
@@ -3050,7 +3414,7 @@ static void test_xkc_y25() {
         cli.close(); return;
     }
 
-    cout << "\nConnected. Actions: r=live read | s=single read | i=set ID | f=factory reset | q=quit\n";
+    cout << "\nConnected. Actions: r=live read | s=single read | i=set ID | b=set baud | f=factory reset | q=quit\n";
 
     while (true) {
         cout << "\n[XKC:" << slave << "] action: ";
@@ -3102,12 +3466,52 @@ static void test_xkc_y25() {
             string c; getline(cin, c);
             if (c != "yes") { cout << "  [CANCEL]\n"; continue; }
 
+            // Per manual §1.6: directed write to reg 0x0004 = new_addr (NOT 0x0003).
+            // Driver's set_address sends and ignores reply (response is non-standard
+            // per §1.7); LED flash + re-reading at new ID is the verification.
             if (lvl.set_address((uint8_t)new_id)) {
-                cerr << "  [ERR] set_address failed — sensor may not have changed\n";
+                cerr << "  [ERR] set_address send fail (TCP / gateway)\n";
             } else {
-                cout << "  [OK] address change frame sent (LED 應閃爍代表成功)\n"
-                     << "       sensor 現在以 ID " << new_id << " 回應，本 menu 將退出讓你重連。\n";
+                cout << "  [OK] address change frame sent (reg 0x0004 = " << new_id << ").\n"
+                     << "       LED 應閃爍代表 sensor 接受，sensor 現在以 ID " << new_id
+                     << " 回應，本 menu 將退出讓你重連確認。\n";
                 break;   // exit and let user re-enter at new ID
+            }
+            continue;
+        }
+
+        if (a == "b") {
+            cout << "  baud codes: 05=2400 06=4800 07=9600 08=14400 09=19200\n"
+                 << "              0A=28800 0C=57600 0D=115200 0E=128000 0F=256000\n"
+                 << "  enter code (hex, e.g. 0D for 115200): ";
+            string n; getline(cin, n);
+            if (n.empty()) { cout << "  [CANCEL] empty input\n"; continue; }
+            int code = 0;
+            try {
+                code = stoi(n, nullptr, 16);
+            } catch (...) {
+                cout << "  [!] invalid hex input\n"; continue;
+            }
+            if (code < 0x05 || code > 0x0F) {
+                cout << "  [!] code out of range (must be 0x05..0x0F)\n"; continue;
+            }
+            cout << "  → set baud code 0x" << hex << uppercase << code << dec << nouppercase
+                 << " ?  type 'yes' to confirm: ";
+            string c; getline(cin, c);
+            if (c != "yes") { cout << "  [CANCEL]\n"; continue; }
+
+            // Per manual §1.8: directed write to reg 0x0005 = code (no reply expected).
+            // After this the sensor restarts UART at the new baud; current TCP connection
+            // can't talk to it any more until gateway baud is changed to match.
+            if (lvl.set_baud_rate((uint8_t)code)) {
+                cerr << "  [ERR] set_baud_rate send fail (TCP / gateway)\n";
+            } else {
+                cout << "  [OK] baud change frame sent (reg 0x0005 = 0x"
+                     << hex << uppercase << code << dec << nouppercase << ").\n"
+                     << "       LED 應閃爍代表 sensor 接受。\n"
+                     << "       ⚠️  sensor 現在用新 baud — 你必須先改 gateway baud 才能重連，\n"
+                     << "           同 bus 上其他 device 通訊會中斷直到 gateway 跟著改。\n";
+                break;   // exit, gateway needs reconfig before reconnect
             }
             continue;
         }
@@ -3129,22 +3533,1323 @@ static void test_xkc_y25() {
             break;
         }
 
-        cout << "  [!] unknown action — use r / s / i / f / q\n";
+        cout << "  [!] unknown action — use r / s / i / b / f / q\n";
     }
 
     cli.close();
 }
 
 
+//=========== 23. SE3 inverter (rope winch) ===========
+//
+// Direct control of a Shihlin SE3 inverter via Modbus-RTU over USR-TCP232.
+// Used for left/right rope winch (replaces ZS_DIO_R_RLY 2026-05-07).
+//
+// Required SE3 panel pre-config (one-time before this menu can drive motor):
+//   P.79 = 2     Operation mode = CU (communication / Modbus run command)
+//   P.36 = <id>  Station number 1..254 (NOT 0 = broadcast)
+//   P.32 = <baud index> match USR (default 1=9600, our drivers expect 9600 or 115200)
+//   P.33 = 0     Protocol = Modbus
+//   P.154 = 4    Format = 8N1 RTU (factory default 1=7N2 ASCII won't work via USR)
+//
+// Operations:
+//   f <hz>  run forward at hz (STF — direction depends on wiring/motor mount)
+//   r <hz>  run reverse at hz (STR)
+//   s       stop (decel per P.7 / acc/dec settings)
+//   e       emergency stop (MRS = output cutoff, no decel ramp)
+//   h <hz>  set frequency only (don't change run state)
+//   m       monitor: read output Hz / current / voltage / status word
+//   q       back to menu (auto-stops motor before exit)
+//
+// Bench observation 2026-05-08 (verified on BOTH left + right cranes):
+//   STF (f) = retract 收繩   ← opposite of what the term "forward" implies
+//   STR (r) = pay-out 放繩
+// Verify direction at low Hz before running any production sequence; rewiring
+// the motor or changing P.17 will flip this. menu 25 (SE3 dual) has a startup
+// prompt that maps semantic verbs (pay/retract) to STF/STR so you don't have to
+// remember the inverted convention during sync operation.
+// ============================================================
+static void test_se3_inverter() {
+    cout << "\n--- SE3 inverter (rope winch) ---\n";
+    string ip;
+    cout << "Gateway IP [192.168.1.30]: ";
+    getline(cin, ip);
+    if (ip.empty()) ip = "192.168.1.30";
+
+    cout << "Port [4001]: ";
+    string s; getline(cin, s);
+    int port = s.empty() ? 4001 : stoi(s);
+
+    cout << "Slave ID [1]: ";
+    getline(cin, s);
+    int slave = s.empty() ? 1 : stoi(s);
+
+    cout << "Max Hz (motor F8-03 / nameplate, used as default upper limit) [50]: ";
+    getline(cin, s);
+    double max_hz = s.empty() ? 50.0 : stod(s);
+
+    if (!quick_tcp_probe(ip, port)) {
+        cerr << "[ERR] " << ip << ":" << port << " unreachable (2s timeout)\n"; return;
+    }
+    TCP_client cli;
+    if (!cli.connectToServer(ip, port, false)) {
+        cerr << "[ERR] Cannot connect to " << ip << ":" << port << "\n"; return;
+    }
+
+    SE3_inverter inv;
+    if (inv.init(cli, slave, true)) {
+        cerr << "[ERR] SE3 slave " << slave << " init fail\n"; cli.close(); return;
+    }
+
+    cout << "\n⚠ SAFETY:\n"
+         << "  - Confirm SE3 P.79 = 2 (CU mode), otherwise run commands are silently rejected.\n"
+         << "  - Verify motor direction with low Hz (e.g. 5) before running fast — wiring\n"
+         << "    or P.17 may swap pay-out / retract relative to forward / reverse.\n"
+         << "  - 'q' will auto-stop before exit. If anything looks wrong press 'e' (emergency).\n\n";
+
+    while (true) {
+        cout << "[SE3 slave=" << slave << "] f <hz> | r <hz> | s | e | h <hz> | m | q : ";
+        string in; getline(cin, in);
+        if (in.empty()) continue;
+        if (in == "q") break;
+
+        if (in == "s") {
+            cout << (inv.stopDecel() ? "  [WARN] stopDecel reported error\n"
+                                       : "  [OK] stop (decel)\n");
+            continue;
+        }
+        if (in == "e") {
+            cout << (inv.emergencyStop() ? "  [WARN] emergencyStop reported error\n"
+                                            : "  [OK] EMERGENCY STOP (MRS)\n");
+            continue;
+        }
+        if (in == "m") {
+            double out_hz = 0, out_a = 0, out_v = 0;
+            uint16_t status = 0;
+            bool e1 = inv.readOutputFreqHz(out_hz);
+            bool e2 = inv.readOutputCurrentA(out_a);
+            bool e3 = inv.readOutputVoltageV(out_v);
+            bool e4 = inv.readStatusWord(status);
+            cout << "  Hz: "       << (e1 ? "ERR" : std::to_string(out_hz)) << "\n"
+                 << "  Current A: " << (e2 ? "ERR" : std::to_string(out_a)) << "\n"
+                 << "  Voltage V: " << (e3 ? "ERR" : std::to_string(out_v)) << "\n"
+                 << "  StatusWord: ";
+            if (e4) cout << "ERR\n";
+            else {
+                cout << "0x" << std::hex << status << std::dec
+                     << " (b0=stop=" << ((status >> 0) & 1)
+                     << " b1=STF="   << ((status >> 1) & 1)
+                     << " b2=STR="   << ((status >> 2) & 1)
+                     << " b7=MRS="   << ((status >> 7) & 1) << ")\n";
+            }
+            continue;
+        }
+
+        // f / r / h all take a hz arg
+        istringstream iss(in);
+        string verb; double hz = 0;
+        iss >> verb >> hz;
+
+        if (verb == "h") {
+            if (inv.setFreqHz(hz, max_hz))
+                cerr << "  [WARN] setFreqHz reported error\n";
+            else
+                cout << "  [OK] freq set to " << hz << " Hz (run state unchanged)\n";
+            continue;
+        }
+        if (verb == "f") {
+            if (inv.setFreqHz(hz, max_hz)) {
+                cerr << "  [WARN] setFreqHz reported error — abort run\n"; continue;
+            }
+            cout << (inv.runForward() ? "  [WARN] runForward reported error\n"
+                                          : "  [OK] running FORWARD (pay out) at " + std::to_string(hz) + " Hz\n");
+            continue;
+        }
+        if (verb == "r") {
+            if (inv.setFreqHz(hz, max_hz)) {
+                cerr << "  [WARN] setFreqHz reported error — abort run\n"; continue;
+            }
+            cout << (inv.runReverse() ? "  [WARN] runReverse reported error\n"
+                                          : "  [OK] running REVERSE (retract) at " + std::to_string(hz) + " Hz\n");
+            continue;
+        }
+        cout << "  [!] usage: f <hz> | r <hz> | s | e | h <hz> | m | q\n";
+    }
+
+    cout << "[CLEANUP] sending stopDecel before exit\n";
+    inv.stopDecel();
+    cli.close();
+}
+
+
+//=========== 24. X518 tension sensor (Modbus TCP :502 direct) ===========
+//
+// X518 is a multi-channel acquisition board reading load cells (DSZL-107).
+// The bench unit speaks raw Modbus TCP on port 502 (no RS485 / no USR gateway),
+// so this test bypasses user_lib/DSZL_107 (which is RTU-framed) and talks
+// MBAP frames directly over a raw socket.
+//
+// Register map (X518 manual v1.1 / x518_probe.py):
+//   0x0A00, 4 reg = 2 long  : CH1 raw, CH2 raw  (read)
+//   0x0A20, 2 reg = 1 long  : zero command (1=CH1, 2=CH2, 7=all)  (write)
+//   0x0614, 2 reg = 1 long  : unit (1=t / 2=kg / 3=g / 4=kN / 5=N / 6=lb)
+//   0x063E,0x0640           : own IP (IPH / IPL)
+//   0x0642 / 0x0644         : port / mode (1=mbTCP, 2=ASC_TCP)
+//   0x064C                  : slave ID
+//   0x0636 / 0x0638         : baud idx / format idx
+//
+// ⚠ Bench note (memory project_x518_architecture_mismatch.md): factory IP is
+// 192.168.1.120 but bench unit was set to 192.168.1.100 — that conflicts with
+// washrobot Pi's deployment IP. If bench is dead, power-cycle ≥10s first.
+// ============================================================
+static void test_x518() {
+    cout << "\n--- X518 tension sensor (Modbus TCP :502 direct) ---\n";
+
+    string ip;
+    cout << "X518 IP [192.168.1.120]: ";
+    getline(cin, ip);
+    if (ip.empty()) ip = "192.168.1.120";
+
+    string s;
+    cout << "Unit ID [1]: ";
+    getline(cin, s);
+    int unit_id = s.empty() ? 1 : stoi(s);
+
+    cout << "Scale (raw -> kg) [0.01]: ";
+    getline(cin, s);
+    double scale = s.empty() ? 0.01 : stod(s);
+
+    int port = 502;
+    // X518's Wiznet TCP stack has very limited concurrent socket capacity;
+    // doing quick_tcp_probe (open→close) right before the real connect can
+    // leave X518 holding state and reject the second SYN. So do a single
+    // non-blocking connect with timeout instead.
+#ifdef _WIN32
+    SOCKET sk = socket(AF_INET, SOCK_STREAM, 0);
+    if (sk == INVALID_SOCKET) { cerr << "[ERR] socket() failed\n"; return; }
+    u_long nb = 1; ioctlsocket(sk, FIONBIO, &nb);
+#else
+    int sk = socket(AF_INET, SOCK_STREAM, 0);
+    if (sk < 0) { cerr << "[ERR] socket() failed\n"; return; }
+    int sk_flags = fcntl(sk, F_GETFL, 0);
+    fcntl(sk, F_SETFL, sk_flags | O_NONBLOCK);
+#endif
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
+
+    auto sock_close = [&]() {
+#ifdef _WIN32
+        closesocket(sk);
+#else
+        close(sk);
+#endif
+    };
+
+    int cres = connect(sk, (sockaddr*)&addr, sizeof(addr));
+    bool connected = (cres == 0);
+    bool pending = false;
+#ifdef _WIN32
+    if (!connected) pending = (WSAGetLastError() == WSAEWOULDBLOCK);
+#else
+    if (!connected) pending = (errno == EINPROGRESS);
+#endif
+    if (!connected && pending) {
+        fd_set wf; FD_ZERO(&wf); FD_SET(sk, &wf);
+        timeval tv{ 3, 0 };  // 3s connect timeout
+        if (select((int)sk + 1, nullptr, &wf, nullptr, &tv) > 0) {
+            int err = 0; socklen_t elen = sizeof(err);
+            getsockopt(sk, SOL_SOCKET, SO_ERROR, (char*)&err, &elen);
+            connected = (err == 0);
+            if (!connected) {
+                cerr << "[ERR] connect to " << ip << ":" << port
+                     << " failed (SO_ERROR=" << err << ")\n";
+                sock_close(); return;
+            }
+        } else {
+            cerr << "[ERR] connect to " << ip << ":" << port
+                 << " timed out (3s) — X518 likely firmware-frozen "
+                 << "(ICMP up but TCP dead). Power-cycle the unit ≥10s.\n";
+            sock_close(); return;
+        }
+    } else if (!connected) {
+#ifdef _WIN32
+        cerr << "[ERR] connect to " << ip << ":" << port
+             << " failed immediately (WSA=" << WSAGetLastError() << ")\n";
+#else
+        cerr << "[ERR] connect to " << ip << ":" << port
+             << " failed immediately (errno=" << errno << ")\n";
+#endif
+        sock_close(); return;
+    }
+
+    // back to blocking with a 1s recv timeout
+#ifdef _WIN32
+    nb = 0; ioctlsocket(sk, FIONBIO, &nb);
+    DWORD rcv_to = 1000;
+    setsockopt(sk, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rcv_to, sizeof(rcv_to));
+#else
+    fcntl(sk, F_SETFL, sk_flags);
+    timeval rcv_to{1, 0};
+    setsockopt(sk, SOL_SOCKET, SO_RCVTIMEO, &rcv_to, sizeof(rcv_to));
+#endif
+
+    // ============ MBAP frame helpers ============
+    uint16_t txid = 0;
+
+    // FC=0x03 read N registers, returns raw byte payload (big-endian regs).
+    // On failure prints diagnostic (timeout / exception code / short reply).
+    auto mbtcp_read = [&](uint16_t reg_addr, uint16_t qty, vector<uint8_t>& out) -> bool {
+        ++txid;
+        uint8_t req[12] = {
+            (uint8_t)(txid >> 8), (uint8_t)(txid & 0xFF),   // txid
+            0, 0,                                            // proto = 0
+            0, 6,                                            // length = 6
+            (uint8_t)unit_id,
+            0x03,
+            (uint8_t)(reg_addr >> 8), (uint8_t)(reg_addr & 0xFF),
+            (uint8_t)(qty >> 8), (uint8_t)(qty & 0xFF)
+        };
+        if (send(sk, (const char*)req, 12, 0) != 12) {
+            cerr << "    [diag] send failed (addr=0x" << hex << reg_addr << dec << ")\n";
+            return true;
+        }
+        uint8_t rx[256];
+        int n = (int)recv(sk, (char*)rx, sizeof(rx), 0);
+        if (n <= 0) {
+            cerr << "    [diag] recv timeout / closed (addr=0x" << hex << reg_addr
+                 << dec << ", n=" << n << ")\n";
+            return true;
+        }
+        if (n < 9) {
+            cerr << "    [diag] short reply (addr=0x" << hex << reg_addr << dec
+                 << ", n=" << n << ")\n";
+            return true;
+        }
+        // Modbus exception: FC | 0x80 in rx[7], exception code in rx[8]
+        if (rx[7] == (0x03 | 0x80)) {
+            cerr << "    [diag] Modbus exception (addr=0x" << hex << reg_addr << dec
+                 << ", code=0x" << hex << (int)rx[8] << dec;
+            switch (rx[8]) {
+                case 1: cerr << " ILLEGAL FUNCTION";  break;
+                case 2: cerr << " ILLEGAL DATA ADDR"; break;
+                case 3: cerr << " ILLEGAL DATA VAL";  break;
+                case 4: cerr << " SERVER FAILURE";    break;
+            }
+            cerr << ")\n";
+            return true;
+        }
+        if (rx[7] != 0x03) {
+            cerr << "    [diag] wrong FC in reply (addr=0x" << hex << reg_addr << dec
+                 << ", fc=0x" << hex << (int)rx[7] << dec << ")\n";
+            return true;
+        }
+        int bc = rx[8];
+        if (n < 9 + bc) {
+            cerr << "    [diag] truncated payload (addr=0x" << hex << reg_addr << dec
+                 << ", n=" << n << ", bc=" << bc << ")\n";
+            return true;
+        }
+        out.assign(rx + 9, rx + 9 + bc);
+        return false;
+    };
+
+    // FC=0x10 write 2 registers (one 32-bit big-endian long)
+    auto mbtcp_write_long = [&](uint16_t reg_addr, int32_t value) -> bool {
+        ++txid;
+        uint8_t req[17] = {
+            (uint8_t)(txid >> 8), (uint8_t)(txid & 0xFF),   // txid
+            0, 0,                                            // proto = 0
+            0, 11,                                           // length = 7 + 4
+            (uint8_t)unit_id,
+            0x10,
+            (uint8_t)(reg_addr >> 8), (uint8_t)(reg_addr & 0xFF),
+            0, 2,                                            // qty = 2 reg
+            4,                                               // byte count = 4
+            (uint8_t)((value >> 24) & 0xFF),
+            (uint8_t)((value >> 16) & 0xFF),
+            (uint8_t)((value >> 8)  & 0xFF),
+            (uint8_t)( value        & 0xFF)
+        };
+        if (send(sk, (const char*)req, 17, 0) != 17) return true;
+        uint8_t rx[256];
+        int n = (int)recv(sk, (char*)rx, sizeof(rx), 0);
+        if (n < 12) return true;
+        if (rx[7] != 0x10) return true;     // exception (0x90) or wrong fc
+        return false;
+    };
+
+    auto parse_long_be = [](const vector<uint8_t>& b, size_t off) -> int32_t {
+        return (int32_t)((uint32_t)b[off]   << 24 |
+                         (uint32_t)b[off+1] << 16 |
+                         (uint32_t)b[off+2] << 8  |
+                         (uint32_t)b[off+3]);
+    };
+
+    // ============ menu ============
+    cout << "\nX518 Modbus TCP @ " << ip << ":" << port << " unit=" << unit_id
+         << " scale=" << scale << "\n"
+         << "X518 is a 2-channel (CH1, CH2) acquisition board per manual v1.1.\n"
+         << "0xA20 is a multi-purpose command reg: 1/2=zero CH1/CH2, 7=zero all,\n"
+         << "40=SAVE parameters (manual: any param/zero/cal change needs save).\n"
+         << "Commands:\n"
+         << "  r            read CH1 + CH2 once\n"
+         << "  l            live read CH1 + CH2 (Enter to stop)\n"
+         << "  z / Z / A    zero CH1 / CH2 / all\n"
+         << "  S            SAVE parameters (write 0xA20 = 40)\n"
+         << "  u            set unit -> kg  (write 0x0614 = 2)\n"
+         << "  c            read device config (IP / port / mode / slave / baud / unit)\n"
+         << "  p            dump all parameter registers 0x600..0x64e (raw long values)\n"
+         << "  R <hex>      raw read long at <hex addr>      e.g.  R 0x614\n"
+         << "  W <hex> <v>  raw write long <v> at <hex addr> e.g.  W 0x620 1\n"
+         << "  s <val>      change kg scale factor (raw * scale = kg)\n"
+         << "  q            quit\n";
+
+    while (true) {
+        cout << "\n[X518] > ";
+        string in;
+        if (!getline(cin, in)) break;
+        if (in.empty()) continue;
+        if (in == "q" || in == "Q") break;
+
+        if (in == "r") {
+            // X518 is 2 channels: 0x0A00 long = CH1, 0x0A02 long = CH2 (4 reg = 2 longs)
+            vector<uint8_t> data;
+            if (mbtcp_read(0x0A00, 4, data) || data.size() < 8) {
+                cerr << "  [ERR] read 0x0A00 failed\n"; continue;
+            }
+            int32_t ch1 = parse_long_be(data, 0);
+            int32_t ch2 = parse_long_be(data, 4);
+            cout << "  CH1 raw=" << ch1
+                 << "  (kg=" << fixed << setprecision(3) << ch1 * scale << ")\n"
+                 << "  CH2 raw=" << ch2
+                 << "  (kg=" << fixed << setprecision(3) << ch2 * scale << ")\n";
+            continue;
+        }
+
+        if (in == "S") {
+            cout << (mbtcp_write_long(0x0A20, 40) ? "  [ERR] save params failed\n"
+                                                  : "  [OK] save params (0xA20 = 40) — wait ≥100ms\n");
+            this_thread::sleep_for(chrono::milliseconds(150));
+            continue;
+        }
+
+        if (in == "p") {
+            // Dump every parameter register from 0x600 to 0x64e (40 longs / 80 reg).
+            // Single FC03 with qty=80 in one frame.
+            vector<uint8_t> data;
+            if (mbtcp_read(0x0600, 80, data) || data.size() < 160) {
+                cerr << "  [ERR] dump 0x0600 +80reg failed\n"; continue;
+            }
+            cout << "  --- parameter registers 0x600..0x64e ---\n";
+            for (int idx = 0; idx < 40; ++idx) {
+                uint16_t addr = 0x0600 + idx * 2;
+                int32_t v = parse_long_be(data, idx * 4);
+                cout << "  [" << setw(2) << idx << "] 0x" << hex << addr << dec
+                     << " = " << setw(12) << v
+                     << "  (0x" << hex << (uint32_t)v << dec << ")\n";
+            }
+            continue;
+        }
+
+        if (in.size() >= 2 && in[0] == 'R' && (in[1] == ' ' || in[1] == '\t')) {
+            string rest = in.substr(2);
+            uint32_t addr = 0;
+            try { addr = (uint32_t)stoul(rest, nullptr, 0); }
+            catch (...) { cout << "  usage: R <hex addr>  e.g.  R 0x614\n"; continue; }
+            vector<uint8_t> data;
+            if (mbtcp_read((uint16_t)addr, 2, data) || data.size() < 4) {
+                cerr << "  [ERR] read 0x" << hex << addr << dec << " failed\n"; continue;
+            }
+            int32_t v = parse_long_be(data, 0);
+            cout << "  0x" << hex << addr << dec << " = " << v
+                 << "  (0x" << hex << (uint32_t)v << dec << ")\n";
+            continue;
+        }
+
+        if (in.size() >= 2 && in[0] == 'W' && (in[1] == ' ' || in[1] == '\t')) {
+            istringstream iss(in.substr(2));
+            string addr_s, val_s;
+            iss >> addr_s >> val_s;
+            if (addr_s.empty() || val_s.empty()) {
+                cout << "  usage: W <hex addr> <value>   e.g.  W 0x620 1\n"; continue;
+            }
+            uint32_t addr = 0; int32_t val = 0;
+            try {
+                addr = (uint32_t)stoul(addr_s, nullptr, 0);
+                val  = (int32_t)stol(val_s,  nullptr, 0);
+            } catch (...) {
+                cout << "  parse fail. usage: W <hex addr> <decimal-or-0xhex value>\n"; continue;
+            }
+            if (mbtcp_write_long((uint16_t)addr, val))
+                cerr << "  [ERR] write 0x" << hex << addr << dec << " = " << val << " failed\n";
+            else
+                cout << "  [OK] wrote 0x" << hex << addr << dec << " = " << val
+                     << "  (remember 'S' to persist if it's a parameter)\n";
+            continue;
+        }
+
+        if (in == "l") {
+            cout << "  [live] press Enter to stop\n";
+            atomic<bool> stop_flag(false);
+            thread input_thread([&]() {
+                string line;
+                getline(cin, line);
+                stop_flag = true;
+            });
+            while (!stop_flag.load()) {
+                vector<uint8_t> data;
+                if (mbtcp_read(0x0A00, 4, data) || data.size() < 8) {
+                    cout << "\r  [live] READ ERROR                                            ";
+                } else {
+                    int32_t ch1 = parse_long_be(data, 0);
+                    int32_t ch2 = parse_long_be(data, 4);
+                    cout << "\r  [live] CH1=" << setw(10) << ch1
+                         << " (" << setw(8) << fixed << setprecision(3) << ch1 * scale << " kg)"
+                         << "   CH2=" << setw(10) << ch2
+                         << " (" << setw(8) << fixed << setprecision(3) << ch2 * scale << " kg)   ";
+                }
+                cout.flush();
+                this_thread::sleep_for(chrono::milliseconds(200));
+            }
+            cout << "\n";
+            if (input_thread.joinable()) input_thread.join();
+            continue;
+        }
+
+        if (in == "z") {
+            cout << (mbtcp_write_long(0x0A20, 1) ? "  [ERR] zero CH1 failed\n"
+                                                 : "  [OK] CH1 zeroed\n");
+            continue;
+        }
+        if (in == "Z") {
+            cout << (mbtcp_write_long(0x0A20, 2) ? "  [ERR] zero CH2 failed\n"
+                                                 : "  [OK] CH2 zeroed\n");
+            continue;
+        }
+        if (in == "A") {
+            cout << (mbtcp_write_long(0x0A20, 7) ? "  [ERR] zero ALL failed\n"
+                                                 : "  [OK] all channels zeroed\n");
+            continue;
+        }
+        if (in == "u") {
+            cout << (mbtcp_write_long(0x0614, 2) ? "  [ERR] set unit kg failed\n"
+                                                 : "  [OK] unit -> kg (2)\n");
+            continue;
+        }
+
+        if (in == "c") {
+            struct { const char* name; uint16_t addr; bool show_hex; } cfg[] = {
+                {"IPH         (0x063E)", 0x063E, true },
+                {"IPL         (0x0640)", 0x0640, true },
+                {"Modbus port (0x0642)", 0x0642, false},
+                {"mode 1=TCP  (0x0644)", 0x0644, false},
+                {"TargetIPH   (0x0646)", 0x0646, true },
+                {"TargetIPL   (0x0648)", 0x0648, true },
+                {"Slave ID    (0x064C)", 0x064C, false},
+                {"Baud idx    (0x0636)", 0x0636, false},
+                {"Format idx  (0x0638)", 0x0638, false},
+                {"Unit        (0x0614)", 0x0614, false},
+            };
+            for (auto& cf : cfg) {
+                vector<uint8_t> d;
+                if (mbtcp_read(cf.addr, 2, d) || d.size() < 4) {
+                    cout << "  " << cf.name << " : [ERR]\n";
+                    continue;
+                }
+                int32_t v = parse_long_be(d, 0);
+                cout << "  " << cf.name << " : " << v;
+                if (cf.show_hex) cout << " (0x" << hex << v << dec << ")";
+                cout << "\n";
+            }
+            continue;
+        }
+
+        if (in.size() >= 1 && (in[0] == 's' || in[0] == 'S')) {
+            istringstream iss(in.substr(1));
+            double new_scale = 0;
+            if (iss >> new_scale && new_scale != 0.0) {
+                scale = new_scale;
+                cout << "  [OK] scale = " << scale << "\n";
+            } else {
+                cout << "  usage: s <number>   e.g.  s 0.01\n";
+            }
+            continue;
+        }
+
+        cout << "  [!] unknown command. r / l / z / Z / A / S / u / c / p / "
+                "R <addr> / W <addr> <v> / s <val> / q\n";
+    }
+
+    sock_close();
+}
+
+
+//=========== 25. SE3 inverter DUAL (left + right rope winch sync) ===========
+//
+// Synchronously control left + right rope winch SE3 inverters for bench
+// dual-rope retract / pay-out testing. Connects to two USR-TCP232 gateways
+// (one per rope, default 192.168.1.30 / .31) and dispatches each command to
+// both inverters in sequence.
+//
+// Direction mapping is wiring-dependent (see menu 23 bench note). Startup
+// prompt lets the user confirm whether STR=pay-out (current bench) or
+// STF=pay-out, so semantic verbs (pay / retract) always do the right thing
+// regardless of which side of the wiring you're on.
+//
+// Safety:
+//   - Either side fails to init -> abort entirely (no single-side run).
+//   - pay / retract are atomic: if either run command errors, both sides are
+//     immediately stopDecel'd to prevent the robot tilting on a single rope.
+//   - 'q' issues stopDecel to both before close (best-effort even on disconnect).
+//
+// Commands:
+//   pay <hz>       both pay out at hz
+//   retract <hz>   both retract at hz
+//   s              both stop (decel per P.7)
+//   e              both emergency stop (MRS, output cutoff)
+//   h <hz>         both set freq, run state unchanged
+//   m              monitor left / right side-by-side (Hz / A / V / StatusWord)
+//   q              stop both and exit
+// ============================================================
+static void test_se3_inverter_dual() {
+    cout << "\n--- SE3 inverter DUAL (left + right rope sync) ---\n";
+
+    string ip_l, ip_r;
+    cout << "Left  Gateway IP [192.168.1.30]: ";
+    getline(cin, ip_l);
+    if (ip_l.empty()) ip_l = "192.168.1.30";
+
+    cout << "Right Gateway IP [192.168.1.31]: ";
+    getline(cin, ip_r);
+    if (ip_r.empty()) ip_r = "192.168.1.31";
+
+    cout << "Port [4001]: ";
+    string s; getline(cin, s);
+    int port = s.empty() ? 4001 : stoi(s);
+
+    cout << "Slave ID (both sides) [1]: ";
+    getline(cin, s);
+    int slave = s.empty() ? 1 : stoi(s);
+
+    cout << "Max Hz (motor F8-03 / nameplate, default upper limit) [50]: ";
+    getline(cin, s);
+    double max_hz = s.empty() ? 50.0 : stod(s);
+
+    // Min Hz floor: low Hz can't produce enough torque to overcome rope friction
+    // -> motor stalls silently (SE3 reports "running" at requested Hz, but shaft
+    // doesn't move). Bench 2026-05-08: 5 Hz fails on right rope, 10 Hz works.
+    // Floor is a soft warning, user can override.
+    cout << "Min Hz floor (warn if requested below this) [10]: ";
+    getline(cin, s);
+    double min_hz = s.empty() ? 10.0 : stod(s);
+
+    cout << "Direction: STR(reverse)=pay-out, STF(forward)=retract? [Y/n]: ";
+    getline(cin, s);
+    bool str_is_payout = !(s == "n" || s == "N");
+    cout << "  -> 'pay'     will send " << (str_is_payout ? "runReverse (STR)" : "runForward (STF)") << "\n";
+    cout << "  -> 'retract' will send " << (str_is_payout ? "runForward (STF)" : "runReverse (STR)") << "\n";
+
+    if (!quick_tcp_probe(ip_l, port)) {
+        cerr << "[ERR] Left  " << ip_l << ":" << port << " unreachable (2s timeout)\n"; return;
+    }
+    if (!quick_tcp_probe(ip_r, port)) {
+        cerr << "[ERR] Right " << ip_r << ":" << port << " unreachable (2s timeout)\n"; return;
+    }
+
+    TCP_client cli_l, cli_r;
+    if (!cli_l.connectToServer(ip_l, port, false)) {
+        cerr << "[ERR] Cannot connect to LEFT  " << ip_l << ":" << port << "\n"; return;
+    }
+    if (!cli_r.connectToServer(ip_r, port, false)) {
+        cerr << "[ERR] Cannot connect to RIGHT " << ip_r << ":" << port << "\n";
+        cli_l.close(); return;
+    }
+
+    SE3_inverter inv_l, inv_r;
+    if (inv_l.init(cli_l, slave, true)) {
+        cerr << "[ERR] LEFT  SE3 slave " << slave << " init fail -- abort\n";
+        cli_l.close(); cli_r.close(); return;
+    }
+    if (inv_r.init(cli_r, slave, true)) {
+        cerr << "[ERR] RIGHT SE3 slave " << slave << " init fail -- abort\n";
+        cli_l.close(); cli_r.close(); return;
+    }
+
+    cout << "\n[!] SAFETY:\n"
+         << "  - Both inverters must be in CU mode (P.79 = 3) before run commands work.\n"
+         << "  - Verify direction at low Hz (e.g., 5) before running fast.\n"
+         << "  - 'q' auto-stops both before exit. 'e' = emergency MRS on both.\n\n";
+
+    // Bind semantic verbs to STF/STR per startup prompt.
+    auto run_pay     = [&](SE3_inverter& inv) { return str_is_payout ? inv.runReverse() : inv.runForward(); };
+    auto run_retract = [&](SE3_inverter& inv) { return str_is_payout ? inv.runForward() : inv.runReverse(); };
+
+    while (true) {
+        cout << "[SE3 dual L=" << ip_l << " R=" << ip_r
+             << "] pay <hz> | retract <hz> | s | e | h <hz> | m | q : ";
+        string in; getline(cin, in);
+        if (in.empty()) continue;
+        if (in == "q") break;
+
+        if (in == "s") {
+            bool eL = inv_l.stopDecel();
+            bool eR = inv_r.stopDecel();
+            cout << "  L: " << (eL ? "[WARN] stopDecel error" : "[OK] stop") << "\n"
+                 << "  R: " << (eR ? "[WARN] stopDecel error" : "[OK] stop") << "\n";
+            continue;
+        }
+        if (in == "e") {
+            bool eL = inv_l.emergencyStop();
+            bool eR = inv_r.emergencyStop();
+            cout << "  L: " << (eL ? "[WARN] emergencyStop error" : "[OK] EMERGENCY STOP (MRS)") << "\n"
+                 << "  R: " << (eR ? "[WARN] emergencyStop error" : "[OK] EMERGENCY STOP (MRS)") << "\n";
+            continue;
+        }
+        if (in == "m") {
+            double hzL=0, aL=0, vL=0, hzR=0, aR=0, vR=0;
+            uint16_t stL=0, stR=0;
+            bool eL_hz = inv_l.readOutputFreqHz(hzL);
+            bool eL_a  = inv_l.readOutputCurrentA(aL);
+            bool eL_v  = inv_l.readOutputVoltageV(vL);
+            bool eL_st = inv_l.readStatusWord(stL);
+            bool eR_hz = inv_r.readOutputFreqHz(hzR);
+            bool eR_a  = inv_r.readOutputCurrentA(aR);
+            bool eR_v  = inv_r.readOutputVoltageV(vR);
+            bool eR_st = inv_r.readStatusWord(stR);
+            cout << "             LEFT              RIGHT\n";
+            cout << "  Hz       : " << (eL_hz ? std::string("ERR") : std::to_string(hzL))
+                 << "       "      << (eR_hz ? std::string("ERR") : std::to_string(hzR)) << "\n";
+            cout << "  Current A: " << (eL_a  ? std::string("ERR") : std::to_string(aL))
+                 << "       "      << (eR_a  ? std::string("ERR") : std::to_string(aR)) << "\n";
+            cout << "  Voltage V: " << (eL_v  ? std::string("ERR") : std::to_string(vL))
+                 << "       "      << (eR_v  ? std::string("ERR") : std::to_string(vR)) << "\n";
+            cout << "  Status   : ";
+            if (eL_st) cout << "ERR     ";
+            else       cout << "0x" << std::hex << stL << std::dec << "  ";
+            if (eR_st) cout << "ERR\n";
+            else       cout << "0x" << std::hex << stR << std::dec << "\n";
+            continue;
+        }
+
+        // pay / retract / h all take a hz arg
+        istringstream iss(in);
+        string verb; double hz = 0;
+        iss >> verb >> hz;
+
+        if (verb == "h") {
+            bool eL = inv_l.setFreqHz(hz, max_hz);
+            bool eR = inv_r.setFreqHz(hz, max_hz);
+            cout << "  L: " << (eL ? "[WARN] setFreqHz error" : "[OK] freq " + std::to_string(hz) + " Hz") << "\n"
+                 << "  R: " << (eR ? "[WARN] setFreqHz error" : "[OK] freq " + std::to_string(hz) + " Hz") << "\n";
+            continue;
+        }
+        if (verb == "pay" || verb == "retract") {
+            // Soft floor: warn but proceed. Below min_hz the SE3 may report
+            // running but the motor stalls because torque < rope friction.
+            if (hz < min_hz) {
+                cerr << "  [WARN] " << hz << " Hz < min " << min_hz
+                     << " Hz floor -- motor may stall silently on heavy side; proceeding\n";
+            }
+            // Set freq on both first; if either fails, abort the run to avoid
+            // running one side at a stale freq.
+            bool fL = inv_l.setFreqHz(hz, max_hz);
+            bool fR = inv_r.setFreqHz(hz, max_hz);
+            if (fL || fR) {
+                cerr << "  [WARN] setFreqHz failed: "
+                     << (fL ? "L " : "") << (fR ? "R " : "") << "-- abort run\n";
+                continue;
+            }
+            bool rL, rR;
+            if (verb == "pay") { rL = run_pay(inv_l);     rR = run_pay(inv_r); }
+            else               { rL = run_retract(inv_l); rR = run_retract(inv_r); }
+
+            if (rL || rR) {
+                // Atomic safety: if either run failed, roll back the side that
+                // succeeded so the robot doesn't tilt with one rope moving.
+                // stopDecel doesn't go through CU-mode latch, so it works even
+                // when the failing side is CU-mode-broken.
+                cerr << "  [WARN] run failed: "
+                     << (rL ? "L " : "") << (rR ? "R " : "")
+                     << "-- rolling back: stopping both sides\n";
+                bool sL = inv_l.stopDecel();
+                bool sR = inv_r.stopDecel();
+                cout << "  L: " << (rL ? "[WARN] run reported error"
+                                       : "[OK] run sent")
+                     << " | rollback stop: " << (sL ? "[WARN] stop error" : "[OK]") << "\n"
+                     << "  R: " << (rR ? "[WARN] run reported error"
+                                       : "[OK] run sent")
+                     << " | rollback stop: " << (sR ? "[WARN] stop error" : "[OK]") << "\n";
+                continue;
+            }
+            cout << "  L: [OK] " << verb << " at " << hz << " Hz\n"
+                 << "  R: [OK] " << verb << " at " << hz << " Hz\n";
+            continue;
+        }
+        cout << "  [!] usage: pay <hz> | retract <hz> | s | e | h <hz> | m | q\n";
+    }
+
+    cout << "[CLEANUP] sending stopDecel to both before exit\n";
+    inv_l.stopDecel();
+    inv_r.stopDecel();
+    cli_l.close();
+    cli_r.close();
+}
+
+
+//=========== 26. DM2J: upper slide move DURING feet sync (INS interference test) ===========
+//
+// Bench test for the "move the upper slide while the feet are stepping"
+// feasibility question (2026-05-22): does the feet group's BROADCAST PR
+// trigger interrupt the upper slide's own independent PR motion?
+//
+//   slide = slave 5     -> PR2, triggered NON-broadcast (addresses slave 5 only)
+//   feet  = slaves 1,3  -> PR1, triggered via BROADCAST PR_trigger_sync
+//                          (hardware sync: both feet rails start the SAME instant)
+//
+// The broadcast PR1 trigger reaches EVERY DM2J on the bus, slave 5 included,
+// while it is mid-PR2. A broadcast makes every slave run ITS OWN PR1, so
+// whether it aborts slave 5's PR2 is decided by SLAVE 5's own PR1 INS
+// (interrupt) bit -- Bit4 of its mode word. The DM2J manual contradicts
+// itself on the INS polarity, so this test settles it empirically:
+//   slide reaches target -> broadcast did NOT interrupt -> independent PR works
+//   slide stops short    -> broadcast DID interrupt     -> must flip INS bit
+//
+// SAFETY:
+//  - feet use BROADCAST sync so the two feet rails never start at different
+//    instants (async feet rails twist the shared mechanism).
+//  - slaves 2,4 (wheels) + slave 5's PR1 are pre-set rpm=0, so the broadcast
+//    PR1 cannot run any motor off; if it DOES interrupt slave 5 it falls into
+//    PR1=rpm0 -> slave 5 just stops (the short final position is the evidence).
+//  - slaves 2,4 are left DISABLED -- a disabled motor cannot move regardless.
+static void test_dm2j_slide_during_feet() {
+    cout << "\n--- DM2J: upper slide (5) move DURING feet (1,3) sync move ---\n";
+
+    string ip;
+    cout << "Gateway IP [192.168.1.20]: ";
+    getline(cin, ip);
+    if (ip.empty()) ip = "192.168.1.20";
+
+    if (!quick_tcp_probe(ip, 4001)) {
+        cerr << "[ERR] " << ip << ":4001 unreachable (2s timeout)\n"; return;
+    }
+    TCP_client cli;
+    if (!cli.connectToServer(ip, 4001, false)) {
+        cerr << "[ERR] Cannot connect to " << ip << ":4001\n"; return;
+    }
+
+    DM2J_RS570 drv[6];   // index 1..5
+    for (int s = 1; s <= 5; ++s) {
+        if (drv[s].init(cli, s, false)) {
+            cerr << "[ERR] DM2J slave " << s << " init fail\n";
+            cli.close(); return;
+        }
+    }
+
+    // --- bystander-safe PR state: PR1 & PR2 = rpm=0 on ALL 5 slaves ---
+    cout << "  -> init safe PR state (PR1, PR2 = rpm=0 on all 5 slaves)\n";
+    for (int s = 1; s <= 5; ++s) {
+        drv[s].PR_move_set(1, 0, 0, 0, 0, 0);
+        drv[s].PR_move_set(2, 0, 0, 0, 0, 0);
+    }
+
+    // --- reset alarm + enable the 3 motors we actually drive (1,3,5) ---
+    for (int s : {1, 3, 5}) {
+        drv[s].reset_alarm();
+        this_thread::sleep_for(chrono::milliseconds(40));
+        if (drv[s].motor_enable())
+            cerr << "  [WARN] enable slave " << s << " failed\n";
+    }
+    this_thread::sleep_for(chrono::milliseconds(300));
+
+    // --- pre positions ---
+    double p1_pre = 0, p3_pre = 0, p5_pre = 0;
+    drv[1].read_position_cm(p1_pre);
+    drv[3].read_position_cm(p3_pre);
+    drv[5].read_position_cm(p5_pre);
+    cout << fixed << setprecision(3);
+    cout << "  current pos: slave1=" << p1_pre << "  slave3=" << p3_pre
+         << "  slave5(slide)=" << p5_pre << " cm\n";
+
+    // --- parameters ---
+    cout << "Slide (slave 5) ABSOLUTE target cm [" << (p5_pre + 15.0)
+         << "] (pick within the slide's safe travel): ";
+    string sc; getline(cin, sc);
+    double slide_target = sc.empty() ? (p5_pre + 15.0) : stod(sc);
+
+    cout << "Slide rpm -- keep SLOW so it is still moving when the feet fire [80]: ";
+    string sr; getline(cin, sr);
+    int slide_rpm = sr.empty() ? 80 : stoi(sr);
+
+    cout << "Feet (slaves 1,3) ABSOLUTE target cm [2]: ";
+    string fc; getline(cin, fc);
+    double feet_cm = fc.empty() ? 2.0 : stod(fc);
+
+    cout << "Feet rpm [300]: ";
+    string fr; getline(cin, fr);
+    int feet_rpm = fr.empty() ? 300 : stoi(fr);
+
+    cout << "Slave 5 PR1 INS bit -- 0=interrupt-enabled (default) / 1=mask-interrupt [0]: ";
+    string ib; getline(cin, ib);
+    int ins_bit = (ib == "1") ? 1 : 0;
+
+    cout << "Delay before feet trigger ms (slide must still be moving) [1500]: ";
+    string dl; getline(cin, dl);
+    int feet_delay_ms = dl.empty() ? 1500 : stoi(dl);
+
+    // Apply the INS bit to the BYSTANDER PR1 slots (slaves 2,4,5). The feet
+    // broadcast PR_trigger_sync(1) makes EVERY slave run ITS OWN PR1 -- so
+    // whether the broadcast interrupts slave 5's in-progress PR2 is decided by
+    // SLAVE 5's PR1 INS bit, not the feet's. (Slaves 1,3 PR1 is overwritten by
+    // the real feet move below; their INS is irrelevant -- the feet are idle
+    // when triggered, INS only matters for a path triggered while busy.)
+    int bystander_pr1_mode = 1 | (ins_bit << 4);   // 0x01 or 0x11
+    for (int s : {2, 4, 5})
+        drv[s].PR_move_set(1, bystander_pr1_mode, 0, 0, 50, 100);
+    cout << "  -> bystander PR1 (slaves 2,4,5) mode word = 0x"
+         << hex << bystander_pr1_mode << dec << " (INS bit " << ins_bit << ")\n";
+
+    // === STEP 1: trigger upper slide (slave 5) on PR2 -- NON-broadcast ===
+    cout << "\n  [1] trigger slave 5 -> PR2 abs " << slide_target
+         << " cm @ " << slide_rpm << " rpm (non-broadcast, nowait)\n";
+    if (drv[5].PR_move_cm_nowait(2, 1, slide_rpm, slide_target, 50, 100))
+        cerr << "  [WARN] slave 5 PR2 nowait trigger failed\n";
+
+    bool slide_started = false;
+    for (int e = 0; e < 1500; e += 50) {
+        uint32_t st = 0;
+        if (drv[5].read_status(st)) break;
+        if (st & 0x0004) { slide_started = true;
+            cout << "      slide RUN bit set at " << e << "ms\n"; break; }
+        this_thread::sleep_for(chrono::milliseconds(50));
+    }
+    if (!slide_started)
+        cout << "  [WARN] slide RUN bit never seen -- it may already be at target / not moving\n";
+
+    // === STEP 2: wait, then BROADCAST-sync trigger feet on PR1 ===
+    cout << "  [2] wait " << feet_delay_ms << " ms ...\n";
+    this_thread::sleep_for(chrono::milliseconds(feet_delay_ms));
+
+    double   p5_atfeet = 0;
+    uint32_t st5_atfeet = 0;
+    drv[5].read_position_cm(p5_atfeet);
+    drv[5].read_status(st5_atfeet);
+    bool slide_running_at_feet = (st5_atfeet & 0x0004);
+    cout << "      slide just before feet trigger: pos=" << p5_atfeet
+         << " cm  RUN=" << (slide_running_at_feet ? 1 : 0) << "\n";
+    if (!slide_running_at_feet)
+        cout << "  [WARN] slide NOT moving when feet fire -- interference NOT tested."
+                " Re-run with a longer / slower slide move.\n";
+
+    cout << "  [3] set feet PR1 abs " << feet_cm
+         << " cm on slaves 1,3 + BROADCAST PR_trigger_sync(1)\n";
+    drv[1].PR_move_cm_set(1, 1, feet_rpm, feet_cm, 50, 100);
+    drv[3].PR_move_cm_set(1, 1, feet_rpm, feet_cm, 50, 100);
+    // ONE broadcast frame -> feet 1+3 start the exact same instant (sync).
+    // Also reaches slaves 2,4 (PR1 rpm=0 -> no-op) and slave 5 (mid-PR2 -> the test).
+    drv[1].PR_trigger_sync(1);
+
+    // === STEP 3: monitor the slide -- "reached target" vs "frozen short" ===
+    // The RUN bit is NOT reliable for the verdict: if the broadcast interrupts
+    // the slide it falls into PR1 (rpm=0) and gets stuck "running" a zero-speed
+    // path forever (RUN stays 1, position frozen). So the verdict is by
+    // POSITION -- reached target = not interrupted; frozen short = interrupted.
+    // The shared Modbus gateway occasionally returns a garbage slide reading;
+    // a big jump opposite the travel direction is filtered out.
+    cout << "\n  [4] monitoring (position-based, stall = interrupted) ...\n";
+    const bool slide_up = (slide_target > p5_pre);
+    double feet_sync_max_div = 0.0;
+    double last_good_p5 = p5_atfeet;
+    int    stall_samples = 0;
+    const int STALL_LIMIT = 10;        // ~10 × 300ms = 3s of no advance = frozen
+    bool   slide_reached = false;
+    bool   slide_frozen  = false;
+    for (int e = 0; e < 30000; e += 300) {
+        uint32_t st1 = 0, st3 = 0, st5 = 0;
+        double p1 = 0, p3 = 0, p5_raw = 0;
+        drv[1].read_status(st1); drv[1].read_position_cm(p1);
+        drv[3].read_status(st3); drv[3].read_position_cm(p3);
+        drv[5].read_status(st5); drv[5].read_position_cm(p5_raw);
+
+        double div = std::fabs(p1 - p3);
+        if (div > feet_sync_max_div) feet_sync_max_div = div;
+
+        // glitch filter: the slide travels one direction; a big jump the OTHER
+        // way is a corrupt read -- reuse the last good value.
+        double p5 = p5_raw;
+        bool glitch = ( slide_up && p5_raw < last_good_p5 - 0.8) ||
+                      (!slide_up && p5_raw > last_good_p5 + 0.8);
+        if (glitch) p5 = last_good_p5;
+
+        double advance = std::fabs(p5 - last_good_p5);
+        last_good_p5 = p5;
+        if (advance < 0.05) stall_samples++; else stall_samples = 0;
+
+        cout << "    t=" << e << "ms  feet1=" << p1 << " feet3=" << p3
+             << " (div=" << div << ")  slide5=" << p5
+             << (glitch ? std::string(" (raw " + std::to_string(p5_raw) + " rejected)")
+                        : std::string())
+             << "  RUN=" << ((st5 & 0x0004) ? 1 : 0)
+             << "  stall=" << stall_samples << "\n";
+
+        if (std::fabs(p5 - slide_target) < 0.3) { slide_reached = true; break; }
+        if (stall_samples >= STALL_LIMIT)        { slide_frozen  = true; break; }
+        this_thread::sleep_for(chrono::milliseconds(300));
+    }
+
+    // stop the slide (clears the stuck rpm=0 PR1 limbo if it was interrupted)
+    drv[5].speed_move_stop();
+    this_thread::sleep_for(chrono::milliseconds(500));
+
+    // === STEP 4: reset PR slots safe, report, cleanup ===
+    for (int s = 1; s <= 5; ++s) {
+        drv[s].PR_move_set(1, 0, 0, 0, 0, 0);
+        drv[s].PR_move_set(2, 0, 0, 0, 0, 0);
+    }
+    double p1_post = 0, p3_post = 0, p5_post = 0;
+    drv[1].read_position_cm(p1_post);
+    drv[3].read_position_cm(p3_post);
+    drv[5].read_position_cm(p5_post);
+
+    cout << "\n  ===================== RESULT =====================\n";
+    cout << "  Slave 5 PR1 INS bit tested : " << ins_bit
+         << "  (bystander PR1 mode word 0x" << hex << bystander_pr1_mode << dec << ")\n";
+    cout << "  FEET  : slave1=" << p1_post << "  slave3=" << p3_post
+         << " cm  (target abs " << feet_cm << ")\n";
+    cout << "  SLIDE : slave5=" << p5_post << " cm  (target abs " << slide_target << ")\n";
+    if (!slide_running_at_feet) {
+        cout << "  >>> INCONCLUSIVE -- slide was not moving when the feet fired."
+                " Re-run with a longer / slower slide move.\n";
+    } else if (slide_frozen) {
+        cout << "  >>> slide FROZE short of target -> broadcast PR1 INTERRUPTED the slide.\n";
+        cout << "      => with INS bit " << ins_bit << ", a broadcast trigger DOES interrupt.\n";
+        if (ins_bit == 0)
+            cout << "      Next: re-run this test with INS bit = 1 (mask-interrupt).\n";
+        else
+            cout << "      INS bit 1 did NOT block the interrupt -- independent PR not viable this way.\n";
+    } else if (slide_reached) {
+        cout << "  >>> slide REACHED its target -> broadcast PR1 did NOT interrupt the slide.\n";
+        cout << "      => with INS bit " << ins_bit << ", the upper slide can run an"
+                " independent PR while the feet step. Software solution viable.\n";
+    } else {
+        cout << "  >>> slide neither reached nor clearly froze within 30s -- inspect the log.\n";
+    }
+    cout << "  ==================================================\n";
+
+    cout << "\n[CLEANUP] disable motors 1,3,5\n";
+    for (int s : {1, 3, 5}) drv[s].motor_disable();
+    cli.close();
+}
+
+//=========== 27. DM2J clear PR1/PR2 (recover from a bad "safe PR") ===========
+//
+// Recovery utility. A PR slot wrongly left as "mode=1, rpm=0" is a CONFIGURED
+// but un-runnable path ("go to absolute 0 at speed 0"): when the feet broadcast
+// PR_trigger_sync(1) triggers it on a bystander that is not at absolute 0, the
+// motor jams (RUN stuck, can never finish a zero-speed move) -- and any later
+// PR_move_cm on that motor then times out.
+//
+// This rewrites PR1 & PR2 on all 5 DM2J slaves to mode=0 (UNCONFIGURED) so a
+// broadcast trigger is a clean no-op again, and sends a stop to clear any motor
+// currently stuck in that limbo. RAM only (no EEPROM save).
+//
+// !! STOP the washrobot main program first -- two TCP clients on one USR
+//    gateway contend on the shared RS485 bus.
+static void test_dm2j_clear_pr() {
+    cout << "\n--- DM2J clear PR1/PR2 (recover from bad 'safe PR') ---\n";
+    cout << "    !! STOP the washrobot main program first (shared gateway) !!\n";
+
+    string ip;
+    cout << "Gateway IP [192.168.1.20]: ";
+    getline(cin, ip);
+    if (ip.empty()) ip = "192.168.1.20";
+
+    if (!quick_tcp_probe(ip, 4001)) {
+        cerr << "[ERR] " << ip << ":4001 unreachable (2s timeout)\n"; return;
+    }
+    TCP_client cli;
+    if (!cli.connectToServer(ip, 4001, false)) {
+        cerr << "[ERR] Cannot connect to " << ip << ":4001\n"; return;
+    }
+
+    DM2J_RS570 drv[6];   // index 1..5
+    for (int s = 1; s <= 5; ++s) {
+        if (drv[s].init(cli, s, false)) {
+            cerr << "[ERR] DM2J slave " << s << " init fail\n";
+            cli.close(); return;
+        }
+    }
+
+    cout << "  -> stop + clear PR1/PR2 (mode 0 = unconfigured) on slaves 1..5\n";
+    for (int s = 1; s <= 5; ++s) {
+        drv[s].speed_move_stop();              // 0x6002=0x40 -- clear any stuck path
+        drv[s].PR_move_set(1, 0, 0, 0, 0, 0);  // PR1 -> unconfigured (broadcast no-op)
+        drv[s].PR_move_set(2, 0, 0, 0, 0, 0);  // PR2 -> unconfigured
+        cout << "     slave " << s << ": stopped + PR1/PR2 cleared\n";
+    }
+
+    cout << "  [OK] done. A feet broadcast PR_trigger_sync(1) is now a clean\n"
+            "       no-op for every bystander again. Restart the washrobot.\n";
+    cli.close();
+}
+
+//=========== 28. DM2J slide bench loop (0 -> X -> 0 × N rounds) ===========
+//
+// Bench tool for upper slide (DM2J slave 14 @ cli_22_ since 2026-05-26
+// migration; was slave 5 @ cli_20_ before that):
+//   - User picks RPM, ACC, DEC, travel cm, rounds.
+//   - Each round: move to baseline + X cm, then back to baseline.
+//   - After each return, reads encoder position and reports drift from baseline.
+//     Cumulative drift = closed-loop slip / mechanical creep / hard-stop slip.
+//
+// PR0 (mode=1 absolute) is used. On exit PR0/PR1/PR2 written to mode=0 +
+// motor disabled (no landmine left behind).
+//
+// !! STOP the washrobot main program first (shared gateway) !!
+static void test_dm2j_slide_bench() {
+    cout << "\n--- DM2J slide bench loop (slave 14 @ .22, 0 -> X -> 0) ---\n";
+    cout << "    !! STOP the washrobot main program first (shared gateway) !!\n";
+
+    string ip;
+    cout << "Gateway IP [192.168.1.22]: ";
+    getline(cin, ip);
+    if (ip.empty()) ip = "192.168.1.22";
+
+    if (!quick_tcp_probe(ip, 4001)) {
+        cerr << "[ERR] " << ip << ":4001 unreachable (2s timeout)\n"; return;
+    }
+    TCP_client cli;
+    if (!cli.connectToServer(ip, 4001, false)) {
+        cerr << "[ERR] Cannot connect to " << ip << ":4001\n"; return;
+    }
+
+    DM2J_RS570 drv;
+    if (drv.init(cli, 14, false)) {
+        cerr << "[ERR] DM2J slave 14 init fail\n";
+        cli.close(); return;
+    }
+
+    // safe PR 墊底 (避免之前測試殘留)
+    drv.PR_move_set(1, 0, 0, 0, 0, 0);
+    drv.PR_move_set(2, 0, 0, 0, 0, 0);
+
+    drv.reset_alarm();
+    this_thread::sleep_for(chrono::milliseconds(40));
+    if (drv.motor_enable())
+        cerr << "  [WARN] motor_enable failed\n";
+    this_thread::sleep_for(chrono::milliseconds(300));
+
+    double p_pre = 0;
+    drv.read_position_cm(p_pre);
+    cout << fixed << setprecision(3);
+    cout << "  slave 14 current pos: " << p_pre << " cm  (used as baseline; each round 回到這裡算 0)\n";
+
+    cout << "Travel cm (each round goes baseline + X then back) [60]: ";
+    string sc; getline(cin, sc);
+    double travel = sc.empty() ? 60.0 : stod(sc);
+
+    cout << "RPM [1500]: ";
+    string sr; getline(cin, sr);
+    int rpm = sr.empty() ? 1500 : stoi(sr);
+
+    cout << "ACC ms/1000rpm [100]: ";
+    string sa; getline(cin, sa);
+    int acc = sa.empty() ? 100 : stoi(sa);
+
+    cout << "DEC ms/1000rpm [100]: ";
+    string sd; getline(cin, sd);
+    int dec = sd.empty() ? 100 : stoi(sd);
+
+    cout << "Rounds (each round = +X then back to baseline) [10]: ";
+    string sn; getline(cin, sn);
+    int rounds = sn.empty() ? 10 : stoi(sn);
+
+    const double abs_high = p_pre + travel;
+    const double abs_low  = p_pre;
+    cout << "\n  Pattern: " << abs_low << " -> " << abs_high << " -> " << abs_low
+         << "   (" << rounds << " rounds)\n";
+    cout << "  RPM=" << rpm << "  ACC=" << acc << "  DEC=" << dec << "\n\n";
+
+    auto t_total_start = chrono::steady_clock::now();
+    double max_drift_abs = 0.0;
+    int    completed = 0;
+
+    for (int r = 1; r <= rounds; ++r) {
+        auto t_r = chrono::steady_clock::now();
+
+        if (drv.PR_move_cm(0, 1, rpm, abs_high, acc, dec)) {
+            cerr << "  [round " << r << "] FAIL on outbound move\n"; break;
+        }
+        if (drv.PR_move_cm(0, 1, rpm, abs_low, acc, dec)) {
+            cerr << "  [round " << r << "] FAIL on return move\n"; break;
+        }
+
+        double p_now = 0;
+        drv.read_position_cm(p_now);
+        double drift = p_now - abs_low;   // expected back at baseline
+        if (std::fabs(drift) > max_drift_abs) max_drift_abs = std::fabs(drift);
+        completed = r;
+
+        auto ms = chrono::duration_cast<chrono::milliseconds>(
+                      chrono::steady_clock::now() - t_r).count();
+        cout << "  round " << r << "/" << rounds
+             << "   pos=" << p_now << " cm   drift=" << drift
+             << " cm   time=" << ms << " ms\n";
+    }
+
+    auto total_ms = chrono::duration_cast<chrono::milliseconds>(
+                        chrono::steady_clock::now() - t_total_start).count();
+
+    cout << "\n  ===================== SUMMARY =====================\n";
+    cout << "  rounds done    : " << completed << " / " << rounds << "\n";
+    cout << "  total time     : " << total_ms << " ms"
+         << (completed > 0 ? "  (avg " + std::to_string(total_ms / completed) + " ms/round)" : "")
+         << "\n";
+    cout << "  max |drift|    : " << max_drift_abs << " cm\n";
+    cout << "  RPM/ACC/DEC    : " << rpm << " / " << acc << " / " << dec << "\n";
+    cout << "  travel each rd : " << travel << " cm\n";
+    cout << "  ==================================================\n";
+
+    cout << "\n[CLEANUP] PR0/PR1/PR2 -> mode 0, motor disable\n";
+    drv.speed_move_stop();
+    drv.PR_move_set(0, 0, 0, 0, 0, 0);
+    drv.PR_move_set(1, 0, 0, 0, 0, 0);
+    drv.PR_move_set(2, 0, 0, 0, 0, 0);
+    drv.motor_disable();
+    cli.close();
+}
+
+//=========== 29. SE3 inspect — dump P.7/P.8/DC brake on L+R, compare ===========
+//
+// Read-only diagnostic. Connects to USR_A (left SE3) + USR_B (right SE3) via
+// Modbus-TCP and dumps acc/dec time + DC brake config. Compares L vs R and
+// flags mismatches.
+//
+// Background — bench 2026-05-29: stop-aligned decel asymmetry visible in field
+// (R rope keeps paying out 2-5cm after `down off` while L stops sooner; over
+// 4 connected hold pulses the gap grew 1cm -> 12cm). Project memory
+// `project_se3_panel_acc_dec_alignment.md` calls out P.7/P.8 + DC brake
+// must align L vs R; this menu lets you check without going to the inverter.
+//
+// Registers (per .claude/summaries/SE3_INVERTER_MODBUS_SUMMARY.md):
+//   0x0106 = 01-06 = P.7  加速時間 1     (unit 0.01s)
+//   0x0107 = 01-07 = P.8  減速時間 1     (unit 0.01s)
+//   0x0A00 = 10-00 = P.10 直流制動動作頻率 (unit 0.01 Hz)
+//   0x0A01 = 10-01 = P.11 直流制動動作時間 (unit 0.01s)
+//   0x0A02 = 10-02 = P.12 直流制動動作電壓 (unit 0.1%)
+static void test_se3_inspect() {
+    cout << "\n--- SE3 inspect (P.7/P.8/DC brake L vs R compare) ---\n";
+
+    string ip_l, ip_r, s;
+    cout << "Left  Gateway IP [192.168.1.30]: ";
+    getline(cin, ip_l); if (ip_l.empty()) ip_l = "192.168.1.30";
+    cout << "Right Gateway IP [192.168.1.31]: ";
+    getline(cin, ip_r); if (ip_r.empty()) ip_r = "192.168.1.31";
+    cout << "Port [4001]: ";
+    getline(cin, s);
+    int port = s.empty() ? 4001 : stoi(s);
+    cout << "Slave ID (both sides) [1]: ";
+    getline(cin, s);
+    int slave = s.empty() ? 1 : stoi(s);
+
+    if (!quick_tcp_probe(ip_l, port)) {
+        cerr << "[ERR] Left  " << ip_l << ":" << port << " unreachable (2s timeout)\n"; return;
+    }
+    if (!quick_tcp_probe(ip_r, port)) {
+        cerr << "[ERR] Right " << ip_r << ":" << port << " unreachable (2s timeout)\n"; return;
+    }
+
+    TCP_client cli_l, cli_r;
+    if (!cli_l.connectToServer(ip_l, port, false)) {
+        cerr << "[ERR] Cannot connect to LEFT  " << ip_l << ":" << port << "\n"; return;
+    }
+    if (!cli_r.connectToServer(ip_r, port, false)) {
+        cerr << "[ERR] Cannot connect to RIGHT " << ip_r << ":" << port << "\n";
+        cli_l.close(); return;
+    }
+
+    SE3_inverter inv_l, inv_r;
+    if (inv_l.init(cli_l, slave, false)) {
+        cerr << "[ERR] LEFT  SE3 slave " << slave << " init fail\n";
+        cli_l.close(); cli_r.close(); return;
+    }
+    if (inv_r.init(cli_r, slave, false)) {
+        cerr << "[ERR] RIGHT SE3 slave " << slave << " init fail\n";
+        cli_l.close(); cli_r.close(); return;
+    }
+
+    struct Param {
+        uint16_t reg;
+        const char* panel;   // panel code (e.g. "01-06")
+        const char* pcode;   // Px alias  (e.g. "P.7")
+        const char* desc;    // chinese description
+        double      scale;   // raw / scale = displayed
+        const char* unit;    // "s", "Hz", "%"
+    };
+
+    static const Param params[] = {
+        { 0x0106, "01-06", "P.7 ", "Acc time 1     ", 100.0, "s"  },
+        { 0x0107, "01-07", "P.8 ", "Dec time 1     ", 100.0, "s"  },
+        { 0x0A00, "10-00", "P.10", "DC brake freq  ", 100.0, "Hz" },
+        { 0x0A01, "10-01", "P.11", "DC brake time  ", 100.0, "s"  },
+        { 0x0A02, "10-02", "P.12", "DC brake volt  ",  10.0, "%"  },
+    };
+
+    cout << "\n";
+    cout << "Panel   Pxx    Desc              | L raw   L val      | R raw   R val      | match\n";
+    cout << "------- ------ ----------------- | ------  ----------- | ------  ----------- | -----\n";
+
+    bool any_mismatch = false;
+    for (const Param& p : params) {
+        uint16_t vL = 0, vR = 0;
+        bool errL = inv_l.readParam(p.reg, vL);
+        bool errR = inv_r.readParam(p.reg, vR);
+
+        cout << p.panel << "   " << p.pcode << "   " << p.desc << " | ";
+
+        if (errL) cout << "ERR    " << "---         ";
+        else      cout << "0x" << hex << setw(4) << setfill('0') << vL << dec
+                       << "  " << setw(7) << setprecision(2) << fixed
+                       << (vL / p.scale) << " " << p.unit << "   ";
+
+        cout << "| ";
+
+        if (errR) cout << "ERR    " << "---         ";
+        else      cout << "0x" << hex << setw(4) << setfill('0') << vR << dec
+                       << "  " << setw(7) << setprecision(2) << fixed
+                       << (vR / p.scale) << " " << p.unit << "   ";
+
+        cout << "| ";
+        if (errL || errR) cout << "  ?  ";
+        else if (vL == vR) cout << "  OK ";
+        else { cout << "*MISMATCH (delta=" << (int)vL - (int)vR << ")*"; any_mismatch = true; }
+        cout << "\n";
+    }
+
+    cout << "\n";
+    if (any_mismatch) {
+        cout << "[!] MISMATCH detected — fix at panel:\n"
+             << "    P.7 / P.8 misalign -> 同步停車一邊晚 0.5~2s (rope drift)\n"
+             << "    P.10/11/12 misalign -> DC brake 一邊吃力一邊放掉\n"
+             << "    參考 .claude/summaries/SE3_INVERTER_MODBUS_SUMMARY.md\n";
+    } else {
+        cout << "[OK] L vs R 對齊，所有 5 個參數一致\n";
+    }
+
+    cli_l.close();
+    cli_r.close();
+}
+
 //=========== main: menu loop ===========
 static void print_menu() {
     cout << "\n========== Linux_test ==========\n"
          << "  1  IMU (WT901BC)   — serial port + live Roll/Pitch/Yaw\n"
          << "  2  DM2J step motor — IP + slave + move cm\n"
-         << "  3  ZDT SMC pusher  — IP + slave + target pulse\n"
+         << "  3  ZDT SMC pusher  — IP + slave + target (pulses 或 'Ncm')\n"
          << "  4  JC-100 pressure — IP + slave + live kPa read\n"
          << "  5  PQW 8CH relay   — IP + slave + channel on/off\n"
-         << "  6  ZDT group       — 1~9 with skip list, unified target pulse\n"
+         << "  6  ZDT group       — 1~9 with skip list, unified target (pulses 或 'Ncm')\n"
          << "  7  Full step seq   — 8 pushers staged 7/10cm + rail + vacuum + retry grip\n"
          << "  8  Step no-rail    — pushers + vacuum only (report, no verify)\n"
          << "  9  SD76 meter      — length meter live read + reset/pause/resume\n"
@@ -3158,6 +4863,16 @@ static void print_menu() {
          << " 17  Emergency cleanup — all relays OFF / pushers retract / rails home\n"
          << " 18  XKC water sensor — XKC-Y25-RS485 read / set ID / factory reset\n"
          << " 19  ZDT positions   — read all 9 ZDT pushers (deg + cm estimate)\n"
+         << " 20  ZDT release stall — clear stall flag on all 9 ZDT pushers\n"
+         << " 21  ZDT driver enable — enable/disable driver_EN on chosen slaves\n"
+         << " 22  Vacuum seal fix  — auto fine-tune ZDT extend per-slave until vacuum sealed (feet/body)\n"
+         << " 23  SE3 inverter    — rope winch fwd/rev/stop + freq + monitor (Modbus-RTU)\n"
+         << " 24  X518 tension    — Modbus TCP :502 direct CH1/CH2 + zero + config\n"
+         << " 25  SE3 dual sync   — left+right rope winch sync pay/retract (兩台吊機同步收/放繩)\n"
+         << " 26  DM2J slide+feet — 上滑台(5) 獨立 PR 移動，移動中觸發腳組(1,3) broadcast 同步 (INS 干擾測試)\n"
+         << " 27  DM2J clear PR   — 清掉壞掉的 PR1/PR2 → mode 0 (從測試的 bad 'safe PR' 復原 slave 卡死)\n"
+         << " 28  DM2J slide bench — 上滑台 (.22 slave 14) 0→X→0 來回 × N round,自選 RPM/ACC/DEC/行程/次數,印 drift\n"
+         << " 29  SE3 inspect       — 遠端讀 L+R 的 P.7/P.8/DC brake (10-00~02) 並比對\n"
          << "  q  Quit\n"
          << "================================\n"
          << "Select: ";
@@ -3189,6 +4904,16 @@ int main() {
         else if (line == "17") test_cleanup();
         else if (line == "18") test_xkc_y25();
         else if (line == "19") test_zdt_positions();
+        else if (line == "20") test_zdt_release_stall();
+        else if (line == "21") test_zdt_driver_enable();
+        else if (line == "22") test_vacuum_seal_fix();
+        else if (line == "23") test_se3_inverter();
+        else if (line == "24") test_x518();
+        else if (line == "25") test_se3_inverter_dual();
+        else if (line == "26") test_dm2j_slide_during_feet();
+        else if (line == "27") test_dm2j_clear_pr();
+        else if (line == "28") test_dm2j_slide_bench();
+        else if (line == "29") test_se3_inspect();
         else if (line.empty()) continue;
         else cout << "[!] unknown selection '" << line << "'\n";
     }

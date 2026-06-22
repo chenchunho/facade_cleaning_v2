@@ -7,21 +7,31 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 </head>
-<body>
+<body data-page="home">
+
+<nav id="sidebar">
+  <button class="nav-btn" data-page="home"   title="Home"><span class="nav-dot"></span><span class="nav-lbl">Home</span></button>
+  <button class="nav-btn" data-page="manual" title="Control"><span class="nav-dot"></span><span class="nav-lbl">Control</span></button>
+  <button class="nav-btn" data-page="camera" title="Camera"><span class="nav-dot"></span><span class="nav-lbl">Camera</span></button>
+  <button class="nav-btn" data-page="settings" title="Settings"><span class="nav-dot"></span><span class="nav-lbl">Settings</span></button>
+</nav>
+
 <header>
   <h1>washrobot control</h1>
   <div id="status">
     <span class="dot" id="dot-washrobot"></span>washrobot
     <span class="dot" id="dot-crane"></span>crane
     <span class="dot" id="dot-easy-crane"></span>easy
+    <span class="dot" id="dot-arm"></span>arm
   </div>
 </header>
 
 <div id="banner" class="banner banner-hidden"></div>
 
 <main>
-  <section class="panel panel-washrobot">
+  <section class="panel panel-washrobot" data-page="home">
     <h2>auto cycle (washrobot)</h2>
     <div class="row">
       <label>step cm: <input type="number" id="step-cm" value="30" min="5" max="60" step="1"></label>
@@ -33,21 +43,37 @@
       <button data-tgt="washrobot" data-cmd="detach">detach</button>
       <button data-tgt="washrobot" data-cmd="arm_sweep">arm_sweep</button>
       <button id="btn-step-down">step_down</button>
+      <button id="btn-step-down-sweep" class="primary">↓ 下移 + 連續清洗</button>
+      <button id="btn-step-down-sweep-af" class="primary">↓ 下移 + 清洗(腳組後)</button>
+      <button id="btn-step-down-sweep-ba" class="primary">↓ 下移 + 移動前後各刷</button>
+      <button id="btn-step-up">step_up</button>
+      <button id="btn-step-up-sweep" class="primary">↑ 上移 + 連續清洗</button>
+      <button id="btn-step-up-sweep-af" class="primary">↑ 上移 + 清洗(腳組後)</button>
+      <button id="btn-step-up-sweep-ba" class="primary">↑ 上移 + 移動前後各刷</button>
     </div>
     <div class="row">
       <label>run steps: <input type="number" id="run-steps" value="1" min="1"></label>
+      <label>direction:
+        <select id="run-direction">
+          <option value="down" selected>down ↓</option>
+          <option value="up">up ↑</option>
+        </select>
+      </label>
       <button id="btn-run">run</button>
+      <button id="btn-run-avoid" class="primary" title="每 step 前自動偵測障礙物、跳通知問你確認">🛡️ RUN (avoid 障礙)</button>
+      <button id="btn-descend-to-ground" class="primary">↓ 走到地面（含清洗）</button>
       <button data-tgt="washrobot" data-cmd="pause">pause</button>
       <button data-tgt="washrobot" data-cmd="resume">resume</button>
       <button class="danger" data-tgt="washrobot" data-cmd="emergency_stop">STOP (robot)</button>
     </div>
     <div class="row error-pause-row">
       <div class="error-pause-status" id="error-pause-status">
-        <span class="error-pause-label" id="error-pause-label">STATUS: unknown</span>
+        <span class="error-pause-label" id="error-pause-label">unknown</span>
         <span class="error-pause-context" id="error-pause-context"></span>
       </div>
       <button id="btn-continue" data-tgt="washrobot" data-cmd="continue" class="primary error-action" disabled>繼續 (重試)</button>
       <button id="btn-skip" data-tgt="washrobot" data-cmd="skip" class="error-action" disabled>略過此步</button>
+      <button id="btn-recover" data-tgt="washrobot" data-cmd="recover" class="error-action" disabled>恢復至 Attached（驗真空）</button>
     </div>
     <div class="row">
       <button data-tgt="washrobot" data-cmd="status">status</button>
@@ -55,13 +81,50 @@
       <button data-tgt="washrobot" data-cmd="shutdown">shutdown</button>
       <button data-tgt="washrobot" data-cmd="tilt_mode on">tilt ON</button>
       <button data-tgt="washrobot" data-cmd="tilt_mode off">tilt OFF</button>
+      <button data-tgt="washrobot" data-cmd="zdt_release_stall">解除 ZDT 堵轉</button>
+      <button data-tgt="washrobot" data-cmd="realign">手動 Realign</button>
     </div>
     <div class="row">
       <button id="btn-return-home" class="primary">↩ 召回回地面 (Phase 6)</button>
     </div>
   </section>
 
-  <section class="panel panel-washrobot">
+  <!-- [2026-06-05] scripted run — CSV of per-step cm, fixed down_sweep_af direction -->
+  <section class="panel panel-washrobot panel-script" data-page="home">
+    <h2>auto run</h2>
+    <div class="row">
+      <label class="script-csv-label">
+        CSV
+        <textarea id="script-csv" rows="2" spellcheck="false"
+                  placeholder="例如：30*5,20*3 或 30n,30,30 （n 後綴 = 不刷洗）"></textarea>
+      </label>
+    </div>
+    <div class="row script-preview-row">
+      <span id="script-preview-text" class="script-preview-dim">— 等待輸入 —</span>
+    </div>
+    <div class="row">
+      <button id="btn-run-script" class="primary">▶ Run</button>
+      <button id="btn-save-script">💾 Save as…</button>
+      <button id="btn-list-scripts">↻ 重新整理列表</button>
+    </div>
+    <div class="row script-saved-row">
+      <span class="label">已存:</span>
+      <div id="saved-scripts-list" class="saved-scripts-list">
+        <span class="script-preview-dim">尚未載入（按「重新整理列表」）</span>
+      </div>
+    </div>
+    <div class="row script-progress-row" id="script-progress-row" hidden>
+      <div class="script-progress-info">
+        <span class="script-progress-text" id="script-progress-text">—</span>
+        <span class="script-progress-cm" id="script-progress-cm"></span>
+      </div>
+      <div class="script-progress-bar">
+        <div class="script-progress-fill" id="script-progress-fill"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel panel-washrobot" data-page="manual">
     <h2>manual — vacuum</h2>
     <div class="row">
       <span class="label">pump (CH1):</span>
@@ -90,7 +153,54 @@
     </div>
   </section>
 
-  <section class="panel panel-washrobot">
+  <section class="panel panel-washrobot" data-page="manual">
+    <h2>manual — cleaning</h2>
+    <!-- [2026-06-09] Water inlet — 互動 panel with state indicator + open timer
+                       + auto-OFF countdown + watchdog warning subscription -->
+    <div class="row water-inlet-row">
+      <span class="label">進水球閥 (crane PQW CH4):</span>
+      <span class="water-inlet-indicator" id="water-inlet-indicator">
+        <span class="water-inlet-dot" id="water-inlet-dot"></span>
+        <span class="water-inlet-state" id="water-inlet-state">OFF</span>
+      </span>
+      <button id="btn-water-inlet-on" class="primary">ON</button>
+      <button id="btn-water-inlet-off">OFF</button>
+      <span class="water-inlet-timers" id="water-inlet-timers" hidden>
+        <span class="water-inlet-elapsed" id="water-inlet-elapsed">0s</span>
+        <span class="water-inlet-sep">·</span>
+        <span class="water-inlet-countdown" id="water-inlet-countdown">auto-OFF in 60s</span>
+      </span>
+    </div>
+    <div class="row water-inlet-watchdog-row" id="water-inlet-watchdog-toast" hidden>
+      <span class="water-inlet-watchdog-text" id="water-inlet-watchdog-text"></span>
+      <button id="btn-water-inlet-watchdog-dismiss">dismiss</button>
+    </div>
+    <ul class="hint">
+      <li>ON 後預設 <strong>60 秒</strong>自動 OFF；再按 ON 重設計時</li>
+      <li>連線失敗會在指示燈顯示紅色 — 後端有 retry 3 次，仍失敗時 5 分鐘 watchdog 會強制關</li>
+      <li>背景 sweep 流程開閥不會在這顯示（只追蹤 GUI 手動操作）</li>
+    </ul>
+    <div class="row">
+      <span class="label">水位 (XKC slave 13):</span>
+      <span class="vac-cell" id="water-level-cell">?</span>
+      <button id="btn-refresh-water-level">refresh</button>
+    </div>
+    <div class="row">
+      <span class="label">水箱泵浦 (CH6):</span>
+      <button data-tgt="washrobot" data-cmd="water_pump on">ON</button>
+      <button data-tgt="washrobot" data-cmd="water_pump off">OFF</button>
+    </div>
+    <div class="row">
+      <span class="label">刷洗滾筒 (CH5):</span>
+      <button data-tgt="washrobot" data-cmd="brush on">ON</button>
+      <button data-tgt="washrobot" data-cmd="brush off">OFF</button>
+    </div>
+    <ul class="hint">
+      <li>auto sweep 失敗後手動關 relay；Error 狀態拒絕</li>
+    </ul>
+  </section>
+
+  <section class="panel panel-washrobot" data-page="home">
     <h2>manual — vacuum readings <button id="btn-refresh-vacuum">refresh</button></h2>
     <div class="row">
       <span class="label">feet:</span>
@@ -111,12 +221,34 @@
       <span class="vac-cell" id="vac-9">p9 = ?</span>
     </div>
     <ul class="hint">
-      <li>單位 kPa；attached 門檻 ≤ -50（綠）/ 弱 -50~-10（黃）/ 脫離 ≥ -10（紅）</li>
-      <li>refresh 送 status 指令；step_down / status 等任何含 pN= 的回應也會自動更新</li>
+      <li>單位 kPa：≤ -50 綠（吸住）/ -50~-10 黃（弱）/ ≥ -10 紅（脫離）</li>
     </ul>
   </section>
 
-  <section class="panel panel-washrobot">
+  <section class="panel panel-washrobot" data-page="home">
+    <h2>📐 IMU 姿態 (WT901BC)</h2>
+    <div class="row">
+      <span class="label">roll:</span>
+      <span class="imu-cell" id="imu-roll">? °</span>
+      <span class="imu-bar-wrap">
+        <span class="imu-bar-center"></span>
+        <span class="imu-bar-fill" id="imu-roll-bar"></span>
+      </span>
+    </div>
+    <div class="row">
+      <span class="label">pitch:</span>
+      <span class="imu-cell" id="imu-pitch">? °</span>
+      <span class="imu-bar-wrap">
+        <span class="imu-bar-center"></span>
+        <span class="imu-bar-fill" id="imu-pitch-bar"></span>
+      </span>
+    </div>
+    <ul class="hint">
+      <li>顯示相對 init baseline 的偏移：±2° 綠 / ±5° 黃 / 超過橘紅</li>
+    </ul>
+  </section>
+
+  <section class="panel panel-washrobot" data-page="manual">
     <h2>manual — pusher</h2>
     <div class="row">
       <span class="label">feet:</span>
@@ -134,6 +266,22 @@
       <button data-tgt="washrobot" data-cmd="pusher center retract">RETRACT</button>
     </div>
     <div class="row">
+      <span class="label">single slave:</span>
+      <select id="zdt-slave-select">
+        <option value="1">1 (右腳1 / RF1)</option>
+        <option value="2">2 (右腳2 / RF2)</option>
+        <option value="3">3 (左腳1 / LF1)</option>
+        <option value="4">4 (左腳2 / LF2)</option>
+        <option value="5">5 (右身上 / RB1)</option>
+        <option value="6">6 (左身上 / LB1)</option>
+        <option value="7">7 (右身下 / RB2)</option>
+        <option value="8">8 (左身下 / LB2)</option>
+        <option value="9">9 (中心 / C)</option>
+      </select>
+      <button id="btn-zdt-extend">EXTEND</button>
+      <button id="btn-zdt-retract">RETRACT</button>
+    </div>
+    <div class="row">
       <span class="label">zero（當前位置 = 0）:</span>
       <button data-tgt="washrobot" data-cmd="zdt_zero feet">feet</button>
       <button data-tgt="washrobot" data-cmd="zdt_zero body">body</button>
@@ -141,22 +289,28 @@
       <button data-tgt="washrobot" data-cmd="zdt_zero all">all</button>
     </div>
     <ul class="hint">
-      <li>set_zero 把當前位置設為新原點（ZDT manual 3.1.3，Reg 0x000A）</li>
-      <li>正確時機：pushers 完全縮回到底時按，之後 abs 0 = 真實縮底</li>
-      <li>半伸/全伸時按 → 後續 retract → 0 不會回真實底，可能 over-extend 或漏縮</li>
+      <li>set_zero 必須在 pusher 完全縮回時按，否則後續 abs 0 不會回真實底</li>
     </ul>
   </section>
 
-  <section class="panel panel-washrobot">
+  <section class="panel panel-washrobot" data-page="manual">
     <h2>manual — wheels</h2>
     <div class="row">
       <span class="label">slave 2, 4（平行同動）:</span>
       <button data-tgt="washrobot" data-cmd="wheels retract">收輪 (abs 0)</button>
       <button data-tgt="washrobot" data-cmd="wheels lower">放輪 (abs -7)</button>
     </div>
+    <div class="row">
+      <span class="label">輪子是否已安裝:</span>
+      <button data-tgt="washrobot" data-cmd="wheels_attached on">attached ON</button>
+      <button data-tgt="washrobot" data-cmd="wheels_attached off">attached OFF</button>
+    </div>
+    <ul class="hint">
+      <li>OFF = 所有輪子動作 no-op（bench 沒裝輪用）</li>
+    </ul>
   </section>
 
-  <section class="panel panel-washrobot">
+  <section class="panel panel-washrobot" data-page="manual">
     <h2>manual — DM2J group sync (cm, absolute)</h2>
     <div class="row">
       <label>group:
@@ -172,11 +326,146 @@
     </div>
   </section>
 
-  <section class="panel panel-crane">
+  <section class="panel panel-arm" data-page="manual">
+    <h2>🦾 清潔手臂 (cleaning arm)</h2>
+    <ul class="hint">
+      <li>本面板直連 motor_api (127.0.0.1:9527)，不需 washrobot</li>
+    </ul>
+    <div class="row">
+      <button data-tgt="washrobot" data-cmd="arm_init">INIT（啟動 + 工具頭校正 + 標記 arm_calibrated）</button>
+      <button data-tgt="arm" data-cmd="PARK">PARK（歸位 + disable）</button>
+      <button data-tgt="arm" data-cmd="STATUS">STATUS</button>
+    </div>
+    <div class="row">
+      <span class="label">DEPLOY：牆距</span>
+      <input type="number" id="arm-wall-mm" value="300" min="1" step="10">
+      <span class="label">mm　／　工具頭</span>
+      <select id="arm-slot">
+        <option value="LEFT">LEFT</option>
+        <option value="CENTER" selected>CENTER</option>
+        <option value="RIGHT">RIGHT</option>
+      </select>
+      <button id="btn-arm-deploy">DEPLOY</button>
+    </div>
+    <ul class="hint">
+      <li>⚠ INIT 時請遠離（工具頭校正力道大）</li>
+    </ul>
+  </section>
+
+  <section class="panel panel-washrobot" data-page="home">
+    <h2>🦾🚿 arm 整合操作 (washrobot 編排)</h2>
+    <ul class="hint">
+      <li>由 washrobot 編排：水/刷/滑台 + arm 連動，需 washrobot + arm 都連線</li>
+    </ul>
+    <div class="row">
+      <span class="label">arm 驅動狀態:</span>
+      <span class="link-badge" id="arm-link-badge">? unknown</span>
+    </div>
+    <div class="row">
+      <span class="label">washrobot 是否驅動 arm:</span>
+      <button data-tgt="washrobot" data-cmd="arm_attached on">attached ON</button>
+      <button data-tgt="washrobot" data-cmd="arm_attached off">attached OFF</button>
+      <span class="label" id="arm-attached-status">(currently: ?)</span>
+    </div>
+    <ul class="hint">
+      <li>OFF = arm_cmd_ no-op（bench 沒裝 arm 或 motor_api 沒跑）</li>
+    </ul>
+    <div class="row">
+      <button data-tgt="washrobot" data-cmd="arm_init" class="arm-action">INIT（啟動 + 工具頭校正 + 標記 arm_calibrated）</button>
+    </div>
+    <ul class="hint">
+      <li>⚠ INIT 時請遠離，會設 arm_calibrated_ flag 後 sweep 才跳過 ENABLE</li>
+    </ul>
+    <hr>
+    <div class="row">
+      <span class="label">🧽 清潔 sweep：牆距</span>
+      <input type="number" id="arm-clean-wall-mm" value="300" min="1" step="10">
+      <span class="label">mm　／　回合數</span>
+      <input type="number" id="arm-clean-rounds" value="1" min="1" max="20" step="1">
+      <button id="btn-arm-clean-sweep" class="danger arm-action">CLEAN SWEEP（補水→INIT→滾筒+刮刀）</button>
+    </div>
+    <ul class="hint">
+      <li>流程：A 補水 → B arm INIT → C × N rounds（LEFT 滾筒+水 → RIGHT 刮刀乾）→ D cleanup</li>
+      <li>任何 abort / fail 都會跑 cleanup (PARK + 刷/泵/球閥 OFF)</li>
+    </ul>
+  </section>
+
+  <section class="panel panel-washrobot" data-page="home">
+    <h2>⚖️ 重心校正 (balance calibration)</h2>
+    <ul class="hint">
+      <li>釋放所有 cup → 純鋼索吊 → IMU roll 自動歸零。⚠ 第一次校正建議離地 ≤50cm</li>
+      <li>校正完只記錄 ΔL，不自動 attach</li>
+    </ul>
+    <div class="row">
+      <span class="label">狀態:</span>
+      <span class="link-badge" id="balcal-state-badge">⚪ idle</span>
+      <span class="label" id="balcal-phase-text">phase: —</span>
+    </div>
+    <div class="row">
+      <span class="label">即時讀數:</span>
+      <span class="label">IMU roll:</span>
+      <span class="hl" id="balcal-roll">— °</span>
+      <span class="label">／ L:</span>
+      <span class="hl" id="balcal-tension-l">— kg</span>
+      <span class="label">／ R:</span>
+      <span class="hl" id="balcal-tension-r">— kg</span>
+      <span class="label">／ iter:</span>
+      <span class="hl" id="balcal-iter">—</span>
+    </div>
+    <div class="row" id="balcal-awaiting-banner" style="display:none;">
+      <span class="label" style="color:#ff5e5e;font-weight:bold;">
+        ⚠ 校正已收斂 — 請按 <span style="color:#5eff7a">RECORD</span> 保存或
+        <span style="color:#ff5e5e">ABORT</span> 取消，才能執行其他動作
+      </span>
+    </div>
+    <div class="row">
+      <button id="btn-balcal-start" class="danger">▶ START CALIBRATION (跑 Phase 1-4)</button>
+      <button id="btn-balcal-record">💾 RECORD ΔL (Phase 5)</button>
+      <button id="btn-balcal-abort" class="danger">⛔ ABORT</button>
+    </div>
+    <div class="row">
+      <span class="label">上次校正結果:</span>
+      <span class="hl" id="balcal-last-offset">— cm</span>
+      <span class="label" id="balcal-last-time"></span>
+    </div>
+    <ul class="hint">
+      <li>收斂門檻 |roll| &lt; 0.5°；watchdog: 張力&lt;30kg 或 roll&gt;15° 立即 abort</li>
+      <li>校正完後機體純鋼索吊，需手動 ATTACH 重新吸牆</li>
+    </ul>
+  </section>
+
+  <section class="panel panel-washrobot" data-page="home">
+    <h2>🎥 窗框避障 (camera obstacle detect)</h2>
+    <ul class="hint">
+      <li>底部相機偵測窗框，動態調 step_cm；OFF=不影響現有流程</li>
+    </ul>
+    <div class="row">
+      <span class="label">avoidance 驅動狀態:</span>
+      <span class="link-badge" id="obstacle-link-badge">? unknown</span>
+    </div>
+    <div class="row">
+      <span class="label">啟用窗框避障:</span>
+      <button data-tgt="washrobot" data-cmd="obstacle_detect on">avoidance ON</button>
+      <button data-tgt="washrobot" data-cmd="obstacle_detect off">avoidance OFF</button>
+      <span class="label" id="obstacle-detect-status">(currently: ?)</span>
+    </div>
+    <ul class="hint">
+      <li>⚠ FrameAnalyzer 未整合，目前 ON 只是 flag — 無實際偵測</li>
+    </ul>
+  </section>
+
+  <section class="panel panel-crane" data-page="home">
     <h2>crane</h2>
+    <div class="crane-busy-row" id="crane-busy-row">
+      <span class="crane-busy-label" id="crane-busy-label">⏳ 初始化中…</span>
+    </div>
     <div class="row">
       <span class="label">crane 驅動狀態:</span>
       <span class="link-badge" id="crane-link-badge">? unknown</span>
+    </div>
+    <div class="row" id="crane-device-state-row" style="display:none">
+      <span class="label">⚠ 裝置狀態:</span>
+      <span id="crane-device-state-msg" class="hl"></span>
     </div>
     <div class="row">
       <span class="label">washrobot 是否驅動 crane:</span>
@@ -185,49 +474,160 @@
       <span class="label" id="crane-attached-status">(currently: ?)</span>
     </div>
     <ul class="hint">
-      <li>ON：step_down 等流程會送 pay_out / retract 到 crane；watchdog timeout 會 abort 動作</li>
-      <li>OFF：crane_cmd_ 變 no-op、watchdog 暫停（bench 測試 / crane 離線時用）</li>
+      <li>OFF = crane_cmd_ no-op、watchdog 暫停（bench / crane 離線時用）</li>
+    </ul>
+    <div class="row">
+      <span class="label">目前長度:</span>
+      <span class="label">左</span> <span id="crane-length-left"   class="hl">?</span> <span class="label">cm</span>
+      <span class="label">／ 右</span> <span id="crane-length-right"  class="hl">?</span> <span class="label">cm</span>
+      <span class="label">／ 中</span> <span id="crane-length-middle" class="hl">?</span> <span class="label">cm</span>
+      <span class="label">｜ home_ground:</span> <span id="crane-home-ground" class="hl">?</span> <span class="label">cm</span>
+      <span class="label">／ 剩</span> <span id="crane-remaining" class="hl">?</span> <span class="label">cm</span>
+    </div>
+    <ul class="hint">
+      <li>剩 = home_ground − |左繩長|；放繩數值絕對值變大</li>
     </ul>
     <div class="row">
       <label>cm: <input type="number" id="crane-cm" value="30" min="1"></label>
-      <button id="btn-payout">pay_out</button>
-      <button id="btn-retract">retract</button>
-      <button data-tgt="crane" data-cmd="status">status</button>
-      <button data-tgt="crane" data-cmd="home_status">home_status</button>
-      <button class="danger" data-tgt="crane" data-cmd="stop">STOP (crane)</button>
+      <button id="btn-payout"  class="crane-action" data-required="motion_lr">pay_out</button>
+      <button id="btn-retract" class="crane-action" data-required="motion_lr">retract</button>
+      <button class="crane-readonly" data-tgt="crane" data-cmd="status">status</button>
+      <button class="crane-readonly" data-tgt="crane" data-cmd="home_status">home_status</button>
+      <button class="danger crane-readonly" data-tgt="crane" data-cmd="stop">STOP (crane)</button>
     </div>
     <div class="row">
-      <span class="label">zero:</span>
-      <button data-tgt="crane" data-cmd="zero_meters ground">鋼索歸零（地面起點）</button>
-      <button data-tgt="crane" data-cmd="zero_meters top">鋼索歸零（洗窗起點）</button>
+      <span class="label">全部零:</span>
+      <button class="crane-action" data-tgt="crane" data-cmd="zero_meters ground" data-required="meters_lr">三條歸零（地面起點）</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="zero_meters top"    data-required="meters_lr">三條歸零（洗窗起點）</button>
     </div>
+    <div class="row">
+      <span class="label">個別零:</span>
+      <button class="crane-action" data-tgt="crane" data-cmd="zero_meter left"   data-required="meter_left">獨零左</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="zero_meter right"  data-required="meter_right">獨零右</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="zero_meter middle" data-required="meter_middle">獨零中</button>
+    </div>
+    <div class="row">
+      <span class="label">同步:</span>
+      <button class="crane-action" data-tgt="crane" data-cmd="align_lengths" data-required="se3_left,se3_right,meter_left,meter_right,dsz_left,dsz_right">對齊左右繩長（以較長邊為準）</button>
+    </div>
+    <ul class="hint">
+      <li>正常用「三條歸零（洗窗起點）」；個別零不會更新 home_ground</li>
+      <li>對齊：較短邊 pay_out 到較長邊 ±2cm</li>
+    </ul>
+
+    <hr>
+    <h3>🪢 鋼索張力 / 拉放繩控制</h3>
+    <div class="row">
+      <span class="label">張力左:</span>
+      <span id="crane-tension-left"  class="hl">?</span>
+      <span class="label">kg　/　右:</span>
+      <span id="crane-tension-right" class="hl">?</span>
+      <span class="label">kg　/　總和:</span>
+      <span id="crane-tension-total" class="hl">?</span>
+      <span class="label">kg</span>
+      <button class="crane-action" data-tgt="crane" data-cmd="zero_tension all" data-required="dsz_left,dsz_right">校零（左右）</button>
+    </div>
+    <div class="row">
+      <span class="label">張力 scale (raw → kg):</span>
+      <span class="label">左</span>
+      <input type="number" id="crane-dsz-left-scale-input"  value="-0.01" step="0.0001">
+      <span class="label">（目前:</span> <span id="crane-dsz-left-scale-current" class="hl">?</span> <span class="label">）　</span>
+      <span class="label">右</span>
+      <input type="number" id="crane-dsz-right-scale-input" value="-0.01" step="0.0001">
+      <span class="label">（目前:</span> <span id="crane-dsz-right-scale-current" class="hl">?</span> <span class="label">）</span>
+    </div>
+    <ul class="hint">
+      <li>kg = raw × scale，預設 -0.01（拉→raw 下降的負號修正）</li>
+      <li>校準：掛已知 W kg → scale = W ÷ ΔR（保留符號）</li>
+    </ul>
+    <div class="row">
+      <span class="label">收繩總和停止門檻:</span>
+      <input type="number" id="crane-up-stop-total-input" value="50" step="1" min="0">
+      <span class="label">kg　（目前:</span>
+      <span id="crane-up-stop-total-current" class="hl">?</span>
+      <span class="label">kg）</span>
+    </div>
+    <div class="row">
+      <span class="label">收繩軟停張力:</span>
+      <input type="number" id="crane-retract-tension-stop-input" value="25" step="1" min="0">
+      <span class="label">kg　（目前:</span>
+      <span id="crane-retract-tension-stop-current" class="hl">?</span>
+      <span class="label">kg）</span>
+    </div>
+    <div class="row">
+      <span class="label">自動運動過載警報:</span>
+      <span class="label">單側上限</span>
+      <input type="number" id="crane-tension-max-input" value="100" step="1" min="0">
+      <span class="label">（目前:</span> <span id="crane-tension-max-current" class="hl">?</span> <span class="label">kg）　</span>
+      <span class="label">左右差上限</span>
+      <input type="number" id="crane-tension-diff-input" value="50" step="1" min="0">
+      <span class="label">（目前:</span> <span id="crane-tension-diff-current" class="hl">?</span> <span class="label">kg）</span>
+    </div>
+    <ul class="hint">
+      <li><b>軟停張力</b>：retract 到此值＝slack 收完正常停（非錯誤）；attach 末段放繩到此值即停</li>
+      <li><b>過載警報</b>：單側或左右差超限 → 立即中止 + tension_alarm（請設比軟停高）</li>
+      <li>「收繩總和停止門檻」只管手動 hold；以上管自動運動。輸入後 150ms 自動套用</li>
+    </ul>
+    <div class="row">
+      <span class="label">頻率設定:</span>
+      <span class="label">手動 hold</span>
+      <input type="number" id="crane-hold-hz-input" value="10" step="0.5" min="0.5" max="50">
+      <span class="label">Hz （目前:</span> <span id="crane-hold-hz-current" class="hl">?</span> <span class="label">）　</span>
+      <span class="label">自動 motion</span>
+      <input type="number" id="crane-motion-hz-input" value="10" step="0.5" min="0.5" max="50">
+      <span class="label">Hz （目前:</span> <span id="crane-motion-hz-current" class="hl">?</span> <span class="label">）　</span>
+      <span class="label">中間絞盤</span>
+      <input type="number" id="crane-middle-hz-input" value="10" step="0.5" min="0.5" max="50">
+      <span class="label">Hz （目前:</span> <span id="crane-middle-hz-current" class="hl">?</span> <span class="label">）</span>
+    </div>
+    <ul class="hint">
+      <li>hold = ↑/↓ 按住按鈕；motion = pay_out/retract cm；中間絞盤 = CLV900</li>
+      <li>輸入後 200ms 自動送，下個 motor-start 才生效（運轉中不會即時改）</li>
+    </ul>
+    <div class="row">
+      <span class="label">同時雙繩:</span>
+      <button id="btn-crane-up"   class="btn-hold primary crane-hold-btn" data-required="se3_left,se3_right">↑ 拉繩（按住）</button>
+      <button id="btn-crane-down" class="btn-hold primary crane-hold-btn" data-required="se3_left,se3_right">↓ 釋放繩（按住）</button>
+    </div>
+    <div class="row">
+      <span class="label">分別控制:</span>
+      <button id="btn-crane-up-left"    class="btn-hold crane-hold-btn" data-required="se3_left">↑左</button>
+      <button id="btn-crane-up-right"   class="btn-hold crane-hold-btn" data-required="se3_right">↑右</button>
+      <button id="btn-crane-down-left"  class="btn-hold crane-hold-btn" data-required="se3_left">↓左</button>
+      <button id="btn-crane-down-right" class="btn-hold crane-hold-btn" data-required="se3_right">↓右</button>
+    </div>
+    <ul class="hint">
+      <li>按住拉/放，放開立即停；網路掉線 2s 內自動停（watchdog）</li>
+      <li>收繩總和過門檻 / 單側過載 / 左右差過大 → 自動全停 + EVT</li>
+    </ul>
+
+    <hr>
+    <h3>raw 個別繼電器（debug）</h3>
     <div class="row">
       <span class="label">left:</span>
-      <button data-tgt="crane" data-cmd="pay_out_left on">pay_out ON</button>
-      <button data-tgt="crane" data-cmd="pay_out_left off">OFF</button>
-      <button data-tgt="crane" data-cmd="retract_left on">retract ON</button>
-      <button data-tgt="crane" data-cmd="retract_left off">OFF</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="pay_out_left on"  data-required="se3_left">pay_out ON</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="pay_out_left off" data-required="se3_left">OFF</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="retract_left on"  data-required="se3_left">retract ON</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="retract_left off" data-required="se3_left">OFF</button>
     </div>
     <div class="row">
       <span class="label">right:</span>
-      <button data-tgt="crane" data-cmd="pay_out_right on">pay_out ON</button>
-      <button data-tgt="crane" data-cmd="pay_out_right off">OFF</button>
-      <button data-tgt="crane" data-cmd="retract_right on">retract ON</button>
-      <button data-tgt="crane" data-cmd="retract_right off">OFF</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="pay_out_right on"  data-required="se3_right">pay_out ON</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="pay_out_right off" data-required="se3_right">OFF</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="retract_right on"  data-required="se3_right">retract ON</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="retract_right off" data-required="se3_right">OFF</button>
     </div>
   </section>
 
-  <section class="panel panel-emergency">
+  <section class="panel panel-emergency" data-page="home">
     <h2>🆘 緊急收繩（救援模式）</h2>
     <ul class="hint">
-      <li>按住按鈕 = 左右繩同時收</li>
-      <li>放開立即停</li>
-      <li>依賴 crane 連線，washrobot 失聯也能用</li>
+      <li>按住=左右同收，放開即停。依賴 crane，washrobot 失聯也能用</li>
     </ul>
-    <button id="btn-emergency" class="btn-emergency">🆘 按住收繩</button>
+    <button id="btn-emergency" class="btn-emergency" data-required="se3_left,se3_right">🆘 按住收繩</button>
   </section>
 
-  <section class="panel panel-easy_crane">
+  <section class="panel panel-easy_crane" data-page="manual">
     <h2>easy crane（獨立簡易吊車）</h2>
     <div class="row">
       <span class="label">重量:</span>
@@ -252,15 +652,12 @@
       <button id="btn-easy-auto" class="btn-auto">🤖 AUTO 拉到上限（點擊）</button>
     </div>
     <ul class="hint">
-      <li>↑ / ↓ 按住拉/釋放，放開立即停</li>
-      <li>AUTO：一鍵啟動拉繩，到「收繩停止門檻」自動停；也可再按一次手動停</li>
-      <li>網路掉線 2 秒內自動停（server watchdog）</li>
-      <li>收繩時重量低於「收繩停止門檻」自動停（AUTO 即靠這個）</li>
-      <li>讀不到重量（DY500 失聯）時自動停所有動作 + 拒絕新的 UP/DOWN 指令</li>
+      <li>↑/↓ 按住拉/放，AUTO 一鍵到門檻自動停</li>
+      <li>DY500 失聯 / 網路 2s 掉線 → 自動停所有動作</li>
     </ul>
   </section>
 
-  <section class="panel">
+  <section class="panel panel-raw" data-page="home">
     <h2>raw command</h2>
     <div class="row">
       <select id="raw-tgt">
@@ -272,11 +669,170 @@
     </div>
   </section>
 
-  <section class="panel panel-log">
+  <section class="panel panel-log" data-page="home">
     <h2>log <button id="btn-clear">clear</button></h2>
     <pre id="log"></pre>
   </section>
+
+  <section class="panel panel-camera" data-page="camera">
+    <h2>📹 攝影機</h2>
+    <div class="cam-grid">
+      <div class="cam-cell" data-cam-id="cam1">
+        <div class="cam-cell-head">CAM 1 — 192.168.1.110</div>
+        <div class="cam-stage">
+          <img id="cam1-stream" class="cam-video" src="/mjpeg/cam1" alt="camera 1 stream">
+          <div class="cam-overlay-offline" id="cam1-offline">
+            <span>相機離線</span>
+            <small>3 秒後自動重試…</small>
+          </div>
+        </div>
+        <div class="cam-controls">
+          <button id="cam1-snap"    class="cam-btn">📸 截圖</button>
+          <button id="cam1-reload"  class="cam-btn" title="重新載入串流">↻ 重連</button>
+          <span id="cam1-status" class="cam-status">streaming</span>
+        </div>
+      </div>
+      <div class="cam-cell" data-cam-id="cam2">
+        <div class="cam-cell-head">CAM 2 — 192.168.1.111</div>
+        <div class="cam-stage">
+          <img id="cam2-stream" class="cam-video" src="/mjpeg/cam2" alt="camera 2 stream">
+          <div class="cam-overlay-offline" id="cam2-offline">
+            <span>相機離線</span>
+            <small>3 秒後自動重試…</small>
+          </div>
+        </div>
+        <div class="cam-controls">
+          <button id="cam2-snap"    class="cam-btn">📸 截圖</button>
+          <button id="cam2-reload"  class="cam-btn" title="重新載入串流">↻ 重連</button>
+          <span id="cam2-status" class="cam-status">streaming</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel panel-settings" data-page="settings">
+    <h2>⚙️ Wall-tune Settings</h2>
+    <ul class="hint">
+      <li>需 washrobot Idle 才能編輯；Apply=立即生效、Save=寫 settings.json 重啟保留</li>
+    </ul>
+    <div class="row">
+      <button id="btn-settings-load">↻ Load (從 washrobot 讀回)</button>
+      <button id="btn-settings-apply-all" class="danger">▶ Apply All (依序 SET)</button>
+      <button id="btn-settings-save"  class="danger">💾 Save (寫入 settings.json)</button>
+      <span id="settings-status" class="label">—</span>
+    </div>
+
+    <h3 style="margin-top:1em">A. 牆距 + cup 伸出長度 (L1)</h3>
+    <div class="settings-grid">
+      <label>arm_clean_wall_mm
+        <input type="number" data-setting="arm_clean_wall_mm" min="100" max="1000" step="10">
+        <span class="default" data-default-for="arm_clean_wall_mm">(default: ?)</span>
+      </label>
+      <label>pusher_extend_feet_pulse
+        <input type="number" data-setting="pusher_extend_feet_pulse" min="10000" max="50000" step="100">
+        <span class="default" data-default-for="pusher_extend_feet_pulse">(default: ?)</span>
+      </label>
+      <label>pusher_extend_feet_pulse_lower
+        <input type="number" data-setting="pusher_extend_feet_pulse_lower" min="10000" max="50000" step="100">
+        <span class="default" data-default-for="pusher_extend_feet_pulse_lower">(default: ?)</span>
+      </label>
+      <label>pusher_extend_body_pulse
+        <input type="number" data-setting="pusher_extend_body_pulse" min="10000" max="50000" step="100">
+        <span class="default" data-default-for="pusher_extend_body_pulse">(default: ?)</span>
+      </label>
+      <label>pusher_extend_body_pulse_short
+        <input type="number" data-setting="pusher_extend_body_pulse_short" min="10000" max="50000" step="100">
+        <span class="default" data-default-for="pusher_extend_body_pulse_short">(default: ?)</span>
+      </label>
+    </div>
+
+    <h3>B. 真空 / seal 判定 (L1+L2)</h3>
+    <div class="settings-grid">
+      <label>vacuum_seal_deep_kpa
+        <input type="number" data-setting="vacuum_seal_deep_kpa" min="-100" max="0" step="1">
+        <span class="default" data-default-for="vacuum_seal_deep_kpa">(default: ?)</span>
+      </label>
+      <label>vacuum_plateau_ms
+        <input type="number" data-setting="vacuum_plateau_ms" min="200" max="10000" step="100">
+        <span class="default" data-default-for="vacuum_plateau_ms">(default: ?)</span>
+      </label>
+      <label>vacuum_backup_cm
+        <input type="number" data-setting="vacuum_backup_cm" min="1" max="50" step="0.5">
+        <span class="default" data-default-for="vacuum_backup_cm">(default: ?)</span>
+      </label>
+      <label>disable_retry_max_iters
+        <input type="number" data-setting="disable_retry_max_iters" min="1" max="20" step="1">
+        <span class="default" data-default-for="disable_retry_max_iters">(default: ?)</span>
+      </label>
+    </div>
+
+    <h3>C. Realign 觸發門檻 (L1)</h3>
+    <div class="settings-grid">
+      <label>realign_threshold_cm
+        <input type="number" data-setting="realign_threshold_cm" min="0.5" max="20" step="0.1">
+        <span class="default" data-default-for="realign_threshold_cm">(default: ?)</span>
+      </label>
+      <label>realign_threshold_mean_cm
+        <input type="number" data-setting="realign_threshold_mean_cm" min="0.5" max="20" step="0.1">
+        <span class="default" data-default-for="realign_threshold_mean_cm">(default: ?)</span>
+      </label>
+    </div>
+
+    <h3>D. Crane 張力 / step 安全 (L2)</h3>
+    <div class="settings-grid">
+      <label>rope_weight_limit_attached (kg)
+        <input type="number" data-setting="rope_weight_limit_attached" min="5" max="200" step="1">
+        <span class="default" data-default-for="rope_weight_limit_attached">(default: ?)</span>
+      </label>
+      <label>rope_weight_limit_hanging (kg)
+        <input type="number" data-setting="rope_weight_limit_hanging" min="5" max="200" step="1">
+        <span class="default" data-default-for="rope_weight_limit_hanging">(default: ?)</span>
+      </label>
+      <label>step_cm_default
+        <input type="number" data-setting="step_cm_default" min="5" max="60" step="1">
+        <span class="default" data-default-for="step_cm_default">(default: ?)</span>
+      </label>
+      <label>step_cm_max
+        <input type="number" data-setting="step_cm_max" min="5" max="100" step="1">
+        <span class="default" data-default-for="step_cm_max">(default: ?)</span>
+      </label>
+      <label>step_margin_cm
+        <input type="number" data-setting="step_margin_cm" min="0" max="50" step="1">
+        <span class="default" data-default-for="step_margin_cm">(default: ?)</span>
+      </label>
+      <label>retract_slow_peel_cm
+        <input type="number" data-setting="retract_slow_peel_cm" min="0.5" max="10" step="0.1">
+        <span class="default" data-default-for="retract_slow_peel_cm">(default: ?)</span>
+      </label>
+    </div>
+
+    <h3>E. IMU / Arm 容忍 (L2)</h3>
+    <div class="settings-grid">
+      <label>imu_ask_deg
+        <input type="number" data-setting="imu_ask_deg" min="1" max="45" step="0.5">
+        <span class="default" data-default-for="imu_ask_deg">(default: ?)</span>
+      </label>
+      <label>arm_deploy_pos_tol_rad
+        <input type="number" data-setting="arm_deploy_pos_tol_rad" min="0.01" max="1.0" step="0.01">
+        <span class="default" data-default-for="arm_deploy_pos_tol_rad">(default: ?)</span>
+      </label>
+    </div>
+  </section>
 </main>
+
+<!-- [2026-06-04] run_avoid modal — pops on EVT obstacle_ask per step, user confirms or cancels -->
+<div id="modal-obstacle" class="modal modal-hidden">
+  <div class="modal-content">
+    <h3>🛡️ 偵測結果（第 <span id="modal-obstacle-iter">?</span> 次）</h3>
+    <p>建議動作：<strong id="modal-obstacle-action" class="hl">?</strong></p>
+    <p>建議步長：<strong id="modal-obstacle-step" class="hl">?</strong> cm</p>
+    <p>原因：<span id="modal-obstacle-reason">?</span></p>
+    <div class="modal-btns">
+      <button id="btn-obstacle-confirm" class="primary">確認往下走</button>
+      <button id="btn-obstacle-cancel" class="danger">取消停止</button>
+    </div>
+  </div>
+</div>
 
 <div id="modal-balance" class="modal modal-hidden">
   <div class="modal-content">

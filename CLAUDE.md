@@ -99,7 +99,12 @@ x64/                 # 編譯輸出目錄
   │
   ├─▶ (Ethernet) Raspberry Pi 5 (eth0) ─── 系統主控 ─── 192.168.1.100
   │     ├─▶ (USB→TTL) 姿態儀 WT901BC
-  │     └─▶ (USB→CAN) 機械手臂控制器 [未來擴充，需終端電阻 120Ω]
+  │     └─▶ (USB→CAN) damiao USB-CAN dongle ─── /dev/ttyACM0 @ 921600 baud
+  │           ├─ M1 damiao DM10010L  (大臂馬達, CAN slave 0x01 / master 0x11)
+  │           └─ M2 damiao DM4340_48V (工具頭, CAN slave 0x02 / master 0x22)
+  │           # 由 cleaning_arm/motor_api 服務驅動 (TCP :9527)，washrobot 透過
+  │           # arm_cmd_("INIT/DEPLOY/PARK/STATUS") 經 127.0.0.1:9527 下指令。
+  │           # 注意 CAN bus 末端需要 120Ω 終端電阻
   │
   ├─▶ (PoE) 防水型 2MP 攝影機 × 4
   │     ├─ 左上
@@ -108,12 +113,12 @@ x64/                 # 編譯輸出目錄
   │     └─ 右下
   │
   ├─▶ (Ethernet) USR-TCP232-304 #1 ─── RS485_1 ─── 192.168.1.20
-  │     └─▶ DM2J_RS570 × 5 (Slave 1~5)
+  │     └─▶ DM2J_RS570 × 4 (Slave 1~4)
   │           ├─ Slave 1: 左腳
   │           ├─ Slave 2: 左輪
   │           ├─ Slave 3: 右腳
-  │           ├─ Slave 4: 右輪
-  │           └─ Slave 5: 上滑台（乘載機械手臂）
+  │           └─ Slave 4: 右輪
+  │           # 2026-05-26: 上滑台 (slave 5) 搬到 .22 slave 14，原因見 RS485_3
   │
   ├─▶ (Ethernet) USR-TCP232-304 #2 ─── RS485_2 ─── 192.168.1.21
   │     └─▶ ZDT_motor_control × 9 (Slave 1~9) ─── 驅動 SMC LEYG25 200mm 推桿
@@ -126,32 +131,53 @@ x64/                 # 編譯輸出目錄
   ├─▶ (Ethernet) USR-TCP232-304 #3 ─── RS485_3 ─── 192.168.1.22
   │     ├─▶ JC_100_METER × 9 (Slave 1~9) ─── 真空氣壓感測器，各裝於推桿末端吸盤
   │     ├─▶ DY_500_weight_sensor × 2 (Slave 10~11) ─── 鋼索重量感測器
-  │     └─▶ PQW_IO_16O_RLY × 1 (Slave 12, 8CH) ─── 吸盤真空 + 清洗系統控制
-  │           ├─ CH1: dp0105 真空泵浦 × 9（共用，給電/斷電）
-  │           ├─ CH2: VT307 電磁閥 ─── 腳組吸盤（左腳 + 右腳，共 4 顆）
-  │           ├─ CH3: VT307 電磁閥 ─── 身體組吸盤（左右身體，共 4 顆）
-  │           ├─ CH4: VT307 電磁閥 ─── 中心吸盤（獨立 1 顆，姿態校正用）
-  │           ├─ CH5: 手臂刷洗滾筒馬達（裝於上滑台機械臂，清洗時旋轉）
-  │           ├─ CH6: 水箱泵浦
-  │           ├─ CH7: 水箱進水球閥（頂樓水壓 → 水箱補水）
-  │           └─ CH8: 保留
+  │     ├─▶ PQW_IO_16O_RLY × 1 (Slave 12, 8CH) ─── 吸盤真空 + 清洗系統控制
+  │     │     ├─ CH1: dp0105 真空泵浦 × 9（共用，給電/斷電）
+  │     │     ├─ CH2: VT307 電磁閥 ─── 腳組吸盤（左腳 + 右腳，共 4 顆）
+  │     │     ├─ CH3: VT307 電磁閥 ─── 身體組吸盤（左右身體，共 4 顆）
+  │     │     ├─ CH4: VT307 電磁閥 ─── 中心吸盤（獨立 1 顆，姿態校正用）
+  │     │     ├─ CH5: 手臂刷洗滾筒馬達（裝於上滑台機械臂，清洗時旋轉）
+  │     │     ├─ CH6: 水箱泵浦
+  │     │     ├─ CH7: 保留（原水箱進水球閥，2026-06-05 控制權移到 crane 端 PQW，CH7 腳位空著）
+  │     │     └─ CH8: 保留
+  │     ├─▶ XKC_Y25_RS485 × 1 (Slave 13) ─── 水箱水位感測（非接觸電容式）
+  │     └─▶ DM2J_RS570 × 1 (Slave 14) ─── 上滑台（乘載機械手臂）
+  │           # 2026-05-26 搬遷：從 RS485_1 slave 5 移到這。理由是讓 arm sweep
+  │           # 跟 feet rail (cli_20_ slave 1,3) 真正並行不撞 bus。代價是
+  │           # arm motion 期間跟 JC100 pressure_poll / PQW valve op 在 cli_22_
+  │           # 序列化（半雙工 modbus + TCP_client::socket_mtx_）。
   │
   │ ─────────── 吊機 (Crane) 子系統 ───────────
   │
   ├─▶ (Ethernet) Raspberry Pi ─── 吊機主控 ─── 192.168.1.101
   │
-  └─▶ (Ethernet) USR-TCP232-304 #4 ─── RS485_crane ─── 192.168.1.30
-        ├─▶ ZS_DIO_R_RLY × 1 (Slave 1, 8CH) ─── 左右鋼索絞盤繼電器（不經變頻器）
-        │     ├─ CH1: 左收繩
-        │     ├─ CH2: 右收繩
-        │     ├─ CH3: 左放繩
-        │     └─ CH4: 右放繩
-        ├─▶ SD76_length_meters (Slave 2) ─── 左鋼索計米
-        ├─▶ SD76_length_meters (Slave 3) ─── 右鋼索計米
-        ├─▶ SD76_length_meters (Slave 4) ─── 中間管線計米（水管 + 電線）
-        ├─▶ DSZL_107 (Slave 5) ─── 左鋼索張力感測 [TBD Modbus 暫存器表]
-        ├─▶ DSZL_107 (Slave 6) ─── 右鋼索張力感測 [TBD Modbus 暫存器表]
-        └─▶ 變頻器 (Slave 7) ─── 中間絞盤馬達控制 [TBD 型號 + 暫存器表]
+  └─▶ (Ethernet) USR-TCP232-304 #A ─── RS485_control ─── 192.168.1.30
+  │     ├─▶ SE3_inverter (Slave 1) ─── 左鋼索變頻器（士林 SE3-210，取代原 ZS_DIO 繼電器 2026-05-07）
+  │     ├─▶ SE3_inverter (Slave 2) ─── 右鋼索變頻器（士林 SE3-210；2026-05-15 從 USR_B 移到 USR_A）
+  │     ├─▶ CLV900 (Slave 3) ─── 中間絞盤變頻器（未安裝）
+  │     └─▶ (reserved Slave 4) ─── SD76 middle 中間管線計米 (未安裝)
+  │
+  └─▶ (Ethernet) USR-TCP232-304 #M ─── RS485_sensing + 進水控制 ─── 192.168.1.34
+  │     ├─▶ SD76_length_meters (Slave 1) ─── 左鋼索計米（2026-05-15 從 USR_A 移到此 bus、slave 2→1）
+  │     ├─▶ SD76_length_meters (Slave 2) ─── 右鋼索計米
+  │     ├─▶ (reserved Slave 4) ─── SD76 middle 中間管線計米 (未安裝)
+  │     └─▶ PQW_IO_16O_RLY × 1 (Slave 12, 8CH) ─── 進水球閥控制（2026-06-05 從 washrobot cli_22_ slave 12 CH7 搬來）
+  │           └─ CH4: 水箱進水球閥（頂樓水壓 → 水箱補水）；其他 CH 保留
+  │           # 跟 SD76 共用 cli_M：meter_loop poll ~50-100ms + 偶爾 relay write，bus 衝突極輕
+  │
+  └─▶ (Ethernet) USR-TCP232-304 #C ─── RS485_crane_dsz_l ─── 192.168.1.32
+  │     └─▶ DSZL_107 (Slave 1) ─── 左鋼索張力感測（X518 採集板，獨佔 RS485）
+  │
+  └─▶ (Ethernet) USR-TCP232-304 #D ─── RS485_crane_dsz_r ─── 192.168.1.33
+        └─▶ DSZL_107 (Slave 1) ─── 右鋼索張力感測（X518 採集板，獨佔 RS485）
+
+# 拓樸理由（2026-05-15 re-layout）：
+#   - **控制 bus** (USR_A .30)：兩台 SE3 + 未來 CLV900。所有「寫 / 命令 / 馬達」流量
+#   - **感測 bus** (USR_B .31)：兩台 SD76 + 未來 middle 計米。所有「讀 / 長度回授」流量
+# Trade-off：兩台 SE3 共一條 bus → Modbus RTU half-duplex 序列化（drift floor ~30-50ms），
+# 但 meter_loop 輪詢 SD76 不再撞到 SE3 dispatch（修掉 2026-05-15 看到的 200-300ms drift）。
+# DSZL-107 各佔 1 個 bus，避免 X518 採樣率高時被別的 device polling 拖慢。
+# 之前的左/右繩 + 中間共線設計（2026-05-07~05-14）已 retired。
 ```
 
 ### 分散式系統通訊
@@ -218,21 +244,17 @@ Socket timeouts: 100-500ms per device. TCP monitor thread: 500ms reconnect polli
 | `TCP_client` | TCP socket abstraction | WinSock2/BSD | Cross-platform TCP with auto-reconnect & monitor thread |
 | `TCP_server` | TCP listener | WinSock2/BSD | washrobot :5001 / crane :5002，多 client、line-buffered |
 | `Serial_port` | Serial port (Windows/Linux) | Native | TTL serial communication (8N1, multiple baud rates) |
-| `DM2J_RS570` | 步進馬達驅動器 × 5 | Modbus-TCP (RS485_1) | 左腳/左輪/右腳/右輪/上滑台，cm 精度，PR/JOG/Home 模式 |
+| `DM2J_RS570` | 步進馬達驅動器 × 5 | Modbus-TCP (RS485_1 + RS485_3) | 左腳/左輪/右腳/右輪 @ RS485_1 slave 1~4；上滑台 @ RS485_3 slave 14（2026-05-26 搬遷，讓 arm sweep 跟 feet rail 並行不撞 bus），cm 精度，PR/JOG/Home 模式 |
 | `ZDT_motor_control` | 閉環步進驅動卡 × 9 | Modbus-TCP (RS485_2) | 驅動 SMC LEYG25 推桿，encoder 回饋，堵轉保護 |
 | `JC_100_METER` | 真空氣壓感測器 × 9 | Modbus-TCP (RS485_3) | 讀取壓力 (0.1 kPa)，裝於各推桿末端吸盤 |
 | `DY_500_weight_sensor` | 鋼索重量感測器 × 2 | Modbus-TCP (RS485_3) | 讀取重量 (int32/float)，裝於機體與鋼索連接處 |
-| `PQW_IO_16O_RLY` | 8CH 繼電器模組 × 1 | Modbus-TCP (RS485_3) | 控制 dp0105 泵浦 + VT307 電磁閥 + 刷洗/水泵/水閥 |
+| `PQW_IO_16O_RLY` | 8CH 繼電器模組 × 2 | Modbus-TCP | washrobot cli_22_ slave 12 (CH1-6 + CH8)：dp0105 泵浦 + VT307 電磁閥 + 刷洗/水泵；crane cli_M slave 12 (CH4 only, 2026-06-05 搬遷)：水箱進水球閥（原 washrobot CH7 改空著） |
 | `WT901BC_TTL` | 九軸姿態儀 | USB→TTL Serial 115200 | 背景執行緒連續讀取，checksum 驗證；Roll+Pitch 平衡監控 |
-| `ZS_DIO_R_RLY` | 8CH 繼電器模組 × 1 | Modbus-TCP (RS485_crane) | 吊機左右鋼索絞盤收/放繩控制 |
-| `SD76_length_meters` | 計米器 × 3 | Modbus-TCP (RS485_crane) | 左/右鋼索 + 中間管線計米，int32 讀取，支援 pause/resume/zero |
-
-**待實作（等硬體文件到位）：**
-
-| Class | Device | Description |
-|---|---|---|
-| `DSZL_107` | 張力感測器 × 2 | 左/右鋼索張力 (kg)，裝於吊機端；等使用者補 Modbus 暫存器表 |
-| 中間絞盤變頻器 | 馬達控制器 × 1 | 中間放繩同步 (RPM + 方向)，等使用者補型號與暫存器表 |
+| `damiao` (header-only) + `SerialPort` | damiao 清潔手臂馬達 × 2 (M1+M2) | USB-CAN (/dev/ttyACM0 @ 921600) | M1 大臂 DM10010L (slave 0x01) + M2 工具頭 DM4340_48V (slave 0x02)；廠商驅動 header-only，由獨立服務 `cleaning_arm/motor_api` 使用，TCP :9527 對外。washrobot 透過 `arm_cmd_` 跨 process 下指令 (127.0.0.1:9527)。整個專案唯一走 CAN 的裝置 |
+| `SD76_length_meters` | 計米器 × 3 | Modbus-TCP (USR_M 感測 bus, .34) | 左 (USR_M.34 slave 1) / 右 (USR_M.34 slave 2) / 中間 (USR_M.34 slave 4, 未安裝)；2026-05-15 re-layout 全部 SD76 移到此 bus，int32 讀取，支援 pause/resume/zero。2026-06-05 起此 bus 多了 PQW slave 12（進水球閥）共用 |
+| `DSZL_107` | 張力感測器 × 2（X518 採集板） | Modbus-TCP (獨佔 gateway) | 左 (USR_C.32 slave 1) / 右 (USR_D.33 slave 1)，各獨佔一條 RS485 bus；scale factor 預設 0.01（待實機校正）。Washrobot 透過 `crane_cmd_("tension")` 跨 PI 拿 kg。 |
+| `CLV900_inverter` | 變頻器 × 1 | Modbus-TCP (USR_A.30 slave 3) | 中間絞盤變頻器，控制 bus 上（未安裝） |
+| `SE3_inverter` | 士林變頻器 × 2 | Modbus-TCP (USR_A 控制 bus) | 左 (USR_A.30 slave 1) / 右 (USR_A.30 slave 2)；2026-05-07 取代原 ZS_DIO_R_RLY 繼電器；2026-05-15 re-layout 右 SE3 從 USR_B 移到 USR_A、slave 1→2；hold 預設 20Hz / 自動運動 30Hz；reg 0x1101 控制位元、0x1002 頻率（RAM）、0x100A 輸出頻率 |
 
 **未使用：**
 
@@ -240,6 +262,7 @@ Socket timeouts: 100-500ms per device. TCP monitor thread: 500ms reconnect polli
 |---|---|
 | `DIHOOL_control` | 馬達定位控制器，已編譯未整合 |
 | `QX_DO24` | 數位輸出模組，已編譯未整合 |
+| `ZS_DIO_R_RLY` | 8CH 繼電器模組（之前用作吊機左右收/放繩，2026-05-07 改用 SE3_inverter；class 保留供未來其他用途） |
 
 ### Driver Initialization Pattern
 

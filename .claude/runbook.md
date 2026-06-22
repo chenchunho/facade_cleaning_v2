@@ -7,6 +7,53 @@
 
 ## A. 啟動順序
 
+### 0. 一鍵啟動（tmux launcher，bench / 測試用）
+
+每台 Pi 上都有對應的 launcher script，會用 tmux 把該機所有程式各開一個 window：
+
+```bash
+# crane Pi (192.168.1.101)
+ssh pi@192.168.1.101
+cd ~/washrobot_new_PI       # repo
+chmod +x scripts/*.sh       # 第一次用要給執行權限
+./scripts/crane.sh start    # 開 Crane_control_PI + web_backend + 一個空 shell
+./scripts/crane.sh attach   # 進去看 log
+
+# washrobot Pi (192.168.1.100)
+ssh pi@192.168.1.100
+cd ~/washrobot_new_PI
+chmod +x scripts/*.sh
+./scripts/wr.sh start       # 開 washrobot_new_PI + frame_capture + 一個空 shell
+./scripts/wr.sh attach
+```
+
+**tmux 操作**：
+
+| 動作 | 鍵 |
+|------|----|
+| 切 window（main / cam / web / shell …） | `Ctrl-b` 然後 `0`/`1`/`2` |
+| 列表選 window | `Ctrl-b w` |
+| **離開但程式繼續跑**（SSH 斷了也沒事） | `Ctrl-b d`（detach） |
+| **只關當前 window 的程式** | `Ctrl-C` |
+| 重開剛剛關的程式 | `↑` 然後 `Enter` |
+| 全關 | `./scripts/{wr,crane}.sh stop` |
+
+**路徑覆蓋**：預設用本節下面手動段落寫的 deploy 路徑（`~/<project>/bin/ARM/Release/...`）。若路徑不一樣：
+
+```bash
+WR_BIN=/path/to/washrobot_new_PI ./scripts/wr.sh start
+CRANE_BIN=/path/to/Crane_control_PI WEB_DIR=/path/to/web_backend ./scripts/crane.sh start
+```
+
+**測試模式吊車**（crane_shim 取代主吊車）：
+
+```bash
+CRANE_BIN="python3 $HOME/washrobot_new_PI/crane_shim/crane_shim.py" \
+  ./scripts/crane.sh start
+```
+
+下面 1~3 是**手動逐項啟動**的對照版本（看 log 直接、能控制每個程式分開重啟）。launcher 內部就是把這些指令各塞進一個 tmux window。
+
 ### 1. Crane RPi (192.168.1.101) — 先啟動
 
 ```bash

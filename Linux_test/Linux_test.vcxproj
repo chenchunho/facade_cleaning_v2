@@ -91,6 +91,7 @@
     <ClCompile Include="..\user_lib\XKC_Y25_RS485.cpp" />
     <ClCompile Include="..\user_lib\ZDT_motor_control.cpp" />
     <ClCompile Include="..\user_lib\ZS_DIO_R_RLY.cpp" />
+    <ClCompile Include="..\user_lib\SE3_inverter.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -106,6 +107,7 @@
     <ClInclude Include="..\user_lib\XKC_Y25_RS485.h" />
     <ClInclude Include="..\user_lib\ZDT_motor_control.h" />
     <ClInclude Include="..\user_lib\ZS_DIO_R_RLY.h" />
+    <ClInclude Include="..\user_lib\SE3_inverter.h" />
     <ClInclude Include="..\user_lib\log_utils.h" />
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
