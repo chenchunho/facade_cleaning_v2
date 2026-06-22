@@ -77,25 +77,41 @@
   <PropertyGroup Label="UserMacros" />
   <ItemGroup>
     <ClCompile Include="..\user_lib\CLV900_inverter.cpp" />
+    <ClCompile Include="..\user_lib\DSZL_107.cpp" />
     <ClCompile Include="..\user_lib\DY_500_weight_sensor.cpp" />
+    <ClCompile Include="..\user_lib\PQW_IO_16O_RLY.cpp" />
     <ClCompile Include="..\user_lib\SD76_length_meters.cpp" />
+    <ClCompile Include="..\user_lib\SE3_inverter.cpp" />
     <ClCompile Include="..\user_lib\TCP_client.cpp" />
     <ClCompile Include="..\user_lib\TCP_server.cpp" />
-    <ClCompile Include="..\user_lib\ZS_DIO_R_RLY.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\user_lib\CLV900_inverter.h" />
+    <ClInclude Include="..\user_lib\DSZL_107.h" />
     <ClInclude Include="..\user_lib\DY_500_weight_sensor.h" />
+    <ClInclude Include="..\user_lib\PQW_IO_16O_RLY.h" />
     <ClInclude Include="..\user_lib\SD76_length_meters.h" />
+    <ClInclude Include="..\user_lib\SE3_inverter.h" />
     <ClInclude Include="..\user_lib\TCP_client.h" />
     <ClInclude Include="..\user_lib\TCP_server.h" />
-    <ClInclude Include="..\user_lib\ZS_DIO_R_RLY.h" />
+    <ClInclude Include="..\user_lib\log_utils.h" />
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
       <AdditionalIncludeDirectories>..\user_lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>-I$(RemoteRootDir)/../user_lib %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
+    <Link>
+      <AdditionalDependencies>%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
+  </ItemDefinitionGroup>
+  <!-- Unconditional: std::thread requires pthread at link time. -->
+  <ItemDefinitionGroup>
+    <Link>
+      <LibraryDependencies>pthread</LibraryDependencies>
+    </Link>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

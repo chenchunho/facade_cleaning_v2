@@ -204,6 +204,99 @@ bool ZDT_motor_control::wait_until_pos_reached(int timeout_ms, int poll_interval
 	}
 }
 
+//=========== driver config (3.7.5 read / 3.7.6 write) ===========
+// Read 15 config regs from 0x0042 (FC 0x04). Response layout (per PDF §3.7.5):
+//   Addr | 04 | byte_count(=0x1E) | 15 regs × 2 bytes | CRC
+// Reg 1 packs [total_byte_count(0x1E), param_count(0x15)] header.
+// Reg 2-15 are real config (motor_type / microstep / currents / baudrate /
+// ID / parity / Clog params / pos-window etc.).
+//
+// out[0] = header (informational), out[1..14] = real config (1-indexed Reg 2..15).
+bool ZDT_motor_control::read_driver_config(uint16_t out[15]) {
+	std::vector<uint8_t> cmd = { slave_id, 0x04, 0x00, 0x42, 0x00, 0x0F };
+	uint16_t crc = modbusCRC(cmd.data(), (int)cmd.size());
+	cmd.push_back((uint8_t)(crc & 0xFF));
+	cmd.push_back((uint8_t)(crc >> 8));
+
+	LOG_HEX(_log_tag, "TX read_driver_config", cmd.data(), (int)cmd.size());
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
+
+	auto resp = readEcho(300);
+	LOG_HEX(_log_tag, "RX read_driver_config", resp.data(), (int)resp.size());
+
+	// Expected: Addr(1) + FC(1) + byteCount(1) + 30 data + CRC(2) = 35 bytes
+	if (resp.size() < 35 || resp[0] != slave_id || resp[1] != 0x04 || resp[2] != 0x1E) {
+		LOG_ERR(_log_tag, "read_driver_config: bad reply len=%d", (int)resp.size());
+		return true;
+	}
+	for (int i = 0; i < 15; ++i) {
+		out[i] = ((uint16_t)resp[3 + i*2] << 8) | resp[3 + i*2 + 1];
+	}
+	return false;
+}
+
+// Write 15 config regs to 0x0048 (FC 0x10). TX layout (per PDF §3.7.6):
+//   Addr | 10 | 00 48 | 00 0F | 1E | Reg1=[0xD1, is_store] | Reg2..15 data | CRC
+//
+// Reg 1 high byte MUST be 0xD1 (magic), low byte = is_store (0=RAM, 1=EEPROM).
+// in[0] is ignored — driver substitutes the magic+store header automatically.
+// in[1..14] map to Reg 2..15 (motor_type / ... / Clog_Ma / pos-window).
+bool ZDT_motor_control::write_driver_config(const uint16_t in[15], bool store) {
+	std::vector<uint8_t> cmd;
+	cmd.reserve(9 + 30 + 2);
+	cmd.push_back(slave_id);
+	cmd.push_back(0x10);
+	cmd.push_back(0x00); cmd.push_back(0x48);   // reg addr 0x0048
+	cmd.push_back(0x00); cmd.push_back(0x0F);   // qty 15
+	cmd.push_back(0x1E);                        // byte count 30
+
+	// Reg 1: magic 0xD1 + is_store
+	cmd.push_back(0xD1);
+	cmd.push_back(store ? 0x01 : 0x00);
+	// Reg 2..15: copy from in[1..14]
+	for (int i = 1; i < 15; ++i) {
+		cmd.push_back((uint8_t)(in[i] >> 8));
+		cmd.push_back((uint8_t)(in[i] & 0xFF));
+	}
+	uint16_t crc = modbusCRC(cmd.data(), (int)cmd.size());
+	cmd.push_back((uint8_t)(crc & 0xFF));
+	cmd.push_back((uint8_t)(crc >> 8));
+
+	LOG_HEX(_log_tag, "TX write_driver_config", cmd.data(), (int)cmd.size());
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
+
+	auto resp = readEcho(300);
+	LOG_HEX(_log_tag, "RX write_driver_config", resp.data(), (int)resp.size());
+
+	// Echo: Addr + FC + reg_addr(2) + qty(2) + CRC(2) = 8 bytes
+	if (resp.size() < 8 || resp[0] != slave_id || resp[1] != 0x10) {
+		LOG_ERR(_log_tag, "write_driver_config: bad echo len=%d", (int)resp.size());
+		return true;
+	}
+	return false;
+}
+
+// Convenience: update only Reg 13 (堵轉保護檢測電流 / Clog_Ma) in mA.
+// Read full config, modify Reg 13 (index 12 in the 15-element buffer where
+// index 0 is the response header), write back with store=0 (RAM only).
+//
+// Cost: 2 Modbus transactions (~100-150ms) per call. Caller should batch
+// per-group rather than per-tick.
+bool ZDT_motor_control::set_clog_ma(uint16_t mA, bool store) {
+	uint16_t cfg[15];
+	if (read_driver_config(cfg)) {
+		LOG_ERR(_log_tag, "set_clog_ma: read_driver_config failed");
+		return true;
+	}
+	cfg[12] = mA;   // Reg 13, 0-based index 12
+	if (write_driver_config(cfg, store)) {
+		LOG_ERR(_log_tag, "set_clog_ma: write_driver_config failed");
+		return true;
+	}
+	LOG_INF(_log_tag, "set_clog_ma: Clog_Ma -> %u mA (store=%d)", (unsigned)mA, store ? 1 : 0);
+	return false;
+}
+
 //=========== control: release stall / emergency stop ===========
 
 bool ZDT_motor_control::release_stall_flag() {

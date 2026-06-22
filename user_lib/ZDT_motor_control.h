@@ -72,6 +72,22 @@ public:
 	bool wait_until_pos_reached(int timeout_ms = 10000, int poll_interval_ms = 500);  // 輪詢直到位置到達或超時
 	MotorSystemStatus status;
 
+	// --- 驅動配置 (3.7.5 / 3.7.6 Emm) ---
+	// Read 15 driver-config registers (FC 0x04 @ 0x0042). out[0] = header
+	// (byte_count + param_count, informational); out[1..14] = real config regs.
+	bool read_driver_config(uint16_t out[15]);
+
+	// Write 15 driver-config registers (FC 0x10 @ 0x0048). Driver internally
+	// substitutes Reg 1 high byte with 0xD1 magic + low byte with is_store flag.
+	// in[0] is ignored; in[1..14] should typically come from read_driver_config
+	// to preserve unrelated settings (ID, baudrate, motor type etc.).
+	bool write_driver_config(const uint16_t in[15], bool store);
+
+	// Convenience read-modify-write: update only Reg 13 (堵轉保護檢測電流 Clog_Ma)
+	// in mA. Other 14 regs preserved via read first. store=false = RAM only
+	// (recommended for runtime tuning; survives until power cycle).
+	bool set_clog_ma(uint16_t mA, bool store = false);
+
 	// Runtime debug-mode toggle (used by upper layer to silence high-frequency
 	// poll loops without losing hex dump on ad-hoc commands). 2026-04-24.
 	void set_debug(bool v) { debug_mode = v; }

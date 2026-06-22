@@ -5,10 +5,12 @@
 // This file owns only the TCP server and routes incoming commands to robot.cmd_*().
 //
 // Command server @ :5001 (line-based, multi-client):
-//   init / attach / detach / step_down [cm] / run <n> [cm]
-//   pause / resume / continue / skip / emergency_stop / reset / ping
+//   init / attach / detach / step_down [cm] / step_up [cm] / run <n> [cm] [down|up]
+//   pause / resume / continue / skip / emergency_stop / reset / recover / realign / ping
 //   vacuum <group> <on|off>   pump <on|off>   pusher <group> <extend|retract>
+//   zdt_pusher <1..9> <extend|retract>     (single-slave manual, GUI 單支按鈕)
 //   zdt_zero <feet|body|center|all>   (set current ZDT pos as zero, manual 3.1.3)
+//   zdt_release_stall                 (release stall flags on all 9 slaves; safe during motion)
 //   move <motor> <cm>         wheels <retract|lower>
 //   dm2j_group <feet|wheels> <cm>     dm2j_zero <feet|wheels|arm>
 //   arm_sweep / tilt_mode <on|off>
@@ -50,11 +52,41 @@ static std::string dispatch(const std::string& line) {
         int cm = 0; iss >> cm;          // optional; 0 = use current step_cm_
         return robot.cmd_step_down(cm);
     }
+    if (cmd == "step_down_with_sweep") {
+        int cm = 0; iss >> cm;
+        return robot.cmd_step_down_with_sweep(cm);
+    }
+    if (cmd == "step_up") {
+        int cm = 0; iss >> cm;          // optional; 0 = use current step_cm_
+        return robot.cmd_step_up(cm);
+    }
+    if (cmd == "step_up_with_sweep") {
+        int cm = 0; iss >> cm;
+        return robot.cmd_step_up_with_sweep(cm);
+    }
+    if (cmd == "step_up_sweep_after_feet") {
+        int cm = 0; iss >> cm;
+        return robot.cmd_step_up_sweep_after_feet(cm);
+    }
+    if (cmd == "step_down_sweep_after_feet") {
+        int cm = 0; iss >> cm;
+        return robot.cmd_step_down_sweep_after_feet(cm);
+    }
+    if (cmd == "step_up_sweep_ba") {
+        int cm = 0; iss >> cm;
+        return robot.cmd_step_up_sweep_before_after(cm);
+    }
+    if (cmd == "step_down_sweep_ba") {
+        int cm = 0; iss >> cm;
+        return robot.cmd_step_down_sweep_before_after(cm);
+    }
     if (cmd == "arm_sweep")      return robot.cmd_arm_sweep();
     if (cmd == "shutdown")       return robot.cmd_shutdown();
     if (cmd == "status")         return robot.cmd_status();
     if (cmd == "emergency_stop") return robot.cmd_emergency_stop();
     if (cmd == "reset")          return robot.cmd_reset();
+    if (cmd == "recover")        return robot.cmd_recover();
+    if (cmd == "realign")        return robot.cmd_realign();
     if (cmd == "ping")           return robot.cmd_ping();
     if (cmd == "pause")          return robot.cmd_pause();
     if (cmd == "resume")         return robot.cmd_resume();
@@ -68,13 +100,130 @@ static std::string dispatch(const std::string& line) {
         if (s == "off") return robot.cmd_crane_attached(false);
         return "ERR expected_on_or_off\n";
     }
+    if (cmd == "wheels_attached") {
+        std::string s; iss >> s;
+        if (iss.fail()) return "ERR usage:wheels_attached_<on|off>\n";
+        if (s == "on")  return robot.cmd_wheels_attached(true);
+        if (s == "off") return robot.cmd_wheels_attached(false);
+        return "ERR expected_on_or_off\n";
+    }
+
+    // ---- cleaning arm (damiao motors via motor_api on 127.0.0.1:9527) ----
+    if (cmd == "arm_init")   return robot.cmd_arm_init();
+    if (cmd == "arm_park")   return robot.cmd_arm_park();
+    if (cmd == "arm_status") return robot.cmd_arm_status();
+    if (cmd == "arm_deploy") {
+        int wall_mm = 0;
+        std::string slot;
+        iss >> wall_mm >> slot;
+        if (iss.fail()) return "ERR usage:arm_deploy_<wall_mm>_<LEFT|CENTER|RIGHT>\n";
+        return robot.cmd_arm_deploy(wall_mm, slot);
+    }
+    if (cmd == "arm_clean_sweep") {
+        int wall_mm = 0;
+        int rounds = 1;
+        iss >> wall_mm >> rounds;
+        if (iss.fail() || wall_mm <= 0) return "ERR usage:arm_clean_sweep_<wall_mm>_<rounds>\n";
+        return robot.cmd_arm_clean_sweep(wall_mm, rounds);
+    }
+    if (cmd == "arm_attached") {
+        std::string s; iss >> s;
+        if (iss.fail()) return "ERR usage:arm_attached_<on|off>\n";
+        if (s == "on")  return robot.cmd_arm_attached(true);
+        if (s == "off") return robot.cmd_arm_attached(false);
+        return "ERR expected_on_or_off\n";
+    }
+
+    // [2026-06-01] Camera obstacle detection toggle (default OFF, testing-only)
+    if (cmd == "obstacle_detect") {
+        std::string s; iss >> s;
+        if (iss.fail()) return "ERR usage:obstacle_detect_<on|off>\n";
+        if (s == "on")  return robot.cmd_obstacle_detect(true);
+        if (s == "off") return robot.cmd_obstacle_detect(false);
+        return "ERR expected_on_or_off\n";
+    }
+    // [2026-06-04] Single-shot obstacle detector test (Step 1).
+    // Reads pre-captured /tmp/cam{3,4}_{before,after}.jpg, runs detector,
+    // returns combined decision.
+    if (cmd == "obstacle_check") return robot.cmd_obstacle_check();
+    // [2026-06-04] RUN with obstacle avoidance (Step 2).
+    // Loop: probe → detect → ask user → step_down with confirmed step.
+    if (cmd == "run_avoid") return robot.cmd_run_avoid();
+    if (cmd == "obstacle_response") {
+        int v; iss >> v;
+        if (iss.fail()) return "ERR usage:obstacle_response_<0|1>\n";
+        return robot.cmd_obstacle_response(v);
+    }
+
+    // [2026-06-02] Balance calibration (3 cmd: start/record/abort + status)
+    if (cmd == "balance_calibrate_start")  return robot.cmd_balance_calibrate_start();
+    if (cmd == "balance_calibrate_record") return robot.cmd_balance_calibrate_record();
+    if (cmd == "balance_calibrate_abort")  return robot.cmd_balance_calibrate_abort();
+    if (cmd == "balance_calibrate_status") return robot.cmd_balance_calibrate_status();
+
+    // [2026-05-29] Runtime settings (wall-tune) — see WashRobot::Settings struct.
+    if (cmd == "get_settings") {
+        return robot.cmd_get_settings();
+    }
+    if (cmd == "set_setting") {
+        std::string key, value;
+        iss >> key >> value;
+        if (iss.fail() || key.empty() || value.empty())
+            return "ERR usage:set_setting_<key>_<value>\n";
+        return robot.cmd_set_setting(key, value);
+    }
+    if (cmd == "save_settings") {
+        return robot.cmd_save_settings();
+    }
 
     if (cmd == "run") {
         int n = 0, cm = 0;
+        std::string direction = "down";
         iss >> n;
-        if (iss.fail()) return "ERR usage:run_<steps>_[cm]\n";
-        iss >> cm;                      // optional second arg
-        return robot.cmd_run(n, cm);
+        if (iss.fail()) return "ERR usage:run_<steps>_[cm]_[down|up]\n";
+        iss >> cm;                      // optional 2nd arg (default 0 = use step_cm_)
+        iss >> direction;               // optional 3rd arg (default "down")
+        return robot.cmd_run(n, cm, direction);
+    }
+    // [2026-06-05] Scripted run — CSV of per-step cm. Fixed down_sweep_af.
+    // CSV grammar: <int> | <int>*<count>, comma-separated. e.g. "30*5,20*3".
+    // CSV may contain spaces (parse_script_csv_ strips them per-token); read
+    // rest-of-line so whitespace inside CSV doesn't get eaten by `iss >>`.
+    if (cmd == "run_script") {
+        std::string csv;
+        std::getline(iss, csv);
+        // Trim leading space left by `iss >> cmd`.
+        size_t p = csv.find_first_not_of(" \t");
+        if (p == std::string::npos) return "ERR usage:run_script_<csv>\n";
+        csv = csv.substr(p);
+        return robot.cmd_run_script(csv);
+    }
+    if (cmd == "save_script") {
+        std::string name;
+        iss >> name;
+        if (iss.fail() || name.empty()) return "ERR usage:save_script_<name>_<csv>\n";
+        std::string csv;
+        std::getline(iss, csv);
+        size_t p = csv.find_first_not_of(" \t");
+        if (p == std::string::npos) return "ERR usage:save_script_<name>_<csv>\n";
+        csv = csv.substr(p);
+        return robot.cmd_save_script(name, csv);
+    }
+    if (cmd == "list_scripts") return robot.cmd_list_scripts();
+    if (cmd == "load_script") {
+        std::string name; iss >> name;
+        if (iss.fail() || name.empty()) return "ERR usage:load_script_<name>\n";
+        return robot.cmd_load_script(name);
+    }
+    if (cmd == "delete_script") {
+        std::string name; iss >> name;
+        if (iss.fail() || name.empty()) return "ERR usage:delete_script_<name>\n";
+        return robot.cmd_delete_script(name);
+    }
+    if (cmd == "run_saved") {
+        std::string name; iss >> name;
+        if (iss.fail() || name.empty()) return "ERR usage:run_saved_<name>\n";
+        return robot.cmd_run_saved(name);
     }
     if (cmd == "vacuum") {
         std::string g, s; iss >> g >> s;
@@ -92,10 +241,38 @@ static std::string dispatch(const std::string& line) {
         if (s == "off") return robot.cmd_pump(false);
         return "ERR expected_on_or_off\n";
     }
+    if (cmd == "brush") {
+        std::string s; iss >> s;
+        if (iss.fail()) return "ERR usage:brush_<on|off>\n";
+        if (s == "on")  return robot.cmd_brush(true);
+        if (s == "off") return robot.cmd_brush(false);
+        return "ERR expected_on_or_off\n";
+    }
+    if (cmd == "water_pump") {
+        std::string s; iss >> s;
+        if (iss.fail()) return "ERR usage:water_pump_<on|off>\n";
+        if (s == "on")  return robot.cmd_water_pump(true);
+        if (s == "off") return robot.cmd_water_pump(false);
+        return "ERR expected_on_or_off\n";
+    }
+    if (cmd == "water_inlet") {
+        std::string s; iss >> s;
+        if (iss.fail()) return "ERR usage:water_inlet_<on|off>\n";
+        if (s == "on")  return robot.cmd_water_inlet(true);
+        if (s == "off") return robot.cmd_water_inlet(false);
+        return "ERR expected_on_or_off\n";
+    }
+    if (cmd == "water_level")    return robot.cmd_water_level();
     if (cmd == "pusher") {
         std::string g, p; iss >> g >> p;
         if (iss.fail()) return "ERR usage:pusher_<group>_<extend|retract>\n";
         return robot.cmd_pusher(g, p);
+    }
+    if (cmd == "zdt_pusher") {
+        int s = 0; std::string a;
+        iss >> s >> a;
+        if (iss.fail() || s < 1 || s > 9) return "ERR usage:zdt_pusher_<1..9>_<extend|retract>\n";
+        return robot.cmd_zdt_pusher(s, a);
     }
     if (cmd == "zdt_zero") {
         std::string g; iss >> g;
@@ -119,6 +296,17 @@ static std::string dispatch(const std::string& line) {
         if (iss.fail()) return "ERR usage:dm2j_group_<feet|wheels>_<cm>\n";
         return robot.cmd_dm2j_group(g, cm);
     }
+    if (cmd == "zdt_disable") {
+        int s = 0; iss >> s;
+        if (iss.fail() || s < 1 || s > 9) return "ERR usage:zdt_disable_<1..9>\n";
+        return robot.cmd_zdt_disable(s);
+    }
+    if (cmd == "zdt_enable") {
+        int s = 0; iss >> s;
+        if (iss.fail() || s < 1 || s > 9) return "ERR usage:zdt_enable_<1..9>\n";
+        return robot.cmd_zdt_enable(s);
+    }
+    if (cmd == "zdt_release_stall") return robot.cmd_zdt_release_stall();
     if (cmd == "dm2j_zero") {
         std::string g; iss >> g;
         if (iss.fail()) return "ERR usage:dm2j_zero_<feet|wheels|arm>\n";
@@ -165,7 +353,8 @@ static std::string dispatch(const std::string& line) {
 
 static const std::unordered_set<std::string> FAST_CMDS = {
     "ping", "status", "pause", "resume",
-    "continue", "skip", "emergency_stop", "reset"
+    "continue", "skip", "emergency_stop", "reset",
+    "zdt_release_stall"
 };
 
 static void on_receive(socket_t sock, const char* data, int len) {
@@ -231,12 +420,16 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::cout << "[washrobot_new_PI] starting...\n";
+    std::cout << "HI~ [washrobot_new_PI] starting...\n";
 
     // Wire EVT broadcast before calling init (background threads may fire events during init)
     robot.evt_cb = [](const std::string& line) {
         cmd_server.broadcast(line.c_str(), (int)line.size());
     };
+
+    // [2026-05-29] Load runtime wall-tune settings (overrides constexpr defaults).
+    // Missing file is silent fallback to defaults — first run before any tune.
+    robot.load_settings_at_boot("settings.json");
 
     // 初始化所有tcp連線和設備
     if (robot.init()) {

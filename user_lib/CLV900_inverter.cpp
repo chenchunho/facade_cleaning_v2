@@ -68,15 +68,20 @@ bool CLV900_inverter::sendModbus(const uint8_t* req, int reqLen,
 {
 	LOG_HEX(_log_tag, "TX", req, reqLen);
 
-	if (!client->sendData((const char*)req, reqLen, 200))
+	// Atomic transaction — see TCP_client::sendAndReceive doc. CLV900 shares
+	// cli_A in Crane_control_PI with SE3 left + SD76 left/middle, so without
+	// atomic locking concurrent threads' replies could intermix.
+	int got = client->sendAndReceive((const char*)req, reqLen,
+	                                 (char*)resp, 256,
+	                                 200, 300);
+	if (got <= 0) {
+		respLen = 0;
 		return true;
+	}
+	respLen = got;
 
-	respLen = client->receiveData((char*)resp, 256, 300);
-
-	if (respLen > 0)
-		LOG_HEX(_log_tag, "RX", resp, respLen);
-
-	return respLen <= 0;
+	LOG_HEX(_log_tag, "RX", resp, respLen);
+	return false;
 }
 
 //=========== utility: generic param write/read ===========

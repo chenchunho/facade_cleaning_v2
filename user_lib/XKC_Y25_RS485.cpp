@@ -4,12 +4,24 @@
 #include <chrono>
 #include <thread>
 
-// MODBUS register map (per XKC-Y25-RS485 V1.6 manual §2.1)
+// MODBUS register map for XKC-Y25-RS485 V1.6.
+//
+// IMPORTANT: the manual is internally inconsistent — §2.1 lists ADR @ 0x0003 and
+// BAUD @ 0x0004 (those are READ-current-value registers), but §1.6 / §1.8 show
+// that the SET operations use DIFFERENT registers (the operation registers are
+// +1 from the read registers). Bench-verified 2026-05-20.
+//
+//   reg     read                     write (directed)             write (broadcast)
+//   0x0001  OutPut (0/1)             —                            —
+//   0x0002  RSSI                     —                            —
+//   0x0003  current ADR (R/O)        — (writes here are ignored)  —
+//   0x0004  current baud (R/O)       SET ADR (value = new_addr)   factory reset (value=0x02)
+//   0x0005  —                        SET BAUD (value = baud code) —
 namespace XKC_REG {
-    constexpr uint16_t OUTPUT     = 0x0001;  // 0 = no liquid, 1 = liquid (R)
-    constexpr uint16_t RSSI       = 0x0002;  // signal strength (R)
-    constexpr uint16_t ADDR       = 0x0003;  // slave address 1..254 (R/W)
-    constexpr uint16_t BAUD       = 0x0004;  // baud code (R/W) — see manual §1.9
+    constexpr uint16_t OUTPUT       = 0x0001;  // 0 = no liquid, 1 = liquid (R)
+    constexpr uint16_t RSSI         = 0x0002;  // signal strength (R)
+    constexpr uint16_t SET_ADDR     = 0x0004;  // directed write: set new ADR (§1.6)
+    constexpr uint16_t SET_BAUD     = 0x0005;  // directed write: set new baud code (§1.8)
 }
 
 //=========== init ===========
@@ -149,10 +161,15 @@ bool XKC_Y25_RS485::set_address(uint8_t new_addr) {
         LOG_ERR(_log_tag, "set_address: invalid addr %u (must be 1..254)", new_addr);
         return true;
     }
-    // Write single register 0x0003 = new_addr (function 0x06).
+    // Per manual §1.6: directed write (current slave ID) to reg 0x0004 = new_addr.
+    // (Reg 0x0003 holds the CURRENT addr value but writing it is ignored — the
+    // operation reg is +1 from the read reg. See XKC_REG comment.)
+    // Sensor reply is non-standard (manual §1.7 shows a 7-byte frame instead of
+    // the standard 8-byte 0x06 echo); we don't try to validate it. Verification
+    // is via LED flash + re-reading at the new address. Mirrors set_baud_rate.
     std::vector<uint8_t> tx = {
         (uint8_t)_slaveID, 0x06,
-        (uint8_t)(XKC_REG::ADDR >> 8), (uint8_t)(XKC_REG::ADDR & 0xFF),
+        (uint8_t)(XKC_REG::SET_ADDR >> 8), (uint8_t)(XKC_REG::SET_ADDR & 0xFF),
         0x00, new_addr,
         0, 0
     };
@@ -160,20 +177,33 @@ bool XKC_Y25_RS485::set_address(uint8_t new_addr) {
     tx[6] = crc & 0xFF;
     tx[7] = crc >> 8;
 
-    std::vector<uint8_t> rx;
-    // 0x06 echoes the same 8-byte frame back.
-    if (sendRecv(tx, rx, 8)) return true;
+    if (!client || !client->isConnected()) {
+        error_flag = 1;
+        return true;
+    }
+    LOG_HEX(_log_tag, "TX (set addr)", tx.data(), (int)tx.size());
+    if (!client->sendData((const char*)tx.data(), (int)tx.size(), 500)) {
+        error_flag = 1;
+        LOG_ERR(_log_tag, "set_address send fail");
+        return true;
+    }
+    // Best-effort drain of any reply (non-standard format per manual §1.7); not validated.
+    char drain[16];
+    client->receiveData(drain, sizeof(drain), 300);
 
-    LOG_INF(_log_tag, "set_address: %u -> %u (sensor LED should flash)", _slaveID, new_addr);
-    // Note: caller must re-init() to keep talking to this sensor at the new address.
+    LOG_INF(_log_tag, "set_address: %u -> %u (verify via LED flash + re-read at new ID)", _slaveID, new_addr);
+    error_flag = 0;
     return false;
 }
 
 bool XKC_Y25_RS485::set_baud_rate(uint8_t code) {
-    // Manual §1.9 valid codes: 0x05..0x0F (some marked reserved; we don't enforce here).
+    // Per manual §1.8: directed write to reg 0x0005 (NOT 0x0004 — that's the
+    // read-current-baud reg; broadcast writing 0x0004 with value 0x02 is the
+    // factory reset trigger). Manual §1.9 valid codes: 0x05..0x0F (some marked
+    // reserved; we don't enforce here). Sensor "no return" — LED flashes only.
     std::vector<uint8_t> tx = {
         (uint8_t)_slaveID, 0x06,
-        (uint8_t)(XKC_REG::BAUD >> 8), (uint8_t)(XKC_REG::BAUD & 0xFF),
+        (uint8_t)(XKC_REG::SET_BAUD >> 8), (uint8_t)(XKC_REG::SET_BAUD & 0xFF),
         0x00, code,
         0, 0
     };
@@ -181,13 +211,11 @@ bool XKC_Y25_RS485::set_baud_rate(uint8_t code) {
     tx[6] = crc & 0xFF;
     tx[7] = crc >> 8;
 
-    // Per manual §1.8 the sensor "no return" on baud change (LED flashes only).
-    // Send the frame; ignore any reply timing.
     if (!client || !client->isConnected()) {
         error_flag = 1;
         return true;
     }
-    LOG_HEX(_log_tag, "TX (baud)", tx.data(), (int)tx.size());
+    LOG_HEX(_log_tag, "TX (set baud)", tx.data(), (int)tx.size());
     if (!client->sendData((const char*)tx.data(), (int)tx.size(), 500)) {
         error_flag = 1;
         LOG_ERR(_log_tag, "set_baud_rate send fail");

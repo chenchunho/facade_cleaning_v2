@@ -119,56 +119,145 @@ void DM2J_RS570::PR_trigger_sync(int pr_num)
 // mode => 0 relative, 1 absolute
 bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec)
 {
-	uint16_t ppr = 10000;
-	if (read_pulse_per_rev(ppr) || ppr == 0)
+	// Modbus read with up to 3 attempts — absorbs transient gateway / bus
+	// hiccups instead of failing the whole move on one bad frame.
+	auto read_status_retry = [this](uint32_t& s) -> bool {
+		for (int a = 0; a < 3; ++a) {
+			if (!read_status(s)) return false;          // ok
+			std::this_thread::sleep_for(std::chrono::milliseconds(30));
+		}
+		return true;                                    // failed after retries
+	};
+
+	// --- pulse-per-rev (with retry) ---
+	uint16_t ppr = 0;
+	bool ppr_ok = false;
+	for (int a = 0; a < 3; ++a) {
+		if (!read_pulse_per_rev(ppr) && ppr != 0) { ppr_ok = true; break; }
+		std::this_thread::sleep_for(std::chrono::milliseconds(30));
+	}
+	if (!ppr_ok)
 	{
-		LOG_ERR(_log_tag, "PPR read failed");
+		LOG_ERR(_log_tag, "PPR read failed (3 attempts)");
 		return true;
 	}
 
-	int pos_pulse = (int)(pos_cm * ppr);
+	const int pos_pulse = (int)(pos_cm * ppr);
 	LOG_DBG(_log_tag, "PR_move_cm %.3f cm -> %d pulses (PPR=%u)", pos_cm, pos_pulse, ppr);
 
-	PR_move_set(pr_num, mode, rpm, pos_pulse, acc, dec);
-	PR_trigger(pr_num);
-
-	const int timeout_ms = 20000;
-	int elapsed = 0;
-
-	uint32_t st = 0;
-
-	while (elapsed < timeout_ms)
+	// Expected absolute encoder position after the move — used by the
+	// !ever_busy check to tell a genuine no-op from a dropped trigger.
+	//   mode 1 = absolute → target is pos_pulse directly.
+	//   mode 0 = relative → target = start position + pos_pulse (need start).
+	int32_t expected_pos = pos_pulse;
+	if (mode == 0)
 	{
-		if (read_status(st))
+		int32_t start_pos = 0;
+		bool have_start = false;
+		for (int a = 0; a < 3; ++a) {
+			if (!read_motor_position(start_pos)) { have_start = true; break; }
+			std::this_thread::sleep_for(std::chrono::milliseconds(30));
+		}
+		if (!have_start)
 		{
-			LOG_ERR(_log_tag, "read status failed during PR wait");
+			LOG_ERR(_log_tag, "start position read failed — cannot run relative move safely");
 			return true;
 		}
+		expected_pos = start_pos + pos_pulse;
+	}
+	const int32_t pos_tol = (int32_t)(0.3 * ppr);   // ~0.3 cm — far below any real move delta
 
-		bool cmd_done  = st & 0x0010;
-		bool path_done = st & 0x0020;
-		bool fault     = st & 0x0001;
+	// Trigger + wait, with re-trigger retry if the trigger has no effect.
+	const int trigger_retry_max = 3;
+	for (int attempt = 1; attempt <= trigger_retry_max; ++attempt)
+	{
+		PR_move_set(pr_num, mode, rpm, pos_pulse, acc, dec);
+		PR_trigger(pr_num);
 
-		if (debug_mode)
-			print_status(st);
+		uint32_t st = 0;
 
-		if (fault)
+		// Phase 1: wait for path_done (0x0020) to CLEAR — drive accepted the
+		// trigger and went busy. Edge-detect avoids a stale "done" bit making
+		// Phase 2 return instantly.
+		const int busy_wait_ms = 500;
+		int busy_elapsed = 0;
+		bool ever_busy = false;
+		while (busy_elapsed < busy_wait_ms)
 		{
-			LOG_ERR(_log_tag, "PR fault detected (status=0x%08X)", st);
-			return true;
+			if (read_status_retry(st))
+			{
+				LOG_ERR(_log_tag, "read status failed during PR busy-wait");
+				return true;
+			}
+			if (st & 0x0001)
+			{
+				LOG_ERR(_log_tag, "PR fault detected during busy-wait (status=0x%08X)", st);
+				return true;
+			}
+			if (!(st & 0x0020)) { ever_busy = true; break; }
+			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+			busy_elapsed += 20;
 		}
 
-		if (cmd_done && path_done)
+		if (!ever_busy)
 		{
-			LOG_DBG(_log_tag, "PR motion completed");
-			return false;
+			// path_done never cleared. The old code blindly assumed "no-op,
+			// already at target" — which silently swallowed dropped triggers
+			// (drive busy / Modbus hiccup) leaving the motor stuck at the
+			// previous target. Disambiguate by ACTUAL position:
+			//   at target     → genuine no-op (or move too fast to observe) → ok
+			//   not at target → trigger was dropped → re-trigger
+			int32_t cur = 0;
+			if (read_motor_position(cur))
+			{
+				LOG_ERR(_log_tag, "PR !ever_busy and position read failed");
+				return true;
+			}
+			int32_t diff = cur - expected_pos;
+			if (diff < 0) diff = -diff;
+			if (diff <= pos_tol)
+			{
+				LOG_DBG(_log_tag, "PR no-op — already at target (pos=%d target=%d)",
+				        cur, expected_pos);
+				return false;
+			}
+			LOG_WRN(_log_tag, "PR trigger had no effect (pos=%d target=%d) — re-trigger %d/%d",
+			        cur, expected_pos, attempt, trigger_retry_max);
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			continue;   // outer loop → re-trigger
 		}
 
-		std::this_thread::sleep_for(std::chrono::milliseconds(50));
-		elapsed += 50;
+		// Phase 2: wait for cmd_done + path_done to SET (motion complete).
+		const int timeout_ms = 20000;
+		int elapsed = 0;
+		while (elapsed < timeout_ms)
+		{
+			if (read_status_retry(st))
+			{
+				LOG_ERR(_log_tag, "read status failed during PR wait");
+				return true;
+			}
+			if (st & 0x0001)
+			{
+				LOG_ERR(_log_tag, "PR fault detected (status=0x%08X)", st);
+				return true;
+			}
+			// [2026-05-22] per-poll status DBG print disabled — too verbose
+			// (spams every ~50ms during a motion wait). Uncomment to restore.
+			//if (debug_mode) print_status(st);
+			if ((st & 0x0010) && (st & 0x0020))
+			{
+				LOG_DBG(_log_tag, "PR motion completed");
+				return false;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+			elapsed += 50;
+		}
+		LOG_ERR(_log_tag, "PR timeout waiting motion done (%d ms)", timeout_ms);
+		return true;
 	}
 
-	LOG_ERR(_log_tag, "PR timeout waiting motion done (%d ms)", timeout_ms);
+	LOG_ERR(_log_tag, "PR trigger had no effect after %d attempts", trigger_retry_max);
 	return true;
 }
 
@@ -211,8 +300,9 @@ bool DM2J_RS570::PR_move_cm_trigger_all(int pr_num)
 			return true;
 		}
 
-		if (debug_mode)
-			print_status(st);
+		// [2026-05-22] per-poll status DBG print disabled — too verbose.
+		//if (debug_mode)
+		//	print_status(st);
 
 		bool cmd_done = st & 0x0010;
 		bool path_done = st & 0x0020;

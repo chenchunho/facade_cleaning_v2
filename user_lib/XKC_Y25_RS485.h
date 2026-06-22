@@ -64,15 +64,21 @@ public:
 
     //=========== config ===========
 
-    // Set new slave address (1..254). Writes register 0x0003.
+    // Set new slave address (1..254). Per manual §1.6: directed write to reg
+    // 0x0004 (NOT 0x0003 — that's the read-current-addr reg; the SET operation
+    // reg is at +1 from the read reg, an XKC firmware quirk verified bench
+    // 2026-05-20). No echo expected — sensor LED flashes on success, verify by
+    // re-reading at the new address.
     // CAUTION: after this call the sensor responds at the new address — current
-    // _slaveID member is NOT updated automatically; caller should re-init() if it
-    // wants to keep talking to the same physical sensor.
+    // _slaveID member is NOT updated automatically; caller should re-init() if
+    // it wants to keep talking to the same physical sensor.
     bool set_address(uint8_t new_addr);
 
     // Set baud rate by code (per manual table §1.9): 5=2400, 6=4800, 7=9600,
     // 8=14400, 9=19200, A=28800, C=57600, D=115200, E=128000, F=256000.
-    // Writes register 0x0004. Sensor restarts UART; LED flashes on success.
+    // Per manual §1.8: directed write to reg 0x0005 (NOT 0x0004 — same operation-
+    // reg-vs-read-reg quirk as set_address). Sensor restarts UART; LED flashes
+    // on success; no reply expected.
     bool set_baud_rate(uint8_t code);
 
     //=========== utility ===========

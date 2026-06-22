@@ -71,14 +71,13 @@ bool JC_100_METER::send_command(uint8_t func, uint16_t reg, uint16_t data, std::
 
 	LOG_HEX(_log_tag, "TX", frame, 8);
 
-	if (!client->sendData((const char*)frame, 8, 500)) {
-		error_flag = 1;
-		return true;
-	}
-
+	// Atomic transaction — see TCP_client::sendAndReceive doc. JC100 shares
+	// the RS485_3 gateway with DY500 weight + PQW relay; multiple readers
+	// must not interleave Modbus on the same bus.
 	char rxBuf[256];
-	int len = client->receiveData(rxBuf, 256, 1000);
-
+	int len = client->sendAndReceive((const char*)frame, 8,
+	                                 rxBuf, 256,
+	                                 500, 1000);
 	if (len < 5) {
 		error_flag = 1;
 		LOG_ERR(_log_tag, "TIMEOUT");

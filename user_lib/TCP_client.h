@@ -35,6 +35,24 @@ public:
 	bool connectToServer(const std::string& ip, int port, bool debug = false);
 	bool sendData(const char* buf, int len, int timeout_ms);
 	int receiveData(char* buf, int bufSize, int timeout_ms);
+
+	// Atomic Modbus-style transaction. Holds the internal socket mutex from
+	// drain → send → recv so a concurrent caller on the same TCP_client cannot
+	// interleave its own send between our send and recv (which would corrupt
+	// both replies in the kernel TCP buffer).
+	//
+	// Required when multiple threads share one TCP_client for distinct Modbus
+	// devices on the same RS485 gateway — e.g. Crane_control_PI's cli_A serves
+	// SE3 left + SD76 left + SD76 middle + CLV900, accessed from cmd_hold,
+	// motion_rope and meter_loop threads. Pre-existing send/recv pair pattern
+	// was racy because the mutex was released between the two calls.
+	//
+	// Returns received byte count on success (>0), 0 on send failure,
+	// -1 on disconnect or recv timeout.
+	int sendAndReceive(const char* tx_buf, int tx_len,
+	                   char* rx_buf, int rx_size,
+	                   int send_timeout_ms, int recv_timeout_ms);
+
 	int available();
 	void close();
 	bool isConnected() { return connected; }

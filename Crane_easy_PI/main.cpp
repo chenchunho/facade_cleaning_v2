@@ -324,9 +324,10 @@ int main() {
     else
         std::cout << "[OK] gateway " << GW_22_IP << "\n";
 
-    // [TEST MODE 2026-04-21] debug=true for on-site troubleshooting; revert to false post-test.
-    relay.init(cli_21, RELAY_SLAVE, 16, true);    // total_relay=16, debug=true (was false)
-    dy.init(cli_22, DY500_SLAVE, true);           // debug=true (was false)
+    // [REVERTED 2026-05-05] debug=false — debug=true 在 weight_loop 1ms cycle 下會刷屏
+    // 卡 stdout/stderr backpressure，導致 TCP server accept 反應慢、web 連不上。
+    relay.init(cli_21, RELAY_SLAVE, 16, false);   // debug=false
+    dy.init(cli_22, DY500_SLAVE, false);          // debug=false
 
     // Safe startup: both relays off
     relay.controlRelay(PIN_UP,   false);

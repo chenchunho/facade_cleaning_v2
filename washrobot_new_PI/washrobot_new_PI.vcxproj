@@ -77,6 +77,7 @@
   <ItemGroup>
     <ClCompile Include="..\user_lib\DM2J_RS570.cpp" />
     <ClCompile Include="..\user_lib\DY_500_weight_sensor.cpp" />
+    <ClCompile Include="..\user_lib\FrameAnalyzer.cpp" />
     <ClCompile Include="..\user_lib\JC_100_METER.cpp" />
     <ClCompile Include="..\user_lib\PQW_IO_16O_RLY.cpp" />
     <ClCompile Include="..\user_lib\Serial_port.cpp" />
@@ -84,12 +85,14 @@
     <ClCompile Include="..\user_lib\TCP_server.cpp" />
     <ClCompile Include="..\user_lib\WASH_ROBOT.cpp" />
     <ClCompile Include="..\user_lib\WT901BC_TTL.cpp" />
+    <ClCompile Include="..\user_lib\XKC_Y25_RS485.cpp" />
     <ClCompile Include="..\user_lib\ZDT_motor_control.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\user_lib\DM2J_RS570.h" />
     <ClInclude Include="..\user_lib\DY_500_weight_sensor.h" />
+    <ClInclude Include="..\user_lib\FrameAnalyzer.h" />
     <ClInclude Include="..\user_lib\JC_100_METER.h" />
     <ClInclude Include="..\user_lib\PQW_IO_16O_RLY.h" />
     <ClInclude Include="..\user_lib\Serial_port.h" />
@@ -97,6 +100,7 @@
     <ClInclude Include="..\user_lib\TCP_server.h" />
     <ClInclude Include="..\user_lib\WASH_ROBOT.h" />
     <ClInclude Include="..\user_lib\WT901BC_TTL.h" />
+    <ClInclude Include="..\user_lib\XKC_Y25_RS485.h" />
     <ClInclude Include="..\user_lib\ZDT_motor_control.h" />
     <ClInclude Include="..\user_lib\log_utils.h" />
   </ItemGroup>
