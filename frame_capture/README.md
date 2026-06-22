@@ -22,7 +22,7 @@
 
 ## 啟動
 
-預設值適用現有硬體（Xiongmai 相機 @ 192.168.1.10，子碼流）：
+預設值適用現有硬體（Xiongmai 相機 @ **192.168.1.110 = cam1 / 192.168.1.111 = cam2**，子碼流）：
 
 ```bash
 python3 frame_capture.py
@@ -32,7 +32,7 @@ python3 frame_capture.py
 
 ```bash
 python3 frame_capture.py \
-  --url "rtsp://192.168.1.10:554/user=admin&password=&channel=1&stream=1.sdp?" \
+  --url "rtsp://192.168.1.110:554/user=admin&password=&channel=1&stream=1.sdp?" \
   --out /tmp/cam_latest.jpg \
   --fps 10 \
   --quality 85
@@ -48,6 +48,9 @@ python3 frame_capture.py \
 | `--quality` | `85` | JPEG quality 0~100 |
 | `--reconnect-delay` | `2.0` | 斷線重試間隔（秒）|
 | `--log-interval` | `10.0` | stderr 統計印出間隔（秒）|
+| `--cam-id` | `cam1` | overlay 文字 + HTTP path 用的 ID |
+| `--http-port` | `5004` | HTTP server port (`/mjpeg/<id>` + `/snap/<id>`)，0=disable |
+| `--http-bind` | `0.0.0.0` | HTTP 監聽介面 |
 
 ---
 
@@ -57,7 +60,7 @@ python3 frame_capture.py \
 
 ```bash
 ffmpeg -rtsp_transport tcp \
-  -i "rtsp://192.168.1.10:554/user=admin&password=&channel=1&stream=1.sdp?" \
+  -i "rtsp://192.168.1.110:554/user=admin&password=&channel=1&stream=1.sdp?" \
   -frames:v 1 -f image2 /tmp/cam_test.jpg -y
 
 file /tmp/cam_test.jpg        # 應為 "JPEG image data"
@@ -71,7 +74,7 @@ python3 frame_capture.py
 
 預期輸出：
 ```
-[frame_capture] target rtsp://192.168.1.10:554/...
+[frame_capture] target rtsp://192.168.1.110:554/...
 [frame_capture] output /tmp/cam_latest.jpg @ max 10 fps (jpeg q=85)
 [frame_capture] connected
 [frame_capture] writes=98 (9.8 fps), latest_age=42ms
@@ -89,6 +92,40 @@ watch -n 0.5 'ls -la /tmp/cam_latest.jpg'
 ### 4. 拔網線測自動重連
 
 拔掉攝影機網線 → 應該看到 `read fail` → `reconnecting`；插回 → 應該自動 `connected`。
+
+### 5. 測 HTTP server（給 web GUI 用）
+
+frame_capture.py 內建 HTTP server，crane Pi 的 `web_backend/server.js` 反代到這裡：
+
+```bash
+# 在 washrobot Pi 上本機測
+curl -s -o /tmp/snap.jpg http://localhost:5004/snap/cam1
+file /tmp/snap.jpg                # 應為 JPEG image data
+
+# health check
+curl http://localhost:5004/health
+# → ok
+
+# 從 crane Pi 測（驗證跨機通）
+curl -s -o /tmp/snap.jpg http://192.168.1.1100:5004/snap/cam1
+```
+
+跨機架構：
+```
+Camera (192.168.1.110:554)
+   ↓ RTSP
+frame_capture.py (washrobot Pi .100, port 5004)
+   ├─ /mjpeg/cam1   ← multipart push
+   └─ /snap/cam1    ← single JPEG
+       ↑ HTTP proxy
+       │
+web_backend/server.js (crane Pi .101, port 8080)
+   ├─ /mjpeg/cam1   → proxy to .100:5004
+   └─ /snap/cam1    → proxy to .100:5004
+       ↑
+       │
+   Browser  http://crane.pi:8080/
+```
 
 ---
 
@@ -128,7 +165,7 @@ tail -f /var/log/frame_capture.log
 
 | 現象 | 可能原因 | 解法 |
 |---|---|---|
-| `open fail` 一直重試 | 相機不通 / 錯 IP / 錯帳密 | `ping 192.168.1.10`、檢查 URL |
+| `open fail` 一直重試 | 相機不通 / 錯 IP / 錯帳密 | `ping 192.168.1.110`、檢查 URL |
 | `read fail` 頻繁 | 網路不穩 / 相機 CPU 過熱 | 確認 PoE Switch 正常 |
 | fps 遠低於 10 | 子碼流本身 fps 低 | 改用主碼流（`stream=0`）但會吃更多 CPU |
 | latest_age 飆高（> 1000ms）| 寫檔卡住 / 磁碟滿 | `df -h`、看 `/tmp` 是否可寫 |
