@@ -3,3 +3,11 @@ Debug/
 doc/
 .claude/settings.local.json
 bash.exe.stackdump
+
+# Build artifacts
+Crane_control_PI/obj/
+cleaning_arm/bin/
+cleaning_arm/motor_api
+
+# bench frame_capture test data (large image files)
+frame_capture/test/
