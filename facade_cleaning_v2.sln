@@ -3,7 +3,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio 15
 VisualStudioVersion = 15.0.36324.19
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "washrobot_new_PI", "washrobot_new_PI\washrobot_new_PI.vcxproj", "{DC920873-C5F4-44A5-8485-682000C12880}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "facade_cleaning_v2", "facade_cleaning_v2\facade_cleaning_v2.vcxproj", "{DC920873-C5F4-44A5-8485-682000C12880}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "crane_control_PI", "Crane_control_PI\Crane_control_PI.vcxproj", "{7DBBDCCD-2C95-4406-8AA6-C5DEB68094D8}"
 EndProject

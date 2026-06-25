@@ -15,7 +15,7 @@
 #   ↑ Enter          重開剛剛關的程式（recall last command）
 #
 # 路徑覆蓋（預設依 .claude/runbook.md 的 deploy 路徑）：
-#   WR_BIN=/path/to/washrobot_new_PI ./scripts/wr.sh start
+#   WR_BIN=/path/to/facade_cleaning_v2 ./scripts/wr.sh start
 #   WR_CAM=/path/to/frame_capture.py ./scripts/wr.sh start
 #
 # 攝影機 IP 覆蓋（預設 cam1=.110、cam2=.111；2026-05-21 從 .10 改）：
@@ -25,7 +25,7 @@ set -u
 
 SESSION="wr"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-WR_BIN="${WR_BIN:-$HOME/washrobot_new_PI/bin/ARM/Release/washrobot_new_PI}"
+WR_BIN="${WR_BIN:-$HOME/facade_cleaning_v2/bin/ARM/Release/facade_cleaning_v2}"
 WR_CAM="${WR_CAM:-$ROOT/frame_capture/frame_capture.py}"
 CAM1_IP="${CAM1_IP:-192.168.1.110}"
 CAM2_IP="${CAM2_IP:-192.168.1.111}"

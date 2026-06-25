@@ -14,16 +14,16 @@
 ```bash
 # crane Pi (192.168.1.101)
 ssh pi@192.168.1.101
-cd ~/washrobot_new_PI       # repo
+cd ~/facade_cleaning_v2       # repo
 chmod +x scripts/*.sh       # 第一次用要給執行權限
 ./scripts/crane.sh start    # 開 Crane_control_PI + web_backend + 一個空 shell
 ./scripts/crane.sh attach   # 進去看 log
 
 # washrobot Pi (192.168.1.100)
 ssh pi@192.168.1.100
-cd ~/washrobot_new_PI
+cd ~/facade_cleaning_v2
 chmod +x scripts/*.sh
-./scripts/wr.sh start       # 開 washrobot_new_PI + frame_capture + 一個空 shell
+./scripts/wr.sh start       # 開 facade_cleaning_v2 + frame_capture + 一個空 shell
 ./scripts/wr.sh attach
 ```
 
@@ -41,14 +41,14 @@ chmod +x scripts/*.sh
 **路徑覆蓋**：預設用本節下面手動段落寫的 deploy 路徑（`~/<project>/bin/ARM/Release/...`）。若路徑不一樣：
 
 ```bash
-WR_BIN=/path/to/washrobot_new_PI ./scripts/wr.sh start
+WR_BIN=/path/to/facade_cleaning_v2 ./scripts/wr.sh start
 CRANE_BIN=/path/to/Crane_control_PI WEB_DIR=/path/to/web_backend ./scripts/crane.sh start
 ```
 
 **測試模式吊車**（crane_shim 取代主吊車）：
 
 ```bash
-CRANE_BIN="python3 $HOME/washrobot_new_PI/crane_shim/crane_shim.py" \
+CRANE_BIN="python3 $HOME/facade_cleaning_v2/crane_shim/crane_shim.py" \
   ./scripts/crane.sh start
 ```
 
@@ -78,7 +78,7 @@ node server.js
 
 ```bash
 # Terminal 1 改跑 shim（取代 Crane_control_PI）
-cd ~/washrobot_new_PI/crane_shim
+cd ~/facade_cleaning_v2/crane_shim
 python3 crane_shim.py --rate-down 3.0 --rate-up 3.0
 # → 印出 "[shim] ready :5002"
 # Terminal 2 (web_backend) 照跑不變
@@ -90,8 +90,8 @@ python3 crane_shim.py --rate-down 3.0 --rate-up 3.0
 
 ```bash
 ssh pi@192.168.1.100
-cd ~/washrobot_new_PI/bin/ARM/Release
-./washrobot_new_PI
+cd ~/facade_cleaning_v2/bin/ARM/Release
+./facade_cleaning_v2
 # → 印出 "[OK] command server :5001"
 # 會自動 lazy connect crane :5002（連不到會 WARN 但不擋 boot）
 ```

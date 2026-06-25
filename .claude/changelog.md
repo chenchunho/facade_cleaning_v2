@@ -13,6 +13,38 @@
 
 ---
 
+## 2026-06-25b Claude (Sadie)
+### 修改檔案
+- `.claude/runbook.md` — 6 處 RPi 部署目錄 `~/washrobot_new_PI/` → `~/facade_cleaning_v2/` + binary `./washrobot_new_PI` → `./facade_cleaning_v2`
+- `.claude/easy_crane_test_mode.md` — 3 處（crane_shim 路徑、washrobot bin/binary、TEST MODE grep 的 source 資料夾名）
+- `scripts/crane.sh` — 註解內 crane_shim 部署路徑範例
+### 原因
+接續 2026-06-25a，user 要求 RPi 端部署目錄（兩台 Pi clone 的 repo 目錄 `~/washrobot_new_PI/`）也跟著改名 facade_cleaning_v2。
+### 影響
+- 部署到 RPi 時 repo clone 目錄請用 `~/facade_cleaning_v2/`（runbook / easy_crane_test_mode 已對齊）。
+- **刻意保留（待 user 決定）**：`.claude/gen_deploy_pdf.py` 用的是另一套 `~/washrobot_build/washrobot_new_PI/` build 暫存方案 + 過時開發機路徑，且改它要重跑 fpdf 重產 `deploy_and_test.pdf` 才同步，故先不動。
+- **依舊不動**：README 的 GitHub 上游 repo URL（v1 身分）、changelog 與舊 work_log 歷史條目、CLAUDE.md/motion_flow 描述原始碼專案名的散文。
+
+---
+
+## 2026-06-25a Claude (Sadie)
+### 修改檔案
+- `washrobot_new_PI/` → `facade_cleaning_v2/`（資料夾，git mv）
+- `washrobot_new_PI.vcxproj` / `.vcxproj.user` → `facade_cleaning_v2.*`（git mv）
+- `washrobot_new_PI.sln` → `facade_cleaning_v2.sln`（git mv）+ 內部 Project 名稱/路徑引用更新
+- `facade_cleaning_v2/facade_cleaning_v2.vcxproj` — `<RootNamespace>` 改 facade_cleaning_v2
+- `facade_cleaning_v2/main.cpp` — header 註解 + 啟動 banner 字串改新名
+- `scripts/wr.sh` — 預設 `WR_BIN` 路徑/binary 名 + 註解範例改 facade_cleaning_v2
+### 原因
+v2 fork 後主程式專案仍叫 washrobot_new_PI，改成跟 repo 根目錄同名 facade_cleaning_v2。
+ProjectGuid 保留不動（維持 VS 識別、sln 對應）。
+### 影響
+- **輸出 binary 名稱變 `facade_cleaning_v2`**（vcxproj 無 TargetName，吃專案名）。RPi 部署目錄/binary 名都變，重 deploy 時注意。
+- VS 要用新的 `facade_cleaning_v2.sln` 重開。
+- **刻意不動**：CLAUDE.md/runbook/work_log 等文件的舊名 + `~/washrobot_new_PI/` 部署路徑、`scripts/crane.sh:17` 的 crane_shim 部署路徑範例（屬 RPi 部署目錄選擇，待 user 決定是否跟改）。
+
+---
+
 ## 2026-06-12b Claude (Sadie)
 ### 修改檔案
 - `user_lib/WASH_ROBOT.cpp` 構造函式 — **取消註解** bystanders PR1=rpm=0 safe setup (3 行 + log)

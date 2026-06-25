@@ -1,5 +1,5 @@
 // ============================================================================
-// washrobot_new_PI — TCP command server + dispatch
+// facade_cleaning_v2 — TCP command server + dispatch
 //
 // All hardware, motion logic, and background threads live in WashRobot (WASH_ROBOT.h/.cpp).
 // This file owns only the TCP server and routes incoming commands to robot.cmd_*().
@@ -420,7 +420,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::cout << "HI~ [washrobot_new_PI] starting...\n";
+    std::cout << "HI~ [facade_cleaning_v2] starting...\n";
 
     // Wire EVT broadcast before calling init (background threads may fire events during init)
     robot.evt_cb = [](const std::string& line) {

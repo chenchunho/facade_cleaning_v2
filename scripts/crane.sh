@@ -14,7 +14,7 @@
 #   WEB_DIR=/path/to/web_backend          ./scripts/crane.sh start
 #
 # 若要跑 crane_shim（測試模式）取代主吊車，自己改 CRANE_BIN 指向 shim：
-#   CRANE_BIN="python3 $HOME/washrobot_new_PI/crane_shim/crane_shim.py" \
+#   CRANE_BIN="python3 $HOME/facade_cleaning_v2/crane_shim/crane_shim.py" \
 #     ./scripts/crane.sh start
 
 set -u

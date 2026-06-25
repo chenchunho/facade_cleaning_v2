@@ -37,7 +37,7 @@
   <PropertyGroup Label="Globals">
     <ProjectGuid>{dc920873-c5f4-44a5-8485-682000c12880}</ProjectGuid>
     <Keyword>Linux</Keyword>
-    <RootNamespace>washrobot_new_PI</RootNamespace>
+    <RootNamespace>facade_cleaning_v2</RootNamespace>
     <MinimumVisualStudioVersion>15.0</MinimumVisualStudioVersion>
     <ApplicationType>Linux</ApplicationType>
     <ApplicationTypeRevision>1.0</ApplicationTypeRevision>

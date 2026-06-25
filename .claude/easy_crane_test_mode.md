@@ -54,7 +54,7 @@
 
 ```bash
 # Crane Pi (.101) — Terminal 1
-cd ~/washrobot_new_PI/crane_shim
+cd ~/facade_cleaning_v2/crane_shim
 python3 crane_shim.py --rate-down 3.0 --rate-up 3.0
 # → [shim] ready :5002
 
@@ -65,7 +65,7 @@ cd ~/washrobot_web_backend && node server.js
 cd ~/Crane_easy_PI/bin/ARM/Release && ./Crane_easy_PI
 
 # Washrobot Pi (.100)
-cd ~/washrobot_new_PI/bin/ARM/Release && ./washrobot_new_PI
+cd ~/facade_cleaning_v2/bin/ARM/Release && ./facade_cleaning_v2
 
 # 瀏覽器
 http://192.168.1.101:8080
@@ -194,7 +194,7 @@ init → attach → run 3  →（觀察）→ pause →（人工補放水管線�
 
 > 每個改動旁都標了 `[TEST MODE 2026-04-21]` 註解，grep `TEST MODE` 可快速找到所有還原點：
 > ```bash
-> grep -rn "TEST MODE" user_lib/ Crane_easy_PI/ washrobot_new_PI/
+> grep -rn "TEST MODE" user_lib/ Crane_easy_PI/ facade_cleaning_v2/
 > ```
 
 ### 9b. 執行環境改動
