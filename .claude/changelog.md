@@ -13,6 +13,21 @@
 
 ---
 
+## 2026-07-07b Claude (Sadie) — 規範記錄（尚未動 code）
+### 修改檔案
+- `.claude/v2_app_redesign_plan.md` §2 — PQW 左右閥 CH 腳位由「待定」→ 確認值
+- memory `project_v2_mechanical_gait` — 補 PQW 通道細節
+### 原因
+user 2026-07-07 確認 v2 PQW（@ 192.168.1.22 slave 12）實際接線。
+### 內容
+- **CH1 = 右腳電磁閥、CH2 = 抽真空幫浦 dp0105（v1 是 CH1）、CH3 = 左腳電磁閥**
+- v1 三分區 feet=CH2 / body=CH3 / center=CH4 作廢，改左右 2 區
+- **推桿 slave 左右歸屬（修正先前誤記）：右腳{1,2}（上=1/下=2）、左腳{3,4}（上=3/下=4）**。
+  group_slaves_ 改 右{1,2}/左{3,4}；plan §2/§4 已同步（CH1右閥↔{1,2}、CH3左閥↔{3,4} 一致）
+- ⚠ **code 尚未套用**：套用等於 step-2 閥門重構（header 常數 + `group_valve_ch_`
+  + `attach/step/realign` 所有 `CH_VALVE_FEET/BODY/CENTER` 呼叫點）。
+  單改 `CH_PUMP=2` 會跟舊 `CH_VALVE_FEET=2` 撞號，故整批一起做，待 user 拍板
+
 ## 2026-07-07a Claude (Sadie)
 ### 修改檔案
 - `Crane_control_PI/main.cpp` — 新增 `cmd_side_measured()` + dispatcher 分流

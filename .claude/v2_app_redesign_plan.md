@@ -29,8 +29,8 @@ v2 = **單側吊機繩放/收、SD76 計米量測位移**。連帶作廢：
 
 | 項目 | v1 | v2 |
 |---|---|---|
-| `group_slaves_` | feet{1,3,4,2} body{5,6,7,8} center{9} | **left{1,2} / right{3,4}** |
-| `group_valve_ch_` | feet=CH2 body=CH3 center=CH4 | **left=CH_LEFT / right=CH_RIGHT**（腳位待定）|
+| `group_slaves_` | feet{1,3,4,2} body{5,6,7,8} center{9} | **右{1,2} / 左{3,4}**（右腳 上=1/下=2、左腳 上=3/下=4，2026-07-07 user 確認）|
+| `group_valve_ch_` | feet=CH2 body=CH3 center=CH4 | **左=CH3 / 右=CH1**（PQW @ .22，2026-07-07 user 確認）|
 | `preset_extend_pulse_for_slave_` | 9 slave 各值 | **4 slave**（1-4，實測校）|
 | `cm_to_pulses_for_slave_` | feet 2857 / body 3000 pulses/cm | 4 顆實測（機構同腳組？待確認）|
 | `disabled_zdt_slaves_` | {9} | {}（無中心）|
@@ -46,8 +46,8 @@ v2 = **單側吊機繩放/收、SD76 計米量測位移**。連帶作廢：
 ## 4. attach() / step 流程
 
 ### attach()（懸空 → 四杯吸附，序列化左→右）
-1. 左閥 ON → `smart_extend_subset_("left", {1,2})` disable-seal → JC100 驗證
-2. 右閥 ON → `smart_extend_subset_("right", {3,4})` → 驗證
+1. 左閥 ON → `smart_extend_subset_("left", {3,4})` disable-seal → JC100 驗證
+2. 右閥 ON → `smart_extend_subset_("right", {1,2})` → 驗證
 3. `vacuum_check_("all")` → 補吸失敗杯
 4. **水平檢查**（IMU roll≈0 + |左繩長−右繩長|<tol）→ 單側微調校正
 5. 吊機放繩到目標張力（`crane_pay_out_to_weight_`）→ state=Attached
@@ -56,14 +56,14 @@ v2 = **單側吊機繩放/收、SD76 計米量測位移**。連帶作廢：
 ```
 左半週期：
  1. 驗證右側吸牢（vacuum_check_("right")）— 右撐住機體
- 2. 左閥 OFF → vacuum_wait_release_({1,2}) → pusher_two_stage_retract_({1,2}) 脫牆
+ 2. 左閥 OFF → vacuum_wait_release_({3,4}) → pusher_two_stage_retract_({3,4}) 脫牆
  3. crane_cmd_("pay_out_left <Δ>")  ← 左繩放 Δcm，crane 端計米閉環停
- 4. 左閥 ON → smart_extend_subset_("left",{1,2}) → 驗證吸附
+ 4. 左閥 ON → smart_extend_subset_("left",{3,4}) → 驗證吸附
 右半週期：
  5. 驗證左側吸牢
- 6. 右閥 OFF → vacuum_wait_release_({3,4}) → pusher_two_stage_retract_({3,4})
+ 6. 右閥 OFF → vacuum_wait_release_({1,2}) → pusher_two_stage_retract_({1,2})
  7. crane_cmd_("pay_out_right <Δ>")
- 8. 右閥 ON → smart_extend_subset_("right",{3,4}) → 驗證
+ 8. 右閥 ON → smart_extend_subset_("right",{1,2}) → 驗證
 收尾：
  9. 水平校正：IMU roll≈0 且 |左繩長−右繩長|<tol，否則單側微調
  10. // TODO 清洗 sweep（手臂未裝，先註解）

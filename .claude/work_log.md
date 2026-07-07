@@ -30,6 +30,7 @@ v2 是新硬體 fork（機械大改）。這幾個 session 累積：專案改名
 
 1. ✅ **第 1 步 crane 單側量測指令**（本次做完）：`pay_out_left/right <cm>`、`retract_left/right <cm>`
 2. ⏭ **第 2 步**：WASH_ROBOT group config（左{1,2}/右{3,4}、2 真空區、拆中心杯）+ `init()`（拆 DM2J/輪組/中心杯）
+   - 📌 PQW 通道已確認（2026-07-07 user）：**CH1=右腳閥 / CH2=幫浦 / CH3=左腳閥**（@ .22 slave 12）。已記 plan §2 + memory + changelog 07-07b，**code 未套用**（單改 CH_PUMP=2 會跟舊 CH_VALVE_FEET=2 撞號，整批隨第 2 步一起改）
 3. 第 3 步 `attach()`（序列化 左→右）
 4. 第 4 步 `do_step_down_` / `do_step_up_`（左半+右半，呼叫第 1 步的 crane 量測指令）
 5. 第 5 步 水平校正整合（IMU + 繩長差）
