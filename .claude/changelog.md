@@ -13,6 +13,29 @@
 
 ---
 
+## 2026-07-07a Claude (Sadie)
+### 修改檔案
+- `Crane_control_PI/main.cpp` — 新增 `cmd_side_measured()` + dispatcher 分流
+### 原因
+v2 應用層重寫第 1 步（`.claude/v2_app_redesign_plan.md` §5 / §9）：step 步態需要
+「單側放/收繩 Δcm、SD76 計米量到就停」，crane 端原本只有雙繩同步(`pay_out`/`retract`)
++ raw 單側 on/off，缺量測式單側移動。
+### 內容
+- `pay_out_left|right <cm>` / `retract_left|right <cm>`：跑單側 vfd 到該側計米前進/後退
+  <cm> 停。安全檢查對齊 motion_rope：tension 過載/失衡、meter-death、vfd fault、abort、
+  timeout；retract 遇張力到 `retract_tension_stop_kg` 視為正常軟停
+- dispatcher：`pay_out_left/right`、`retract_left/right` 依參數分流 —
+  `on|off`→`cmd_manual`(raw)、數字→`cmd_side_measured`(量測)
+- 複用 `reliable_start_one`/`reliable_stop_one`/`read_tensions`/
+  `tension_safety_check_values`/`broadcast_tension_alarm`/`g_length_*`
+### 待辦 / 注意
+- **未編譯驗證**（同 MH300，需 remote build）
+- 未加 MotionScope（GUI motion-active 狀態）— dispatch 為序列執行，無互斥問題，GUI 狀態列 TODO
+- washrobot 端還沒呼叫（v2 plan 第 4 步 do_step 才接）
+- 方向靠 `VFD_DIR_PAY_OUT/RETRACT` 巨集 — 實機要驗（MH300 未驗）
+
+---
+
 ## 2026-07-03b Claude (Sadie)
 ### 修改檔案
 - `Crane_control_PI/Crane_control_PI.vcxproj` — 加入 `MH300_inverter.cpp/.h`（SE3 檔暫留並存）

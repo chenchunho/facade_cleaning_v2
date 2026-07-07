@@ -1,6 +1,52 @@
 # Work Log
 
-## 2026-06-09 — 📌 SESSION HANDOFF（下次接手讀這條）
+## 2026-07-07 — 📌 v2 SESSION HANDOFF（下次接手讀這條）
+
+> **規範權威：** `.claude/v2_app_redesign_plan.md`（應用層重寫）+ `.claude/mh300_migration_plan.md`（吊機變頻器）+ memory `project_v2_mechanical_gait` / `project_new_crane_vfd_mh300`
+
+### v2 目前在哪
+
+v2 是新硬體 fork（機械大改）。這幾個 session 累積：專案改名 → 吊機變頻器換 MH300 → 開始 v2 應用層重寫。**所有程式改動都尚未編譯**（VS Linux 交叉編譯要 remote build，本機編不了）。
+
+### 已完成（git 狀態）
+
+| 項目 | commit | 狀態 |
+|---|---|---|
+| 專案改名 washrobot_new_PI → facade_cleaning_v2（含 .sln/vcxproj/部署路徑）| `a2e0704` | 已 push |
+| MH300 driver + 吊機 SE3→MH300 遷移 + GUI se3_→vfd_ + 2 份計畫文件 | `1829964` | 本機、未 push、**未編譯** |
+| v2 重寫**第 1 步**：crane 端單側量測放/收繩 `cmd_side_measured` | 本次 commit | **未編譯** |
+
+### v2 機械架構（user 口述 + 決策，2026-07-07）
+
+- 4 吸盤：推桿 slave **1,2=左 / 3,4=右**（單顆機構同 v1：ZDT 推桿+真空+JC100）
+- 真空 **2 區**（左閥/右閥），無中心杯
+- **無 DM2J**（無滑軌、無輪組）、**無橫向**（只垂直上下）
+- 垂直位移 = **單側吊機繩放/收 + SD76 計米量測**（取代 v1 的滑軌）
+- 水平 = IMU + 左右繩長差
+- 步態（向下一步）：4杯吸附水平 → 放左2杯+放左繩+重吸左 → 放右2杯+放右繩+重吸右 → 完成。**不變式：至少一側撐住，絕不4杯全放**
+- 清洗手臂仍要但**未裝** → step 收尾 sweep 先註解
+
+### 下次要做的（照 v2_app_redesign_plan.md §9）
+
+1. ✅ **第 1 步 crane 單側量測指令**（本次做完）：`pay_out_left/right <cm>`、`retract_left/right <cm>`
+2. ⏭ **第 2 步**：WASH_ROBOT group config（左{1,2}/右{3,4}、2 真空區、拆中心杯）+ `init()`（拆 DM2J/輪組/中心杯）
+3. 第 3 步 `attach()`（序列化 左→右）
+4. 第 4 步 `do_step_down_` / `do_step_up_`（左半+右半，呼叫第 1 步的 crane 量測指令）
+5. 第 5 步 水平校正整合（IMU + 繩長差）
+6. 第 6 步 GUI 對應
+
+### ⚠ 開機第一件事：建議先 remote build 驗證 crane 端
+
+第 1 步 + MH300 遷移都改在 `Crane_control_PI`（跟 WASH_ROBOT 是獨立編譯單元）。往下大改 WASH_ROBOT 前，**先 build `Crane_control_PI` 確認綠燈**，隔離問題。有編譯錯我再修。
+另有 MH300 實機必驗清單（方向/電流scale/2101H run bit/fault code）見 `mh300_migration_plan.md`。
+
+### 未 push 提醒
+
+`1829964` + 本次 commit 都在本機 main、**未 push**（因未編譯）。build 綠燈後再決定 push。
+
+---
+
+## 2026-06-09 — 📌 SESSION HANDOFF（v1 舊交接，v2 已由上方取代）
 
 > **規範權威：** `changelog.md` 2026-06-05k~o + 2026-06-09a~b（這一週累積的程式改動）
 

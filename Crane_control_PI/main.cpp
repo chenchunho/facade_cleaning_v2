@@ -50,8 +50,10 @@
 //
 // Command TCP server @ :5002 (line-based text protocol, multi-client)
 //   pay_out <cm> / retract <cm>       # 雙繩 + 中間管線同步 (× K)
-//   pay_out_left|right <on|off>       # 個別控制（debug）
+//   pay_out_left|right <on|off>       # 個別控制（debug，無張力安全）
 //   retract_left|right <on|off>
+//   pay_out_left|right <cm>           # 單側量測放繩：該側計米前進 cm 停 (v2 step)
+//   retract_left|right <cm>           # 單側量測收繩：該側計米後退 cm 停 (v2 step)
 //   up|down on|off                    # hold-to-pull 雙繩同時
 //   up_left|up_right on|off           # hold 個別
 //   down_left|down_right on|off
@@ -2681,6 +2683,101 @@ static std::string cmd_manual(const std::string& dir, const std::string& onoff) 
     return "OK\n";
 }
 
+// Measured single-side rope move (v2 step gait). Runs ONE rope inverter until
+// that side's SD76 meter advances `cm`, then stops. Unlike cmd_manual (raw
+// on/off, bypasses safety), this closes the loop on the meter and enforces the
+// same safety set as motion_rope (tension overload, meter-death, fault, abort,
+// timeout). Used by the v2 washrobot step: one side descends/ascends by cm
+// while the other 2 cups anchor the body.
+//   cmd ∈ {pay_out_left, pay_out_right, retract_left, retract_right}
+// NOTE: dispatch is serial (one command at a time), so no MotionScope mutual-
+// exclusion is needed here; GUI motion-active state is a TODO (see cmd_hold).
+static std::string cmd_side_measured(const std::string& cmd, int cm) {
+    if (cm <= 0) return "ERR expected_positive_cm\n";
+
+    bool side_left, is_retract;
+    if      (cmd == "pay_out_left")  { side_left = true;  is_retract = false; }
+    else if (cmd == "pay_out_right") { side_left = false; is_retract = false; }
+    else if (cmd == "retract_left")  { side_left = true;  is_retract = true;  }
+    else                             { side_left = false; is_retract = true;  } // retract_right
+
+    MH300_inverter&       inv       = side_left ? vfd_left : vfd_right;
+    std::atomic<int32_t>& len       = side_left ? g_length_left : g_length_right;
+    std::atomic<bool>&    len_valid = side_left ? g_length_left_valid : g_length_right_valid;
+    std::atomic<bool>&    fault     = side_left ? g_vfd_left_fault : g_vfd_right_fault;
+    const bool  dev_ok   = side_left ? g_dev_vfd_left.load()   : g_dev_vfd_right.load();
+    const bool  meter_ok = side_left ? g_dev_meter_left.load() : g_dev_meter_right.load();
+    const char* side     = side_left ? "left" : "right";
+
+    if (!dev_ok)           return std::string("ERR vfd_")   + side + "_unavailable\n";
+    if (!meter_ok)         return std::string("ERR meter_") + side + "_unavailable\n";
+    if (!len_valid.load()) return std::string("ERR meter_") + side + "_read_fail\n";
+
+    const int32_t base    = len.load();
+    const bool    pay_out = !is_retract;
+
+    if (reliable_start_one(inv, g_vfd_motion_hz.load(), pay_out)) {
+        reliable_stop_one(inv);
+        return "ERR vfd_start_fail\n";
+    }
+
+    const auto  start = std::chrono::steady_clock::now();
+    std::string abort_reason;
+    int64_t     invalid_since = 0;
+
+    while (true) {
+        if (abort_flag.load()) { abort_reason = "aborted"; break; }
+
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        if (elapsed > MOTION_TIMEOUT_MS) { abort_reason = "timeout"; break; }
+
+        if (fault.load()) { abort_reason = std::string("vfd_") + side + "_fault"; break; }
+
+        // Meter-death: if this side's meter stays invalid past grace, abort —
+        // else the distance check never fires and the motor runs uncontrolled.
+        if (!len_valid.load()) {
+            if (invalid_since == 0) invalid_since = elapsed;
+            else if (elapsed - invalid_since > METER_LOST_GRACE_MS) {
+                abort_reason = std::string("meter_") + side + "_lost"; break;
+            }
+        } else {
+            invalid_since = 0;
+            if (std::abs(len.load() - base) >= cm) break;   // target reached — success
+        }
+
+        // Tension safety: read both sides each iter (read failure → skip iter).
+        double l_kg = 0, r_kg = 0;
+        if (!read_tensions(l_kg, r_kg)) {
+            const double this_kg = side_left ? l_kg : r_kg;
+            // Retract soft-stop: rising tension = rope taut = slack collected →
+            // finish NORMALLY (not an alarm). pay_out is exempt.
+            if (is_retract && this_kg >= g_retract_tension_stop_kg.load()) {
+                std::cout << "[" << cmd << "] soft tension stop " << this_kg << "kg\n";
+                break;   // success (soft stop)
+            }
+            // Hard overload (either side over single-side limit / imbalance).
+            const std::string alarm = tension_safety_check_values(l_kg, r_kg);
+            if (!alarm.empty()) { abort_reason = "tension_" + alarm; break; }
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    reliable_stop_one(inv);
+
+    if (!abort_reason.empty()) {
+        if (abort_reason.compare(0, 8, "tension_") == 0) {
+            double l = 0, r = 0; read_tensions(l, r);
+            broadcast_tension_alarm(abort_reason.substr(8), l, r);
+        }
+        return "ERR " + abort_reason + "\n";
+    }
+    std::ostringstream ok;
+    ok << "OK moved=" << std::abs(len.load() - base) << "cm\n";
+    return ok.str();
+}
+
 static std::string cmd_middle_set(int rpm, const std::string& dir) {
     if (!g_dev_clv900.load()) return "ERR clv900_unavailable\n";
 
@@ -3673,9 +3770,15 @@ static std::string dispatch(const std::string& line) {
     }
     if (cmd == "pay_out_left" || cmd == "pay_out_right" ||
         cmd == "retract_left" || cmd == "retract_right") {
-        std::string onoff; iss >> onoff;
-        if (iss.fail()) return "ERR usage:<cmd>_<on|off>\n";
-        return cmd_manual(cmd, onoff);
+        std::string arg; iss >> arg;
+        if (iss.fail()) return "ERR usage:<cmd>_<on|off|cm>\n";
+        // "on"/"off" → raw manual hold (debug, bypasses tension safety).
+        // numeric  → measured move: run until this side's meter advances <cm>,
+        //            meter-closed-loop + tension safety (v2 step gait).
+        if (arg == "on" || arg == "off") return cmd_manual(cmd, arg);
+        int cm = 0; std::istringstream as(arg); as >> cm;
+        if (as.fail() || cm <= 0) return "ERR usage:<cmd>_<on|off|cm>\n";
+        return cmd_side_measured(cmd, cm);
     }
     if (cmd == "middle_set") {
         int rpm = 0; std::string dir;
