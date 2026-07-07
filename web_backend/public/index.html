@@ -508,7 +508,7 @@
     </div>
     <div class="row">
       <span class="label">同步:</span>
-      <button class="crane-action" data-tgt="crane" data-cmd="align_lengths" data-required="se3_left,se3_right,meter_left,meter_right,dsz_left,dsz_right">對齊左右繩長（以較長邊為準）</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="align_lengths" data-required="vfd_left,vfd_right,meter_left,meter_right,dsz_left,dsz_right">對齊左右繩長（以較長邊為準）</button>
     </div>
     <ul class="hint">
       <li>正常用「三條歸零（洗窗起點）」；個別零不會更新 home_ground</li>
@@ -586,15 +586,15 @@
     </ul>
     <div class="row">
       <span class="label">同時雙繩:</span>
-      <button id="btn-crane-up"   class="btn-hold primary crane-hold-btn" data-required="se3_left,se3_right">↑ 拉繩（按住）</button>
-      <button id="btn-crane-down" class="btn-hold primary crane-hold-btn" data-required="se3_left,se3_right">↓ 釋放繩（按住）</button>
+      <button id="btn-crane-up"   class="btn-hold primary crane-hold-btn" data-required="vfd_left,vfd_right">↑ 拉繩（按住）</button>
+      <button id="btn-crane-down" class="btn-hold primary crane-hold-btn" data-required="vfd_left,vfd_right">↓ 釋放繩（按住）</button>
     </div>
     <div class="row">
       <span class="label">分別控制:</span>
-      <button id="btn-crane-up-left"    class="btn-hold crane-hold-btn" data-required="se3_left">↑左</button>
-      <button id="btn-crane-up-right"   class="btn-hold crane-hold-btn" data-required="se3_right">↑右</button>
-      <button id="btn-crane-down-left"  class="btn-hold crane-hold-btn" data-required="se3_left">↓左</button>
-      <button id="btn-crane-down-right" class="btn-hold crane-hold-btn" data-required="se3_right">↓右</button>
+      <button id="btn-crane-up-left"    class="btn-hold crane-hold-btn" data-required="vfd_left">↑左</button>
+      <button id="btn-crane-up-right"   class="btn-hold crane-hold-btn" data-required="vfd_right">↑右</button>
+      <button id="btn-crane-down-left"  class="btn-hold crane-hold-btn" data-required="vfd_left">↓左</button>
+      <button id="btn-crane-down-right" class="btn-hold crane-hold-btn" data-required="vfd_right">↓右</button>
     </div>
     <ul class="hint">
       <li>按住拉/放，放開立即停；網路掉線 2s 內自動停（watchdog）</li>
@@ -605,17 +605,17 @@
     <h3>raw 個別繼電器（debug）</h3>
     <div class="row">
       <span class="label">left:</span>
-      <button class="crane-action" data-tgt="crane" data-cmd="pay_out_left on"  data-required="se3_left">pay_out ON</button>
-      <button class="crane-action" data-tgt="crane" data-cmd="pay_out_left off" data-required="se3_left">OFF</button>
-      <button class="crane-action" data-tgt="crane" data-cmd="retract_left on"  data-required="se3_left">retract ON</button>
-      <button class="crane-action" data-tgt="crane" data-cmd="retract_left off" data-required="se3_left">OFF</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="pay_out_left on"  data-required="vfd_left">pay_out ON</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="pay_out_left off" data-required="vfd_left">OFF</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="retract_left on"  data-required="vfd_left">retract ON</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="retract_left off" data-required="vfd_left">OFF</button>
     </div>
     <div class="row">
       <span class="label">right:</span>
-      <button class="crane-action" data-tgt="crane" data-cmd="pay_out_right on"  data-required="se3_right">pay_out ON</button>
-      <button class="crane-action" data-tgt="crane" data-cmd="pay_out_right off" data-required="se3_right">OFF</button>
-      <button class="crane-action" data-tgt="crane" data-cmd="retract_right on"  data-required="se3_right">retract ON</button>
-      <button class="crane-action" data-tgt="crane" data-cmd="retract_right off" data-required="se3_right">OFF</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="pay_out_right on"  data-required="vfd_right">pay_out ON</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="pay_out_right off" data-required="vfd_right">OFF</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="retract_right on"  data-required="vfd_right">retract ON</button>
+      <button class="crane-action" data-tgt="crane" data-cmd="retract_right off" data-required="vfd_right">OFF</button>
     </div>
   </section>
 
@@ -624,7 +624,7 @@
     <ul class="hint">
       <li>按住=左右同收，放開即停。依賴 crane，washrobot 失聯也能用</li>
     </ul>
-    <button id="btn-emergency" class="btn-emergency" data-required="se3_left,se3_right">🆘 按住收繩</button>
+    <button id="btn-emergency" class="btn-emergency" data-required="vfd_left,vfd_right">🆘 按住收繩</button>
   </section>
 
   <section class="panel panel-easy_crane" data-page="manual">

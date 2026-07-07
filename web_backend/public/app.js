@@ -286,26 +286,26 @@ document.querySelectorAll('button[data-tgt][data-cmd]').forEach(btn => {
 // "motion_full" / "meters_all" are expanded via DEVICE_TOKEN_GROUPS.
 const craneDevices = {
     gw_a: true, gw_b: true, gw_m: true, gw_c: true, gw_d: true,
-    se3_left: true, se3_right: true,
+    vfd_left: true, vfd_right: true,
     meter_left: true, meter_right: true, meter_middle: true,
     clv900: true,
     dsz_left: true, dsz_right: true,
 };
 const DEVICE_TOKEN_GROUPS = {
-    motion_full: ['se3_left','se3_right','meter_left','meter_right','meter_middle','clv900','dsz_left','dsz_right'],
-    motion_diff: ['se3_left','se3_right','meter_left','meter_right','dsz_left','dsz_right'],
+    motion_full: ['vfd_left','vfd_right','meter_left','meter_right','meter_middle','clv900','dsz_left','dsz_right'],
+    motion_diff: ['vfd_left','vfd_right','meter_left','meter_right','dsz_left','dsz_right'],
     meters_all:  ['meter_left','meter_right','meter_middle'],
     // bench-friendly variants — middle pipeline (meter_middle + clv900) is
     // optional hardware; server-side motion_rope and zero_meters skip middle
     // gracefully if not installed. Buttons using these groups stay enabled
     // when only middle is missing.
-    motion_lr:   ['se3_left','se3_right','meter_left','meter_right','dsz_left','dsz_right'],
+    motion_lr:   ['vfd_left','vfd_right','meter_left','meter_right','dsz_left','dsz_right'],
     meters_lr:   ['meter_left','meter_right'],
 };
 const DEVICE_LABEL_TW = {
-    gw_a: 'USR_A 閘道(SE3 左)', gw_b: 'USR_B 閘道(SE3 右)', gw_m: 'USR_M 閘道(計米器)',
+    gw_a: 'USR_A 閘道(VFD 左)', gw_b: 'USR_B 閘道(VFD 右)', gw_m: 'USR_M 閘道(計米器)',
     gw_c: 'USR_C 閘道(張力左)', gw_d: 'USR_D 閘道(張力右)',
-    se3_left: '左繩變頻器', se3_right: '右繩變頻器',
+    vfd_left: '左繩變頻器', vfd_right: '右繩變頻器',
     meter_left: '左繩計米', meter_right: '右繩計米', meter_middle: '中間管線計米',
     clv900: '中間絞盤變頻器',
     dsz_left: '左繩張力', dsz_right: '右繩張力',
@@ -324,7 +324,7 @@ function expandDeviceTokens(str) {
 function parseCraneDeviceState(line) {
     let changed = false;
     Object.keys(craneDevices).forEach(k => {
-        // matches both "dev_se3_left=1" (cmd_status) and "se3_left=1" (EVT device_state)
+        // matches both "dev_vfd_left=1" (cmd_status) and "vfd_left=1" (EVT device_state)
         const re = new RegExp(`\\b(?:dev_)?${k}=(\\d)\\b`);
         const m = line.match(re);
         if (m) {

@@ -80,6 +80,7 @@
     <ClCompile Include="..\user_lib\DSZL_107.cpp" />
     <ClCompile Include="..\user_lib\DY_500_weight_sensor.cpp" />
     <ClCompile Include="..\user_lib\PQW_IO_16O_RLY.cpp" />
+    <ClCompile Include="..\user_lib\MH300_inverter.cpp" />
     <ClCompile Include="..\user_lib\SD76_length_meters.cpp" />
     <ClCompile Include="..\user_lib\SE3_inverter.cpp" />
     <ClCompile Include="..\user_lib\TCP_client.cpp" />
@@ -91,6 +92,7 @@
     <ClInclude Include="..\user_lib\DSZL_107.h" />
     <ClInclude Include="..\user_lib\DY_500_weight_sensor.h" />
     <ClInclude Include="..\user_lib\PQW_IO_16O_RLY.h" />
+    <ClInclude Include="..\user_lib\MH300_inverter.h" />
     <ClInclude Include="..\user_lib\SD76_length_meters.h" />
     <ClInclude Include="..\user_lib\SE3_inverter.h" />
     <ClInclude Include="..\user_lib\TCP_client.h" />

@@ -13,6 +13,63 @@
 
 ---
 
+## 2026-07-03b Claude (Sadie)
+### 修改檔案
+- `Crane_control_PI/Crane_control_PI.vcxproj` — 加入 `MH300_inverter.cpp/.h`（SE3 檔暫留並存）
+- `Crane_control_PI/main.cpp` — 左右吊機變頻器 SE3 → MH300（type swap + 邏輯差異修正 + 識別碼改名）
+- `user_lib/MH300_inverter.{h,cpp}` — 加 `base_blocked_` 機制（run 前自動解除急停 B.B）
+- `web_backend/public/{app.js,index.html}` — 裝置識別碼 `se3_left/se3_right` → `vfd_left/vfd_right`
+### 原因
+接 `.claude/mh300_migration_plan.md`，把吊機程式從士林 SE3-210 換成 Delta MH300。
+scope：只換左右繩兩台；CLV900 中間不動；keepalive 先保留。
+### 主要改動
+1. **型別**：`SE3_inverter` → `MH300_inverter`（全 ~35 處，含 helper 簽名）；常數/atomic/helper 的 `SE3_`→`VFD_`、`se3_`→`vfd_`
+2. **急停 recovery（driver 層解）**：MH300 的 B.B 在 0x2002、run 在 0x2000，run 清不掉 B.B。driver `runForward/runReverse` 在 `base_blocked_` 時先寫 0x2002=0，還原 SE3「run 自動解除急停 cutoff」不變式 → app 端 `emergencyStop→stopDecel` callsite 邏輯不用動
+3. **keepalive fault 判斷**：MH300 fault 在 error code 0x2100（不在 status word bit7）→ 改讀 `readErrorCode` + `(x & 0x00FF)`
+4. **wire token**：EVT device_state `se3_left=`→`vfd_left=`、cmd_status `dev_se3_*`→`dev_vfd_*`，GUI 同步
+### ⚠ 尚未編譯/實機驗證（VS Linux 交叉編譯需 remote，本機無法編）
+### ⚠ 實機必驗（詳見回覆給 user 的清單 + plan Phase 0/5）
+- **方向**：`VFD_DIR_PAY_OUT/RETRACT` 巨集（main.cpp L259-260）沿用 SE3 bench 值，MH300 首次上機要低 Hz 重驗、錯就對調
+- **2101H run bit**：`dual_vfd_hold_start` 用 `(status & 0x0001)` 判 running（MH300 2101H bit 手冊 text 糊，待驗；fail-safe）
+- **電流/電壓 scale**：driver `OUTPUT_CURRENT_SCALE/VOLTAGE_SCALE=0.1` 對面板校
+- **fault code 表**：`vfd_fault_name()` 仍是 SE3 代號、MH300 要換（ocA/Sto/… 待手冊）
+- **bus 現況**：code 為 left cli_A(.30) / right cli_B(.31)；CLAUDE.md 說 2026-05-15 兩台都搬 USR_A — 換裝前確認實際接線
+
+---
+
+## 2026-07-03a Claude (Sadie)
+### 修改檔案
+- `user_lib/MH300_inverter.h`（新增）— Delta VFD-MH300 變頻器 driver 宣告
+- `user_lib/MH300_inverter.cpp`（新增）— 實作
+### 原因
+左右吊機變頻器將由士林 SE3-210 換成 Delta VFD-MH300。依 memory
+`project_new_crane_vfd_mh300` + 手冊 `DELTA_IA-MDS_MH300_UM_TC_20260505.pdf`
+（附錄 A ACMD 位址表）寫新 driver，方便之後 Crane_control_PI 呼叫。
+### 設計
+- **API 對齊 `SE3_inverter`**（drop-in）：init x2 / runForward / runReverse /
+  stopDecel / emergencyStop / setFreqHz / setFreqRaw / readOutputFreqHz /
+  readOutputCurrentA / readOutputVoltageV / readStatusWord / readFaultCode /
+  clearAlarm / invalidateCuModeCache / writeParam / readParam / getSlaveID
+- Modbus-RTU over USR-TCP232 gateway（同 SE3 crane bus）、CRC16 / FC03 / FC06
+  framing 與 SE3 相同
+- **拿掉 CU-mode latch**（MH300 不需要）→ run 指令直寫 0x2000；
+  `invalidateCuModeCache()` 保留為 no-op 只為 SE3→MH300 換 class 能編過
+- Register（手冊確認）：0x2000 run/dir（0x12 正轉 / 0x22 反轉 / 0x01 停）、
+  0x2001 頻率 0.01Hz、0x2002 EF/RESET/B.B、0x2100 錯誤碼、0x2101 狀態字、
+  0x2102 輸出頻率、0x2104 電流、0x2105 DC bus、0x2106 輸出電壓
+- 新增 `readErrorCode()`（讀 0x2100）+ `configureModbusControl()`（一次性寫
+  00-20=1 / 00-21=2，RS-485 命令來源，寫 EEPROM）
+### 待處理 / 注意
+- **未加入任何 vcxproj build**、未接進 `Crane_control_PI/main.cpp`（等實際換裝時做）
+- ⚠ **行為差異**：SE3 的 emergencyStop(MRS) 與 run 同 reg（0x1001），MH300 的
+  B.B 在 0x2002、run 在 0x2000 → **急停後必須先 clearAlarm/清 0x2002 才能再 run**
+  （header 已註明）。應用層 SE3→MH300 換裝時要注意此 recovery 路徑
+- ⚠ 電流/電壓 scale 常數（`OUTPUT_CURRENT_SCALE` / `OUTPUT_VOLTAGE_SCALE`）手冊
+  標註前後不一致，暫用 0.1，**待實機對面板讀值校正**
+- 手冊未 100% 確認：0x2102 vs 頻率命令回讀之分、0x2106 vs 2107 輸出電壓確切位址
+
+---
+
 ## 2026-06-25b Claude (Sadie)
 ### 修改檔案
 - `.claude/runbook.md` — 6 處 RPi 部署目錄 `~/washrobot_new_PI/` → `~/facade_cleaning_v2/` + binary `./washrobot_new_PI` → `./facade_cleaning_v2`

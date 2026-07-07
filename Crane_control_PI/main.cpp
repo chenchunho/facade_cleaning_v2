@@ -30,7 +30,7 @@
 //   + Single point of meaning per bus: USR_A down = all motion lost / USR_B
 //     down = all distance feedback lost (easier to diagnose)
 //   - Both SE3 share one RS485 bus → Modbus RTU half-duplex forces the two
-//     threads in dual_se3_sync_retry to serialize on TCP_client::socket_mtx.
+//     threads in dual_vfd_sync_retry to serialize on TCP_client::socket_mtx.
 //     Drift floor ≈ 30-50ms per round-trip (vs theoretical 10ms when each
 //     side had its own physical bus). Still 4-10x better than the 200-300ms
 //     contention drift on the old layout.
@@ -94,12 +94,12 @@
 #include "SD76_length_meters.h"
 #include "CLV900_inverter.h"
 #include "DSZL_107.h"
-#include "SE3_inverter.h"
+#include "MH300_inverter.h"
 #include "PQW_IO_16O_RLY.h"
 
 // ============ Manual-button trace (2026-05-15) ============
 // Forward declaration of ts_now() — body defined at ~line 953. HOLD_TRACE macro
-// expands inline so must be defined before first use (dual_se3_sync_start at
+// expands inline so must be defined before first use (dual_vfd_sync_start at
 // ~line 690 uses it). Putting the forward decl + macro here lets later code
 // reference HOLD_TRACE freely.
 static std::string ts_now();
@@ -137,8 +137,8 @@ static constexpr int         CMD_PORT      = 5002;
 //                         since each SE3 has its own bus, ID 1 is fine)
 //   SD76 left = slave 1, SD76 right = slave 2 (on .34, shared sensing bus)
 //   CLV900 middle (future) = slave 3 (on .30 with SE3 left, mutex serialized)
-static constexpr int SE3_LEFT_SLAVE     = 1;   // on USR_A (.30) — alone
-static constexpr int SE3_RIGHT_SLAVE    = 1;   // on USR_B (.31) — alone (2026-05-26: 2→1, panel P.36 was always 1)
+static constexpr int VFD_LEFT_SLAVE     = 1;   // on USR_A (.30) — alone
+static constexpr int VFD_RIGHT_SLAVE    = 1;   // on USR_B (.31) — alone (2026-05-26: 2→1, panel P.36 was always 1)
 static constexpr int METER_MIDDLE_SLAVE = 4;   // on USR_M — middle SD76, future install
 static constexpr int INVERTER_SLAVE     = 3;   // on USR_A — CLV900 middle winch (future, shares SE3 left bus)
 
@@ -159,16 +159,16 @@ static constexpr int    MOTION_TIMEOUT_MS    = 120000;
 static constexpr int    POLL_INTERVAL_MS     = 20;   // 50→20 (2026-05-15): motion_rope main loop tick. atomic cache load only, no extra bus traffic. Reduces stop-trigger lag at 30Hz/30cm-s motion: was ~50ms tick + 150ms cache lag = ~6cm worst, now ~20+100ms = ~3.6cm.
 static constexpr double MIDDLE_WINCH_RATIO_K = 1.00;
 static constexpr double CLV900_MAX_HZ        = 50.0;  // F8-03 default
-static constexpr double SE3_MAX_HZ           = 50.0;  // SE3 upper bound for setFreqHz
+static constexpr double VFD_MAX_HZ           = 50.0;  // SE3 upper bound for setFreqHz
 
 // Frequency presets — runtime adjustable via set_hold_hz / set_motion_hz /
 // set_middle_hz cmds. Defaults conservative (10 Hz) for first deploy / bench
 // validation; bump up via GUI once direction + safety verified.
-static constexpr double SE3_HOLD_HZ_DEFAULT      = 10.0;
-static constexpr double SE3_MOTION_HZ_DEFAULT    = 30.0;  // 10 → 20 (2026-05-13): user wants faster traversal; rope ~10 cm/s; fine_adjust still 10 Hz for precision tail
+static constexpr double VFD_HOLD_HZ_DEFAULT      = 10.0;
+static constexpr double VFD_MOTION_HZ_DEFAULT    = 30.0;  // 10 → 20 (2026-05-13): user wants faster traversal; rope ~10 cm/s; fine_adjust still 10 Hz for precision tail
 static constexpr double MIDDLE_WINCH_HZ_DEFAULT  = 10.0;
-static std::atomic<double> g_se3_hold_hz     {SE3_HOLD_HZ_DEFAULT};
-static std::atomic<double> g_se3_motion_hz   {SE3_MOTION_HZ_DEFAULT};
+static std::atomic<double> g_vfd_hold_hz     {VFD_HOLD_HZ_DEFAULT};
+static std::atomic<double> g_vfd_motion_hz   {VFD_MOTION_HZ_DEFAULT};
 static std::atomic<double> g_middle_winch_hz {MIDDLE_WINCH_HZ_DEFAULT};
 
 // Periodic progress EVT during long ops (motion_rope main loop + fine_adjust).
@@ -256,8 +256,13 @@ static std::atomic<double> g_kick_hz {KICK_HZ_DEFAULT};
 // Re-verify at low Hz before any production sequence — rewiring or P.17 change
 // will flip this back. Linux_test menu 25 has a startup prompt that maps verbs
 // to STF/STR if you need to test the inverted case again.
-#define SE3_DIR_PAY_OUT(inv)   inv.runReverse()    // STR per bench 2026-05-08
-#define SE3_DIR_RETRACT(inv)   inv.runForward()   // STF per bench 2026-05-08
+// ⚠ MH300 MIGRATION (2026-07-03): this direction mapping was bench-set for the
+//   SE3 inverters. The MH300 swap keeps the SAME motors, but the runForward/
+//   runReverse ↔ physical rope-direction relationship MUST be re-verified at
+//   low Hz on the first MH300 bring-up — motor phasing / VFD direction param
+//   may differ. If pay_out drives the wrong way, swap these two macro bodies.
+#define VFD_DIR_PAY_OUT(inv)   inv.runReverse()    // STR per SE3 bench 2026-05-08 — RE-VERIFY on MH300
+#define VFD_DIR_RETRACT(inv)   inv.runForward()   // STF per SE3 bench 2026-05-08 — RE-VERIFY on MH300
 
 // Watchdog tunables (motion_flow.md §6)
 //
@@ -336,8 +341,8 @@ static SD76_length_meters meter_left;     // on cli_M slave 1
 static SD76_length_meters meter_right;    // on cli_M slave 2
 static SD76_length_meters meter_middle;   // on cli_M slave 4 (future install)
 static CLV900_inverter    inverter;       // middle winch (cli_A slave 3, future install)
-static SE3_inverter       se3_left;       // left rope  (cli_A slave 1)
-static SE3_inverter       se3_right;      // right rope (cli_B slave 2)
+static MH300_inverter       vfd_left;       // left rope  (cli_A slave 1)
+static MH300_inverter       vfd_right;      // right rope (cli_B slave 2)
 static DSZL_107           dsz_left;       // left tension (cli_C slave 1)
 static DSZL_107           dsz_right;      // right tension (cli_D slave 1)
 // [2026-06-05] Water inlet ball valve relay, moved from washrobot to crane side.
@@ -370,10 +375,10 @@ static std::atomic<bool>     g_init_done(false);
 //   Each flag tracks whether the corresponding relay is held ON by GUI.
 //   Cleared either by GUI sending "off", by hold_loop on safety breach,
 //   or by watchdog on TCP silence timeout.
-static std::atomic<bool> hold_up_left(false);     // se3_left  retract (motor reverse)
-static std::atomic<bool> hold_up_right(false);    // se3_right retract
-static std::atomic<bool> hold_down_left(false);   // se3_left  pay_out (motor forward)
-static std::atomic<bool> hold_down_right(false);  // se3_right pay_out
+static std::atomic<bool> hold_up_left(false);     // vfd_left  retract (motor reverse)
+static std::atomic<bool> hold_up_right(false);    // vfd_right retract
+static std::atomic<bool> hold_down_left(false);   // vfd_left  pay_out (motor forward)
+static std::atomic<bool> hold_down_right(false);  // vfd_right pay_out
 static std::atomic<bool> hold_loop_stop(false);
 static std::thread       hold_thread;
 
@@ -411,17 +416,17 @@ static std::thread          g_meter_thread;
 // With 07-09 (comm timeout window) = 2s, these silent periods would trip OPT.
 // Keepalive at 1s cadence keeps SE3 happy while still allowing 07-10 = 0
 // (alarm + coast stop on real disconnect) for safety.
-static constexpr int SE3_KEEPALIVE_INTERVAL_MS = 1000;  // 500→1000 (2026-05-15): test if keepalive interleaving with cmd_hold's sync_start causes Phase B L 316ms retry. middle disabled (2026-05-14e) reduced cli_A traffic so 1s should still beat 07-09 (~2s) safely.
-static std::atomic<bool>    g_se3_keepalive_stop {false};
-static std::thread          g_se3_keepalive_thread;
+static constexpr int VFD_KEEPALIVE_INTERVAL_MS = 1000;  // 500→1000 (2026-05-15): test if keepalive interleaving with cmd_hold's sync_start causes Phase B L 316ms retry. middle disabled (2026-05-14e) reduced cli_A traffic so 1s should still beat 07-09 (~2s) safely.
+static std::atomic<bool>    g_vfd_keepalive_stop {false};
+static std::thread          g_vfd_keepalive_thread;
 
-// SE3 fault state tracking. Set/cleared by se3_keepalive_loop based on
+// SE3 fault state tracking. Set/cleared by vfd_keepalive_loop based on
 // status word bit 7. Read by motion_rope / cmd_roll_correct main loops to
 // abort BOTH sides when either side is in fault (e.g., OPT alarm).
 // Safety principle: if one rope motor can't run, stop the other immediately
 // to prevent asymmetric load on the crane structure.
-static std::atomic<bool> g_se3_left_fault  {false};
-static std::atomic<bool> g_se3_right_fault {false};
+static std::atomic<bool> g_vfd_left_fault  {false};
+static std::atomic<bool> g_vfd_right_fault {false};
 // SD76 poll period — fast in idle (GUI gets fresh length), aggressive in
 // motion to minimize cache lag for distance-based stop decisions.
 //
@@ -431,7 +436,7 @@ static std::atomic<bool> g_se3_right_fault {false};
 //   50ms   → cache lag drops to ~50ms worst, freeing distance precision to
 //            be limited by SE3 ramp / DC brake (the unfixable physics part)
 //   150ms  → mitigation for cli_A bus contention (2026-05-14): pre-re-layout,
-//            cli_A carried 3+ devices (SE3_left + SD76_left + SD76_middle +
+//            cli_A carried 3+ devices (VFD_left + SD76_left + SD76_middle +
 //            CLV900). 50ms polling queued SE3 H1001/setFreq writes long enough
 //            that L-side keepalive saw 6% fail rate. 150ms cut traffic ~67%.
 //
@@ -459,7 +464,7 @@ static std::atomic<double> g_retract_tension_stop_kg {RETRACT_TENSION_STOP_KG_DE
 
 // ============ Dynamic balance (length-diff feedback) ============
 //
-// Both ropes nominally run at g_se3_motion_hz (or g_se3_hold_hz for hold mode).
+// Both ropes nominally run at g_vfd_motion_hz (or g_vfd_hold_hz for hold mode).
 // Open-loop, two SE3 inverters drift apart over time → after a few meters one
 // side is visibly ahead. balance_loop tweaks each SE3's freq based on the
 // length-diff error to pull the lagging side faster + slow the leading side.
@@ -496,7 +501,7 @@ static constexpr double BALANCE_DEADBAND_DEFAULT = 1.0;   // cm, |err| below = n
 static constexpr double BALANCE_HZ_MIN_DEFAULT       = 5.0;   // Hz, hard floor on per-side hz after trim (2→5 on 2026-05-15: avoid near-stall on slow side under aggressive cap)
 // Note: hz_max changed from absolute Hz (30) to **offset above base_hz** (default 5).
 // effective hz_max = base_hz + offset. base_hz comes from apply_balance_trim caller
-// (g_se3_hold_hz or g_se3_motion_hz). With base=10Hz → max=15Hz; base=30Hz → max=35Hz.
+// (g_vfd_hold_hz or g_vfd_motion_hz). With base=10Hz → max=15Hz; base=30Hz → max=35Hz.
 // Reason (2026-05-15): old absolute 30Hz cap meant balance couldn't speed R above
 // motion_hz=30, so balance could only slow L (asymmetric authority). Offset-based
 // gives symmetric ±5Hz headroom around base regardless of how fast user sets base.
@@ -581,8 +586,8 @@ static std::atomic<bool> g_gw_b_ok           {false};   // USR_B .31 — SE3 rig
 static std::atomic<bool> g_gw_m_ok           {false};   // USR_M .34 — SD76 meters
 static std::atomic<bool> g_gw_c_ok           {false};   // USR_C .32 — DSZL left
 static std::atomic<bool> g_gw_d_ok           {false};   // USR_D .33 — DSZL right
-static std::atomic<bool> g_dev_se3_left      {false};
-static std::atomic<bool> g_dev_se3_right     {false};
+static std::atomic<bool> g_dev_vfd_left      {false};
+static std::atomic<bool> g_dev_vfd_right     {false};
 static std::atomic<bool> g_dev_meter_left    {false};
 static std::atomic<bool> g_dev_meter_right   {false};
 static std::atomic<bool> g_dev_meter_middle  {false};
@@ -601,8 +606,8 @@ static std::string make_device_state_line() {
         << " gw_m="        << (g_gw_m_ok.load()         ? 1 : 0)
         << " gw_c="        << (g_gw_c_ok.load()         ? 1 : 0)
         << " gw_d="        << (g_gw_d_ok.load()         ? 1 : 0)
-        << " se3_left="    << (g_dev_se3_left.load()    ? 1 : 0)
-        << " se3_right="   << (g_dev_se3_right.load()   ? 1 : 0)
+        << " vfd_left="    << (g_dev_vfd_left.load()    ? 1 : 0)
+        << " vfd_right="   << (g_dev_vfd_right.load()   ? 1 : 0)
         << " meter_left="  << (g_dev_meter_left.load()  ? 1 : 0)
         << " meter_right=" << (g_dev_meter_right.load() ? 1 : 0)
         << " meter_middle="<< (g_dev_meter_middle.load()? 1 : 0)
@@ -642,7 +647,7 @@ static void allMotionOff();
 // failure (TCP packet loss / SE3 firmware busy / Modbus contention timeout).
 //
 // Same rationale as reliable_stop_one — without retry the first transient
-// fail surfaces as "ERR se3_*_start_fail" to the GUI even though the next
+// fail surfaces as "ERR vfd_*_start_fail" to the GUI even though the next
 // attempt 80ms later would have succeeded. With retry the user just sees
 // the motor start (typically ≤200ms even when the first attempt failed).
 //
@@ -658,11 +663,11 @@ static void allMotionOff();
 //
 // Returns true iff all 8 attempts failed (motor didn't start; caller should
 // rollback any other side that did start).
-static bool reliable_start_one(SE3_inverter& inv, double hz, bool pay_out) {
+static bool reliable_start_one(MH300_inverter& inv, double hz, bool pay_out) {
     constexpr int MAX_ATTEMPTS = 8;
     for (int i = 0; i < MAX_ATTEMPTS; ++i) {
-        if (!inv.setFreqHz(hz, SE3_MAX_HZ)) {
-            bool runErr = pay_out ? SE3_DIR_PAY_OUT(inv) : SE3_DIR_RETRACT(inv);
+        if (!inv.setFreqHz(hz, VFD_MAX_HZ)) {
+            bool runErr = pay_out ? VFD_DIR_PAY_OUT(inv) : VFD_DIR_RETRACT(inv);
             if (!runErr) return false;
         }
         if (i < MAX_ATTEMPTS - 1) {
@@ -680,7 +685,7 @@ static bool reliable_start_one(SE3_inverter& inv, double hz, bool pay_out) {
 // helper so the user never sees the transient as visible motor behavior.
 //
 // 8 attempts × 100ms backoff = up to ~900ms wall time worst case before giving
-// up. SE3_inverter::stopDecel already has its own internal CU-mode watchdog
+// up. MH300_inverter::stopDecel already has its own internal CU-mode watchdog
 // reclaim (kicks in after 2 consecutive H1001 fails) so each attempt may
 // itself trigger driver-level retry — this outer loop covers transients the
 // driver-level watchdog can't recover from in a single invocation.
@@ -691,7 +696,7 @@ static bool reliable_start_one(SE3_inverter& inv, double hz, bool pay_out) {
 //
 // Returns true iff all 8 attempts failed (caller must treat as hard error;
 // motor likely still running — escalation would be a separate decision).
-static bool reliable_stop_one(SE3_inverter& inv) {
+static bool reliable_stop_one(MH300_inverter& inv) {
     constexpr int MAX_ATTEMPTS = 8;
     for (int i = 0; i < MAX_ATTEMPTS; ++i) {
         if (!inv.stopDecel()) return false;
@@ -718,16 +723,16 @@ static bool reliable_stop_one(SE3_inverter& inv) {
 //
 // USE FOR: single-shot ops where retry is not desired (emergencyStop,
 // stopDecel for MRS clear). For retry-based ops (setFreq / run cmd / stop
-// with retry), use dual_se3_sync_retry below — that bounds inter-side drift
+// with retry), use dual_vfd_sync_retry below — that bounds inter-side drift
 // even when one side needs retry, while this template would let the faster
 // side return immediately and the slower side keep retrying solo.
 template <typename Fn>
-static bool dual_se3_concurrent(Fn fn) {
+static bool dual_vfd_concurrent(Fn fn) {
     bool eL = false, eR = false;
     const auto t0 = std::chrono::steady_clock::now();
     auto tL_done = t0, tR_done = t0;
-    std::thread tL([&]{ eL = fn(se3_left);  tL_done = std::chrono::steady_clock::now(); });
-    std::thread tR([&]{ eR = fn(se3_right); tR_done = std::chrono::steady_clock::now(); });
+    std::thread tL([&]{ eL = fn(vfd_left);  tL_done = std::chrono::steady_clock::now(); });
+    std::thread tR([&]{ eR = fn(vfd_right); tR_done = std::chrono::steady_clock::now(); });
     tL.join();
     tR.join();
     // Diagnostic: if one side's command dispatch took much longer than the
@@ -737,7 +742,7 @@ static bool dual_se3_concurrent(Fn fn) {
     const auto durL = std::chrono::duration_cast<std::chrono::milliseconds>(tL_done - t0).count();
     const auto durR = std::chrono::duration_cast<std::chrono::milliseconds>(tR_done - t0).count();
     if (std::abs(durL - durR) > 100) {
-        std::cout << "[dual_se3_concurrent] asymmetric cmd dispatch L=" << durL
+        std::cout << "[dual_vfd_concurrent] asymmetric cmd dispatch L=" << durL
                   << "ms R=" << durR << "ms (errL=" << eL << " errR=" << eR << ")\n";
     }
     return eL || eR;
@@ -748,10 +753,10 @@ static bool dual_se3_concurrent(Fn fn) {
 // then both retry together when EITHER side failed. Bounds inter-side drift
 // to one attempt's wall time even when only one side hits a transient — vs
 // the old independent-retry pattern (reliable_*_one ran in two threads via
-// dual_se3_concurrent) where the failing side could run solo for N × attempt
+// dual_vfd_concurrent) where the failing side could run solo for N × attempt
 // cycles (300-700ms drift typical) while the other side retried independently.
 //
-// NOTE (2026-05-15 physical-separation layout): SE3_left and SE3_right are
+// NOTE (2026-05-15 physical-separation layout): VFD_left and VFD_right are
 // on PHYSICALLY SEPARATE USR gateways (cli_A → USR_A .30, cli_B → USR_B .31).
 // No mutex contention, no shared bus, no USR multi-client broadcast issue —
 // the two SE3 commands literally travel through different cables to different
@@ -784,7 +789,7 @@ static bool dual_se3_concurrent(Fn fn) {
 // max_attempts / backoff_ms: as in reliable_*_one (typically 8x100 or 2x50).
 // tag: log identifier, prints on retry / failure / drift > 100ms.
 template <typename FnL, typename FnR>
-static bool dual_se3_sync_retry(FnL fnL, FnR fnR,
+static bool dual_vfd_sync_retry(FnL fnL, FnR fnR,
                                 int max_attempts, int backoff_ms,
                                 const char* tag) {
     bool eL = false, eR = false;
@@ -797,8 +802,8 @@ static bool dual_se3_sync_retry(FnL fnL, FnR fnR,
         bool atL = false, atR = false;
         const auto tA0 = std::chrono::steady_clock::now();
         auto tL_done = tA0, tR_done = tA0;
-        std::thread tL([&]{ atL = fnL(se3_left);  tL_done = std::chrono::steady_clock::now(); });
-        std::thread tR([&]{ atR = fnR(se3_right); tR_done = std::chrono::steady_clock::now(); });
+        std::thread tL([&]{ atL = fnL(vfd_left);  tL_done = std::chrono::steady_clock::now(); });
+        std::thread tR([&]{ atR = fnR(vfd_right); tR_done = std::chrono::steady_clock::now(); });
         tL.join();
         tR.join();
 
@@ -830,18 +835,18 @@ static bool dual_se3_sync_retry(FnL fnL, FnR fnR,
 
 // Convenience overload: same single-attempt fn used on both sides (most cases).
 template <typename Fn>
-static bool dual_se3_sync_retry(Fn fn, int max_attempts, int backoff_ms,
+static bool dual_vfd_sync_retry(Fn fn, int max_attempts, int backoff_ms,
                                 const char* tag) {
-    return dual_se3_sync_retry<Fn, Fn>(fn, fn, max_attempts, backoff_ms, tag);
+    return dual_vfd_sync_retry<Fn, Fn>(fn, fn, max_attempts, backoff_ms, tag);
 }
 
-// setFreqHz only with retry (no run command). Used by dual_se3_sync_start
+// setFreqHz only with retry (no run command). Used by dual_vfd_sync_start
 // Phase A so the variable retry latency is absorbed BEFORE the run command,
 // not bundled with it. Returns true if all attempts failed.
-static bool reliable_setfreq_one(SE3_inverter& inv, double hz) {
+static bool reliable_setfreq_one(MH300_inverter& inv, double hz) {
     constexpr int MAX_ATTEMPTS = 8;
     for (int i = 0; i < MAX_ATTEMPTS; ++i) {
-        if (!inv.setFreqHz(hz, SE3_MAX_HZ)) return false;
+        if (!inv.setFreqHz(hz, VFD_MAX_HZ)) return false;
         if (i < MAX_ATTEMPTS - 1) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
@@ -850,17 +855,17 @@ static bool reliable_setfreq_one(SE3_inverter& inv, double hz) {
 }
 
 // Per-side run cmd with bounded retry. Default 2 attempts × 50ms used by
-// Phase B of dual_se3_sync_start (sync-sensitive, keeps L/R drift small).
+// Phase B of dual_vfd_sync_start (sync-sensitive, keeps L/R drift small).
 // Callers that fire RUN after a recent stopDecel (motion_rope → fine_adjust,
 // correction pass after reversal lockout) override with larger window:
 //   - fine_adjust entry: 6 × 200ms = 1200ms window covers SE3 stop ramp +
 //     DC brake injection (P.8 decel + P.55-57 brake duration, ~1-2s)
 //   - correction reversal: 6 × 200ms additionally absorbs firmware reversal
 //     lockout tail (already settled 2s outside, retry catches residual)
-static bool reliable_run_one(SE3_inverter& inv, bool pay_out,
+static bool reliable_run_one(MH300_inverter& inv, bool pay_out,
                              int max_attempts = 2, int backoff_ms = 50) {
     for (int i = 0; i < max_attempts; ++i) {
-        const bool err = pay_out ? SE3_DIR_PAY_OUT(inv) : SE3_DIR_RETRACT(inv);
+        const bool err = pay_out ? VFD_DIR_PAY_OUT(inv) : VFD_DIR_RETRACT(inv);
         if (!err) return false;
         if (i < max_attempts - 1) {
             std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
@@ -884,7 +889,7 @@ static bool reliable_run_one(SE3_inverter& inv, bool pay_out,
 //
 // Returns true (error) if either phase fails after retry. On any failure,
 // both sides get stopDecel to leave a clean state for the next attempt.
-static bool dual_se3_sync_start(double hz, bool left_pay_out, bool right_pay_out) {
+static bool dual_vfd_sync_start(double hz, bool left_pay_out, bool right_pay_out) {
     HOLD_TRACE("sync_start ENTRY hz=" << hz << " L_pay=" << left_pay_out
                << " R_pay=" << right_pay_out);
 
@@ -894,14 +899,14 @@ static bool dual_se3_sync_start(double hz, bool left_pay_out, bool right_pay_out
     // clears=8/30s) causes Phase B to fail because SE3 firmware rejects
     // run cmds while in fault state. Cheap (~150ms each side, only on fault).
     // Atomic check first (read-only) — no Modbus traffic if both sides clean.
-    const bool l_fault = g_se3_left_fault.load();
-    const bool r_fault = g_se3_right_fault.load();
+    const bool l_fault = g_vfd_left_fault.load();
+    const bool r_fault = g_vfd_right_fault.load();
     if (l_fault || r_fault) {
         HOLD_TRACE("sync_start pre-flight: clearAlarm L=" << l_fault << " R=" << r_fault);
         std::cout << "[sync_start] pre-flight clearAlarm L_fault=" << l_fault
                   << " R_fault=" << r_fault << "\n";
-        if (l_fault) se3_left.clearAlarm();
-        if (r_fault) se3_right.clearAlarm();
+        if (l_fault) vfd_left.clearAlarm();
+        if (r_fault) vfd_right.clearAlarm();
         // clearAlarm itself has internal sleep_for(200ms) so SE3 firmware has
         // time to settle before Phase A fires. No additional sleep needed.
     }
@@ -911,8 +916,8 @@ static bool dual_se3_sync_start(double hz, bool left_pay_out, bool right_pay_out
     // on either-side failure — bounds drift even when one side hits a transient.
     HOLD_TRACE("sync_start Phase A start (sync setFreq L+R)");
     const auto tA0 = std::chrono::steady_clock::now();
-    auto setfreq_fn = [hz](SE3_inverter& inv) { return inv.setFreqHz(hz, SE3_MAX_HZ); };
-    const bool freq_err = dual_se3_sync_retry(setfreq_fn, 8, 100, "sync_start.setfreq");
+    auto setfreq_fn = [hz](MH300_inverter& inv) { return inv.setFreqHz(hz, VFD_MAX_HZ); };
+    const bool freq_err = dual_vfd_sync_retry(setfreq_fn, 8, 100, "sync_start.setfreq");
     const auto tA1 = std::chrono::steady_clock::now();
     const auto durA = std::chrono::duration_cast<std::chrono::milliseconds>(tA1 - tA0).count();
     std::cout << "[sync_start] Phase A setFreq total=" << durA << "ms err=" << freq_err
@@ -926,16 +931,16 @@ static bool dual_se3_sync_start(double hz, bool left_pay_out, bool right_pay_out
 
     // Phase B: run command, attempt-synchronized retry. Per-side direction may
     // differ (roll_correct: L pay, R retract) so two separate lambdas captured.
-    // Residual mechanical drift ≤ 1 attempt cycle (~150ms) — see dual_se3_sync_retry
+    // Residual mechanical drift ≤ 1 attempt cycle (~150ms) — see dual_vfd_sync_retry
     // doc for why eliminating that would require commit-or-rollback.
     const auto tB0 = std::chrono::steady_clock::now();
-    auto run_left_fn  = [left_pay_out](SE3_inverter& inv)  {
-        return left_pay_out  ? SE3_DIR_PAY_OUT(inv) : SE3_DIR_RETRACT(inv);
+    auto run_left_fn  = [left_pay_out](MH300_inverter& inv)  {
+        return left_pay_out  ? VFD_DIR_PAY_OUT(inv) : VFD_DIR_RETRACT(inv);
     };
-    auto run_right_fn = [right_pay_out](SE3_inverter& inv) {
-        return right_pay_out ? SE3_DIR_PAY_OUT(inv) : SE3_DIR_RETRACT(inv);
+    auto run_right_fn = [right_pay_out](MH300_inverter& inv) {
+        return right_pay_out ? VFD_DIR_PAY_OUT(inv) : VFD_DIR_RETRACT(inv);
     };
-    const bool run_err = dual_se3_sync_retry(run_left_fn, run_right_fn, 2, 50, "sync_start.run");
+    const bool run_err = dual_vfd_sync_retry(run_left_fn, run_right_fn, 2, 50, "sync_start.run");
     const auto tB1 = std::chrono::steady_clock::now();
     const auto durB = std::chrono::duration_cast<std::chrono::milliseconds>(tB1 - tB0).count();
     std::cout << "[sync_start] Phase B run total=" << durB << "ms err=" << run_err
@@ -948,8 +953,8 @@ static bool dual_se3_sync_start(double hz, bool left_pay_out, bool right_pay_out
         // next run cmd works normally.
         HOLD_TRACE("sync_start Phase B FAIL -> EMERGENCY stop both -> EXIT");
         std::cout << "[sync_start] Phase B failed after retry — EMERGENCY stop both\n";
-        dual_se3_concurrent([](SE3_inverter& inv){ return inv.emergencyStop(); });
-        dual_se3_concurrent([](SE3_inverter& inv){ return inv.stopDecel();     });
+        dual_vfd_concurrent([](MH300_inverter& inv){ return inv.emergencyStop(); });
+        dual_vfd_concurrent([](MH300_inverter& inv){ return inv.stopDecel();     });
         return true;
     }
     HOLD_TRACE("sync_start EXIT OK (both running)");
@@ -963,7 +968,7 @@ static bool dual_se3_sync_start(double hz, bool left_pay_out, bool right_pay_out
 // reliable_stop_one which let one side complete in 5ms while the other ran
 // solo for 300-700ms.
 static void allRopeInvertersOff() {
-    dual_se3_sync_retry([](SE3_inverter& inv){ return inv.stopDecel(); },
+    dual_vfd_sync_retry([](MH300_inverter& inv){ return inv.stopDecel(); },
                         8, 100, "all_rope_off");
 }
 
@@ -982,7 +987,7 @@ static void allMotionOff() {
 // safety event already happened and we want maximum speed cutoff. CLV900
 // stop also single-shot for same reason.
 static void allMotionEmergencyStop() {
-    dual_se3_concurrent([](SE3_inverter& inv){ return inv.emergencyStop(); });
+    dual_vfd_concurrent([](MH300_inverter& inv){ return inv.emergencyStop(); });
     if (g_dev_clv900.load()) inverter.stopDecel();   // CLV900 decel (no MRS-equivalent here); skip if uninited
 }
 
@@ -995,17 +1000,17 @@ static void allMotionEmergencyStop() {
 // 100ms but bench observed transients lasting > 300ms; bumped to 5 × 80ms
 // 2026-05-08 to handle longer windows.
 
-// Start one SE3 rope inverter at SE3_MOTION_HZ in given direction.
+// Start one SE3 rope inverter at VFD_MOTION_HZ in given direction.
 //   pay_out=true  → release rope (motor "forward" by convention)
 //   pay_out=false → retract rope (motor "reverse")
 // Returns true on error after all retries exhausted.
-static bool se3StartRopeMotion(SE3_inverter& inv, bool pay_out) {
-    return reliable_start_one(inv, g_se3_motion_hz.load(), pay_out);
+static bool vfdStartRopeMotion(MH300_inverter& inv, bool pay_out) {
+    return reliable_start_one(inv, g_vfd_motion_hz.load(), pay_out);
 }
 
 // Same but with HOLD_HZ (used by hold-to-pull for slower manual operation).
-static bool se3StartRopeHold(SE3_inverter& inv, bool pay_out) {
-    return reliable_start_one(inv, g_se3_hold_hz.load(), pay_out);
+static bool vfdStartRopeHold(MH300_inverter& inv, bool pay_out) {
+    return reliable_start_one(inv, g_vfd_hold_hz.load(), pay_out);
 }
 
 // Direction convention (wiring-dependent — flip fwd/rev if inverted on site):
@@ -1033,12 +1038,12 @@ static void apply_balance_trim(double base_hz, int direction,
         if (!was_trimmed) return;
         // [2026-05-29] Parallel L+R setFreq (was sequential). Sequential meant
         // L received new Hz ~20-50ms before R → during that window the system
-        // ran asymmetric Hz. Use dual_se3_sync_retry's dual-lambda overload
+        // ran asymmetric Hz. Use dual_vfd_sync_retry's dual-lambda overload
         // with 1 attempt / 0 backoff (BAL doesn't need retry — next tick will
         // re-issue on failure).
-        dual_se3_sync_retry(
-            [base_hz](SE3_inverter& inv){ return inv.setFreqHz(base_hz, SE3_MAX_HZ); },
-            [base_hz](SE3_inverter& inv){ return inv.setFreqHz(base_hz, SE3_MAX_HZ); },
+        dual_vfd_sync_retry(
+            [base_hz](MH300_inverter& inv){ return inv.setFreqHz(base_hz, VFD_MAX_HZ); },
+            [base_hz](MH300_inverter& inv){ return inv.setFreqHz(base_hz, VFD_MAX_HZ); },
             1, 0, "bal_reset");
         was_trimmed = false;
         std::cout << "[BAL] reset to base " << base_hz << " Hz\n";
@@ -1072,9 +1077,9 @@ static void apply_balance_trim(double base_hz, int direction,
     if (right_hz > hz_max) right_hz = hz_max;
 
     // [2026-05-29] Parallel L+R trim (was sequential). See reset_to_base comment.
-    dual_se3_sync_retry(
-        [left_hz ](SE3_inverter& inv){ return inv.setFreqHz(left_hz,  SE3_MAX_HZ); },
-        [right_hz](SE3_inverter& inv){ return inv.setFreqHz(right_hz, SE3_MAX_HZ); },
+    dual_vfd_sync_retry(
+        [left_hz ](MH300_inverter& inv){ return inv.setFreqHz(left_hz,  VFD_MAX_HZ); },
+        [right_hz](MH300_inverter& inv){ return inv.setFreqHz(right_hz, VFD_MAX_HZ); },
         1, 0, "bal_trim");
     was_trimmed = true;
     std::cout << "[BAL] err=" << err << "cm trim=" << trim
@@ -1248,7 +1253,7 @@ static void hold_all_off() {
     hold_up_right.store(false);
     hold_down_left.store(false);
     hold_down_right.store(false);
-    dual_se3_sync_retry([](SE3_inverter& inv){ return inv.stopDecel(); },
+    dual_vfd_sync_retry([](MH300_inverter& inv){ return inv.stopDecel(); },
                         8, 100, "hold_all_off");
     motion_active.store(false);
 }
@@ -1277,7 +1282,7 @@ static void hold_all_off() {
 // cache never recovered → balance saw fake huge err → trim cap → motor jolt.
 constexpr int32_t METER_SMALL_JUMP_CM         = 15;   // normal motion threshold
 constexpr int32_t METER_CONSISTENCY_CM        = 5;    // v1/v2 agreement for "real big jump"
-// Max physically possible per-poll change: 50Hz (SE3_MAX) × 1cm/Hz × 0.25s
+// Max physically possible per-poll change: 50Hz (VFD_MAX) × 1cm/Hz × 0.25s
 // (slowest poll METER_POLL_MS_IDLE) ≈ 12.5cm. 30cm gives 2.4x margin for
 // kick-start transients / mechanical slip. Above this, even two reads that
 // agree are treated as sustained corruption (bench 2026-05-14: SD76 returned
@@ -1411,7 +1416,7 @@ static void meter_loop() {
 // snapshot length cache as base for progress error, on sync exit reset any
 // trimmed still-held side back to base_hz.
 
-// SE3 keepalive thread (see g_se3_keepalive_* declaration for rationale).
+// SE3 keepalive thread (see g_vfd_keepalive_* declaration for rationale).
 // ALWAYS runs (not gated on motion_active) — SE3 firmware starts counting
 // 07-08/09 timeouts as soon as it's powered up, regardless of whether we're
 // commanding motion. If we don't talk to SE3 within 4 seconds (07-09 × 07-08
@@ -1427,7 +1432,7 @@ static void meter_loop() {
 // Decode SE3 fault code byte → short mnemonic. Source: SE3-INVERTER manual
 // §異常代碼 table. Only the codes seen in this project's bench history are
 // fully named; rare codes log as "?" with raw hex preserved in the caller.
-static const char* se3_fault_name(uint8_t code) {
+static const char* vfd_fault_name(uint8_t code) {
     switch (code) {
         case 0:   return "-";        // empty slot (no fault recorded here)
         case 16:  return "OC1";      // overcurrent (accel)
@@ -1459,7 +1464,7 @@ static const char* se3_fault_name(uint8_t code) {
 // Read and format SE3 fault history (H1007 + H1008) for diagnostic logging.
 // Caller passes the inverter ref + a side label ("left" / "right"). On read
 // failure, returns a placeholder string so log still tells us we tried.
-static std::string format_se3_fault_codes(SE3_inverter& inv) {
+static std::string format_vfd_fault_codes(MH300_inverter& inv) {
     uint8_t f1 = 0, f2 = 0, f3 = 0, f4 = 0;
     if (inv.readFaultCode(f1, f2, f3, f4)) {
         return "fault_code=READ_FAIL";
@@ -1467,14 +1472,14 @@ static std::string format_se3_fault_codes(SE3_inverter& inv) {
     char buf[128];
     std::snprintf(buf, sizeof(buf),
         "fault_codes=[%u/%s %u/%s %u/%s %u/%s]",
-        f1, se3_fault_name(f1),
-        f2, se3_fault_name(f2),
-        f3, se3_fault_name(f3),
-        f4, se3_fault_name(f4));
+        f1, vfd_fault_name(f1),
+        f2, vfd_fault_name(f2),
+        f3, vfd_fault_name(f3),
+        f4, vfd_fault_name(f4));
     return std::string(buf);
 }
 
-static void se3_keepalive_loop() {
+static void vfd_keepalive_loop() {
     // Diagnostic counters — log every 30s so bench can verify keepalive is
     // actually running and SE3 is responding.
     int ticks = 0;
@@ -1501,7 +1506,7 @@ static void se3_keepalive_loop() {
     auto last_clear_r = std::chrono::steady_clock::now() - std::chrono::seconds(60);
 
     // Throttle fault-code reads to ≤1/side per FAULT_CODE_READ_INTERVAL_MS.
-    // format_se3_fault_codes does 2x readParam (H1007 + H1008), adding ~50-300ms
+    // format_vfd_fault_codes does 2x readParam (H1007 + H1008), adding ~50-300ms
     // per call. Without throttle, every fault tick would do these reads, eating
     // keepalive bandwidth and risking the OTHER side's 07-09=2s silence trip
     // (2026-05-14 cascade scenario). With 5s throttle, frequent-fault scenarios
@@ -1511,9 +1516,9 @@ static void se3_keepalive_loop() {
     auto last_fault_code_l = std::chrono::steady_clock::now() - std::chrono::seconds(60);
     auto last_fault_code_r = std::chrono::steady_clock::now() - std::chrono::seconds(60);
 
-    while (!g_se3_keepalive_stop.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(SE3_KEEPALIVE_INTERVAL_MS));
-        if (g_se3_keepalive_stop.load()) break;
+    while (!g_vfd_keepalive_stop.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(VFD_KEEPALIVE_INTERVAL_MS));
+        if (g_vfd_keepalive_stop.load()) break;
 
         // Cheap reads. readStatusWord = single Modbus 0x03, ~50ms per side.
         // Failure tolerated — TCP_client has its own reconnect; if SE3 truly
@@ -1526,17 +1531,20 @@ static void se3_keepalive_loop() {
         // fail rate ≈ fail² (60% → 36%, 30% → 9%) — and crucially SE3 sees a
         // valid request on either attempt, which resets its silence counter.
         const auto now_pt = std::chrono::steady_clock::now();
-        if (g_dev_se3_left.load()) {
+        if (g_dev_vfd_left.load()) {
             uint16_t st = 0;
-            bool read_err = se3_left.readStatusWord(st);
-            if (read_err) read_err = se3_left.readStatusWord(st);   // retry once
+            // MH300: fault lives in the error-code register (0x2100), NOT a
+            // status-word bit like SE3 (b7). readErrorCode polls 0x2100 and
+            // doubles as the keepalive ping. Low byte nonzero = active fault.
+            bool read_err = vfd_left.readErrorCode(st);
+            if (read_err) read_err = vfd_left.readErrorCode(st);   // retry once
             if (read_err) {
                 l_fail++;
             } else {
                 l_ok++;
                 last_l_status = st;
-                const bool fault = (st & 0x0080) != 0;
-                g_se3_left_fault.store(fault);    // expose for motion_rope abort
+                const bool fault = (st & 0x00FF) != 0;   // 0x2100 low byte = error code
+                g_vfd_left_fault.store(fault);    // expose for motion_rope abort
                 if (fault) {
                     const auto since = std::chrono::duration_cast<std::chrono::milliseconds>(
                         now_pt - last_clear_l).count();
@@ -1549,30 +1557,30 @@ static void se3_keepalive_loop() {
                         const auto since_fc = std::chrono::duration_cast<std::chrono::milliseconds>(
                             now_pt - last_fault_code_l).count();
                         if (since_fc >= FAULT_CODE_READ_INTERVAL_MS) {
-                            fc_str = format_se3_fault_codes(se3_left);
+                            fc_str = format_vfd_fault_codes(vfd_left);
                             last_fault_code_l = now_pt;
                         }
-                        std::cout << "[SE3-keepalive] left FAULT (status=0x" << std::hex << st
+                        std::cout << "[VFD-keepalive] left FAULT (err=0x" << std::hex << st
                                   << std::dec << ") " << fc_str
-                                  << " — auto-clear via H1101=0x9696\n";
-                        se3_left.clearAlarm();
+                                  << " — auto-clear via 0x2002 RESET\n";
+                        vfd_left.clearAlarm();
                         last_clear_l = now_pt;
                         l_clear_count++;
                     }
                 }
             }
         }
-        if (g_dev_se3_right.load()) {
+        if (g_dev_vfd_right.load()) {
             uint16_t st = 0;
-            bool read_err = se3_right.readStatusWord(st);
-            if (read_err) read_err = se3_right.readStatusWord(st);   // retry once — see left-side comment
+            bool read_err = vfd_right.readErrorCode(st);   // MH300 fault @ 0x2100 (see left)
+            if (read_err) read_err = vfd_right.readErrorCode(st);   // retry once — see left-side comment
             if (read_err) {
                 r_fail++;
             } else {
                 r_ok++;
                 last_r_status = st;
-                const bool fault = (st & 0x0080) != 0;
-                g_se3_right_fault.store(fault);
+                const bool fault = (st & 0x00FF) != 0;   // 0x2100 low byte = error code
+                g_vfd_right_fault.store(fault);
                 if (fault) {
                     const auto since = std::chrono::duration_cast<std::chrono::milliseconds>(
                         now_pt - last_clear_r).count();
@@ -1582,13 +1590,13 @@ static void se3_keepalive_loop() {
                         const auto since_fc = std::chrono::duration_cast<std::chrono::milliseconds>(
                             now_pt - last_fault_code_r).count();
                         if (since_fc >= FAULT_CODE_READ_INTERVAL_MS) {
-                            fc_str = format_se3_fault_codes(se3_right);
+                            fc_str = format_vfd_fault_codes(vfd_right);
                             last_fault_code_r = now_pt;
                         }
-                        std::cout << "[SE3-keepalive] right FAULT (status=0x" << std::hex << st
+                        std::cout << "[VFD-keepalive] right FAULT (err=0x" << std::hex << st
                                   << std::dec << ") " << fc_str
-                                  << " — auto-clear via H1101=0x9696\n";
-                        se3_right.clearAlarm();
+                                  << " — auto-clear via 0x2002 RESET\n";
+                        vfd_right.clearAlarm();
                         last_clear_r = now_pt;
                         r_clear_count++;
                     }
@@ -1600,9 +1608,9 @@ static void se3_keepalive_loop() {
         // before OPT alarm triggers. After that, batch every ~30s.
         ticks++;
         if (ticks <= 10) {
-            const bool l_fault = (last_l_status & 0x0080) != 0;   // b7 = fault
-            const bool r_fault = (last_r_status & 0x0080) != 0;
-            std::cout << "[SE3-keepalive] tick " << ticks
+            const bool l_fault = (last_l_status & 0x00FF) != 0;   // MH300 0x2100 error code
+            const bool r_fault = (last_r_status & 0x00FF) != 0;
+            std::cout << "[VFD-keepalive] tick " << ticks
                       << " — L: ok=" << l_ok << " fail=" << l_fail
                       << " status=0x" << std::hex << last_l_status << std::dec
                       << (l_fault ? " ⚠FAULT" : "")
@@ -1612,7 +1620,7 @@ static void se3_keepalive_loop() {
                       << "\n";
             std::cout.flush();
         } else if (ticks >= 60) {   // every ~30s (60 ticks × 500ms)
-            std::cout << "[SE3-keepalive] last 30s — L: ok=" << l_ok << " fail=" << l_fail
+            std::cout << "[VFD-keepalive] last 30s — L: ok=" << l_ok << " fail=" << l_fail
                       << " status=0x" << std::hex << last_l_status << std::dec
                       << " clears=" << l_clear_count
                       << " | R: ok=" << r_ok << " fail=" << r_fail
@@ -1695,11 +1703,11 @@ static void hold_loop() {
                 // their partner released. setFreqHz on stopped SE3 just queues
                 // the next-start freq, harmless.
                 if (was_trimmed) {
-                    const double base = g_se3_hold_hz.load();
+                    const double base = g_vfd_hold_hz.load();
                     if (hold_up_left.load()  || hold_down_left.load())
-                        se3_left .setFreqHz(base, SE3_MAX_HZ);
+                        vfd_left .setFreqHz(base, VFD_MAX_HZ);
                     if (hold_up_right.load() || hold_down_right.load())
-                        se3_right.setFreqHz(base, SE3_MAX_HZ);
+                        vfd_right.setFreqHz(base, VFD_MAX_HZ);
                     was_trimmed = false;
                     std::cout << "[BAL] hold sync ended — reset to base " << base << " Hz\n";
                 }
@@ -1713,7 +1721,7 @@ static void hold_loop() {
             if (std::chrono::duration_cast<std::chrono::milliseconds>(
                     now_pt - last_balance_tick).count() >= BALANCE_TICK_MS) {
                 last_balance_tick = now_pt;
-                apply_balance_trim(g_se3_hold_hz.load(), cur_sync_dir,
+                apply_balance_trim(g_vfd_hold_hz.load(), cur_sync_dir,
                                    balance_base_left, balance_base_right, was_trimmed);
             }
         }
@@ -1784,8 +1792,8 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
         std::cout << "[fine_adjust] L=" << curL_init << " R=" << curR_init
                   << " diff=" << diff_init << " — within ±" << FINE_ADJUST_TOLERANCE_CM
                   << ", stopping both\n";
-        std::thread sL([]{ reliable_stop_one(se3_left);  });
-        std::thread sR([]{ reliable_stop_one(se3_right); });
+        std::thread sL([]{ reliable_stop_one(vfd_left);  });
+        std::thread sR([]{ reliable_stop_one(vfd_right); });
         sL.join();
         sR.join();
         return "";
@@ -1824,8 +1832,8 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
     // stopped both on target reach, but if this function is called from
     // cmd_align_lengths (independent of motion_rope), motor state may be
     // unknown — idempotent stop is cheap.
-    if (!left_needs)  reliable_stop_one(se3_left);
-    if (!right_needs) reliable_stop_one(se3_right);
+    if (!left_needs)  reliable_stop_one(vfd_left);
+    if (!right_needs) reliable_stop_one(vfd_right);
 
     // Start only the lagging side(s). Distance-adaptive kick:
     //   distance >= KICK_DISTANCE_THRESHOLD_CM → kick_hz × KICK_DURATION_MS, then drop to precision hz
@@ -1842,7 +1850,7 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
     const double R_start_hz = R_use_kick ? kick_hz : hz;
 
     if (left_needs) {
-        if (reliable_setfreq_one(se3_left, L_start_hz)) {
+        if (reliable_setfreq_one(vfd_left, L_start_hz)) {
             std::cout << "[fine_adjust] L setFreq FAILED (8x100ms retries exhausted)\n";
             return "fine_adjust_setfreq_l_fail";
         }
@@ -1850,7 +1858,7 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
         // both sides via reliable_stop_one; SE3 firmware may still be in P.8
         // decel / DC brake injection phase and reject H1001 RUN. Default 2x50ms
         // (sync_start use) is too short to outwait the firmware transient.
-        if (reliable_run_one(se3_left, L_pay, 6, 200)) {
+        if (reliable_run_one(vfd_left, L_pay, 6, 200)) {
             std::cout << "[fine_adjust] L run cmd FAILED (Modbus / SE3 firmware reject, 6x200ms exhausted)\n";
             return "fine_adjust_run_l_fail";
         }
@@ -1863,14 +1871,14 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
         }
     }
     if (right_needs) {
-        if (reliable_setfreq_one(se3_right, R_start_hz)) {
+        if (reliable_setfreq_one(vfd_right, R_start_hz)) {
             std::cout << "[fine_adjust] R setFreq FAILED (8x100ms retries exhausted)\n";
-            if (left_needs) reliable_stop_one(se3_left);
+            if (left_needs) reliable_stop_one(vfd_left);
             return "fine_adjust_setfreq_r_fail";
         }
-        if (reliable_run_one(se3_right, R_pay, 6, 200)) {
+        if (reliable_run_one(vfd_right, R_pay, 6, 200)) {
             std::cout << "[fine_adjust] R run cmd FAILED (Modbus / SE3 firmware reject, 6x200ms exhausted)\n";
-            if (left_needs) reliable_stop_one(se3_left);
+            if (left_needs) reliable_stop_one(vfd_left);
             return "fine_adjust_run_r_fail";
         }
         if (R_use_kick) {
@@ -1892,9 +1900,9 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
     // Drop kicking sides from kick_hz to precision hz; non-kicking sides are
     // already at hz (set at start). Diagnostic status read on every started side.
     if (left_needs) {
-        if (L_use_kick) se3_left.setFreqHz(hz, SE3_MAX_HZ);   // drop to precision Hz
+        if (L_use_kick) vfd_left.setFreqHz(hz, VFD_MAX_HZ);   // drop to precision Hz
         uint16_t st = 0;
-        if (!se3_left.readStatusWord(st)) {
+        if (!vfd_left.readStatusWord(st)) {
             std::cout << "[fine_adjust] L post-start status=0x" << std::hex << st << std::dec
                       << " running=" << ((st&0x01)?1:0)
                       << " fwd=" << ((st&0x02)?1:0)
@@ -1904,9 +1912,9 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
         }
     }
     if (right_needs) {
-        if (R_use_kick) se3_right.setFreqHz(hz, SE3_MAX_HZ);
+        if (R_use_kick) vfd_right.setFreqHz(hz, VFD_MAX_HZ);
         uint16_t st = 0;
-        if (!se3_right.readStatusWord(st)) {
+        if (!vfd_right.readStatusWord(st)) {
             std::cout << "[fine_adjust] R post-start status=0x" << std::hex << st << std::dec
                       << " running=" << ((st&0x01)?1:0)
                       << " fwd=" << ((st&0x02)?1:0)
@@ -1957,7 +1965,7 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
         if (!left_done && L_valid) {
             const bool reached = L_approach_from_below ? (curL >= L_stop_at) : (curL <= L_stop_at);
             if (reached) {
-                reliable_stop_one(se3_left);
+                reliable_stop_one(vfd_left);
                 left_done = true;
                 std::cout << "[fine_adjust] left converged at " << curL
                           << " (target=" << target_cm << ")\n";
@@ -1966,7 +1974,7 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
         if (!right_done && R_valid) {
             const bool reached = R_approach_from_below ? (curR >= R_stop_at) : (curR <= R_stop_at);
             if (reached) {
-                reliable_stop_one(se3_right);
+                reliable_stop_one(vfd_right);
                 right_done = true;
                 std::cout << "[fine_adjust] right converged at " << curR
                           << " (target=" << target_cm << ")\n";
@@ -2010,8 +2018,8 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
     }
 
     // Safety: stop any still-running side (abort / timeout / tension paths)
-    if (!left_done)  reliable_stop_one(se3_left);
-    if (!right_done) reliable_stop_one(se3_right);
+    if (!left_done)  reliable_stop_one(vfd_left);
+    if (!right_done) reliable_stop_one(vfd_right);
 
     // Wait for motor ramp + drum settling, then log final cache. Useful for
     // verifying convergence matched the panel reading. ~1s covers P.8 decel
@@ -2069,36 +2077,36 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
             }
 
             if (need_l) {
-                if (reliable_setfreq_one(se3_left, correction_hz)) {
+                if (reliable_setfreq_one(vfd_left, correction_hz)) {
                     std::cout << "[fine_adjust] correction L setFreq FAILED (8x100ms exhausted)\n";
-                    reliable_stop_one(se3_left);
-                    if (need_r) reliable_stop_one(se3_right);
+                    reliable_stop_one(vfd_left);
+                    if (need_r) reliable_stop_one(vfd_right);
                     break;
                 }
-                if (reliable_run_one(se3_left, L_dir_pay_out, 6, 200)) {
+                if (reliable_run_one(vfd_left, L_dir_pay_out, 6, 200)) {
                     std::cout << "[fine_adjust] correction L run cmd FAILED (Modbus / SE3 reject, 6x200ms exhausted)"
                               << " — dir_pay_out=" << L_dir_pay_out
                               << " main_was_pay_out=" << main_motion_pay_out
                               << " (reversing=" << L_reversing << ")\n";
-                    reliable_stop_one(se3_left);
-                    if (need_r) reliable_stop_one(se3_right);
+                    reliable_stop_one(vfd_left);
+                    if (need_r) reliable_stop_one(vfd_right);
                     break;
                 }
             }
             if (need_r) {
-                if (reliable_setfreq_one(se3_right, correction_hz)) {
+                if (reliable_setfreq_one(vfd_right, correction_hz)) {
                     std::cout << "[fine_adjust] correction R setFreq FAILED (8x100ms exhausted)\n";
-                    if (need_l) reliable_stop_one(se3_left);
-                    reliable_stop_one(se3_right);
+                    if (need_l) reliable_stop_one(vfd_left);
+                    reliable_stop_one(vfd_right);
                     break;
                 }
-                if (reliable_run_one(se3_right, R_dir_pay_out, 6, 200)) {
+                if (reliable_run_one(vfd_right, R_dir_pay_out, 6, 200)) {
                     std::cout << "[fine_adjust] correction R run cmd FAILED (Modbus / SE3 reject, 6x200ms exhausted)"
                               << " — dir_pay_out=" << R_dir_pay_out
                               << " main_was_pay_out=" << main_motion_pay_out
                               << " (reversing=" << R_reversing << ")\n";
-                    if (need_l) reliable_stop_one(se3_left);
-                    reliable_stop_one(se3_right);
+                    if (need_l) reliable_stop_one(vfd_left);
+                    reliable_stop_one(vfd_right);
                     break;
                 }
             }
@@ -2121,7 +2129,7 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
                     if (std::abs(new_err) <= FINE_ADJUST_TOLERANCE_CM ||
                         (errL > 0 && new_err <= 0) ||
                         (errL < 0 && new_err >= 0)) {
-                        reliable_stop_one(se3_left);
+                        reliable_stop_one(vfd_left);
                         L_corr_done = true;
                         std::cout << "[fine_adjust] correction L stop at " << curL << "\n";
                     }
@@ -2132,7 +2140,7 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
                     if (std::abs(new_err) <= FINE_ADJUST_TOLERANCE_CM ||
                         (errR > 0 && new_err <= 0) ||
                         (errR < 0 && new_err >= 0)) {
-                        reliable_stop_one(se3_right);
+                        reliable_stop_one(vfd_right);
                         R_corr_done = true;
                         std::cout << "[fine_adjust] correction R stop at " << curR << "\n";
                     }
@@ -2140,8 +2148,8 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
                 std::this_thread::sleep_for(std::chrono::milliseconds(POLL_INTERVAL_MS));
             }
             // Safety stop on timeout / abort
-            if (!L_corr_done) reliable_stop_one(se3_left);
-            if (!R_corr_done) reliable_stop_one(se3_right);
+            if (!L_corr_done) reliable_stop_one(vfd_left);
+            if (!R_corr_done) reliable_stop_one(vfd_right);
             if (corr_aborted) { fa_abort = "aborted"; break; }
 
             // Settle, re-read for next pass evaluation / final log
@@ -2167,8 +2175,8 @@ static std::string motion_rope(int cm, bool is_retract) {
     // bench usually has no middle conduit, so we skip middle motion if either
     // device is unavailable or its cache is invalid. Production deployment
     // requires middle; operator should verify all 4 light up at startup.
-    if (!g_dev_se3_left.load())    return "ERR se3_left_unavailable\n";
-    if (!g_dev_se3_right.load())   return "ERR se3_right_unavailable\n";
+    if (!g_dev_vfd_left.load())    return "ERR vfd_left_unavailable\n";
+    if (!g_dev_vfd_right.load())   return "ERR vfd_right_unavailable\n";
     if (!g_dev_meter_left.load())  return "ERR meter_left_unavailable\n";
     if (!g_dev_meter_right.load()) return "ERR meter_right_unavailable\n";
     if (!g_dev_dsz_left.load())    return "ERR dsz_left_unavailable\n";
@@ -2211,9 +2219,9 @@ static std::string motion_rope(int cm, bool is_retract) {
     // Two-phase sync start: setFreq with retry first (Phase A absorbs variable
     // latency), then run command on both sides at near-same wall time (Phase B,
     // no retry). Drift between sides ~10ms vs concurrent-with-bundled-retry's
-    // 80-700ms when one side hits a transient. See dual_se3_sync_start doc.
-    if (dual_se3_sync_start(g_se3_motion_hz.load(), pay_out, pay_out)) {
-        return "ERR se3_start_fail\n";
+    // 80-700ms when one side hits a transient. See dual_vfd_sync_start doc.
+    if (dual_vfd_sync_start(g_vfd_motion_hz.load(), pay_out, pay_out)) {
+        return "ERR vfd_start_fail\n";
     }
     if (use_middle && middleStart(pay_out)) {
         allMotionOff();
@@ -2259,12 +2267,12 @@ static std::string motion_rope(int cm, bool is_retract) {
         // abort BOTH immediately. keepalive thread sets these atomics based
         // on status word b7. Safety principle: one rope stuck = abort both
         // (asymmetric load on crane structure is dangerous).
-        if (g_se3_left_fault.load() || g_se3_right_fault.load()) {
-            const bool lf = g_se3_left_fault.load();
-            const bool rf = g_se3_right_fault.load();
-            abort_reason = (lf && rf) ? "se3_both_fault"
-                         : lf         ? "se3_left_fault"
-                                      : "se3_right_fault";
+        if (g_vfd_left_fault.load() || g_vfd_right_fault.load()) {
+            const bool lf = g_vfd_left_fault.load();
+            const bool rf = g_vfd_right_fault.load();
+            abort_reason = (lf && rf) ? "vfd_both_fault"
+                         : lf         ? "vfd_left_fault"
+                                      : "vfd_right_fault";
             break;
         }
 
@@ -2300,7 +2308,7 @@ static std::string motion_rope(int cm, bool is_retract) {
                 // tension_alarm, no abort_reason). pay_out is exempt.
                 if (is_retract &&
                     std::max(l_kg, r_kg) >= g_retract_tension_stop_kg.load()) {
-                    dual_se3_sync_retry([](SE3_inverter& inv){ return inv.stopDecel(); },
+                    dual_vfd_sync_retry([](MH300_inverter& inv){ return inv.stopDecel(); },
                                         8, 100, "motion_rope.tension_soft_stop");
                     if (use_middle) inverter.stopDecel();
                     std::cout << "[motion_rope] soft tension stop — L=" << l_kg
@@ -2322,7 +2330,7 @@ static std::string motion_rope(int cm, bool is_retract) {
 
         // Sync stop on FIRST side to reach target (2026-05-15): matches hold
         // mode semantic — when user releases hold button, both sides stop
-        // together via dual_se3_sync_retry. For motion_rope, "leader reaches
+        // together via dual_vfd_sync_retry. For motion_rope, "leader reaches
         // target" is the analog trigger. Follower stops short by however much
         // it was lagging; fine_adjust picks up the residual after this loop.
         // Pre-2026-05-15 had per-side independent stop → drift between L and R
@@ -2341,7 +2349,7 @@ static std::string motion_rope(int cm, bool is_retract) {
                 const char* leader = l_reached ? (r_reached ? "BOTH" : "L") : "R";
                 // Sync stop both (matches hold_off pattern). 8x retry covers
                 // transient Modbus failures so neither side is left running.
-                dual_se3_sync_retry([](SE3_inverter& inv){ return inv.stopDecel(); },
+                dual_vfd_sync_retry([](MH300_inverter& inv){ return inv.stopDecel(); },
                                     8, 100, "motion_rope.sync_stop");
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 const int32_t afterL = g_length_left.load();
@@ -2371,7 +2379,7 @@ static std::string motion_rope(int cm, bool is_retract) {
             if (std::chrono::duration_cast<std::chrono::milliseconds>(
                     now_pt - last_balance_tick).count() >= BALANCE_TICK_MS) {
                 last_balance_tick = now_pt;
-                apply_balance_trim(g_se3_motion_hz.load(), balance_dir,
+                apply_balance_trim(g_vfd_motion_hz.load(), balance_dir,
                                    base_left, base_right, was_trimmed);
             }
         }
@@ -2408,15 +2416,15 @@ static std::string motion_rope(int cm, bool is_retract) {
         return "OK tension_reached\n";
     }
 
-    // For tension / meter / se3 fault aborts: hard-stop everything via
+    // For tension / meter / vfd fault aborts: hard-stop everything via
     // allMotionOff (extra safety; main loop already stopped on target reach).
     // For success / timeout / user-abort: motors already stopped on target
     // reach; fine_adjust starts each side from stationary.
     const bool tension_aborted = (abort_reason.compare(0, 8, "tension_") == 0);
     const bool meter_aborted   = (abort_reason.compare(0, 6, "meter_") == 0);
-    const bool se3_aborted     = (abort_reason.compare(0, 4, "se3_") == 0);
+    const bool vfd_aborted     = (abort_reason.compare(0, 4, "vfd_") == 0);
 
-    if (tension_aborted || meter_aborted || se3_aborted) {
+    if (tension_aborted || meter_aborted || vfd_aborted) {
         // EMERGENCY hard stop — switched from allMotionOff() (decel ramp via
         // reliable_stop_one, ~800ms + P.8 ramp) to allMotionEmergencyStop()
         // for safety critical aborts (2026-05-14). When one side comm-dead
@@ -2426,11 +2434,11 @@ static std::string motion_rope(int cm, bool is_retract) {
         // OPT timeout (panel-side, typically 2-4s). emergencyStop = MRS bit
         // = output cutoff in ~50ms. Then stopDecel to clear MRS for next cmd.
         allMotionEmergencyStop();
-        dual_se3_concurrent([](SE3_inverter& inv){ return inv.stopDecel(); });   // clear MRS
+        dual_vfd_concurrent([](MH300_inverter& inv){ return inv.stopDecel(); });   // clear MRS
     }
 
     // Broadcast EVT for hard-abort reasons so washrobot/GUI sees specific cause
-    if (meter_aborted || se3_aborted) {
+    if (meter_aborted || vfd_aborted) {
         std::ostringstream evt;
         evt << "EVT motion_abort reason=" << abort_reason << "\n";
         broadcast_evt(evt.str());
@@ -2445,7 +2453,7 @@ static std::string motion_rope(int cm, bool is_retract) {
     //
     // For user-abort: reset abort_flag so fine_adjust loop's own abort check
     // doesn't immediately fire. User can press stop again to interrupt.
-    if (!tension_aborted && !meter_aborted && !se3_aborted) {
+    if (!tension_aborted && !meter_aborted && !vfd_aborted) {
         if (abort_reason == "aborted") {
             abort_flag.exchange(false);
             std::cout << "[fine_adjust] post-abort cleanup attempt (abort_flag reset; "
@@ -2471,8 +2479,8 @@ static std::string cmd_roll_correct(int delta_cm) {
     if (delta_cm == 0) return "OK\n";
 
     // roll_correct needs both ropes + tension safety. Middle pipeline not used.
-    if (!g_dev_se3_left.load())    return "ERR se3_left_unavailable\n";
-    if (!g_dev_se3_right.load())   return "ERR se3_right_unavailable\n";
+    if (!g_dev_vfd_left.load())    return "ERR vfd_left_unavailable\n";
+    if (!g_dev_vfd_right.load())   return "ERR vfd_right_unavailable\n";
     if (!g_dev_meter_left.load())  return "ERR meter_left_unavailable\n";
     if (!g_dev_meter_right.load()) return "ERR meter_right_unavailable\n";
     if (!g_dev_dsz_left.load())    return "ERR dsz_left_unavailable\n";
@@ -2496,9 +2504,9 @@ static std::string cmd_roll_correct(int delta_cm) {
 
     // Two-phase sync start with opposing directions (left / right move
     // opposite ways for differential roll correction). Same rationale as
-    // motion_rope — see dual_se3_sync_start doc.
-    if (dual_se3_sync_start(g_se3_motion_hz.load(), left_pay, !left_pay)) {
-        return "ERR se3_start_fail\n";
+    // motion_rope — see dual_vfd_sync_start doc.
+    if (dual_vfd_sync_start(g_vfd_motion_hz.load(), left_pay, !left_pay)) {
+        return "ERR vfd_start_fail\n";
     }
 
     const auto start = std::chrono::steady_clock::now();
@@ -2516,12 +2524,12 @@ static std::string cmd_roll_correct(int delta_cm) {
         // SE3 fault detection (same as motion_rope): if either side in fault,
         // abort both. Critical for roll_correct which moves L/R opposite —
         // one side stuck while other moves causes large tilt asymmetry.
-        if (g_se3_left_fault.load() || g_se3_right_fault.load()) {
-            const bool lf = g_se3_left_fault.load();
-            const bool rf = g_se3_right_fault.load();
-            abort_reason = (lf && rf) ? "se3_both_fault"
-                         : lf         ? "se3_left_fault"
-                                      : "se3_right_fault";
+        if (g_vfd_left_fault.load() || g_vfd_right_fault.load()) {
+            const bool lf = g_vfd_left_fault.load();
+            const bool rf = g_vfd_right_fault.load();
+            abort_reason = (lf && rf) ? "vfd_both_fault"
+                         : lf         ? "vfd_left_fault"
+                                      : "vfd_right_fault";
             break;
         }
 
@@ -2555,12 +2563,12 @@ static std::string cmd_roll_correct(int delta_cm) {
         // Each side stops when its displayed delta reaches abs_cm.
         if (!left_done && g_length_left_valid.load() &&
             std::abs(g_length_left.load() - base_left) >= abs_cm) {
-            reliable_stop_one(se3_left);
+            reliable_stop_one(vfd_left);
             left_done = true;
         }
         if (!right_done && g_length_right_valid.load() &&
             std::abs(g_length_right.load() - base_right) >= abs_cm) {
-            reliable_stop_one(se3_right);
+            reliable_stop_one(vfd_right);
             right_done = true;
         }
 
@@ -2569,9 +2577,9 @@ static std::string cmd_roll_correct(int delta_cm) {
 
     allRopeInvertersOff();
 
-    // EVT broadcast for hard-abort reasons (meter / se3 fault) so GUI sees cause
+    // EVT broadcast for hard-abort reasons (meter / vfd fault) so GUI sees cause
     if (abort_reason.compare(0, 6, "meter_") == 0 ||
-        abort_reason.compare(0, 4, "se3_")   == 0) {
+        abort_reason.compare(0, 4, "vfd_")   == 0) {
         std::ostringstream evt;
         evt << "EVT motion_abort reason=" << abort_reason << "\n";
         broadcast_evt(evt.str());
@@ -2594,16 +2602,16 @@ static std::string cmd_roll_correct(int delta_cm) {
 //
 // Standard safety checks: SE3 fault, meter availability, tension monitoring.
 static std::string cmd_align_lengths() {
-    if (!g_dev_se3_left.load())    return "ERR se3_left_unavailable\n";
-    if (!g_dev_se3_right.load())   return "ERR se3_right_unavailable\n";
+    if (!g_dev_vfd_left.load())    return "ERR vfd_left_unavailable\n";
+    if (!g_dev_vfd_right.load())   return "ERR vfd_right_unavailable\n";
     if (!g_dev_meter_left.load())  return "ERR meter_left_unavailable\n";
     if (!g_dev_meter_right.load()) return "ERR meter_right_unavailable\n";
     if (!g_dev_dsz_left.load())    return "ERR dsz_left_unavailable\n";
     if (!g_dev_dsz_right.load())   return "ERR dsz_right_unavailable\n";
 
     // Refuse if either SE3 is in fault (would silently fail to start)
-    if (g_se3_left_fault.load() || g_se3_right_fault.load()) {
-        return "ERR se3_fault_pending\n";
+    if (g_vfd_left_fault.load() || g_vfd_right_fault.load()) {
+        return "ERR vfd_fault_pending\n";
     }
 
     std::unique_lock<std::mutex> lock(motion_mtx, std::try_to_lock);
@@ -2616,8 +2624,8 @@ static std::string cmd_align_lengths() {
     // cu_mode_set_ flag (bench observed 2-3 silent failures before working).
     // Next run cmd from fine_adjust will write H1000=0 + 150ms sleep before
     // the actual H1001 run write.
-    se3_left.invalidateCuModeCache();
-    se3_right.invalidateCuModeCache();
+    vfd_left.invalidateCuModeCache();
+    vfd_right.invalidateCuModeCache();
 
     // Snapshot for log
     const int32_t curL_init = g_length_left.load();
@@ -2628,7 +2636,7 @@ static std::string cmd_align_lengths() {
 
     // Reuse motion_fine_adjust_sync with main_motion_pay_out=true:
     //   - target = max(L, R)
-    //   - lagging side runs SE3_DIR_PAY_OUT (= STR per project bench)
+    //   - lagging side runs VFD_DIR_PAY_OUT (= STR per project bench)
     //   - converges to target ± FINE_ADJUST_TOLERANCE_CM
     const std::string fa_reason = motion_fine_adjust_sync(/*main_motion_pay_out=*/true);
     if (!fa_reason.empty()) {
@@ -2642,8 +2650,8 @@ static std::string cmd_align_lengths() {
 
 // Raw debug-only manual control of one rope inverter. Bypasses tension safety
 // monitoring — use hold mode (`up_left on` etc.) for normal operation.
-//   pay_out_left/right on  → setFreqHz(SE3_HOLD_HZ) + runForward (or convention)
-//   retract_left/right on  → setFreqHz(SE3_HOLD_HZ) + runReverse
+//   pay_out_left/right on  → setFreqHz(VFD_HOLD_HZ) + runForward (or convention)
+//   retract_left/right on  → setFreqHz(VFD_HOLD_HZ) + runReverse
 //   <any> off              → stopDecel
 static std::string cmd_manual(const std::string& dir, const std::string& onoff) {
     bool on;
@@ -2652,24 +2660,24 @@ static std::string cmd_manual(const std::string& dir, const std::string& onoff) 
     else return "ERR expected_on_or_off\n";
 
     bool pay_out;
-    SE3_inverter* inv = nullptr;
+    MH300_inverter* inv = nullptr;
     bool side_left = false;
-    if      (dir == "pay_out_left")  { inv = &se3_left;  pay_out = true;  side_left = true;  }
-    else if (dir == "pay_out_right") { inv = &se3_right; pay_out = true;  side_left = false; }
-    else if (dir == "retract_left")  { inv = &se3_left;  pay_out = false; side_left = true;  }
-    else if (dir == "retract_right") { inv = &se3_right; pay_out = false; side_left = false; }
+    if      (dir == "pay_out_left")  { inv = &vfd_left;  pay_out = true;  side_left = true;  }
+    else if (dir == "pay_out_right") { inv = &vfd_right; pay_out = true;  side_left = false; }
+    else if (dir == "retract_left")  { inv = &vfd_left;  pay_out = false; side_left = true;  }
+    else if (dir == "retract_right") { inv = &vfd_right; pay_out = false; side_left = false; }
     else return "ERR unknown_channel\n";
 
     // Per-side SE3 availability check (manual = bypass tension safety, so DSZL
     // not required — caller accepted that trade-off by using cmd_manual).
-    if ( side_left && !g_dev_se3_left.load())  return "ERR se3_left_unavailable\n";
-    if (!side_left && !g_dev_se3_right.load()) return "ERR se3_right_unavailable\n";
+    if ( side_left && !g_dev_vfd_left.load())  return "ERR vfd_left_unavailable\n";
+    if (!side_left && !g_dev_vfd_right.load()) return "ERR vfd_right_unavailable\n";
 
     if (!on) {
-        if (reliable_stop_one(*inv)) return "ERR se3_stop_fail\n";
+        if (reliable_stop_one(*inv)) return "ERR vfd_stop_fail\n";
         return "OK\n";
     }
-    if (se3StartRopeHold(*inv, pay_out)) return "ERR se3_start_fail\n";
+    if (vfdStartRopeHold(*inv, pay_out)) return "ERR vfd_start_fail\n";
     return "OK\n";
 }
 
@@ -2910,8 +2918,8 @@ static std::string cmd_status() {
     oss << " meter_right_scale="  << (g_meter_right_scale_valid .load() ? std::to_string(g_meter_right_device_scale .load()) : std::string("ERR"));
     oss << " meter_middle_scale=" << (g_meter_middle_scale_valid.load() ? std::to_string(g_meter_middle_device_scale.load()) : std::string("ERR"));
     oss << " home_ground_cm="  << home_ground_cm.load();
-    oss << " hold_hz="         << g_se3_hold_hz.load();
-    oss << " motion_hz="       << g_se3_motion_hz.load();
+    oss << " hold_hz="         << g_vfd_hold_hz.load();
+    oss << " motion_hz="       << g_vfd_motion_hz.load();
     oss << " middle_hz="       << g_middle_winch_hz.load();
     oss << " balance_enabled=" << (g_balance_enabled.load() ? 1 : 0);
     oss << " balance_kp="       << g_balance_kp.load();
@@ -2923,8 +2931,8 @@ static std::string cmd_status() {
     oss << " freeze_hz="        << g_freeze_hz.load();
     oss << " kick_hz="          << g_kick_hz.load();
     // Device availability — GUI uses these to grey out unavailable controls.
-    oss << " dev_se3_left="    << (g_dev_se3_left.load()    ? 1 : 0);
-    oss << " dev_se3_right="   << (g_dev_se3_right.load()   ? 1 : 0);
+    oss << " dev_vfd_left="    << (g_dev_vfd_left.load()    ? 1 : 0);
+    oss << " dev_vfd_right="   << (g_dev_vfd_right.load()   ? 1 : 0);
     oss << " dev_meter_left="  << (g_dev_meter_left.load()  ? 1 : 0);
     oss << " dev_meter_right=" << (g_dev_meter_right.load() ? 1 : 0);
     oss << " dev_meter_middle="<< (g_dev_meter_middle.load()? 1 : 0);
@@ -2964,13 +2972,13 @@ static std::string cmd_tension() {
 //   down=true → pay_out (motor forward)
 //   neither  → stopDecel
 // Returns true on inverter command failure.
-static bool apply_hold_one_side(SE3_inverter& inv, bool up, bool down,
+static bool apply_hold_one_side(MH300_inverter& inv, bool up, bool down,
                                 const char* side_tag = "?") {
     const auto t0 = std::chrono::steady_clock::now();
     bool err;
     const char* action;
-    if (up)        { action = "retract"; err = se3StartRopeHold(inv, /*pay_out=*/false); }
-    else if (down) { action = "pay_out"; err = se3StartRopeHold(inv, /*pay_out=*/true);  }
+    if (up)        { action = "retract"; err = vfdStartRopeHold(inv, /*pay_out=*/false); }
+    else if (down) { action = "pay_out"; err = vfdStartRopeHold(inv, /*pay_out=*/true);  }
     else           { action = "stop";    err = reliable_stop_one(inv);                   }
     const auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
@@ -2990,7 +2998,7 @@ static bool apply_hold_one_side(SE3_inverter& inv, bool up, bool down,
 // step fails, rolls back internally (stopDecel both) and returns true.
 //
 // Both setFreqHz pair AND run pair AND rollback stopDecel pair use
-// dual_se3_concurrent so the two sides start / stop in lockstep even when
+// dual_vfd_concurrent so the two sides start / stop in lockstep even when
 // driver retry latency lands asymmetrically. Sequential dispatch was visibly
 // asymmetric (one side could lag 0.5-2s if it hit a watchdog reclaim).
 //
@@ -3001,23 +3009,23 @@ static bool apply_hold_one_side(SE3_inverter& inv, bool up, bool down,
 //   3. Mirrors the proven Linux_test menu 25 implementation that handled the
 //      "left only retract / right only pay_out" intermittent observed when
 //      SE3 Modbus comms are flaky (CU-mode write fail, stale-buffer reply)
-static bool dual_se3_hold_start(bool pay_out) {
-    const double hz = g_se3_hold_hz.load();
-    HOLD_TRACE("dual_se3_hold_start ENTRY pay_out=" << pay_out << " hz=" << hz);
+static bool dual_vfd_hold_start(bool pay_out) {
+    const double hz = g_vfd_hold_hz.load();
+    HOLD_TRACE("dual_vfd_hold_start ENTRY pay_out=" << pay_out << " hz=" << hz);
 
-    // Switched to dual_se3_sync_start (2026-05-14): old reliable_start_one
+    // Switched to dual_vfd_sync_start (2026-05-14): old reliable_start_one
     // bundled setFreqHz + run + retry, so a retry on one side could let the
     // other side run alone for 100-800ms before catching up — audibly /
     // visibly asymmetric. sync_start splits into Phase A (setFreq both, full
     // retry) then Phase B (run both, near-simultaneous, bounded retry) → drift
     // 10-100ms. Same direction on both sides for hold (pay_out, pay_out).
-    HOLD_TRACE("dual_se3_hold_start -> dual_se3_sync_start");
-    if (dual_se3_sync_start(hz, pay_out, pay_out)) {
+    HOLD_TRACE("dual_vfd_hold_start -> dual_vfd_sync_start");
+    if (dual_vfd_sync_start(hz, pay_out, pay_out)) {
         // sync_start already rolled back internally on Phase B failure
-        HOLD_TRACE("dual_se3_hold_start EXIT (sync_start fail)");
+        HOLD_TRACE("dual_vfd_hold_start EXIT (sync_start fail)");
         return true;
     }
-    HOLD_TRACE("dual_se3_hold_start sync_start OK -> 200ms settle + verification");
+    HOLD_TRACE("dual_vfd_hold_start sync_start OK -> 200ms settle + verification");
 
     // Post-start verification (2026-05-14): SE3 firmware has a known silent-
     // reject pattern where H1001 (run cmd) is ACK'd at protocol level but
@@ -3034,7 +3042,7 @@ static bool dual_se3_hold_start(bool pay_out) {
     // we still can't get status, the comm channel is genuinely down → abort
     // is correct.
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    auto robust_read_status = [](SE3_inverter& inv, uint16_t& out, int& attempts_used) -> bool {
+    auto robust_read_status = [](MH300_inverter& inv, uint16_t& out, int& attempts_used) -> bool {
         constexpr int MAX_ATTEMPTS = 4;
         for (int i = 0; i < MAX_ATTEMPTS; ++i) {
             attempts_used = i + 1;
@@ -3045,33 +3053,37 @@ static bool dual_se3_hold_start(bool pay_out) {
     };
     uint16_t stL = 0, stR = 0;
     int l_attempts = 0, r_attempts = 0;
-    const bool l_read_err = robust_read_status(se3_left,  stL, l_attempts);
-    const bool r_read_err = robust_read_status(se3_right, stR, r_attempts);
+    const bool l_read_err = robust_read_status(vfd_left,  stL, l_attempts);
+    const bool r_read_err = robust_read_status(vfd_right, stR, r_attempts);
     const bool l_read_ok = !l_read_err;
     const bool r_read_ok = !r_read_err;
     if (l_attempts > 1 || r_attempts > 1) {
-        std::cout << "[dual_se3_hold_start] verification needed retry L=" << l_attempts
+        std::cout << "[dual_vfd_hold_start] verification needed retry L=" << l_attempts
                   << "/" << 4 << " R=" << r_attempts << "/" << 4 << " attempts\n";
     }
-    const bool l_running = l_read_ok && ((stL & 0x0001) != 0);   // b0
+    // ⚠ MH300: readStatusWord reads 0x2101. SE3 used b0 = running; MH300 2101H
+    //   run-status is bit1~0 (manual table garbled in PDF text dump) — b0 is the
+    //   best-guess run bit and is fail-safe here (misread "not running" only
+    //   triggers a protective emergency-stop). RE-VERIFY the run bit on bench.
+    const bool l_running = l_read_ok && ((stL & 0x0001) != 0);   // b0 (MH300 2101H — verify)
     const bool r_running = r_read_ok && ((stR & 0x0001) != 0);
     if (!l_running || !r_running) {
-        HOLD_TRACE("dual_se3_hold_start verification FAIL l_run=" << l_running
+        HOLD_TRACE("dual_vfd_hold_start verification FAIL l_run=" << l_running
                    << " r_run=" << r_running << " -> EMERGENCY stop both");
-        std::cout << "[dual_se3_hold_start] asymmetric run state — "
+        std::cout << "[dual_vfd_hold_start] asymmetric run state — "
                   << "L: " << (l_read_ok ? "" : "READ_FAIL ") << "running=" << l_running
                   << " status=0x" << std::hex << stL << std::dec
                   << " | R: " << (r_read_ok ? "" : "READ_FAIL ") << "running=" << r_running
                   << " status=0x" << std::hex << stR << std::dec
                   << " — EMERGENCY stop both for safety\n";
-        // Fast abort — see dual_se3_sync_start comment. emergencyStop (MRS
+        // Fast abort — see dual_vfd_sync_start comment. emergencyStop (MRS
         // output cutoff) instead of decel ramp; clear MRS for next run cmd.
-        dual_se3_concurrent([](SE3_inverter& inv){ return inv.emergencyStop(); });
-        dual_se3_concurrent([](SE3_inverter& inv){ return inv.stopDecel();     });
-        HOLD_TRACE("dual_se3_hold_start EXIT (verification fail, both stopped)");
+        dual_vfd_concurrent([](MH300_inverter& inv){ return inv.emergencyStop(); });
+        dual_vfd_concurrent([](MH300_inverter& inv){ return inv.stopDecel();     });
+        HOLD_TRACE("dual_vfd_hold_start EXIT (verification fail, both stopped)");
         return true;
     }
-    HOLD_TRACE("dual_se3_hold_start EXIT OK both running");
+    HOLD_TRACE("dual_vfd_hold_start EXIT OK both running");
     return false;
 }
 
@@ -3097,13 +3109,13 @@ static std::string cmd_hold(const std::string& dir, const std::string& onoff) {
     // Per-side SE3 availability for "on" requests. "off" is always allowed
     // (releasing flags / sending stopDecel is safe even if device is gone).
     if (on) {
-        if (need_left  && !g_dev_se3_left.load()) {
+        if (need_left  && !g_dev_vfd_left.load()) {
             std::cout << "[cmd_hold] EXIT dir=" << dir << " result=ERR_L_UNAVAIL\n";
-            return "ERR se3_left_unavailable\n";
+            return "ERR vfd_left_unavailable\n";
         }
-        if (need_right && !g_dev_se3_right.load()) {
+        if (need_right && !g_dev_vfd_right.load()) {
             std::cout << "[cmd_hold] EXIT dir=" << dir << " result=ERR_R_UNAVAIL\n";
-            return "ERR se3_right_unavailable\n";
+            return "ERR vfd_right_unavailable\n";
         }
     }
 
@@ -3119,14 +3131,14 @@ static std::string cmd_hold(const std::string& dir, const std::string& onoff) {
                    << " -> apply_hold_one_side");
         hold_up_left.store(up_state);
         hold_down_left.store(down_state);
-        const bool side_err = apply_hold_one_side(se3_left, up_state, down_state, "L");
+        const bool side_err = apply_hold_one_side(vfd_left, up_state, down_state, "L");
         HOLD_TRACE("set_left done err=" << side_err);
         if (side_err) {
             if (!up_state && !down_state) {
                 HOLD_TRACE("set_left STOP failed -> ESCALATE emergencyStop(L)");
                 std::cout << "[cmd_hold] L stop failed — ESCALATE to emergencyStop\n";
-                se3_left.emergencyStop();
-                se3_left.stopDecel();
+                vfd_left.emergencyStop();
+                vfd_left.stopDecel();
                 HOLD_TRACE("set_left ESCALATE done");
             }
             err = true;
@@ -3137,14 +3149,14 @@ static std::string cmd_hold(const std::string& dir, const std::string& onoff) {
                    << " -> apply_hold_one_side");
         hold_up_right.store(up_state);
         hold_down_right.store(down_state);
-        const bool side_err = apply_hold_one_side(se3_right, up_state, down_state, "R");
+        const bool side_err = apply_hold_one_side(vfd_right, up_state, down_state, "R");
         HOLD_TRACE("set_right done err=" << side_err);
         if (side_err) {
             if (!up_state && !down_state) {
                 HOLD_TRACE("set_right STOP failed -> ESCALATE emergencyStop(R)");
                 std::cout << "[cmd_hold] R stop failed — ESCALATE to emergencyStop\n";
-                se3_right.emergencyStop();
-                se3_right.stopDecel();
+                vfd_right.emergencyStop();
+                vfd_right.stopDecel();
                 HOLD_TRACE("set_right ESCALATE done");
             }
             err = true;
@@ -3168,9 +3180,9 @@ static std::string cmd_hold(const std::string& dir, const std::string& onoff) {
         const bool pay_out = (dir == "down");
         if (on) {
             // Menu-25 atomic: freq both → run both, internal rollback on any fail
-            HOLD_TRACE("combined ON pay_out=" << pay_out << " -> dual_se3_hold_start");
-            const bool dhs_err = dual_se3_hold_start(pay_out);
-            HOLD_TRACE("combined ON dual_se3_hold_start return err=" << dhs_err);
+            HOLD_TRACE("combined ON pay_out=" << pay_out << " -> dual_vfd_hold_start");
+            const bool dhs_err = dual_vfd_hold_start(pay_out);
+            HOLD_TRACE("combined ON dual_vfd_hold_start return err=" << dhs_err);
             if (dhs_err) {
                 err = true;
             } else {
@@ -3192,9 +3204,9 @@ static std::string cmd_hold(const std::string& dir, const std::string& onoff) {
             // catches up, bounds drift to ~150ms (vs 300-700ms for the old
             // independent reliable_stop_one threads). Flags clear regardless of
             // stop result.
-            HOLD_TRACE("combined OFF -> dual_se3_sync_retry(stopDecel)");
-            const bool stop_err = dual_se3_sync_retry(
-                [](SE3_inverter& inv){ return inv.stopDecel(); },
+            HOLD_TRACE("combined OFF -> dual_vfd_sync_retry(stopDecel)");
+            const bool stop_err = dual_vfd_sync_retry(
+                [](MH300_inverter& inv){ return inv.stopDecel(); },
                 8, 100, "hold_off");
             HOLD_TRACE("combined OFF sync_retry return err=" << stop_err);
             if (stop_err) {
@@ -3211,8 +3223,8 @@ static std::string cmd_hold(const std::string& dir, const std::string& onoff) {
                 HOLD_TRACE("combined OFF ESCALATE -> emergencyStop both");
                 std::cout << "[cmd_hold] OFF sync_retry stopDecel failed — "
                              "ESCALATE to emergencyStop\n";
-                dual_se3_concurrent([](SE3_inverter& inv){ return inv.emergencyStop(); });
-                dual_se3_concurrent([](SE3_inverter& inv){ return inv.stopDecel();     });   // clear MRS
+                dual_vfd_concurrent([](MH300_inverter& inv){ return inv.emergencyStop(); });
+                dual_vfd_concurrent([](MH300_inverter& inv){ return inv.stopDecel();     });   // clear MRS
                 HOLD_TRACE("combined OFF ESCALATE done");
             }
             if (pay_out) {
@@ -3241,26 +3253,26 @@ static std::string cmd_hold(const std::string& dir, const std::string& onoff) {
 
     // Atomic rollback for ON failures (single-side or combined). Without this,
     // "up on" partial failure leaves one rope moving solo → robot tilts. The
-    // dual_se3_hold_start helper already rolls back on combined-cmd failure;
+    // dual_vfd_hold_start helper already rolls back on combined-cmd failure;
     // this catches per-side (up_left etc.) failures too.
     if (err && on) {
         if (need_left) {
-            reliable_stop_one(se3_left);
+            reliable_stop_one(vfd_left);
             hold_up_left  .store(false);
             hold_down_left.store(false);
         }
         if (need_right) {
-            reliable_stop_one(se3_right);
+            reliable_stop_one(vfd_right);
             hold_up_right  .store(false);
             hold_down_right.store(false);
         }
         motion_active.store(any_hold_active());
         exit_log("ERR_FAIL_ROLLBACK");
-        return "ERR se3_cmd_fail_rollback\n";
+        return "ERR vfd_cmd_fail_rollback\n";
     }
 
     exit_log(err ? "ERR_CMD_FAIL" : "OK");
-    return err ? "ERR se3_cmd_fail\n" : "OK\n";
+    return err ? "ERR vfd_cmd_fail\n" : "OK\n";
 }
 
 static std::string cmd_set_up_stop_total_kg(double kg) {
@@ -3473,15 +3485,15 @@ static std::string cmd_read_meter_scale(const std::string& side) {
 // effect on NEXT motor-start command (not currently-running motors). Caller
 // should send a fresh hold/motion cmd after change to apply at the inverter.
 static std::string cmd_set_hold_hz(double hz) {
-    if (hz <= 0 || hz > SE3_MAX_HZ) return "ERR hz_out_of_range\n";
-    g_se3_hold_hz.store(hz);
-    std::cout << "[crane] se3_hold_hz = " << hz << "\n";
+    if (hz <= 0 || hz > VFD_MAX_HZ) return "ERR hz_out_of_range\n";
+    g_vfd_hold_hz.store(hz);
+    std::cout << "[crane] vfd_hold_hz = " << hz << "\n";
     return "OK\n";
 }
 static std::string cmd_set_motion_hz(double hz) {
-    if (hz <= 0 || hz > SE3_MAX_HZ) return "ERR hz_out_of_range\n";
-    g_se3_motion_hz.store(hz);
-    std::cout << "[crane] se3_motion_hz = " << hz << "\n";
+    if (hz <= 0 || hz > VFD_MAX_HZ) return "ERR hz_out_of_range\n";
+    g_vfd_motion_hz.store(hz);
+    std::cout << "[crane] vfd_motion_hz = " << hz << "\n";
     return "OK\n";
 }
 static std::string cmd_set_middle_hz(double hz) {
@@ -3511,10 +3523,10 @@ static std::string cmd_set_balance_cap(double ratio) {
     if (ratio < 0 || ratio > 2.0) return "ERR ratio_out_of_range (0..2.0)\n";
     g_balance_trim_cap_ratio.store(ratio);
     std::cout << "[crane] balance_trim_cap_ratio = " << ratio
-              << " (effective at hold_hz=" << g_se3_hold_hz.load()
-              << " → " << (g_se3_hold_hz.load() * ratio) << " Hz; "
-              << "at motion_hz=" << g_se3_motion_hz.load()
-              << " → " << (g_se3_motion_hz.load() * ratio) << " Hz)\n";
+              << " (effective at hold_hz=" << g_vfd_hold_hz.load()
+              << " → " << (g_vfd_hold_hz.load() * ratio) << " Hz; "
+              << "at motion_hz=" << g_vfd_motion_hz.load()
+              << " → " << (g_vfd_motion_hz.load() * ratio) << " Hz)\n";
     return "OK\n";
 }
 static std::string cmd_set_balance_deadband(double cm) {
@@ -3524,7 +3536,7 @@ static std::string cmd_set_balance_deadband(double cm) {
     return "OK\n";
 }
 static std::string cmd_set_balance_hz_min(double hz) {
-    if (hz < 0 || hz > SE3_MAX_HZ) return "ERR hz_out_of_range\n";
+    if (hz < 0 || hz > VFD_MAX_HZ) return "ERR hz_out_of_range\n";
     g_balance_hz_min.store(hz);
     std::cout << "[crane] balance_hz_min = " << hz << " Hz\n";
     return "OK\n";
@@ -3532,28 +3544,28 @@ static std::string cmd_set_balance_hz_min(double hz) {
 // NOTE (2026-05-15): semantic changed — now sets OFFSET above base_hz, not
 // absolute hz. effective hz_max = base_hz + offset. Default 5.
 static std::string cmd_set_balance_hz_max(double offset) {
-    if (offset < 0 || offset > SE3_MAX_HZ) return "ERR offset_out_of_range\n";
+    if (offset < 0 || offset > VFD_MAX_HZ) return "ERR offset_out_of_range\n";
     g_balance_hz_max_offset.store(offset);
     std::cout << "[crane] balance_hz_max_offset = " << offset
               << " Hz (effective max = base_hz + " << offset
-              << " → hold " << (g_se3_hold_hz.load() + offset)
-              << "Hz / motion " << (g_se3_motion_hz.load() + offset) << "Hz)\n";
+              << " → hold " << (g_vfd_hold_hz.load() + offset)
+              << "Hz / motion " << (g_vfd_motion_hz.load() + offset) << "Hz)\n";
     return "OK\n";
 }
 static std::string cmd_set_fine_adjust_hz(double hz) {
-    if (hz <= 0 || hz > SE3_MAX_HZ) return "ERR hz_out_of_range\n";
+    if (hz <= 0 || hz > VFD_MAX_HZ) return "ERR hz_out_of_range\n";
     g_fine_adjust_hz.store(hz);
     std::cout << "[crane] fine_adjust_hz = " << hz << " Hz\n";
     return "OK\n";
 }
 static std::string cmd_set_freeze_hz(double hz) {
-    if (hz <= 0 || hz > SE3_MAX_HZ) return "ERR hz_out_of_range\n";
+    if (hz <= 0 || hz > VFD_MAX_HZ) return "ERR hz_out_of_range\n";
     g_freeze_hz.store(hz);
     std::cout << "[crane] freeze_hz = " << hz << " Hz\n";
     return "OK\n";
 }
 static std::string cmd_set_kick_hz(double hz) {
-    if (hz <= 0 || hz > SE3_MAX_HZ) return "ERR hz_out_of_range\n";
+    if (hz <= 0 || hz > VFD_MAX_HZ) return "ERR hz_out_of_range\n";
     g_kick_hz.store(hz);
     std::cout << "[crane] kick_hz = " << hz << " Hz\n";
     return "OK\n";
@@ -3612,14 +3624,14 @@ static std::string cmd_ping() {
 // near the SE3 07-09=2s OPT threshold causing cascading faults, and (b)
 // 0x1007/0x1008 register addresses are unverified — first bench run should
 // confirm via this raw command before any reliance.
-// Usage:  se3_fault left   or   se3_fault right
-static std::string cmd_se3_fault(const std::string& side) {
-    SE3_inverter* inv = nullptr;
+// Usage:  vfd_fault left   or   vfd_fault right
+static std::string cmd_vfd_fault(const std::string& side) {
+    MH300_inverter* inv = nullptr;
     bool          available = false;
-    if (side == "left")  { inv = &se3_left;  available = g_dev_se3_left .load(); }
-    if (side == "right") { inv = &se3_right; available = g_dev_se3_right.load(); }
-    if (!inv)       return "ERR usage:se3_fault_<left|right>\n";
-    if (!available) return std::string("ERR se3_") + side + "_unavailable\n";
+    if (side == "left")  { inv = &vfd_left;  available = g_dev_vfd_left .load(); }
+    if (side == "right") { inv = &vfd_right; available = g_dev_vfd_right.load(); }
+    if (!inv)       return "ERR usage:vfd_fault_<left|right>\n";
+    if (!available) return std::string("ERR vfd_") + side + "_unavailable\n";
 
     uint8_t f1 = 0, f2 = 0, f3 = 0, f4 = 0;
     if (inv->readFaultCode(f1, f2, f3, f4)) {
@@ -3629,10 +3641,10 @@ static std::string cmd_se3_fault(const std::string& side) {
     std::snprintf(buf, sizeof(buf),
         "OK side=%s f1=%u/%s f2=%u/%s f3=%u/%s f4=%u/%s\n",
         side.c_str(),
-        f1, se3_fault_name(f1),
-        f2, se3_fault_name(f2),
-        f3, se3_fault_name(f3),
-        f4, se3_fault_name(f4));
+        f1, vfd_fault_name(f1),
+        f2, vfd_fault_name(f2),
+        f3, vfd_fault_name(f3),
+        f4, vfd_fault_name(f4));
     return std::string(buf);
 }
 
@@ -3816,10 +3828,10 @@ static std::string dispatch(const std::string& line) {
     if (cmd == "status") return cmd_status();
     if (cmd == "stop")   return cmd_stop();
     if (cmd == "ping")   return cmd_ping();
-    if (cmd == "se3_fault") {
+    if (cmd == "vfd_fault") {
         std::string side; iss >> side;
-        if (iss.fail()) return "ERR usage:se3_fault_<left|right>\n";
-        return cmd_se3_fault(side);
+        if (iss.fail()) return "ERR usage:vfd_fault_<left|right>\n";
+        return cmd_vfd_fault(side);
     }
     // [2026-06-05] Water inlet ball valve — moved from washrobot to crane side.
     // On PQW slave 12 CH4 (cli_M, .34 shared bus with SD76 meters).
@@ -3947,11 +3959,11 @@ int main() {
 
     // ---- USR_A (.30) — SE3 left (+ future CLV900 middle if installed) ----
     if (g_gw_a_ok.load()) {
-        if (!se3_left.init(cli_A, SE3_LEFT_SLAVE, false)) {
-            g_dev_se3_left = true;
-            std::cout << "[OK]   SE3 left       USR_A slave " << SE3_LEFT_SLAVE << std::endl;
+        if (!vfd_left.init(cli_A, VFD_LEFT_SLAVE, false)) {
+            g_dev_vfd_left = true;
+            std::cout << "[OK]   VFD left (MH300)  USR_A slave " << VFD_LEFT_SLAVE << std::endl;
         } else {
-            std::cerr << "[WARN] SE3 left init failed — left rope motion disabled" << std::endl;
+            std::cerr << "[WARN] VFD left (MH300) init failed — left rope motion disabled" << std::endl;
         }
         // CLV900 middle winch intentionally NOT initialized (2026-05-14):
         // hardware not yet installed. When re-enabled it shares cli_A with
@@ -3966,11 +3978,11 @@ int main() {
 
     // ---- USR_B (.31) — SE3 right ----
     if (g_gw_b_ok.load()) {
-        if (!se3_right.init(cli_B, SE3_RIGHT_SLAVE, false)) {
-            g_dev_se3_right = true;
-            std::cout << "[OK]   SE3 right      USR_B slave " << SE3_RIGHT_SLAVE << std::endl;
+        if (!vfd_right.init(cli_B, VFD_RIGHT_SLAVE, false)) {
+            g_dev_vfd_right = true;
+            std::cout << "[OK]   VFD right (MH300) USR_B slave " << VFD_RIGHT_SLAVE << std::endl;
         } else {
-            std::cerr << "[WARN] SE3 right init failed — right rope motion disabled" << std::endl;
+            std::cerr << "[WARN] VFD right (MH300) init failed — right rope motion disabled" << std::endl;
         }
     } else {
         std::cerr << "[WARN] USR_B down — skipping SE3 right init" << std::endl;
@@ -4124,16 +4136,16 @@ int main() {
               << METER_POLL_MS_IDLE << " ms idle / "
               << METER_POLL_MS_MOTION << " ms during motion)" << std::endl;
 
-    g_se3_keepalive_thread = std::thread(se3_keepalive_loop);
-    std::cout << "[OK] SE3 keepalive thread (" << SE3_KEEPALIVE_INTERVAL_MS
+    g_vfd_keepalive_thread = std::thread(vfd_keepalive_loop);
+    std::cout << "[OK] SE3 keepalive thread (" << VFD_KEEPALIVE_INTERVAL_MS
               << "ms always-on; readStatusWord on both SE3; first 10 ticks logged individually)"
               << std::endl;
 
     std::cout << "[INFO] balance: enabled=" << (g_balance_enabled.load() ? 1 : 0)
               << " kp=" << g_balance_kp.load() << "Hz/cm"
               << " cap_ratio=" << g_balance_trim_cap_ratio.load()
-              << " (eff @hold " << (g_se3_hold_hz.load() * g_balance_trim_cap_ratio.load()) << "Hz"
-              << " / @motion " << (g_se3_motion_hz.load() * g_balance_trim_cap_ratio.load()) << "Hz)"
+              << " (eff @hold " << (g_vfd_hold_hz.load() * g_balance_trim_cap_ratio.load()) << "Hz"
+              << " / @motion " << (g_vfd_motion_hz.load() * g_balance_trim_cap_ratio.load()) << "Hz)"
               << " deadband=" << g_balance_deadband.load() << "cm"
               << " hz_min=" << g_balance_hz_min.load() << "Hz"
               << " hz_max_offset=" << g_balance_hz_max_offset.load() << "Hz (above base)"
@@ -4157,11 +4169,11 @@ int main() {
     watchdog_stop = true;
     hold_loop_stop = true;
     g_meter_loop_stop = true;
-    g_se3_keepalive_stop = true;
+    g_vfd_keepalive_stop = true;
     if (watchdog_thread.joinable())       watchdog_thread.join();
     if (hold_thread.joinable())           hold_thread.join();
     if (g_meter_thread.joinable())        g_meter_thread.join();
-    if (g_se3_keepalive_thread.joinable())g_se3_keepalive_thread.join();
+    if (g_vfd_keepalive_thread.joinable())g_vfd_keepalive_thread.join();
     cmd_server.stop();
     allMotionOff();
     return 0;
