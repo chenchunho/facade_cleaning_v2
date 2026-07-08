@@ -6013,41 +6013,30 @@ std::string WashRobot::cmd_attach() {
     arm_sweep_obstacle_pending_.store(false);
     arm_sweep_skip_rest_of_run_.store(false);
 
-    // [v2] attach: hanging → four cups sealed, sequential right → left.
-    //   Both sides use the disable_seal 「一點一點補伸」 pipeline
-    //   (smart_extend_subset_): valve open → incremental extend → wait vacuum.
+    // [v2] attach: hanging → four cups sealed. The machine hangs on the crane
+    //   rope here (no side needs to anchor), so BOTH sides extend TOGETHER:
+    //   open both valves, then one smart_extend_subset_ over all 4 cups (uses
+    //   pusher_move_many_ = simultaneous extend, disable_seal 「一點一點補伸」).
     //   No body/center groups, no mid-attach feet realign.
 
-    // 1. Right side — open valve CH1, then incremental extend cups {1,2}.
-    std::cout << "[attach] open RIGHT valve CH" << CH_VALVE_RIGHT << "\n";
+    // 1. Open BOTH valves (right CH1 + left CH3).
+    std::cout << "[attach] open RIGHT valve CH" << CH_VALVE_RIGHT
+              << " + LEFT valve CH" << CH_VALVE_LEFT << "\n";
     if (try_or_pause_([this]() { return pqw_set_relay_verified_(CH_VALVE_RIGHT, true); },
                       "attach_valve_right_on")) return "ERR aborted\n";
-    {
-        std::vector<int> right_slaves;
-        for (int s : {ZDT_RF1, ZDT_RF2}) {
-            if (!disabled_zdt_slaves_.count(s)) right_slaves.push_back(s);
-        }
-        if (!right_slaves.empty()) {
-            std::cout << "[attach] right disable_seal — extend + wait vacuum\n";
-            if (try_or_pause_([this, &right_slaves]() { return smart_extend_subset_("right", right_slaves); },
-                              "attach_right_disable_seal_wait"))
-                return "ERR aborted\n";
-        }
-    }
-
-    // 2. Left side — open valve CH3, then incremental extend cups {3,4}.
-    std::cout << "[attach] open LEFT valve CH" << CH_VALVE_LEFT << "\n";
     if (try_or_pause_([this]() { return pqw_set_relay_verified_(CH_VALVE_LEFT, true); },
                       "attach_valve_left_on")) return "ERR aborted\n";
+
+    // 2. Extend all four cups together (left + right simultaneously).
     {
-        std::vector<int> left_slaves;
-        for (int s : {ZDT_LF1, ZDT_LF2}) {
-            if (!disabled_zdt_slaves_.count(s)) left_slaves.push_back(s);
+        std::vector<int> all_slaves;
+        for (int s : {ZDT_RF1, ZDT_RF2, ZDT_LF1, ZDT_LF2}) {
+            if (!disabled_zdt_slaves_.count(s)) all_slaves.push_back(s);
         }
-        if (!left_slaves.empty()) {
-            std::cout << "[attach] left disable_seal — extend + wait vacuum\n";
-            if (try_or_pause_([this, &left_slaves]() { return smart_extend_subset_("left", left_slaves); },
-                              "attach_left_disable_seal_wait"))
+        if (!all_slaves.empty()) {
+            std::cout << "[attach] all-cups disable_seal — extend + wait vacuum (L+R together)\n";
+            if (try_or_pause_([this, &all_slaves]() { return smart_extend_subset_("all", all_slaves); },
+                              "attach_all_disable_seal_wait"))
                 return "ERR aborted\n";
         }
     }

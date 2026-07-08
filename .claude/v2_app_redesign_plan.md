@@ -48,12 +48,14 @@ v2 = **單側吊機繩放/收、SD76 計米量測位移**。連帶作廢：
 
 ## 4. attach() / step 流程
 
-### attach()（懸空 → 四杯吸附，序列化左→右）
-1. 左閥 ON → `smart_extend_subset_("left", {3,4})` disable-seal **一點一點補伸** → JC100 驗證
-2. 右閥 ON → `smart_extend_subset_("right", {1,2})` **一點一點補伸** → 驗證
-3. `vacuum_check_("all")` → 補吸失敗杯
-4. **水平檢查**（IMU roll≈0 + |左繩長−右繩長|<tol）→ 單側微調校正
+### attach()（懸空 → 四杯吸附，**左右同時伸**）
+> 機體掛在吊機繩上、無 anchor 需求 → 4 杯同時伸最快最省。（2026-07-08 user 指定同時伸）
+1. 開右閥 CH1 + 左閥 CH3
+2. `smart_extend_subset_("all", {1,2,3,4})` disable-seal **一點一點補伸**（`pusher_move_many_` 同動）→ 邊伸邊等真空
+3. `vacuum_check_("all")` → 補吸失敗杯（依左右分組重伸）
+4. 安全閘：pay_out 前再驗真空，有杯沒吸牢就跳過放繩（繩續承重）
 5. 吊機放繩到目標張力（`crane_pay_out_to_weight_`）→ state=Attached
+   - （水平校正 IMU+繩長差：目前未加，留 TODO）
 
 ### do_step_down_(step_cm)（前提：4 杯吸附、水平；step_cm = 使用者輸入全量）
 ```
