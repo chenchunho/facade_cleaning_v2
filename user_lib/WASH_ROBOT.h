@@ -274,10 +274,14 @@ private:
     // PQW relay channels (slave 12, 8CH)
     static constexpr int PQW_SLAVE       = 12;
     static constexpr int PQW_TOTAL_CH    = 8;
-    static constexpr int CH_PUMP         = 1;  // dp0105 vacuum pump (always ON while running)
-    static constexpr int CH_VALVE_FEET   = 2;  // VT307 feet suction cups
-    static constexpr int CH_VALVE_BODY   = 3;  // VT307 body suction cups
-    static constexpr int CH_VALVE_CENTER = 4;  // VT307 center suction cup
+    // [v2 2026-07-07] 4-cup rewiring on the same PQW @ .22 slave 12:
+    //   CH1 = right-foot valve (cups slave 1,2)
+    //   CH2 = vacuum pump dp0105 (was CH1 in v1)   ← moved
+    //   CH3 = left-foot valve  (cups slave 3,4)
+    // v1's 3-zone feet/body/center scheme is retired (no body cups, no center cup).
+    static constexpr int CH_VALVE_RIGHT  = 1;  // VT307 right-foot cups (slave 1,2)
+    static constexpr int CH_PUMP         = 2;  // dp0105 vacuum pump (always ON while running)
+    static constexpr int CH_VALVE_LEFT   = 3;  // VT307 left-foot cups (slave 3,4)
     static constexpr int CH_BRUSH        = 5;  // arm roller brush motor
     static constexpr int CH_WATER_PUMP   = 6;  // water tank pump (spray)
     // [2026-06-05] CH_WATER_INLET 移除 — 進水球閥控制權搬到 crane 端 PQW
@@ -295,16 +299,12 @@ private:
     static constexpr int WATER_FILL_TIMEOUT_MS  = 180000;  // 180s — 2026-06-03 拉長，實機 60s 不夠水填滿（log 顯示需要 ~80s+）
     static constexpr int WATER_POLL_INTERVAL_MS = 200;     // poll output reg every 200 ms while filling
 
-    // ZDT pusher slave IDs
-    // Slave IDs updated 2026-04-23 per actual wiring on robot
-    //   feet:  left = 3,4 / right = 1,2
-    //   body:  left = 6,8 / right = 5,7
-    //   center = 9
-    static constexpr int ZDT_LF1 = 3, ZDT_LF2 = 4;  // left foot
-    static constexpr int ZDT_LB1 = 6, ZDT_LB2 = 8;  // left body
-    static constexpr int ZDT_RF1 = 1, ZDT_RF2 = 2;  // right foot
-    static constexpr int ZDT_RB1 = 5, ZDT_RB2 = 7;  // right body
-    static constexpr int ZDT_C   = 9;                // center
+    // ZDT pusher slave IDs — [v2] 4 cups only: right{1,2} / left{3,4}
+    //   right foot: upper = slave 1, lower = slave 2   (valve CH1)
+    //   left  foot: upper = slave 3, lower = slave 4   (valve CH3)
+    // v1 body{5,6,7,8} + center{9} cups retired (2026-07-07).
+    static constexpr int ZDT_RF1 = 1, ZDT_RF2 = 2;  // right foot upper/lower
+    static constexpr int ZDT_LF1 = 3, ZDT_LF2 = 4;  // left foot upper/lower
 
     // DM2J rail/arm slave IDs
     // 2026-05-26: 上滑台從 cli_20_ slave 5 搬到 cli_22_ slave 14，目的是讓

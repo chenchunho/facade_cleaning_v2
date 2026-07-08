@@ -13,6 +13,32 @@
 
 ---
 
+## 2026-07-08a Claude (Sadie) — v2 WASH_ROBOT 應用層大重構（8→4 吸盤、吊機驅動）
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` / `user_lib/WASH_ROBOT.cpp` / `facade_cleaning_v2/main.cpp`
+### 原因
+v2 機械大改：4 吸盤（右{ZDT 1,2}/左{3,4}）、無 DM2J 腳/輪滑軌、無中心杯、無 body 組；
+垂直位移改由**單側吊機繩放/收 + SD76 計米**（取代 v1 DM2J rail）。照 `v2_app_redesign_plan.md`。
+### 內容
+- **常數**：PQW `CH_VALVE_RIGHT=1/CH_PUMP=2/CH_VALVE_LEFT=3`（拆單一 feet 閥為左右兩閥、泵 CH1→CH2）；
+  ZDT 只剩 `ZDT_RF1/2`(1,2)`ZDT_LF1/2`(3,4)，刪 body/center 常數
+- **group config**：`group_slaves_`/`group_valve_ch_`/`preset_extend`/`vacuum_valve_`/stall helper 全改右/左 2 區
+  （"all"/"feet" = 4 杯）；陣列 size 保留 9（只用 1-4，免 reindex）
+- **init/cmd_init_impl_**：拆 DM2J 腳輪 rail init + bystander broadcast + 中心杯 disable；ZDT/JC100 迴圈 9→4；
+  cli_20_ 改非致命；保留 arm rail(cli_22 s14)/DY500(present=false)/crane/IMU/threads
+- **cmd_attach**：右→左序列，開閥→smart_extend「一點一點補伸」→vacuum_check→補吸分左右→crane pay_out to weight
+- **do_step_down_/do_step_up_**：重寫 v2。**右先左後、每側跑 `cycle_group_` 保留完整「吸不好重吸」重試/backup**，
+  只把位移 DM2J rail→吊機繩：pre_cycle 主位移 = crane `pay_out/retract_right|left <step>`；
+  backup「退一點到新牆點」= crane 微移 VACUUM_BACKUP_CM/OBSTACLE_RESCUE_BACKUP_CM。anchor 安全檢查（放一側前先驗另一側吸牢）
+- **修正保留**：cmd_detach/shutdown/emergency/status/pusher/zdt_*/return_home/recover 的閥門與 slave 範圍改右左 1-4
+- **#if0 中性化**（v1-only、v2 不呼叫、保留當 reference 待 bench 驗證後刪）：do_feet_realign_/obstacle 全套/
+  balance 全套/phase5/tilt/wheels/dm2j_group/dm2j_zero/cmd_move/cmd_realign/wheels_attached/feet_max_overextend_cm_；
+  v1 舊 do_step_down_/up_ body 也 #if0 封存
+- **main.cpp**：已移除指令 dispatch → 回 `ERR removed_in_v2`；zdt_* 範圍 1-4
+- ⚠ **全未編譯**（本機編不了）；`feet_target_capped_`/`cycle_group_` 刻意保留 LIVE（step 重試引擎依賴）
+### 待辦
+- remote build 驗證；水平校正整合（IMU+繩長差，目前 step 收尾留 TODO）；GUI 對應；arm sweep（未裝先 deferred）
+
 ## 2026-07-07b Claude (Sadie) — 規範記錄（尚未動 code）
 ### 修改檔案
 - `.claude/v2_app_redesign_plan.md` §2 — PQW 左右閥 CH 腳位由「待定」→ 確認值

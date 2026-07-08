@@ -86,7 +86,7 @@ static std::string dispatch(const std::string& line) {
     if (cmd == "emergency_stop") return robot.cmd_emergency_stop();
     if (cmd == "reset")          return robot.cmd_reset();
     if (cmd == "recover")        return robot.cmd_recover();
-    if (cmd == "realign")        return robot.cmd_realign();
+    if (cmd == "realign")        return "ERR removed_in_v2\n";   // [v2] cmd_realign retired
     if (cmd == "ping")           return robot.cmd_ping();
     if (cmd == "pause")          return robot.cmd_pause();
     if (cmd == "resume")         return robot.cmd_resume();
@@ -100,13 +100,7 @@ static std::string dispatch(const std::string& line) {
         if (s == "off") return robot.cmd_crane_attached(false);
         return "ERR expected_on_or_off\n";
     }
-    if (cmd == "wheels_attached") {
-        std::string s; iss >> s;
-        if (iss.fail()) return "ERR usage:wheels_attached_<on|off>\n";
-        if (s == "on")  return robot.cmd_wheels_attached(true);
-        if (s == "off") return robot.cmd_wheels_attached(false);
-        return "ERR expected_on_or_off\n";
-    }
+    if (cmd == "wheels_attached") return "ERR removed_in_v2\n";   // [v2] DM2J wheels retired
 
     // ---- cleaning arm (damiao motors via motor_api on 127.0.0.1:9527) ----
     if (cmd == "arm_init")   return robot.cmd_arm_init();
@@ -134,32 +128,15 @@ static std::string dispatch(const std::string& line) {
         return "ERR expected_on_or_off\n";
     }
 
-    // [2026-06-01] Camera obstacle detection toggle (default OFF, testing-only)
-    if (cmd == "obstacle_detect") {
-        std::string s; iss >> s;
-        if (iss.fail()) return "ERR usage:obstacle_detect_<on|off>\n";
-        if (s == "on")  return robot.cmd_obstacle_detect(true);
-        if (s == "off") return robot.cmd_obstacle_detect(false);
-        return "ERR expected_on_or_off\n";
-    }
-    // [2026-06-04] Single-shot obstacle detector test (Step 1).
-    // Reads pre-captured /tmp/cam{3,4}_{before,after}.jpg, runs detector,
-    // returns combined decision.
-    if (cmd == "obstacle_check") return robot.cmd_obstacle_check();
-    // [2026-06-04] RUN with obstacle avoidance (Step 2).
-    // Loop: probe → detect → ask user → step_down with confirmed step.
-    if (cmd == "run_avoid") return robot.cmd_run_avoid();
-    if (cmd == "obstacle_response") {
-        int v; iss >> v;
-        if (iss.fail()) return "ERR usage:obstacle_response_<0|1>\n";
-        return robot.cmd_obstacle_response(v);
-    }
-
-    // [2026-06-02] Balance calibration (3 cmd: start/record/abort + status)
-    if (cmd == "balance_calibrate_start")  return robot.cmd_balance_calibrate_start();
-    if (cmd == "balance_calibrate_record") return robot.cmd_balance_calibrate_record();
-    if (cmd == "balance_calibrate_abort")  return robot.cmd_balance_calibrate_abort();
-    if (cmd == "balance_calibrate_status") return robot.cmd_balance_calibrate_status();
+    // [v2 2026-07-07] Camera obstacle detection + balance calibration retired.
+    if (cmd == "obstacle_detect")          return "ERR removed_in_v2\n";
+    if (cmd == "obstacle_check")           return "ERR removed_in_v2\n";
+    if (cmd == "run_avoid")                return "ERR removed_in_v2\n";
+    if (cmd == "obstacle_response")        return "ERR removed_in_v2\n";
+    if (cmd == "balance_calibrate_start")  return "ERR removed_in_v2\n";
+    if (cmd == "balance_calibrate_record") return "ERR removed_in_v2\n";
+    if (cmd == "balance_calibrate_abort")  return "ERR removed_in_v2\n";
+    if (cmd == "balance_calibrate_status") return "ERR removed_in_v2\n";
 
     // [2026-05-29] Runtime settings (wall-tune) — see WashRobot::Settings struct.
     if (cmd == "get_settings") {
@@ -271,59 +248,32 @@ static std::string dispatch(const std::string& line) {
     if (cmd == "zdt_pusher") {
         int s = 0; std::string a;
         iss >> s >> a;
-        if (iss.fail() || s < 1 || s > 9) return "ERR usage:zdt_pusher_<1..9>_<extend|retract>\n";
+        if (iss.fail() || s < 1 || s > 4) return "ERR usage:zdt_pusher_<1..4>_<extend|retract>\n";
         return robot.cmd_zdt_pusher(s, a);
     }
     if (cmd == "zdt_zero") {
         std::string g; iss >> g;
-        if (iss.fail()) return "ERR usage:zdt_zero_<feet|body|center|all>\n";
+        if (iss.fail()) return "ERR usage:zdt_zero_<right|left|all>\n";
         return robot.cmd_zdt_zero(g);
     }
-    if (cmd == "move") {
-        std::string m; double cm = 0;
-        iss >> m >> cm;
-        if (iss.fail()) return "ERR usage:move_<motor>_<cm>\n";
-        return robot.cmd_move(m, cm);
-    }
-    if (cmd == "wheels") {
-        std::string a; iss >> a;
-        if (iss.fail()) return "ERR usage:wheels_<retract|lower>\n";
-        return robot.cmd_wheels(a);
-    }
-    if (cmd == "dm2j_group") {
-        std::string g; double cm = 0;
-        iss >> g >> cm;
-        if (iss.fail()) return "ERR usage:dm2j_group_<feet|wheels>_<cm>\n";
-        return robot.cmd_dm2j_group(g, cm);
-    }
+    // [v2 2026-07-07] DM2J feet-wheel rails + 3-valve roll cal retired.
+    if (cmd == "move")           return "ERR removed_in_v2\n";
+    if (cmd == "wheels")         return "ERR removed_in_v2\n";
+    if (cmd == "dm2j_group")     return "ERR removed_in_v2\n";
+    if (cmd == "dm2j_zero")      return "ERR removed_in_v2\n";
+    if (cmd == "tilt_mode")      return "ERR removed_in_v2\n";
+    if (cmd == "confirm_balance") return "ERR removed_in_v2\n";
     if (cmd == "zdt_disable") {
         int s = 0; iss >> s;
-        if (iss.fail() || s < 1 || s > 9) return "ERR usage:zdt_disable_<1..9>\n";
+        if (iss.fail() || s < 1 || s > 4) return "ERR usage:zdt_disable_<1..4>\n";
         return robot.cmd_zdt_disable(s);
     }
     if (cmd == "zdt_enable") {
         int s = 0; iss >> s;
-        if (iss.fail() || s < 1 || s > 9) return "ERR usage:zdt_enable_<1..9>\n";
+        if (iss.fail() || s < 1 || s > 4) return "ERR usage:zdt_enable_<1..4>\n";
         return robot.cmd_zdt_enable(s);
     }
     if (cmd == "zdt_release_stall") return robot.cmd_zdt_release_stall();
-    if (cmd == "dm2j_zero") {
-        std::string g; iss >> g;
-        if (iss.fail()) return "ERR usage:dm2j_zero_<feet|wheels|arm>\n";
-        return robot.cmd_dm2j_zero(g);
-    }
-    if (cmd == "tilt_mode") {
-        std::string s; iss >> s;
-        if (iss.fail()) return "ERR usage:tilt_mode_<on|off>\n";
-        if (s == "on")  return robot.cmd_tilt_mode(true);
-        if (s == "off") return robot.cmd_tilt_mode(false);
-        return "ERR expected_on_or_off\n";
-    }
-    if (cmd == "confirm_balance") {
-        std::string ans; iss >> ans;
-        if (iss.fail()) return "ERR usage:confirm_balance_<yes|no>\n";
-        return robot.cmd_confirm_balance(ans);
-    }
     if (cmd == "return_home") {
         int cm = 0; iss >> cm;
         if (iss.fail() || cm <= 0) return "ERR usage:return_home_<descent_cm>\n";

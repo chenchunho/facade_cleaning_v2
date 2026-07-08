@@ -98,9 +98,10 @@ WashRobot::~WashRobot() {
 
 bool WashRobot::init() {
     // TCP connections
-    if (!cli_20_.connectToServer(IP_485_1, PORT_485)) {
-        std::cerr << "[WashRobot] connect " << IP_485_1 << " fail\n"; return true;
-    }
+    // [v2] cli_20_ (RS485_1) hosted the v1 DM2J feet/wheel rails, removed in v2.
+    // Non-fatal: a missing .20 gateway must not block boot.
+    if (!cli_20_.connectToServer(IP_485_1, PORT_485))
+        std::cerr << "[WARN] .20 (legacy DM2J feet/wheel bus) not reachable — v2 unused\n";
     if (!cli_21_.connectToServer(IP_485_2, PORT_485)) {
         std::cerr << "[WashRobot] connect " << IP_485_2 << " fail\n"; return true;
     }
@@ -122,63 +123,30 @@ bool WashRobot::init() {
     std::cout << "[OK] driver debug = " << (dbg ? "ON" : "OFF")
               << " (override via WR_DRIVER_DEBUG=0|1)\n";
 
-    // DM2J slave 1..4 on cli_20_ (feet + wheels)
-    for (int i = 1; i <= 4; ++i) {
-        if (D_(i).init(cli_20_, i, dbg)) {
-            std::cerr << "[FATAL] DM2J slave " << i << " init fail\n"; return true;
-        }
-    }
-    std::cout << "[OK] DM2J 1~4 (cli_20_)\n";
-
-    // DM2J arm rail (slave 14) on cli_22_ — shares bus with JC100/PQW/XKC/DY500.
-    // 2026-05-26 wiring change: moved off cli_20_ so arm sweep can run truly in
-    // parallel with feet rail motion (different physical RS485 bus).
+    // [v2] DM2J feet/wheel rails removed. Only the arm-cleaning slide rail
+    // (DM2J_ARM slave 14 @ cli_22_) remains — arm subsystem unchanged (currently
+    // not installed; Mode-B init does no probe, so absence won't fail boot).
     if (D_(DM2J_ARM).init(cli_22_, DM2J_ARM, dbg)) {
         std::cerr << "[FATAL] DM2J arm rail (slave " << DM2J_ARM << " @ cli_22_) init fail\n";
         return true;
     }
     std::cout << "[OK] DM2J arm rail (slave " << DM2J_ARM << " @ cli_22_)\n";
 
-    // [2026-06-12] Re-enabled — 之前註解掉造成「同步 feet 變成輪子動」bug。
-    // Bystanders safe PR1 — do_step_down_ uses PR_trigger_sync(1) broadcast so
-    // slaves 1,3 start in the same Modbus frame (required: rigid-coupled feet
-    // rails, ms-skew damages mechanism). The broadcast also hits wheels (2,4)
-    // and arm (5); setting their PR1 to rpm=0 here makes that broadcast a no-op
-    // for them. PR1 on bystanders is only touched here (one-shot) — wheel retract
-    // in cmd_init and arm_sweep both use PR0, so PR1 stays safe for the session.
-    // Mirrors Linux_test menu 7 dm2j_set_safe_pr pattern.
-    D_(DM2J_LEFT_WHEEL ).PR_move_set(1, 1 /*absolute*/, 0 /*rpm=0*/, 0, DM2J_ACC, DM2J_DEC);
-    D_(DM2J_RIGHT_WHEEL).PR_move_set(1, 1,              0,           0, DM2J_ACC, DM2J_DEC);
-    D_(DM2J_ARM        ).PR_move_set(1, 1,              0,           0, DM2J_ACC, DM2J_DEC);
-    std::cout << "[OK] DM2J bystanders (2,4,5) PR1 = rpm=0 safe for broadcast\n";
-
-    // ZDT slave 1..9
-    for (int i = 1; i <= 9; ++i) {
+    // ZDT slave 1..4 ([v2] 4 cups: right{1,2} / left{3,4})
+    for (int i = 1; i <= 4; ++i) {
         if (Z_(i).init(cli_21_, i, dbg)) {
             std::cerr << "[FATAL] ZDT slave " << i << " init fail\n"; return true;
         }
     }
-    std::cout << "[OK] ZDT 1~9\n";
+    std::cout << "[OK] ZDT 1~4\n";
 
-    // 2026-05-18: center pusher (ZDT slave 9) intentionally disabled — not
-    // controlled in current bench config. Adding to disabled_zdt_slaves_ makes
-    // group_slaves_() filter it out of every group op (extend / retract /
-    // stall-clear / vacuum-wait). Most center control paths were already
-    // commented out (2026-05-04) but this guarantees no group op touches it.
-    // Re-enable: remove this line OR runtime `zdt_enable 9`.
-    // static_cast → prvalue copy: avoids ODR-use of the static constexpr
-    // member (set::insert binds a const int& — would need out-of-class
-    // definition in C++14 otherwise → "undefined reference to ZDT_C").
-    disabled_zdt_slaves_.insert(static_cast<int>(ZDT_C));
-    std::cout << "[OK] ZDT 9 (center) disabled — excluded from all group ops\n";
-
-    // JC-100 slave 1..9
-    for (int i = 1; i <= 9; ++i) {
+    // JC-100 slave 1..4 ([v2] one vacuum-pressure sensor per cup)
+    for (int i = 1; i <= 4; ++i) {
         if (M_(i).init(cli_22_, i, dbg)) {
             std::cerr << "[FATAL] JC-100 slave " << i << " init fail\n"; return true;
         }
     }
-    std::cout << "[OK] JC-100 1~9\n";
+    std::cout << "[OK] JC-100 1~4\n";
 
     // PQW 8CH relay
     if (pqw_.init(cli_22_, PQW_SLAVE, PQW_TOTAL_CH, dbg)) {
@@ -206,7 +174,7 @@ bool WashRobot::init() {
     std::cout << "[--] DY-500 slaves 10/11 not installed — polling disabled\n";
 
     // Init last_seal_pulse_ to per-slave preset; will be updated by fine_tune on success.
-    for (int s = 1; s <= 9; ++s)
+    for (int s = 1; s <= 4; ++s)
         last_seal_pulse_[s - 1].store(preset_extend_pulse_for_slave_(s));
     last_feet_max_over_cm_.store(0.0);
     cached_weight_kg_[0].store(-1.0);
@@ -278,14 +246,12 @@ bool WashRobot::init() {
     // code but harmless — sensors aren't installed anyway.
     std::cout << "[OK] pressure poll DISABLED (cmd_status fresh-reads on demand)\n";
 
-    // Safe startup: ensure all relays off
-    //pqw_.controlRelay(CH_BRUSH,        false);
-    //pqw_.controlRelay(CH_WATER_PUMP,   false);
-    //pqw_.controlRelay(CH_WATER_INLET,  false);
-    //pqw_.controlRelay(CH_PUMP,         false);
-    //pqw_.controlRelay(CH_VALVE_FEET,   false);
-    //pqw_.controlRelay(CH_VALVE_BODY,   false);
-    //pqw_.controlRelay(CH_VALVE_CENTER, false);
+    // Safe startup: ensure all relays off ([v2] channels)
+    //pqw_.controlRelay(CH_BRUSH,       false);
+    //pqw_.controlRelay(CH_WATER_PUMP,  false);
+    //pqw_.controlRelay(CH_PUMP,        false);
+    //pqw_.controlRelay(CH_VALVE_RIGHT, false);
+    //pqw_.controlRelay(CH_VALVE_LEFT,  false);
 
     // [REMOVED 2026-04-24] Startup wheel-lower step removed per user request.
     // Previously slaves 2, 4 were moved to absolute -7 cm here. If you need wheels
@@ -787,6 +753,7 @@ std::string WashRobot::cmd_arm_attached(bool on) {
 // wired up in do_step_down_ (camera_obstacle_plan.md Phase 5).
 //
 // Reply mirrors arm_attached / crane_attached format so GUI can reuse regex.
+#if 0  // [v2 2026-07-07] retired v1 obstacle-detect + balance-calibration cmds — kept for reference until bench-verified, then delete
 std::string WashRobot::cmd_obstacle_detect(bool on) {
     bool prev = obstacle_detect_enabled_.exchange(on);
     if (prev != on) {
@@ -1683,6 +1650,7 @@ std::string WashRobot::cmd_balance_calibrate_status() {
         << "\n";
     return oss.str();
 }
+#endif  // [v2] end retired obstacle-detect + balance-calibration block
 
 // ====================================================================
 // [2026-05-29] Runtime settings (wall-tune) — see WASH_ROBOT.h Settings struct.
@@ -3693,6 +3661,7 @@ std::string WashRobot::crane_pay_out_to_weight_(double target_kg, int max_cm) {
 // [2026-06-02] Per-side retract until both L/R tension >= target_kg. See
 // header doc for why this exists vs symmetric `retract` cmd. Used by
 // bal_cal_preload_; could be general-purpose.
+#if 0  // [v2 2026-07-07] retired v1 crane_retract_to_weight_ — only balance-cal used it — kept for reference
 std::string WashRobot::crane_retract_to_weight_(double target_kg, double safety_max_kg,
                                                   int max_iter,
                                                   int pulse_ms, int settle_ms) {
@@ -3778,6 +3747,7 @@ std::string WashRobot::crane_retract_to_weight_(double target_kg, double safety_
 // and rely on its self-healing reconnect on failure. Crane safety alarms still
 // flow via EVT broadcasts (handle_crane_evt_) which arrive on the recv side
 // of any crane_cmd_ in progress.
+#endif  // [v2] end retired crane_retract_to_weight_
 void WashRobot::crane_watchdog_loop_() {
     while (crane_wd_running_.load()) {
         sleep_ms_(HEARTBEAT_INTERVAL_MS);
@@ -3874,6 +3844,7 @@ bool WashRobot::imu_take_baseline_() {
     return false;
 }
 
+#if 0  // [v2 2026-07-07] retired v1 do_phase5_roll_correct_ (feet/body/center 3-valve roll cal) — kept for reference
 std::string WashRobot::do_phase5_roll_correct_() {
     std::lock_guard<std::mutex> lk(motion_mtx_);
 
@@ -3925,6 +3896,7 @@ std::string WashRobot::do_phase5_roll_correct_() {
     return err;
 }
 
+#endif  // [v2] end retired do_phase5_roll_correct_
 void WashRobot::imu_monitor_loop_() {
     const int SAMPLE_MS   = 100;
     const int AVG_SAMPLES = 10;
@@ -5330,7 +5302,7 @@ bool WashRobot::pusher_extend_with_disable_seal_(const std::vector<int>& slaves,
 //   final_pulse recorded into last_seal_pulse_ internally.
 bool WashRobot::smart_extend_subset_(const std::string& group, const std::vector<int>& slaves) {
     if (slaves.empty()) return false;
-    if (group != "feet" && group != "body" && group != "center") {
+    if (group != "right" && group != "left" && group != "all" && group != "feet") {
         std::cout << "[smart_extend] unknown group=" << group << "\n";
         return true;
     }
@@ -5351,21 +5323,12 @@ bool WashRobot::smart_extend_subset_(const std::string& group, const std::vector
     std::vector<int> extend_pulses(slaves.size(), 0);
     for (size_t i = 0; i < slaves.size(); ++i) {
         const int s = slaves[i];
-        int target;
-        if (group == "body") {
-            const double over_cm = last_feet_max_over_cm_.load();
-            target = preset_extend_pulse_for_slave_(s)
-                   + ((over_cm > 0) ? cm_to_pulses_for_slave_(s, over_cm) : 0);
-        } else {
-            // [2026-06-05] Snowball protection (fix C): cap feet target so
-            // last_seal_pulse_ can't grow unbounded across steps.
-            target = feet_target_capped_(s);
-        }
-        extend_pulses[i] = target;
+        // [v2] all groups are feet cups (1-4) — cap target to guard snowball.
+        extend_pulses[i] = feet_target_capped_(s);
     }
 
-    const int extend_rpm = (group == "body") ? PUSHER_RPM_BODY_EXTEND : PUSHER_RPM;
-    const int extend_acc = (group == "body") ? PUSHER_ACC_BODY_EXTEND : PUSHER_ACC;
+    const int extend_rpm = PUSHER_RPM;
+    const int extend_acc = PUSHER_ACC;
 
     std::cout << "[smart_extend] " << group << " slaves={";
     for (size_t i = 0; i < slaves.size(); ++i) { if (i) std::cout << ","; std::cout << slaves[i]; }
@@ -5428,13 +5391,15 @@ bool WashRobot::smart_extend_subset_(const std::string& group, const std::vector
     return false;
 }
 
+// [v2] groups are the two vertical sides: right{1,2} / left{3,4}.
+//   "all" (and legacy alias "feet") = all four cups.
+//   body/center groups retired.
 std::vector<int> WashRobot::group_slaves_(const std::string& group) const {
     std::vector<int> all;
-    if (group == "feet")   all = {ZDT_LF1, ZDT_LF2, ZDT_RF1, ZDT_RF2};
-    else if (group == "body")   all = {ZDT_LB1, ZDT_LB2, ZDT_RB1, ZDT_RB2};
-    else if (group == "center") all = {ZDT_C};
-    else if (group == "all")    all = {ZDT_LF1, ZDT_LF2, ZDT_LB1, ZDT_LB2,
-                                       ZDT_RF1, ZDT_RF2, ZDT_RB1, ZDT_RB2, ZDT_C};
+    if (group == "right")       all = {ZDT_RF1, ZDT_RF2};                     // {1,2}
+    else if (group == "left")   all = {ZDT_LF1, ZDT_LF2};                     // {3,4}
+    else if (group == "all" || group == "feet")
+                                all = {ZDT_RF1, ZDT_RF2, ZDT_LF1, ZDT_LF2};   // {1,2,3,4}
     if (disabled_zdt_slaves_.empty()) return all;
     std::vector<int> out;
     for (int s : all)
@@ -5443,19 +5408,15 @@ std::vector<int> WashRobot::group_slaves_(const std::string& group) const {
 }
 
 int WashRobot::group_valve_ch_(const std::string& group) {
-    if (group == "feet")   return CH_VALVE_FEET;
-    if (group == "body")   return CH_VALVE_BODY;
-    if (group == "center") return CH_VALVE_CENTER;
+    if (group == "right") return CH_VALVE_RIGHT;
+    if (group == "left")  return CH_VALVE_LEFT;
     return -1;
 }
 
-// Per-slave preset extend pulse (matches cycle_group_ logic for body 7,8 SHORT)
+// Per-slave preset extend pulse. [v2] only feet cups 1-4 remain: upper(1,3) / lower(2,4).
 int WashRobot::preset_extend_pulse_for_slave_(int slave) const {
-    if (slave == ZDT_RF1 || slave == ZDT_LF1) return PUSHER_EXTEND_FEET_PULSE;          // feet upper 1,3 (~8.0 cm)
-    if (slave == ZDT_RF2 || slave == ZDT_LF2) return PUSHER_EXTEND_FEET_PULSE_LOWER;    // feet lower 2,4 (~8.3 cm)
-    if (slave == ZDT_RB2 || slave == ZDT_LB2) return PUSHER_EXTEND_BODY_PULSE_SHORT;    // body 7,8 (~9.3 cm)
-    if (slave == ZDT_RB1 || slave == ZDT_LB1) return PUSHER_EXTEND_BODY_PULSE;          // body 5,6 (~9.5 cm)
-    if (slave == ZDT_C)                       return PUSHER_EXTEND_PULSE;               // center 9 (~10 cm)
+    if (slave == ZDT_RF1 || slave == ZDT_LF1) return PUSHER_EXTEND_FEET_PULSE;          // upper 1,3
+    if (slave == ZDT_RF2 || slave == ZDT_LF2) return PUSHER_EXTEND_FEET_PULSE_LOWER;    // lower 2,4
     return PUSHER_EXTEND_PULSE;   // fallback
 }
 
@@ -5520,11 +5481,10 @@ int WashRobot::feet_target_capped_(int slave) const {
 }
 
 bool WashRobot::vacuum_valve_(const std::string& group, bool on) {
-    if (group == "all") {
+    if (group == "all" || group == "feet") {
         bool err = false;
-        err |= pqw_set_relay_verified_(CH_VALVE_FEET,   on);
-        err |= pqw_set_relay_verified_(CH_VALVE_BODY,   on);
-        err |= pqw_set_relay_verified_(CH_VALVE_CENTER, on);
+        err |= pqw_set_relay_verified_(CH_VALVE_RIGHT, on);
+        err |= pqw_set_relay_verified_(CH_VALVE_LEFT,  on);
         return err;
     }
     int ch = group_valve_ch_(group);
@@ -5833,7 +5793,7 @@ bool WashRobot::ensure_group_stall_clear_(const std::string& group) {
 // → cup yanked off wall by valve release → cascade failure.
 bool WashRobot::ensure_all_zdt_stall_clear_() {
     int cleared = 0;
-    for (int s = 1; s <= 9; ++s) {
+    for (int s = 1; s <= 4; ++s) {   // [v2] 4 cups
         if (disabled_zdt_slaves_.count(s)) continue;
         if (Z_(s).get_system_status()) continue;   // comm fail, best-effort skip
         if (Z_(s).status.stall_flag) {
@@ -5850,7 +5810,7 @@ bool WashRobot::ensure_all_zdt_stall_clear_() {
     }
     sleep_ms_(100);   // firmware settle
     int persistent = 0;
-    for (int s = 1; s <= 9; ++s) {
+    for (int s = 1; s <= 4; ++s) {
         if (disabled_zdt_slaves_.count(s)) continue;
         if (Z_(s).get_system_status()) continue;
         if (Z_(s).status.stall_flag) {
@@ -5868,10 +5828,10 @@ bool WashRobot::ensure_all_zdt_stall_clear_() {
 
 bool WashRobot::clear_other_group_stalls_(const std::string& current_group) {
     std::vector<int> other;
-    if (current_group == "body") {
-        other = {ZDT_LF1, ZDT_LF2, ZDT_RF1, ZDT_RF2};
-    } else if (current_group == "feet") {
-        other = {ZDT_LB1, ZDT_LB2, ZDT_RB1, ZDT_RB2};
+    if (current_group == "right") {          // [v2] other side = left
+        other = {ZDT_LF1, ZDT_LF2};
+    } else if (current_group == "left") {    // other side = right
+        other = {ZDT_RF1, ZDT_RF2};
     } else {
         std::cout << "[other_stall_clear] unknown group=" << current_group << " — skip\n";
         return false;
@@ -5937,12 +5897,10 @@ std::string WashRobot::cmd_init_impl_() {
     // and trapping the user (re-running init would hit the same fail).
     if (try_or_pause_([this]() { return pqw_.controlRelay(CH_PUMP, true); },
                       "init_pump_on")) return "ERR aborted\n";
-    if (try_or_pause_([this]() { return pqw_.controlRelay(CH_VALVE_FEET, false); },
-                      "init_valve_feet_off")) return "ERR aborted\n";
-    if (try_or_pause_([this]() { return pqw_.controlRelay(CH_VALVE_BODY, false); },
-                      "init_valve_body_off")) return "ERR aborted\n";
-    if (try_or_pause_([this]() { return pqw_.controlRelay(CH_VALVE_CENTER, false); },
-                      "init_valve_center_off")) return "ERR aborted\n";
+    if (try_or_pause_([this]() { return pqw_.controlRelay(CH_VALVE_RIGHT, false); },
+                      "init_valve_right_off")) return "ERR aborted\n";
+    if (try_or_pause_([this]() { return pqw_.controlRelay(CH_VALVE_LEFT, false); },
+                      "init_valve_left_off")) return "ERR aborted\n";
     if (try_or_pause_([this]() { return pqw_.controlRelay(CH_BRUSH, false); },
                       "init_brush_off")) return "ERR aborted\n";
     if (try_or_pause_([this]() { return pqw_.controlRelay(CH_WATER_PUMP, false); },
@@ -5951,44 +5909,18 @@ std::string WashRobot::cmd_init_impl_() {
     if (try_or_pause_([this]() { return set_water_inlet_(false); },
                       "init_water_inlet_off")) return "ERR aborted\n";
 
-    // Retract wheels (Phase 1 climb → Phase 2 prep) before pushers extend.
-    // Assumes Phase 1 zeroed wheels at retracted position before deploy.
-    // wheels_attached_=off skips the block — bench without wheels stays clean
-    // (otherwise PR_move_cm Modbus-times-out on missing slaves 2/4 → PausedOnError).
-    if (wheels_attached_.load()) {
-        std::cout << "[init] DM2J wheels (slave 2, 4) → retract to 0 (parallel)\n";
-        // [2026-06-05] 改成 nowait + wait pattern，跟 cmd_wheels（收輪按鈕）一致：
-        // 兩邊 trigger 都下完才開始 wait，總時間 ≈ max(L, R) 而非 L + R。
-        // 原本是兩個 try_or_pause_ 各自 blocking PR_move_cm 依序執行。
-        if (try_or_pause_([this]() -> bool {
-            if (D_(DM2J_LEFT_WHEEL ).PR_move_cm_nowait(0, 1, DM2J_RPM, 0.0, DM2J_ACC, DM2J_DEC)) return true;
-            if (D_(DM2J_RIGHT_WHEEL).PR_move_cm_nowait(0, 1, DM2J_RPM, 0.0, DM2J_ACC, DM2J_DEC)) return true;
-            if (dm2j_wait_done_(DM2J_LEFT_WHEEL )) return true;
-            if (dm2j_wait_done_(DM2J_RIGHT_WHEEL)) return true;
-            return false;
-        }, "init_wheels_retract")) return "ERR aborted\n";
-    } else {
-        std::cout << "[init] wheels_attached=off, skip wheel retract\n";
-    }
-
-    // Foot rails (DM2J slave 1, 3) → absolute 0. Rigid-coupled mechanically so
-    // broadcast-sync via dm2j_pair_move_abs_ on PR1 (bystanders 2/4/5 have PR1
-    // rpm=0 safe set in WashRobot::init).
-    std::cout << "[init] DM2J feet rails (slave " << DM2J_LEFT_FOOT
-              << ", " << DM2J_RIGHT_FOOT << ") → home to abs 0\n";
-    if (try_or_pause_([this]() { return dm2j_pair_move_abs_(DM2J_LEFT_FOOT, DM2J_RIGHT_FOOT, 1, 0.0); },
-                      "init_feet_rail_home")) return "ERR aborted\n";
-    rail_pos_cm_.store(0.0);
+    // [v2] No DM2J wheels or feet rails — vertical motion is crane-rope driven.
+    // (v1 wheel-retract + feet-rail-home block removed here.)
 
     // Release stall + enable all ZDT drivers before sending any motion command.
     // ZDT firmware returns Modbus exception 0x03 (illegal data value) for pos_mode
     // calls when the drive is disabled or has a latched stall flag. WASH_ROBOT::init()
     // connects TCP but does not enable, and cmd_shutdown / cmd_emergency_stop disable,
     // so cmd_init must re-enable here. Matches Linux_test menu 3 sequence.
-    std::cout << "[init] ZDT 1-9 → release_stall + driver enable"
+    std::cout << "[init] ZDT 1-4 → release_stall + driver enable"
               << (disabled_zdt_slaves_.empty() ? "" : " (disabled slaves skipped)")
               << "\n";
-    for (int s = 1; s <= 9; ++s) {
+    for (int s = 1; s <= 4; ++s) {
         if (disabled_zdt_slaves_.count(s)) {
             std::cout << "[init] ZDT " << s << " disabled — skip\n";
             continue;
@@ -6000,59 +5932,11 @@ std::string WashRobot::cmd_init_impl_() {
     }
     sleep_ms_(200);   // let drives settle into enabled state
 
-    // Extend pushers in init in 4 staged sub-groups (2026-05-05):
-    //   1. feet lower  (F2 = slave 2, 4)
-    //   2. feet upper  (F1 = slave 1, 3)
-    //   3. body lower  (B2 = slave 7, 8) — 9.3 cm short
-    //   4. body upper  (B1 = slave 5, 6) — 9.5 cm long
-    // defer_stall=true: cup hitting wall during init is treated as success;
-    // cmd_attach handles valves later.
-    auto filter_disabled = [&](std::initializer_list<int> raw) {
-        std::vector<int> out;
-        for (int s : raw) if (!disabled_zdt_slaves_.count(s)) out.push_back(s);
-        return out;
-    };
-    const std::vector<int> feet_lower = filter_disabled({ZDT_RF2, ZDT_LF2});   // slave 2, 4
-    const std::vector<int> feet_upper = filter_disabled({ZDT_RF1, ZDT_LF1});   // slave 1, 3
-    const std::vector<int> body_short = filter_disabled({ZDT_RB2, ZDT_LB2});   // slave 7, 8
-    const std::vector<int> body_long  = filter_disabled({ZDT_RB1, ZDT_LB1});   // slave 5, 6
-
-    // [2026-05-25] feet extend MOVED to cmd_attach (after feet valve open).
-    // init 不再伸任何 pusher（feet + body 都留在 0）。attach 開 feet valve 之後
-    // 才透過 smart_extend_subset_("feet") 一氣呵成「伸 + 等真空」。
-    // 舊版「init 伸 feet」kept commented for easy revert。
-    //if (!feet_lower.empty()) {
-    //    std::cout << "[init] feet lower pushers (2,4) → extend " << PUSHER_EXTEND_FEET_PULSE_LOWER
-    //              << " pulses (~8.3 cm)\n";
-    //    if (try_or_pause_([this, &feet_lower]() { return pusher_move_many_(feet_lower, PUSHER_EXTEND_FEET_PULSE_LOWER, PUSHER_RPM, PUSHER_ACC, /*defer_stall=*/true); },
-    //                      "init_feet_lower_extend")) return "ERR aborted\n";
-    //}
-    //if (!feet_upper.empty()) {
-    //    std::cout << "[init] feet upper pushers (1,3) → extend " << PUSHER_EXTEND_FEET_PULSE
-    //              << " pulses (~8.0 cm)\n";
-    //    if (try_or_pause_([this, &feet_upper]() { return pusher_move_many_(feet_upper, PUSHER_EXTEND_FEET_PULSE, PUSHER_RPM, PUSHER_ACC, /*defer_stall=*/true); },
-    //                      "init_feet_upper_extend")) return "ERR aborted\n";
-    //}
-    // [2026-05-22] body extend MOVED to cmd_attach (smart_extend_subset_, disable_seal).
-    // Old "init extends body too" kept commented for easy revert.
-    //if (!body_short.empty()) {
-    //    std::cout << "[init] body lower pushers (7,8) → extend " << PUSHER_EXTEND_BODY_PULSE_SHORT
-    //              << " pulses (~9.3 cm)\n";
-    //    if (try_or_pause_([this, &body_short]() { return pusher_move_many_(body_short, PUSHER_EXTEND_BODY_PULSE_SHORT, PUSHER_RPM_BODY_EXTEND, PUSHER_ACC_BODY_EXTEND, /*defer_stall=*/true); },
-    //                      "init_body_lower_extend")) return "ERR aborted\n";
-    //}
-    //if (!body_long.empty()) {
-    //    std::cout << "[init] body upper pushers (5,6) → extend " << PUSHER_EXTEND_BODY_PULSE
-    //              << " pulses (~9.5 cm)\n";
-    //    if (try_or_pause_([this, &body_long]() { return pusher_move_many_(body_long, PUSHER_EXTEND_BODY_PULSE, PUSHER_RPM_BODY_EXTEND, PUSHER_ACC_BODY_EXTEND, /*defer_stall=*/true); },
-    //                      "init_body_upper_extend")) return "ERR aborted\n";
-    //}
-    // Release any deferred stall flags from init extends (feet only — body extend disabled above)
-    for (int s : feet_lower)  Z_(s).release_stall_flag();
-    for (int s : feet_upper)  Z_(s).release_stall_flag();
-    //for (int s : body_short)  Z_(s).release_stall_flag();
-    //for (int s : body_long)   Z_(s).release_stall_flag();
-    (void)body_short; (void)body_long;   // declared above; silence unused-variable warning
+    // [v2] init does NOT extend any pusher — all 4 cups stay retracted at 0.
+    // cmd_attach opens the valves then extends via smart_extend_subset_ (the
+    // disable_seal 「一點一點補伸」 pipeline). Just clear any stale stall flags.
+    for (int s = 1; s <= 4; ++s)
+        if (!disabled_zdt_slaves_.count(s)) Z_(s).release_stall_flag();
 
     std::cout << "[init] DM2J arm (slave " << DM2J_ARM << ") → set current as zero\n";
     D_(DM2J_ARM).home_set_current_pos_zero();
@@ -6129,76 +6013,41 @@ std::string WashRobot::cmd_attach() {
     arm_sweep_obstacle_pending_.store(false);
     arm_sweep_skip_rest_of_run_.store(false);
 
-    // [2026-05-22] init now only extends FEET to preset; body (5,6,7,8) stays at 0.
-    // attach takes care of:
-    //   1) open all valves (feet / body / center)
-    //   2) body group extends from 0 -> preset via smart_extend_subset_ (the same
-    //      disable_seal pipeline step_up/down use). The feet, already pressed
-    //      against the wall from init, build vacuum PASSIVELY during this body
-    //      extend (body disable_seal typically takes 10s+, plenty of settle).
-    //   3) vacuum_check all; any cup still unsealed gets a smart_extend fine-tune.
-    //   4) crane pay_out_to_weight_ transfers body weight onto the cups.
-    // [TEMP DISABLED] center pusher (slave 9) is still NOT extended; its valve is
-    // opened anyway (existing behavior, no change).
+    // [v2] attach: hanging → four cups sealed, sequential right → left.
+    //   Both sides use the disable_seal 「一點一點補伸」 pipeline
+    //   (smart_extend_subset_): valve open → incremental extend → wait vacuum.
+    //   No body/center groups, no mid-attach feet realign.
 
-    // [2026-05-25 重排] 新流程：feet valve → feet seal wait → realign → body valve → body extend
-    //   (center valve 不開 — per user 2026-05-25 暫不控制 center)
-    //   舊流程 "同時開 3 valve + body extend 期間 feet 被動 seal" 改成顯式
-    //   "feet 先 seal + realign → 才動 body"。
-
-    // 1. 開 FEET valve（FC01 readback verify 防 USR gateway 丟 FC05）
-    std::cout << "[attach] open FEET valve CH" << CH_VALVE_FEET << "\n";
-    if (try_or_pause_([this]() { return pqw_set_relay_verified_(CH_VALVE_FEET, true); },
-                      "attach_valve_feet_on")) return "ERR aborted\n";
-
-    // 1b. 開腳真空後才伸 + 等真空建立：用 disable_seal pipeline (smart_extend_subset_)。
-    //     2026-05-25 起 init 不伸 feet → 進來 feet 在 0；pipeline 內 Phase 1 fast
-    //     extend 從 0 → preset-buffer、iter loop 慢推到 preset + WAIT_SEAL 等真空。
-    //     一氣呵成「伸 + 等 seal」。
+    // 1. Right side — open valve CH1, then incremental extend cups {1,2}.
+    std::cout << "[attach] open RIGHT valve CH" << CH_VALVE_RIGHT << "\n";
+    if (try_or_pause_([this]() { return pqw_set_relay_verified_(CH_VALVE_RIGHT, true); },
+                      "attach_valve_right_on")) return "ERR aborted\n";
     {
-        std::vector<int> feet_slaves;
-        for (int s : {ZDT_LF1, ZDT_LF2, ZDT_RF1, ZDT_RF2}) {
-            if (!disabled_zdt_slaves_.count(s)) feet_slaves.push_back(s);
+        std::vector<int> right_slaves;
+        for (int s : {ZDT_RF1, ZDT_RF2}) {
+            if (!disabled_zdt_slaves_.count(s)) right_slaves.push_back(s);
         }
-        if (!feet_slaves.empty()) {
-            std::cout << "[attach] feet disable_seal — wait for feet vacuum to build\n";
-            if (try_or_pause_([this, &feet_slaves]() { return smart_extend_subset_("feet", feet_slaves); },
-                              "attach_feet_disable_seal_wait"))
+        if (!right_slaves.empty()) {
+            std::cout << "[attach] right disable_seal — extend + wait vacuum\n";
+            if (try_or_pause_([this, &right_slaves]() { return smart_extend_subset_("right", right_slaves); },
+                              "attach_right_disable_seal_wait"))
                 return "ERR aborted\n";
         }
     }
 
-    // 1c. realign once（force=false → 內部 threshold check 自動決定要不要跑）
-    //     必須先 unlock motion_mtx_：do_feet_realign_ 內部會自己 lock,
-    //     同 thread re-lock std::mutex = deadlock(2026-05-25 user bench 踩到)。
-    //     in_window=true：跳 Phase A（body retract，因為此時 body 在 0、
-    //     從 0 retract 會撞下限）。Phase B 還是會 open body valve + 伸 body
-    //     via disable_seal — 後面的 step 4-5 變成 no-op-ish 但保留當保險。
-    lk.unlock();
+    // 2. Left side — open valve CH3, then incremental extend cups {3,4}.
+    std::cout << "[attach] open LEFT valve CH" << CH_VALVE_LEFT << "\n";
+    if (try_or_pause_([this]() { return pqw_set_relay_verified_(CH_VALVE_LEFT, true); },
+                      "attach_valve_left_on")) return "ERR aborted\n";
     {
-        std::cout << "[attach] mid-attach realign (force=false, in_window=true)\n";
-        std::string realign_err = do_feet_realign_(/*force=*/false, /*in_window=*/true);
-        if (!realign_err.empty()) {
-            std::cout << "[attach] mid-attach realign FAIL (non-fatal): " << realign_err;
+        std::vector<int> left_slaves;
+        for (int s : {ZDT_LF1, ZDT_LF2}) {
+            if (!disabled_zdt_slaves_.count(s)) left_slaves.push_back(s);
         }
-    }
-    lk.lock();
-
-    // 2. 開 BODY valve（center valve 不開，per user 2026-05-25）
-    std::cout << "[attach] open BODY valve CH" << CH_VALVE_BODY << "\n";
-    if (try_or_pause_([this]() { return pqw_set_relay_verified_(CH_VALVE_BODY, true); },
-                      "attach_valve_body_on")) return "ERR aborted\n";
-
-    // 3. 身體組從 0 走 disable_seal 伸出 (跟 step_up/down 共用 smart_extend_subset_)。
-    {
-        std::vector<int> body_slaves;
-        for (int s : {ZDT_RB1, ZDT_LB1, ZDT_RB2, ZDT_LB2}) {
-            if (!disabled_zdt_slaves_.count(s)) body_slaves.push_back(s);
-        }
-        if (!body_slaves.empty()) {
-            std::cout << "[attach] body disable_seal extend (from 0 -> preset)\n";
-            if (try_or_pause_([this, &body_slaves]() { return smart_extend_subset_("body", body_slaves); },
-                              "attach_body_disable_seal_extend"))
+        if (!left_slaves.empty()) {
+            std::cout << "[attach] left disable_seal — extend + wait vacuum\n";
+            if (try_or_pause_([this, &left_slaves]() { return smart_extend_subset_("left", left_slaves); },
+                              "attach_left_disable_seal_wait"))
                 return "ERR aborted\n";
         }
     }
@@ -6210,24 +6059,24 @@ std::string WashRobot::cmd_attach() {
     //    若把已密封的 cup 一起傳進去會被 Phase 1 縮回而破真空。
     auto initial_fails = vacuum_check_("all");
     if (!initial_fails.empty()) {
-        std::cout << "[attach] cups not sealed after body extend:";
+        std::cout << "[attach] cups not sealed after extend:";
         for (int s : initial_fails) std::cout << " " << s;
         std::cout << " → smart_extend (disable_seal)\n";
 
-        // Split unsealed cups by group (center slave 9 not extended in attach).
-        std::vector<int> feet_fails, body_fails;
+        // Re-extend each unsealed cup grouped by its own side.
+        std::vector<int> right_fails, left_fails;
         for (int s : initial_fails) {
-            if (s >= 1 && s <= 4)      feet_fails.push_back(s);
-            else if (s >= 5 && s <= 8) body_fails.push_back(s);
+            if (s == ZDT_RF1 || s == ZDT_RF2)      right_fails.push_back(s);
+            else if (s == ZDT_LF1 || s == ZDT_LF2) left_fails.push_back(s);
         }
 
-        if (!feet_fails.empty() &&
-            try_or_pause_([this, &feet_fails]() { return smart_extend_subset_("feet", feet_fails); },
-                          "attach_feet_smart_extend"))
+        if (!right_fails.empty() &&
+            try_or_pause_([this, &right_fails]() { return smart_extend_subset_("right", right_fails); },
+                          "attach_right_smart_extend"))
             return "ERR aborted\n";
-        if (!body_fails.empty() &&
-            try_or_pause_([this, &body_fails]() { return smart_extend_subset_("body", body_fails); },
-                          "attach_body_smart_extend"))
+        if (!left_fails.empty() &&
+            try_or_pause_([this, &left_fails]() { return smart_extend_subset_("left", left_fails); },
+                          "attach_left_smart_extend"))
             return "ERR aborted\n";
 
         auto remaining = vacuum_check_("all");
@@ -6240,7 +6089,7 @@ std::string WashRobot::cmd_attach() {
             std::cout << "[attach] all cups sealed after smart_extend\n";
         }
     } else {
-        std::cout << "[attach] all 9 cups sealed on first check\n";
+        std::cout << "[attach] all 4 cups sealed on first check\n";
     }
 
     // 4. Pay out crane rope to transfer body weight from the rope onto the
@@ -6299,11 +6148,10 @@ std::string WashRobot::cmd_detach() {
     if (cur != State::Attached) return state_violation_(cur);
 
     std::lock_guard<std::mutex> lk(motion_mtx_);
-    std::cout << "[detach] close valves CH" << CH_VALVE_FEET << "/"
-              << CH_VALVE_BODY << "/" << CH_VALVE_CENTER << " → Ready\n";
-    pqw_.controlRelay(CH_VALVE_FEET,   false);
-    pqw_.controlRelay(CH_VALVE_BODY,   false);
-    pqw_.controlRelay(CH_VALVE_CENTER, false);
+    std::cout << "[detach] close valves CH" << CH_VALVE_RIGHT << "/"
+              << CH_VALVE_LEFT << " → Ready\n";
+    pqw_.controlRelay(CH_VALVE_RIGHT, false);
+    pqw_.controlRelay(CH_VALVE_LEFT,  false);
     set_state_(State::Ready);
     return "OK detached\n";
 }
@@ -6364,6 +6212,125 @@ std::string WashRobot::cmd_arm_sweep() {
 //
 // Rail coord: feet forward = rail +, body forward = rail - (shared rail axis).
 std::string WashRobot::do_step_down_(bool skip_cleaning_sweep,
+                                      std::function<void()> after_feet_rail_hook,
+                                      std::function<void()> before_feet_rail_hook,
+                                      std::function<void()> during_body_rail_hook,
+                                      std::function<void()> after_body_rail_hook) {
+    // [v2 2026-07-07] Descend one step. No DM2J rail — each side's crane rope
+    // pays out `step_cm` while the OTHER side's 2 cups anchor the machine.
+    // Robustness (per user 2026-07-07): each side runs through the SAME v1
+    // `cycle_group_` retry engine — extend (disable_seal 一點一點補伸) → verify
+    // → 沒吸牢就退一點到新牆點 backup → retry (VACUUM_RETRY_MAX) → obstacle
+    // rescue → PausedOnError. ONLY the movement is swapped DM2J rail → crane
+    // rope: pre_cycle's main descent AND backup's "fresh wall spot" retreat both
+    // use crane pay_out on that side. Arm cleaning sweep deferred (arm 未裝); the
+    // v1 sweep-timing rail hooks are unused in v2.
+    (void)after_feet_rail_hook; (void)before_feet_rail_hook;
+    (void)during_body_rail_hook; (void)after_body_rail_hook;
+    std::lock_guard<std::mutex> lk(motion_mtx_);
+    abort_flag     = false;
+    motion_active_ = true;
+
+    const int step = step_cm_.load();
+    std::cout << "[step_down] v2 begin, step=" << step << "cm (right then left)\n";
+
+    // Run one side's descent through cycle_group_. `anchor_group` must stay
+    // sealed (bears the machine); `move_group` releases, descends `step`, and
+    // reseals with the full retry/backup engine. crane_word = pay_out_right|left.
+    auto run_side = [&](const std::string& move_group, const std::string& anchor_group,
+                        const std::vector<int>& move_slaves, int valve_ch,
+                        const std::string& crane_word) -> std::string {
+        // pre_cycle (once): verify anchor sealed, release moving side off the
+        // wall, then crane pays out `step` on this side (main descent). Leaves
+        // cups retracted + valve OFF for cycle_group_'s first extend.
+        auto pre_cycle = [this, move_group, anchor_group, move_slaves, valve_ch, crane_word, step]() -> std::string {
+            if (try_or_pause_([this]() { return ensure_all_zdt_stall_clear_(); },
+                              "step_down_" + move_group + "_pre_stall_clear")) return "aborted";
+            if (try_or_pause_([this, anchor_group, move_group]() -> bool {
+                auto fails = vacuum_check_(anchor_group);
+                if (fails.empty()) return false;
+                std::string msg = "step_down_anchor_unsealed " + anchor_group + "=";
+                for (size_t i = 0; i < fails.size(); ++i) { if (i) msg += ","; msg += std::to_string(fails[i]); }
+                std::cout << "[safety] " << msg << " — REFUSE to release " << move_group << "\n";
+                evt_(msg);
+                return true;
+            }, "step_down_" + move_group + "_anchor_check")) return "aborted";
+            if (try_or_pause_([this, valve_ch]() { return pqw_set_relay_verified_(valve_ch, false); },
+                              "step_down_" + move_group + "_valve_off")) return "aborted";
+            if (try_or_pause_([this, move_slaves]() { return vacuum_wait_release_(move_slaves, VACUUM_RELEASE_WAIT_MS); },
+                              "step_down_" + move_group + "_vacuum_release")) return "aborted";
+            clear_other_group_stalls_(move_group);
+            if (try_or_pause_([this, move_slaves]() { return pusher_two_stage_retract_(move_slaves); },
+                              "step_down_" + move_group + "_pusher_retract")) return "aborted";
+            {
+                std::ostringstream oss; oss << crane_word << " " << step;
+                const std::string cs = oss.str();
+                const int to = crane_motion_timeout_sec_(step);
+                std::cout << "[step_down] crane " << cs << "\n";
+                if (try_or_pause_([this, cs, to]() { return crane_cmd_(cs, to).rfind("OK", 0) != 0; },
+                                  "step_down_" + move_group + "_crane_payout")) return "aborted";
+            }
+            return "";
+        };
+        // Vacuum-retry / rescue backup: cycle_group_ has already released +
+        // retracted this side; shift it to a FRESH wall spot by paying out a bit
+        // more on the crane (v1 did a DM2J rail retreat here). dry_run: always
+        // feasible (crane has building-height headroom).
+        auto backup_cm = [this, move_group, crane_word](double cm, const char* tag, bool dry_run) -> std::string {
+            if (dry_run) return "";
+            const int mv = (int)std::lround(cm);
+            std::ostringstream oss; oss << crane_word << " " << mv;
+            const std::string cs = oss.str();
+            const int to = crane_motion_timeout_sec_(mv);
+            std::cout << "  [retry " << move_group << tag << "] crane " << cs << " (fresh wall spot)\n";
+            if (try_or_pause_([this, cs, to]() { return crane_cmd_(cs, to).rfind("OK", 0) != 0; },
+                              std::string("step_down_") + move_group + "_backup" + tag)) return "aborted";
+            return "";
+        };
+        auto backup = [backup_cm](bool dry_run) { return backup_cm(VACUUM_BACKUP_CM,          "",        dry_run); };
+        auto rescue = [backup_cm](bool dry_run) { return backup_cm(OBSTACLE_RESCUE_BACKUP_CM, "_rescue", dry_run); };
+
+        int rc = 0, sc = 0;
+        return cycle_group_(move_group, pre_cycle, backup, rescue, rc, sc);
+    };
+
+    // Pre-flight: clear stall flags + confirm all four cups sealed.
+    if (try_or_pause_([this]() { return ensure_all_zdt_stall_clear_(); },
+                      "step_down_pre_stall_clear")) { motion_active_ = false; return "ERR aborted\n"; }
+    if (try_or_pause_([this]() -> bool {
+        auto fails = vacuum_check_("all");
+        if (fails.empty()) return false;
+        std::string msg = "step_down_pre_unsealed=";
+        for (size_t i = 0; i < fails.size(); ++i) { if (i) msg += ","; msg += std::to_string(fails[i]); }
+        std::cout << "[safety] " << msg << " — REFUSE to start step\n";
+        evt_(msg);
+        return true;
+    }, "step_down_pre_all_sealed")) { motion_active_ = false; return "ERR aborted\n"; }
+
+    // Right half (left anchors), then left half (right anchors).
+    std::string err;
+    err = run_side("right", "left", {ZDT_RF1, ZDT_RF2}, CH_VALVE_RIGHT, "pay_out_right");
+    if (!err.empty()) { motion_active_ = false; return "ERR " + err + "\n"; }
+    if (check_abort_()) { motion_active_ = false; return "ERR aborted\n"; }
+
+    err = run_side("left", "right", {ZDT_LF1, ZDT_LF2}, CH_VALVE_LEFT, "pay_out_left");
+    if (!err.empty()) { motion_active_ = false; return "ERR " + err + "\n"; }
+    if (check_abort_()) { motion_active_ = false; return "ERR aborted\n"; }
+
+    // Both sides descended the same step_cm → nominally level.
+    // TODO v2: optional IMU roll + left/right meter-length tolerance check here.
+
+    motion_active_ = false;
+    if (!skip_cleaning_sweep) {
+        // TODO v2: re-enable arm cleaning sweep once the arm is installed.
+        std::cout << "[step_down] cleaning sweep deferred (arm not installed in v2)\n";
+    }
+    return "OK step_done\n";
+}
+
+#if 0  // [v2 2026-07-07] retired v1 do_step_down_ body — kept for reference
+       // until the v2 rewrite is bench-verified, then delete. Not compiled.
+std::string WashRobot::_retired_do_step_down_v1_(bool skip_cleaning_sweep,
                                       std::function<void()> after_feet_rail_hook,
                                       std::function<void()> before_feet_rail_hook,
                                       std::function<void()> during_body_rail_hook,
@@ -6770,6 +6737,7 @@ std::string WashRobot::do_step_down_(bool skip_cleaning_sweep,
     }
     return "OK step_done\n";
 }
+#endif  // [v2] end retired v1 do_step_down_
 
 // StepInProgressGuard 已上移至 cmd_attach 上方（2026-06-08 修 compile error）。
 // 同一個定義被 cmd_attach / cmd_step_down / cmd_step_up 共用。
@@ -6901,6 +6869,101 @@ std::string WashRobot::cmd_step_down_with_sweep(int cm) {
 // retracts exactly that slack (= rail_delta, the actual body climb). Net retract
 // per step = body climb. Feet phase has no crane motion (body anchored).
 std::string WashRobot::do_step_up_(bool skip_cleaning_sweep,
+                                    std::function<void()> after_feet_rail_hook,
+                                    std::function<void()> before_feet_rail_hook) {
+    // [v2 2026-07-07] Ascend one step — mirror of do_step_down_ with the crane
+    // RETRACTING each side's rope by `step_cm` instead of paying out. Same
+    // cycle_group_ retry/backup engine (吸不好重吸); only the movement is crane
+    // rope (retract). Right side first, left second; non-moving side anchors.
+    (void)after_feet_rail_hook; (void)before_feet_rail_hook;
+    std::lock_guard<std::mutex> lk(motion_mtx_);
+    abort_flag     = false;
+    motion_active_ = true;
+
+    const int step = step_cm_.load();
+    std::cout << "[step_up] v2 begin, step=" << step << "cm (right then left)\n";
+
+    auto run_side = [&](const std::string& move_group, const std::string& anchor_group,
+                        const std::vector<int>& move_slaves, int valve_ch,
+                        const std::string& crane_word) -> std::string {
+        auto pre_cycle = [this, move_group, anchor_group, move_slaves, valve_ch, crane_word, step]() -> std::string {
+            if (try_or_pause_([this]() { return ensure_all_zdt_stall_clear_(); },
+                              "step_up_" + move_group + "_pre_stall_clear")) return "aborted";
+            if (try_or_pause_([this, anchor_group, move_group]() -> bool {
+                auto fails = vacuum_check_(anchor_group);
+                if (fails.empty()) return false;
+                std::string msg = "step_up_anchor_unsealed " + anchor_group + "=";
+                for (size_t i = 0; i < fails.size(); ++i) { if (i) msg += ","; msg += std::to_string(fails[i]); }
+                std::cout << "[safety] " << msg << " — REFUSE to release " << move_group << "\n";
+                evt_(msg);
+                return true;
+            }, "step_up_" + move_group + "_anchor_check")) return "aborted";
+            if (try_or_pause_([this, valve_ch]() { return pqw_set_relay_verified_(valve_ch, false); },
+                              "step_up_" + move_group + "_valve_off")) return "aborted";
+            if (try_or_pause_([this, move_slaves]() { return vacuum_wait_release_(move_slaves, VACUUM_RELEASE_WAIT_MS); },
+                              "step_up_" + move_group + "_vacuum_release")) return "aborted";
+            clear_other_group_stalls_(move_group);
+            if (try_or_pause_([this, move_slaves]() { return pusher_two_stage_retract_(move_slaves); },
+                              "step_up_" + move_group + "_pusher_retract")) return "aborted";
+            {
+                std::ostringstream oss; oss << crane_word << " " << step;
+                const std::string cs = oss.str();
+                const int to = crane_motion_timeout_sec_(step);
+                std::cout << "[step_up] crane " << cs << "\n";
+                if (try_or_pause_([this, cs, to]() { return crane_cmd_(cs, to).rfind("OK", 0) != 0; },
+                                  "step_up_" + move_group + "_crane_retract")) return "aborted";
+            }
+            return "";
+        };
+        auto backup_cm = [this, move_group, crane_word](double cm, const char* tag, bool dry_run) -> std::string {
+            if (dry_run) return "";
+            const int mv = (int)std::lround(cm);
+            std::ostringstream oss; oss << crane_word << " " << mv;
+            const std::string cs = oss.str();
+            const int to = crane_motion_timeout_sec_(mv);
+            std::cout << "  [retry " << move_group << tag << "] crane " << cs << " (fresh wall spot)\n";
+            if (try_or_pause_([this, cs, to]() { return crane_cmd_(cs, to).rfind("OK", 0) != 0; },
+                              std::string("step_up_") + move_group + "_backup" + tag)) return "aborted";
+            return "";
+        };
+        auto backup = [backup_cm](bool dry_run) { return backup_cm(VACUUM_BACKUP_CM,          "",        dry_run); };
+        auto rescue = [backup_cm](bool dry_run) { return backup_cm(OBSTACLE_RESCUE_BACKUP_CM, "_rescue", dry_run); };
+
+        int rc = 0, sc = 0;
+        return cycle_group_(move_group, pre_cycle, backup, rescue, rc, sc);
+    };
+
+    if (try_or_pause_([this]() { return ensure_all_zdt_stall_clear_(); },
+                      "step_up_pre_stall_clear")) { motion_active_ = false; return "ERR aborted\n"; }
+    if (try_or_pause_([this]() -> bool {
+        auto fails = vacuum_check_("all");
+        if (fails.empty()) return false;
+        std::string msg = "step_up_pre_unsealed=";
+        for (size_t i = 0; i < fails.size(); ++i) { if (i) msg += ","; msg += std::to_string(fails[i]); }
+        std::cout << "[safety] " << msg << " — REFUSE to start step\n";
+        evt_(msg);
+        return true;
+    }, "step_up_pre_all_sealed")) { motion_active_ = false; return "ERR aborted\n"; }
+
+    std::string err;
+    err = run_side("right", "left", {ZDT_RF1, ZDT_RF2}, CH_VALVE_RIGHT, "retract_right");
+    if (!err.empty()) { motion_active_ = false; return "ERR " + err + "\n"; }
+    if (check_abort_()) { motion_active_ = false; return "ERR aborted\n"; }
+
+    err = run_side("left", "right", {ZDT_LF1, ZDT_LF2}, CH_VALVE_LEFT, "retract_left");
+    if (!err.empty()) { motion_active_ = false; return "ERR " + err + "\n"; }
+    if (check_abort_()) { motion_active_ = false; return "ERR aborted\n"; }
+
+    motion_active_ = false;
+    if (!skip_cleaning_sweep) {
+        std::cout << "[step_up] cleaning sweep deferred (arm not installed in v2)\n";
+    }
+    return "OK step_up_done\n";
+}
+
+#if 0  // [v2 2026-07-07] retired v1 do_step_up_ body — kept for reference
+       // until bench-verified, then delete. Not compiled.
+std::string WashRobot::_retired_do_step_up_v1_(bool skip_cleaning_sweep,
                                     std::function<void()> after_feet_rail_hook,
                                     std::function<void()> before_feet_rail_hook) {
     // unique_lock — same reason as do_step_down_ (release before mid-step realign).
@@ -7234,6 +7297,7 @@ std::string WashRobot::do_step_up_(bool skip_cleaning_sweep,
 
     return "OK step_up_done\n";
 }
+#endif  // [v2] end retired v1 do_step_up_
 
 // === E. Realign sequence ===
 // Periodically re-zero cup extension drift by retracting all 9 cups
@@ -7245,6 +7309,7 @@ std::string WashRobot::do_step_up_(bool skip_cleaning_sweep,
 // Returns "" on success or "not needed"; "ERR ..." on failure.
 //
 // Caller (cmd_step_down/up after success) decides whether to act on ERR.
+#if 0  // [v2 2026-07-07] retired v1 do_feet_realign_ (feet+body 8-cup drift realign) — kept for reference
 std::string WashRobot::do_feet_realign_(bool force, bool in_window) {
     // in_window (2026-05-22): "feet-only" mode. Caller is a step's body cycle,
     // running inside body_pre_cycle with the body group ALREADY retracted and
@@ -8008,6 +8073,7 @@ std::string WashRobot::do_feet_realign_(bool force, bool in_window) {
     return "";
 }
 
+#endif  // [v2] end retired do_feet_realign_
 std::string WashRobot::cmd_step_up(int cm) {
     StepInProgressGuard _sip_guard{step_in_progress_};
     State cur = state_.load();
@@ -9085,6 +9151,7 @@ bool WashRobot::save_saved_scripts_to_disk_(const std::string& path) {
     return false;
 }
 
+#if 0  // [v2 2026-07-07] retired v1 cmd_tilt_mode — kept for reference
 std::string WashRobot::cmd_tilt_mode(bool on) {
     State cur = state_.load();
     if (cur == State::Error) return state_violation_(cur);
@@ -9101,11 +9168,12 @@ std::string WashRobot::cmd_tilt_mode(bool on) {
     return on ? "OK tilt_on\n" : "OK tilt_off\n";
 }
 
+#endif  // [v2] end retired cmd_tilt_mode
 std::string WashRobot::cmd_emergency_stop() {
     abort_flag    = true;
     pause_flag    = false;
     motion_active_ = false;
-    for (int s = 1; s <= 9; ++s) Z_(s).emergency_stop(false);
+    for (int s = 1; s <= 4; ++s) Z_(s).emergency_stop(false);
     crane_cmd_("stop", 2);   // Crane_control_PI uses 'stop' (no 'emergency_stop' alias)
     // [2026-05-28] Invalidate arm calibration: emergency_stop may have left arm
     // in an unknown state (mid-motion abort). Next cmd_init must re-INIT.
@@ -9127,13 +9195,12 @@ std::string WashRobot::cmd_shutdown() {
     abort_flag    = true;
     pause_flag    = false;
     motion_active_ = false;
-    for (int s = 1; s <= 9; ++s) Z_(s).emergency_stop(false);
+    for (int s = 1; s <= 4; ++s) Z_(s).emergency_stop(false);
     pqw_.controlRelay(CH_BRUSH,        false);
     pqw_.controlRelay(CH_WATER_PUMP,   false);
     set_water_inlet_(false);   // [2026-06-05] → crane PQW (.34 slave 12 CH4)
-    pqw_.controlRelay(CH_VALVE_FEET,   false);
-    pqw_.controlRelay(CH_VALVE_BODY,   false);
-    pqw_.controlRelay(CH_VALVE_CENTER, false);
+    pqw_.controlRelay(CH_VALVE_RIGHT,  false);
+    pqw_.controlRelay(CH_VALVE_LEFT,   false);
     pqw_.controlRelay(CH_PUMP,         false);
     return "OK shutdown\n";
 }
@@ -9182,7 +9249,7 @@ std::string WashRobot::cmd_status() {
             // JC100 timeouts cascade across slaves). 9 × 30ms = 270ms total gap
             // is well under 1Hz rate-limit budget.
             bool first = true;
-            for (int s = 1; s <= 9; ++s) {
+            for (int s = 1; s <= 4; ++s) {
                 if (disabled_zdt_slaves_.count(s)) continue;
                 if (!first) sleep_ms_(30);
                 first = false;
@@ -9197,10 +9264,8 @@ std::string WashRobot::cmd_status() {
     oss << " crane_attached=" << (crane_attached_.load() ? "on" : "off");
     oss << " arm_attached="   << (arm_attached_.load()   ? "on" : "off");
     oss << " obstacle_detect=" << (obstacle_detect_enabled_.load() ? "on" : "off");
-    oss << std::fixed << std::setprecision(1)
-        << " rail=" << rail_pos_cm_.load()
-        << " body_residual=" << body_residual_cm_.load();
-    for (int s = 1; s <= 9; ++s)
+    oss << std::fixed << std::setprecision(1);
+    for (int s = 1; s <= 4; ++s)
         oss << " p" << s << "=" << cached_pressure_[s - 1].load();
     if (!imu_.read_error.load()) {
         oss << std::setprecision(2)
@@ -9359,10 +9424,9 @@ std::string WashRobot::cmd_pusher(const std::string& group, const std::string& p
         // Release vacuum valve(s) before retracting — prevents ZDT stall
         // from cups still adhered to wall when valve hasn't been released.
         const std::string valve_ctx = "manual_pusher_" + group + "_valve_off";
-        if (group == "all") {
-            if (try_or_pause_([this]() { return pqw_.controlRelay(CH_VALVE_FEET,   false); }, valve_ctx + "_feet"))   return on_abort();
-            if (try_or_pause_([this]() { return pqw_.controlRelay(CH_VALVE_BODY,   false); }, valve_ctx + "_body"))   return on_abort();
-            if (try_or_pause_([this]() { return pqw_.controlRelay(CH_VALVE_CENTER, false); }, valve_ctx + "_center")) return on_abort();
+        if (group == "all" || group == "feet") {
+            if (try_or_pause_([this]() { return pqw_.controlRelay(CH_VALVE_RIGHT, false); }, valve_ctx + "_right")) return on_abort();
+            if (try_or_pause_([this]() { return pqw_.controlRelay(CH_VALVE_LEFT,  false); }, valve_ctx + "_left"))  return on_abort();
         } else {
             const int valve_ch = group_valve_ch_(group);
             if (valve_ch >= 0) {
@@ -9378,32 +9442,10 @@ std::string WashRobot::cmd_pusher(const std::string& group, const std::string& p
             }
         }
 
-        // Two-stage retract: half → wait → full.
-        if (group == "all") {
-            std::vector<int> feet_g   = {ZDT_LF1, ZDT_LF2, ZDT_RF1, ZDT_RF2};
-            std::vector<int> body_g   = {ZDT_LB1, ZDT_LB2, ZDT_RB1, ZDT_RB2};
-            // 2026-05-18: center_g (ZDT_C slave 9) commented out — center
-            // pusher not controlled in current bench config.
-            // std::vector<int> center_g = {ZDT_C};
-
-            if (try_or_pause_([this, &feet_g]() { return pusher_two_stage_retract_(feet_g); }, "manual_pusher_all_feet_retract")) return on_abort();
-            if (try_or_pause_([this, &body_g]() { return pusher_two_stage_retract_(body_g); }, "manual_pusher_all_body_retract")) return on_abort();
-            // [2026-05-18 disabled] center pusher retract:
-            // if (try_or_pause_([this, &center_g]() { return pusher_two_stage_retract_(center_g); }, "manual_pusher_all_center_retract")) return on_abort();
-            return "OK\n";
-        }
-
+        // Two-stage retract: half → wait → full. [v2] "all"/"feet" = 4 cups {1,2,3,4}.
         auto slaves = group_slaves_(group);
         if (slaves.empty()) return "ERR unknown_group\n";
         const std::string ctx = "manual_pusher_" + group + "_retract";
-        // Safety: before retracting feet/body, ensure the OTHER load-bearing
-        // group has no latched stall (firmware would reject its next motion cmd).
-        // Center is independent — skip the cross-check.
-        if (group == "feet" || group == "body") {
-            const std::string other = (group == "feet") ? "body" : "feet";
-            if (try_or_pause_([this, other]() { return ensure_group_stall_clear_(other); },
-                              ctx + "_check_other_stall")) return on_abort();
-        }
         if (try_or_pause_([this, &slaves]() { return pusher_two_stage_retract_(slaves); }, ctx)) return on_abort();
         return "OK\n";
     }
@@ -9411,13 +9453,9 @@ std::string WashRobot::cmd_pusher(const std::string& group, const std::string& p
         // Manual extend mirrors auto-cycle extend logic: per-slave start pulses
         // from last_seal_pulse_ + B compensation, vacuum early-stop, fine_tune
         // with obstacle detection. Caller (user) must ensure valve state is set.
-        if (group == "all") {
-            auto feet_g   = group_slaves_("feet");
-            auto body_g   = group_slaves_("body");
-            auto center_g = group_slaves_("center");
-            if (try_or_pause_([this, &feet_g]()   { return smart_extend_subset_("feet",   feet_g); },   "manual_pusher_all_feet_extend"))   return on_abort();
-            if (try_or_pause_([this, &body_g]()   { return smart_extend_subset_("body",   body_g); },   "manual_pusher_all_body_extend"))   return on_abort();
-            if (try_or_pause_([this, &center_g]() { return smart_extend_subset_("center", center_g); }, "manual_pusher_all_center_extend")) return on_abort();
+        if (group == "all" || group == "feet") {
+            auto all_g = group_slaves_(group);
+            if (try_or_pause_([this, &all_g]() { return smart_extend_subset_("all", all_g); }, "manual_pusher_all_extend")) return on_abort();
             return "OK\n";
         }
         auto slaves = group_slaves_(group);
@@ -9434,7 +9472,7 @@ std::string WashRobot::cmd_pusher(const std::string& group, const std::string& p
 // body lower=9.3cm / center=10cm). Retract always goes to 0 with full RPM.
 // Acquires motion_mtx_; not allowed in Error / Running / Balancing states.
 std::string WashRobot::cmd_zdt_pusher(int slave, const std::string& action) {
-    if (slave < 1 || slave > 9) return "ERR invalid_slave\n";
+    if (slave < 1 || slave > 4) return "ERR invalid_slave\n";
     if (disabled_zdt_slaves_.count(slave)) return "ERR slave_disabled\n";
 
     State cur = state_.load();
@@ -9452,9 +9490,8 @@ std::string WashRobot::cmd_zdt_pusher(int slave, const std::string& action) {
         // Use smart_extend_subset_ to align with auto step_down/run extend:
         // vacuum early-stop, fine_tune for obstacle / unsealed cup, last_seal_pulse_
         // persistence. Per-slave preset pulse + body delta picked inside helper.
-        const std::string slave_group = (slave >= 1 && slave <= 4) ? "feet"
-                                       : (slave == ZDT_C)          ? "center"
-                                       :                             "body";
+        const std::string slave_group = (slave == ZDT_RF1 || slave == ZDT_RF2) ? "right"
+                                                                               : "left";
         std::vector<int> single = {slave};
         std::cout << "[zdt_pusher] slave " << slave << " smart_extend group=" << slave_group << "\n";
         if (smart_extend_subset_(slave_group, single))
@@ -9485,14 +9522,14 @@ std::string WashRobot::cmd_zdt_pusher(int slave, const std::string& action) {
 // at retracted hard-stop, otherwise subsequent abs-0 moves won't return to the
 // real bottom. Group "all" hits feet+body+center (8+1=9 slaves).
 std::string WashRobot::cmd_zdt_disable(int slave) {
-    if (slave < 1 || slave > 9) return "ERR invalid_slave\n";
+    if (slave < 1 || slave > 4) return "ERR invalid_slave\n";
     disabled_zdt_slaves_.insert(slave);
     std::cout << "[zdt_disable] slave " << slave << " excluded from group ops\n";
     return "OK\n";
 }
 
 std::string WashRobot::cmd_zdt_enable(int slave) {
-    if (slave < 1 || slave > 9) return "ERR invalid_slave\n";
+    if (slave < 1 || slave > 4) return "ERR invalid_slave\n";
     disabled_zdt_slaves_.erase(slave);
     std::cout << "[zdt_enable] slave " << slave << " re-included in group ops\n";
     return "OK\n";
@@ -9504,7 +9541,7 @@ std::string WashRobot::cmd_zdt_enable(int slave) {
 // (operator can re-issue).
 std::string WashRobot::cmd_zdt_release_stall() {
     int ok = 0, fail = 0, skipped = 0;
-    for (int s = 1; s <= 9; ++s) {
+    for (int s = 1; s <= 4; ++s) {
         if (disabled_zdt_slaves_.count(s)) { ++skipped; continue; }
         if (Z_(s).release_stall_flag()) ++fail; else ++ok;
     }
@@ -9531,6 +9568,7 @@ std::string WashRobot::cmd_zdt_zero(const std::string& group) {
     return "OK\n";
 }
 
+#if 0  // [v2 2026-07-07] retired v1 cmd_move/cmd_wheels/cmd_dm2j_*/cmd_confirm_balance (DM2J feet-wheel rails + 3-valve roll cal removed) — kept for reference
 std::string WashRobot::cmd_move(const std::string& motor, double cm) {
     State cur = state_.load();
     if (cur == State::Error) return state_violation_(cur);
@@ -9753,6 +9791,7 @@ std::string WashRobot::cmd_confirm_balance(const std::string& ans) {
 // Phase 6 — Return home (release cups, retract pushers, crane pays out to ground).
 // descent_cm: how far crane should pay out. Caller computes
 // (home_ground_cm - current_down_cm) since washrobot does not track cable length.
+#endif  // [v2] end retired cmd_move/wheels/dm2j/confirm_balance block
 std::string WashRobot::cmd_return_home(int descent_cm) {
     if (descent_cm <= 0) return "ERR invalid_descent\n";
     State cur = state_.load();
@@ -9770,50 +9809,34 @@ std::string WashRobot::cmd_return_home(int descent_cm) {
         return msg;
     };
 
-    // 1. Arm rail back to zero
-    if (D_(DM2J_ARM).PR_move_cm(0, 1, DM2J_RPM, 0.0, DM2J_ACC, DM2J_DEC))
-        return fail("ERR arm_home_fail\n");
-    if (check_abort_()) return fail("ERR aborted\n");
+    // [v2 2026-07-07] No DM2J rail homing (feet/wheel rails removed).
 
-    // 2. Water system off (brush / pump / inlet valve)
+    // 1. Water system off (brush / pump / inlet valve)
     pqw_.controlRelay(CH_BRUSH,       false);
     pqw_.controlRelay(CH_WATER_PUMP,  false);
     set_water_inlet_(false);   // [2026-06-05] → crane PQW (.34 slave 12 CH4)
 
-    // 3. Break suction on all three groups
-    pqw_.controlRelay(CH_VALVE_FEET,   false);
-    pqw_.controlRelay(CH_VALVE_BODY,   false);
-    pqw_.controlRelay(CH_VALVE_CENTER, false);
+    // 2. Break suction on both foot groups (right/left)
+    pqw_.controlRelay(CH_VALVE_RIGHT, false);
+    pqw_.controlRelay(CH_VALVE_LEFT,  false);
 
-    // 4. Wait for all 9 cups to release. Poll-based — proceeds the moment
+    // 3. Wait for all 4 cups to release. Poll-based — proceeds the moment
     //    pressures rise above DETACH_THRESHOLD_KPA, up to RETURN_VACUUM_RELEASE_MS.
     //    Wrapped in try_or_pause_: timeout drops into PausedOnError so operator
     //    can investigate (continue=re-poll / skip=force retract / stop=Error).
-    //    Replaces previous fixed sleep + one-shot manual check.
     {
-        // 2026-05-18: ZDT_C (center, slave 9) commented out — not controlled.
-        std::vector<int> all9 = {ZDT_LF1, ZDT_LF2, ZDT_LB1, ZDT_LB2,
-                                 ZDT_RF1, ZDT_RF2, ZDT_RB1, ZDT_RB2 /*, ZDT_C*/};
-        if (try_or_pause_([this, &all9]() { return vacuum_wait_release_(all9, RETURN_VACUUM_RELEASE_MS); },
+        std::vector<int> all_cups = {ZDT_RF1, ZDT_RF2, ZDT_LF1, ZDT_LF2};
+        if (try_or_pause_([this, &all_cups]() { return vacuum_wait_release_(all_cups, RETURN_VACUUM_RELEASE_MS); },
                           "return_home_vacuum_release"))
             return fail("ERR aborted\n");
     }
     if (check_abort_()) return fail("ERR aborted\n");
 
-    // 6. Retract feet + body pushers — TWO-STAGE (half → wait → full), per group.
-    // Single-stage fast retract risks ZDT stall when cup adhesion lingers after
-    // valve OFF. feet/body groups have different extend pulses → split per group
-    // so each stage-1 target = that group's (extend × 2/3). Matches the two-stage
-    // pattern used everywhere else (do_step_*, cmd_pusher, cycle_group_).
-    // 2026-05-18: ZDT_C (center, slave 9) commented out — not controlled.
+    // 4. Retract all 4 foot pushers — TWO-STAGE (half → wait → full).
     {
-        std::vector<int> feet_g = {ZDT_LF1, ZDT_LF2, ZDT_RF1, ZDT_RF2};
-        std::vector<int> body_g = {ZDT_LB1, ZDT_LB2, ZDT_RB1, ZDT_RB2};
-        if (try_or_pause_([this, &feet_g]() { return pusher_two_stage_retract_(feet_g); },
-                          "return_home_feet_retract"))
-            return fail("ERR aborted\n");
-        if (try_or_pause_([this, &body_g]() { return pusher_two_stage_retract_(body_g); },
-                          "return_home_body_retract"))
+        std::vector<int> all_cups = {ZDT_RF1, ZDT_RF2, ZDT_LF1, ZDT_LF2};
+        if (try_or_pause_([this, &all_cups]() { return pusher_two_stage_retract_(all_cups); },
+                          "return_home_pusher_retract"))
             return fail("ERR aborted\n");
     }
     if (check_abort_()) return fail("ERR aborted\n");
@@ -9865,7 +9888,7 @@ std::string WashRobot::cmd_recover() {
     if (cur != State::Error) return state_violation_(cur);
 
     std::lock_guard<std::mutex> lk(motion_mtx_);
-    std::cout << "[recover] verify vacuum on all 9 cups\n";
+    std::cout << "[recover] verify vacuum on all 4 cups\n";
     // [2026-06-02] Re-enabled vacuum_check_. recover() bypass without verification
     // was unsafe — user could jump Error→Attached with cups not actually sealed,
     // and next step would release the "anchor" group onto nothing → shock load.
@@ -9883,7 +9906,7 @@ std::string WashRobot::cmd_recover() {
         std::cout << "[recover] FAIL: " << oss.str();
         return oss.str();
     }
-    std::cout << "[recover] all 9 sealed → Attached\n";
+    std::cout << "[recover] all 4 sealed → Attached\n";
     abort_flag       = false;
     pause_flag       = false;
     motion_active_   = false;
@@ -9896,6 +9919,7 @@ std::string WashRobot::cmd_recover() {
 // like the auto trigger, so user pressing the button when drift is small results
 // in a clear "skipped" message rather than running unnecessary motion.
 // Allowed only when state ∈ {Attached, Paused, PausedOnError} (cups on wall).
+#if 0  // [v2 2026-07-07] retired v1 cmd_realign (do_feet_realign_ retired) — kept for reference
 std::string WashRobot::cmd_realign() {
     State cur = state_.load();
     //if (cur != State::Attached && cur != State::Paused && cur != State::PausedOnError)
@@ -9935,6 +9959,7 @@ std::string WashRobot::cmd_realign() {
     return "OK realign_done\n";
 }
 
+#endif  // [v2] end retired cmd_realign
 std::string WashRobot::cmd_ping() {
     return "OK pong\n";
 }
@@ -10054,6 +10079,7 @@ std::string WashRobot::cmd_crane_attached(bool on) {
 // Toggle whether DM2J wheels (slave 2, 4) are physically present.
 //   on=true  → init() retracts wheels + cmd_wheels / cmd_dm2j_group("wheels") active
 //   on=false → all wheel ops become no-ops; bench without wheels can run cleanly
+#if 0  // [v2 2026-07-07] retired v1 cmd_wheels_attached (DM2J wheels removed) — kept for reference
 std::string WashRobot::cmd_wheels_attached(bool on) {
     bool prev = wheels_attached_.exchange(on);
     if (prev != on) {
@@ -10063,3 +10089,4 @@ std::string WashRobot::cmd_wheels_attached(bool on) {
     }
     return on ? "OK wheels_attached=on\n" : "OK wheels_attached=off\n";
 }
+#endif  // [v2] end retired cmd_wheels_attached

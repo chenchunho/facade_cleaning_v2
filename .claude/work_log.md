@@ -18,7 +18,7 @@ v2 是新硬體 fork（機械大改）。這幾個 session 累積：專案改名
 
 ### v2 機械架構（user 口述 + 決策，2026-07-07）
 
-- 4 吸盤：推桿 slave **1,2=左 / 3,4=右**（單顆機構同 v1：ZDT 推桿+真空+JC100）
+- 4 吸盤：推桿 slave **1,2=右腳 / 3,4=左腳**（右腳 上=1/下=2、左腳 上=3/下=4；單顆機構同 v1：ZDT 推桿+真空+JC100）
 - 真空 **2 區**（左閥/右閥），無中心杯
 - **無 DM2J**（無滑軌、無輪組）、**無橫向**（只垂直上下）
 - 垂直位移 = **單側吊機繩放/收 + SD76 計米量測**（取代 v1 的滑軌）
@@ -26,15 +26,26 @@ v2 是新硬體 fork（機械大改）。這幾個 session 累積：專案改名
 - 步態（向下一步）：4杯吸附水平 → 放左2杯+放左繩+重吸左 → 放右2杯+放右繩+重吸右 → 完成。**不變式：至少一側撐住，絕不4杯全放**
 - 清洗手臂仍要但**未裝** → step 收尾 sweep 先註解
 
-### 下次要做的（照 v2_app_redesign_plan.md §9）
+### v2 WASH_ROBOT 重構進度（2026-07-07，「從上往下改到好」）
 
-1. ✅ **第 1 步 crane 單側量測指令**（本次做完）：`pay_out_left/right <cm>`、`retract_left/right <cm>`
-2. ⏭ **第 2 步**：WASH_ROBOT group config（左{1,2}/右{3,4}、2 真空區、拆中心杯）+ `init()`（拆 DM2J/輪組/中心杯）
-   - 📌 PQW 通道已確認（2026-07-07 user）：**CH1=右腳閥 / CH2=幫浦 / CH3=左腳閥**（@ .22 slave 12）。已記 plan §2 + memory + changelog 07-07b，**code 未套用**（單改 CH_PUMP=2 會跟舊 CH_VALVE_FEET=2 撞號，整批隨第 2 步一起改）
-3. 第 3 步 `attach()`（序列化 左→右）
-4. 第 4 步 `do_step_down_` / `do_step_up_`（左半+右半，呼叫第 1 步的 crane 量測指令）
-5. 第 5 步 水平校正整合（IMU + 繩長差）
-6. 第 6 步 GUI 對應
+PQW 通道確認：**CH1=右腳閥 / CH2=幫浦(原CH1) / CH3=左腳閥**（@ .22 slave 12）。推桿 slave 右{1,2}/左{3,4}（v1 feet 本來就這樣，不用動）。
+
+WASH_ROBOT 大重構已做（**未編譯**，本機編不了）：
+1. ✅ 第 1 步 crane 單側量測指令 `pay_out/retract_left/right <cm>`（commit 845e200）
+2. ✅ 常數（.h）：CH_VALVE_RIGHT/PUMP/LEFT；ZDT 只剩 1-4；刪 body/center/CH_VALVE_FEET等
+3. ✅ group config：group_slaves_/valve_ch_/preset/vacuum_valve_/stall helper 全改右左；陣列 size 保留 9（只用 1-4）
+4. ✅ init() + cmd_init_impl_：拆 DM2J 腳/輪 rail、中心杯、bystander broadcast；ZDT/JC100 迴圈 9→4；保留 arm rail(cli_22 s14)/DY500(present=false)/IMU/threads
+5. ✅ cmd_attach：右→左序列，各側 smart_extend 一點一點補伸 + vacuum_check；拆 body/center/realign
+6. ✅ do_step_down_/do_step_up_：**重寫成 v2 精簡版**（右先左後、每側 crane pay_out/retract step_cm、補伸重吸、anchor 安全檢查）；v1 舊 body 用 `#if 0` 包起來「retired，待 bench 驗證後刪」
+7. 🔄 **task #6 收尾（fork 執行中）**：把剩下引用已移除符號的 v1-only 函式 #if0（do_feet_realign_/obstacle/balance/phase5/tilt/wheels/dm2j_group/realign/cmd_move）或修正（detach/shutdown/emergency/status/pusher/zdt_*/return_home 的閥門與 1-4 範圍）+ main.cpp dispatch，目標整檔可編譯
+
+⚠ **`#if 0` retired 慣例**：do_step_down_/up_（及 fork 中性化的函式）保留 v1 舊 body 在 `#if 0` 內當 reference，**bench 驗證 v2 綠燈後再硬刪**。
+
+### 之後還沒做
+- 水平校正整合（IMU roll + 左右繩長差 tol）：step 收尾目前只留 TODO
+- GUI 按鈕對應（右/左閥、單側繩、step）
+- arm 清洗 sweep（未裝，step 收尾先 deferred）
+- **remote build 驗證** washrobot 主程式（改動全未編譯）
 
 ### ⚠ 開機第一件事：建議先 remote build 驗證 crane 端
 

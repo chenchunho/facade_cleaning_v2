@@ -12,6 +12,7 @@
 - 位移：**單側吊機繩放/收 + SD76 計米量測**（無 DM2J）
 - **step 位移量：每側各放/收「使用者輸入的 step_cm」全量**（非拆半）；順序 **右側先、左側後**（2026-07-07 user 詳細步驟為準，取代最早口述的「左先」示意）
 - **伸腳一律沿用 v1「一點一點補伸 seal」**（`smart_extend_subset_` + disable-seal + `fine_tune` 逐步找 seal）；**禁止單發盲伸**。attach 與 step 皆同
+- **「吸不好重吸」重試/backup 全保留**（2026-07-07 user 強調）：step 每側沿用 v1 `cycle_group_` 重試框架（extend→驗真空→沒吸牢就退一點 backup→重試 N 次→rescue→全失敗才 Paused）。**只把 v1 backup 的 DM2J rail 退位改成吊機繩微移到新牆點**（pre_cycle 主位移＝crane pay_out/retract step；backup＝crane 微移 VACUUM_BACKUP_CM）。`feet_target_capped_` 需保持 LIVE（cycle_group_ 非-body 分支會呼叫）
 - 水平：**IMU roll/pitch + 左右計米繩長差**，兩者都用（step 收尾做 check，兩側同 step_cm 本身即對稱）
 - 橫向：**無**（只垂直上下）
 - 單側量測放繩：**crane 端新增指令**（見 §5）
