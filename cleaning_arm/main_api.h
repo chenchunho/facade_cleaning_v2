@@ -112,18 +112,94 @@ public:
     static constexpr float VERTICAL_OFFSET_RAD = 0.38f;
 
     // M2-slot-specific tool extension beyond the passive joint (mm)
-    static constexpr float TOOL_EXT_LEFT_MM   = 148.09f;
+    // [2026-08-18 per user] LEFT/RIGHT values SWAPPED — the physical tool heads
+    // were swapped left-for-right on the hardware, so each slot now presents the
+    // other one's extension. Was LEFT=148.09 / RIGHT=134.07. CENTER unchanged.
+    // Mirrored in user_lib/WASH_ROBOT.h (ARM_M2_TOOL_LEFT_MM / _RIGHT_MM) — that
+    // copy drives verify_arm_deploy_'s expected-θ check, so the two MUST stay in
+    // sync or DEPLOY verification will compare against the wrong angle.
+    static constexpr float TOOL_EXT_LEFT_MM   = 134.07f;
     static constexpr float TOOL_EXT_CENTER_MM = 160.00f;
-    static constexpr float TOOL_EXT_RIGHT_MM  = 134.07f;
-
-    // ---- M2 calibrate velocity buffer ---------------------------------------
-    static constexpr float LR_VEL_BUFFER_K  = 0.05f;   // back-off += K * vel_at_first_resist
+    static constexpr float TOOL_EXT_RIGHT_MM  = 148.09f;
 
     // ---- M2 / small motor constants (左右軸) --------------------------------
     static constexpr float ZERO_OFFSET = 0.8f;   // M2 only: calibration back-off / lr slot offset
 
     // ---- M1 gravity feedforward (0 = disabled) ------------------------------
-    static constexpr float ARM_MASS_KG = 0.0f;    // effective arm mass; fill in after measurement
+    // [2026-08-14 per user] 原本假設 tau_ff = ARM_MASS_KG*g*L*sin(pos-VERTICAL_OFFSET_RAD)，
+    // 套用實秤 2.3kg 之後暴衝反而更嚴重（vel 1.5→1.78 rad/s、overshoot 0.117→
+    // 0.219 rad）。事後用慢速實測 + M1 STATUS 量了 3 個乾淨的靜止點
+    // (0.6495,-9.5238) / (0.7662,-12.3565) / (0.8330,-12.7473)，回推發現：
+    //   1. 真正的重力零點角度落在 M1 硬體範圍 [0,1.5] 之外（約 3.32 rad）——
+    //      代表整個可移動範圍內重力都沒有天然平衡點，會一路把手臂往外拉，
+    //      跟 VERTICAL_OFFSET_RAD=0.38 的假設完全對不上，這就是先前補償
+    //      方向錯誤、越補越糟的根因
+    //   2. 換算「等效重量」約 6.65kg，比實秤的 2.3kg 重快 3 倍——公式把整重
+    //      當「集中在 ARM_LENGTH_MM 末端」的點質量算，跟實際重心分布/連桿
+    //      結構的落差，屬於這個簡化模型的已知限制
+    // 改用直接從實測數據反推出的 M1_GRAVITY_K/M1_GRAVITY_PHASE_RAD，取代
+    // ARM_MASS_KG 那條路徑（ARM_MASS_KG 常數本身已移除，兩處呼叫點都改吃這組
+    // 新常數；VERTICAL_OFFSET_RAD 維持只用於牆距三角函數，不要跟這組重力常數混用）。
+    static constexpr float M1_GRAVITY_K          = 20.87f;   // Nm，兩個外側乾淨點解出
+    static constexpr float M1_GRAVITY_PHASE_RAD  = 3.317f;   // rad，同上；中間點驗證誤差 ~6%
+    // [2026-08-14b per user] 三個實測點都落在 0.65~0.83 rad，PARK 目標
+    // (PARK_STOP_MARGIN=0.05) 遠在這個範圍之外——套進 go_home_slot 後實測「PARK
+    // 收不到底」，手算發現 pos=0.05 處外推出來的補償方向是「往伸出推」，跟收回
+    // 方向相反，會在終點前提早跟 kp 打平、卡住。在有更多資料驗證這段之前，只在
+    // 有實測驗證過的範圍內套用前饋，範圍外一律不補償（退回純 kp/kd），避免拿
+    // 外推錯誤的方向去扯後腿。
+    // [2026-08-17] 0.55 → 0.20。上面那筆的觀察（低角度處方向會反過來）是對的，
+    // 但門檻設在 0.55 過度保守：tau_ff = K*sin(pos - PHASE) 的變號點是
+    // pos = PHASE - π = 3.317 - 3.14159 = 0.1754 rad，也就是 0.1754 以上公式
+    // 方向都還是正確的（負值 = 往收回方向出力 = 抵銷重力）。原本 0.1754~0.55
+    // 這整段方向正確卻被擋掉，而那正好是 PARK 收回最後、最吃力的一段：
+    // pos=0.4 時真實需求約 4.74 Nm，沒有前饋就得靠 kp 硬頂出 4.74/26 = 0.18 rad
+    // 的位置落後才生得出力 —— 這就是「PARK 無力收回原點」的直接來源。
+    // 另外舊門檻還有個副作用：跨越 0.55 的瞬間 tau_ff 會在 0 和 -7.53 Nm 之間
+    // 階躍，手臂只要在門檻附近抖動就會被這個 7.5 Nm 的跳變放大成震盪。
+    // 新值 0.20 略高於變號點 0.1754，留一點餘裕；0.20 以下仍然不補償（那裡公式
+    // 方向確實是錯的）。注意 0.1754~0.65 屬於外推區（實測點最低只到 0.6495），
+    // sin 形式對單一剛體重力矩是正確的物理形式，但 K 值若偏大，外推區會過補償——
+    // 首次驗證請留意 PARK 末段有沒有出現「自己往回衝」的過補償跡象。
+    static constexpr float M1_GRAVITY_MIN_VALID_RAD = 0.20f;   // 變號點 PHASE-π=0.1754，留餘裕
+
+    // ---- M1 Coulomb friction breakaway assist -------------------------------
+    // [2026-08-18 per user] PARK/DEPLOY 修好重力前饋之後仍有「停一下再突然滑一段」
+    // 的分段感。從 bench trace 逐行差分（每行 240ms，命令速度應為 0.0168 rad/行）
+    // 可以看到典型 stick-slip：Δpos 在 -0.0011 / -0.0004 / 0.0000（卡住）與
+    // -0.0271 / -0.0344 / -0.0400（突然滑，末段甚至超過命令速度，tau 翻正在煞車）
+    // 之間交替。
+    // 用「總 tau 減去該點重力」量出來的淨推力：
+    //   pos=0.5217 淨 0.78 Nm → 推不動
+    //   pos=0.4522 淨 1.28 Nm → 突破
+    //   pos=0.4946 滑動中淨僅 0.14 Nm 就能維持 0.1 rad/s
+    // → 靜摩擦約 1.0 Nm、動摩擦約 0.15 Nm，相差 6~7 倍，正是 stick-slip 的成因。
+    // （更早一版曾估 3.8 Nm，那是拿 tau_ff 還算錯的 log 推的，基準不對，已作廢。）
+    //
+    // 補償策略：只在「快要動不動」時幫忙推一把，動起來就退場。若全速期間持續補
+    // 償，反而會加劇末段衝過頭（動摩擦太小，多推的力沒有東西吸收）。因此用速度
+    // 線性衰減而非 on/off 開關——硬切換會在門檻附近反覆進出，製造新的抖動。
+    //   scale = 1 - min(|vel| / FADE_VEL, 1)
+    //   vel=0 → 補滿 0.8 Nm；vel=0.05 → 補一半；vel>=0.10 → 完全不補
+    // 取 0.8 Nm 略低於量到的靜摩擦 1.0 Nm：寧可欠補讓它慢一點鬆動，也不要過補
+    // 造成手臂自己往前溜。DEADBAND 讓到位附近不補，避免在 target 兩側來回推。
+    // HOLD 分支刻意不套用——靜止撐住本來就靠靜摩擦幫忙，補了只會造成緩慢漂移。
+    // [2026-08-18 per user] 0.8 → 1.5。0.8 是照 pos≈0.52 量到的靜摩擦 1.0 訂的，
+    // 但後續 bench 顯示靜摩擦隨角度大幅變化——手臂伸得越遠、軸承側向負載越大：
+    //     pos≈0.22 → ~2.3 Nm ／ pos≈0.52 → ~1.0 Nm ／ pos≈0.83 → ≥4.6 Nm
+    // 0.8 只夠應付最輕的那一段，於是 PARK 兩道關卡都只以 0.002~0.004 rad 的餘裕
+    // 擦過，DEPLOY 300 也曾以 err=0.0501738 對 0.05 容差差 0.0002 rad 判失敗。
+    // 提到 1.5 是折衷（低角度需求 2.3、中段只要 1.0），不是精確補償；真要精準得
+    // 讓它隨角度變化，複雜度高，非必要不做。fade 機制仍在，動起來就退場，所以
+    // 中段過補償的風險有限。
+    // [2026-08-18 per user] 1.5 → 2.5。配合上面把 DEPLOY 收尾的 hold_pos 改鎖
+    // move_target：手臂停穩後 fade 回滿，這個值就是它能多拿到的推力。1.5 只讓
+    // 淨力到 ~4.5 Nm，仍略低於 pos≈0.83 實測的 ≥4.6 Nm 靜摩擦；2.5 讓淨力到
+    // ~5.5 Nm 才真的越過。仍遠低於馬達額定，且只在低速時生效（fade 機制），
+    // 中高速段完全不參與，所以不會加劇過衝。
+    static constexpr float M1_FRICTION_TAU          = 2.5f;    // 靜摩擦隨角度 1.0~4.6，取能越過高端的值
+    static constexpr float M1_FRICTION_FADE_VEL     = 0.10f;   // rad/s，此速度以上完全不補
+    static constexpr float M1_FRICTION_DEADBAND_RAD = 0.02f;   // rad，誤差小於此不補
 
     // ---- direct motor control (C++ API, default targets M2) -----------------
     void  enable();
@@ -173,8 +249,26 @@ private:
         float lower_bound { 0.0f };    // move_to lower clamp: M1=0.0, M2=-ZERO_OFFSET
         float upper_bound { 1e9f };    // hard upper clamp: M1=1.2 rad, M2=unconstrained
 
-        float hold_kp { 5.0f };       // per-slot MIT hold/move gain
+        float hold_kp { 5.0f };       // per-slot MIT hold/move gain (DEPLOY path: move_to_slot/feedback_loop move_act)
         float hold_kd { 1.0f };
+
+        // [2026-07-24 per user] PARK (go_home_slot) needs less torque than DEPLOY
+        // for M1 — separate gains so tuning one doesn't affect the other.
+        // Defaults mirror hold_kp/hold_kd; init() overrides per-slot as needed.
+        float park_kp { 5.0f };
+        float park_kd { 1.0f };
+
+        // [2026-07-24 per user] PARK ramp trajectory speed (was a single shared
+        // local const in go_home_slot) — split per-slot so slowing M1's PARK
+        // down doesn't touch M2. Default matches the original shared value.
+        float park_speed { 0.45f };
+
+        // [2026-08-18 per user] DEPLOY 的預設 ramp 速度（M1 only）。原本是
+        // cmd_deploy_sequence() 裡的 local 預設值，改成成員以便用
+        // `M1 SET_DEPLOY_SPEED <v>` 在執行期調整——GUI 的 DEPLOY 按鈕只送
+        // `DEPLOY <mm> <slot>`、不帶速度參數，所以唯有改這個預設值才影響得到它
+        // （指令列仍可用第 4 個參數做單次覆蓋）。init() 會覆寫成實際採用值。
+        float deploy_speed { 0.15f };
 
         std::atomic<bool> enabled  { false };
         std::atomic<bool> hold_en  { false };
@@ -191,20 +285,68 @@ private:
         float hold_ki          { 0.0f };   // integral gain; 0 = disabled
         float hold_err_integral{ 0.0f };   // integrator state (protected by motor_mutex_)
         static constexpr float HOLD_I_MAX = 2.0f;   // anti-windup clamp (N·m)
+
+        // [2026-08-13 per user] M2 only: measured half-range from lr_calibrate_slot's
+        // two-sided seek (Phase 1 + Phase 1B), replacing the old fixed ZERO_OFFSET
+        // assumption for LEFT/RIGHT slot targets in lr_move_to_slot_impl.
+        // [2026-08-14 per user] Auto-seek proved unreliable across restarts (and
+        // lr_half_range/lr_calibrated don't persist across a motor_api restart —
+        // plain in-memory struct fields). Hand-measured via M2 DISABLE -> move by
+        // hand -> M2 MIT 0 0 0 0 0 (refresh stale Get_Position cache) -> M2 STATUS
+        // at LEFT/CENTER/RIGHT, with `M2 ZERO` called at physical CENTER first so
+        // this is measured from the right origin. Using the SMALLER of the two
+        // measured half-distances (CENTER->RIGHT=0.7275 vs CENTER->LEFT=0.7603) —
+        // the larger one would leave only ~0.005 rad margin on the LEFT target
+        // before the real hard stop, too thin. ASSUMES the motor's own zero
+        // reference (set via `M2 ZERO`) survives a motor_api restart (appears to,
+        // based on bench logs) — if that assumption ever breaks, re-measure and
+        // update this constant, or restore the ZERO_OFFSET default and re-run
+        // LR_CALIBRATE.
+        float lr_half_range { 0.7275f };
+
+        // [2026-08-14 per user] M2 only: true once lr_half_range holds a value we
+        // actually trust (either a converged two-sided LR_CALIBRATE, or a manual
+        // SET_HALF_RANGE). cmd_init_sequence() checks this so repeat INIT calls
+        // don't re-run the auto-seek (still unreliable — false-early stops, or
+        // seeks that travel huge distances finding no resistance at all) and
+        // stomp a good value; once trusted, INIT just moves to CENTER instead.
+        // Defaults true here since lr_half_range above is now a real hand-measured
+        // value, not the old ZERO_OFFSET placeholder — trust it from first boot.
+        bool lr_calibrated { true };
+
+        // [2026-08-17 per user] M1 only: continuous passive-state recovery cooldown
+        // for feedback_loop()'s HOLD/MOVE branches. Video evidence showed M1 going
+        // fully passive mid-HOLD (not just at the start of a new command, where the
+        // existing touch_wall_slot/go_home_slot pre-checks already cover it) and
+        // free-falling to near-horizontal with nobody/nothing catching it in
+        // software — the user had to grab it by hand. dm_->enable() blocks ~100ms,
+        // so this counts down in feedback_loop ticks (20ms each) to avoid calling
+        // it every single tick and stalling M2's servicing too.
+        int passive_recover_cooldown_ticks { 0 };
     };
 
     // ---- private slot operations --------------------------------------------
     void        enable_slot(MotorSlot& s);
     void        disable_slot(MotorSlot& s);
     void        set_zero_slot(MotorSlot& s);
-    void        go_home_slot(MotorSlot& s);
+    // [2026-07-24 per user] use_park_profile=true (default) = slow/gentle PARK
+    // tuning (park_kp/park_kd/park_speed + stop-short-of-hard-limit margin).
+    // false = original fast DEPLOY-matching behavior (hold_kp/hold_kd, 0.45
+    // rad/s, target=0) — used by cmd_deploy_sequence's internal "retract before
+    // re-extending to a new slot" step, which must NOT inherit PARK's tuning.
+    // [2026-08-18] Was void. Returns true = actually reached target (within
+    // ARRIVE_TOL); false = ramp/settle finished without converging. Callers that
+    // release the motor afterwards (cmd_park_sequence) MUST check this — dropping
+    // a disable on a still-elevated arm lets it fall. Other call sites may ignore
+    // the result, which keeps their previous behavior unchanged.
+    bool        go_home_slot(MotorSlot& s, bool use_park_profile = true);
     void        hold_slot(MotorSlot& s);
     void        release_hold_slot(MotorSlot& s);
     void        move_to_slot(MotorSlot& s, float target_rad, float speed_rad_s);
     bool        approach_wall_slot(MotorSlot& s, float clearance_mm, float speed_rad_s);
     bool        touch_wall_slot(MotorSlot& s, float wall_dist_mm, int m2_slot,
                                 float clearance_mm, float speed_rad_s);
-    void        lr_calibrate_slot(MotorSlot& s, bool seek_left);
+    bool        lr_calibrate_slot(MotorSlot& s, bool seek_left);   // 2026-07-27: true = converged, false = stop not found / MAX_TRAVEL / Phase 2 not converged
     bool        lr_move_to_slot_impl(MotorSlot& s, int slot, float speed_rad_s);   // 2026-06-06: true=converged
     bool        calibrate_arm_slot(MotorSlot& s);
 

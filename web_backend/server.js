@@ -1,15 +1,14 @@
 // ============================================================================
 // washrobot web_backend
 //
-// Bridges browser WebSocket clients to three C++ TCP command servers:
+// Bridges browser WebSocket clients to C++ TCP command servers:
 //   washrobot  @ 192.168.1.100:5001
 //   crane      @ 192.168.1.101:5002
-//   easy_crane @ 192.168.5.26:5003   (independent simple crane)
 //
 // Browser ↔ backend protocol (JSON over WebSocket):
-//   → {target: "washrobot"|"crane"|"easy_crane"|"arm", cmd: "<line>"}   send command
-//   ← {src:    "washrobot"|"crane"|"easy_crane"|"arm", line: "OK ..."} reply / EVT
-//   ← {src: "status", washrobot: bool, crane: bool, easy_crane: bool, arm: bool}   connection state
+//   → {target: "washrobot"|"crane"|"arm", cmd: "<line>"}   send command
+//   ← {src:    "washrobot"|"crane"|"arm", line: "OK ..."} reply / EVT
+//   ← {src: "status", washrobot: bool, crane: bool, arm: bool}   connection state
 // ============================================================================
 
 const express = require('express');
@@ -25,8 +24,6 @@ const WASHROBOT_IP    = process.env.WROBOT_IP    || '192.168.1.100';
 const WASHROBOT_PORT  = 5001;
 const CRANE_IP        = process.env.CRANE_IP     || '192.168.1.101';
 const CRANE_PORT      = 5002;
-const EASY_CRANE_IP   = process.env.EASY_CRANE_IP || '192.168.5.26';
-const EASY_CRANE_PORT = 5003;
 // cleaning_arm motor_api runs on washrobot Pi (same host as washrobot itself).
 // target='arm' supports BOTH paths:
 //   (1) direct: panel-arm sends raw motor_api commands (INIT/DEPLOY/PARK/STATUS)
@@ -48,16 +45,40 @@ const ARM_PORT        = 9527;
 const CAMERAS = {
     cam1: process.env.CAM1_URL || `http://${WASHROBOT_IP}:5004`,  // RTSP src 192.168.1.110
     cam2: process.env.CAM2_URL || `http://${WASHROBOT_IP}:5005`,  // RTSP src 192.168.1.111
+    // [2026-07-20] D435i depth-camera obstacle detection — depth_cam_service.py
+    // exposes /snap/depth on its own HTTP server (port 5006, same washrobot Pi).
+    // Only /snap is used (no live /mjpeg — result photo only updates once per
+    // step's AFTER capture, not worth a continuous stream).
+    depth: process.env.DEPTH_CAM_URL || `http://${WASHROBOT_IP}:5008`,
+    // [2026-07-21] raw current frame, no BEFORE/AFTER analysis — backs the
+    // standalone camera panel's manual snapshot button (depth-snap in
+    // app.js). depth_cam_service.py serves it at /snap/depth_live on the
+    // same HTTP server; reuses the generic /snap/:cam_id proxy route below.
+    depth_live: process.env.DEPTH_CAM_LIVE_URL || `http://${WASHROBOT_IP}:5008`,
+    // [2026-07-21] raw (un-annotated) color frame from THIS step's BEFORE /
+    // AFTER capture — distinct from depth_live (ignores BEFORE/AFTER state
+    // entirely, always "right now") and from `depth` (annotated RESULT,
+    // only meaningful for the very latest AFTER call). Lets the
+    // run_depth_avoid modal show what the camera actually saw every step,
+    // not just when big_obstacle=yes — needed to debug candidates=0 (nothing
+    // detected) steps, where the annotated result photo has nothing to draw.
+    depth_before: process.env.DEPTH_CAM_URL || `http://${WASHROBOT_IP}:5008`,
+    depth_after:  process.env.DEPTH_CAM_URL || `http://${WASHROBOT_IP}:5008`,
+    // [2026-07-21] colorized depth map (heatmap) of the CURRENT frame — pairs
+    // with depth_live so the manual "拍照" button can show color + depth side
+    // by side. Same host/port, depth_cam_service.py just serves a different
+    // path (/snap/depth_live_depth).
+    depth_live_depth: process.env.DEPTH_CAM_LIVE_URL || `http://${WASHROBOT_IP}:5008`,
 };
 
 const RECONNECT_MS = 1000;   // 2026-04-29: 3000 → 1000 配合前端 panel-disabled 3s debounce，瞬斷情境總計約 1s 即恢復、UI 不會 flicker
 
 // Backend-driven keepalive for each TCP bridge.
-// Reason: easy_crane is on a different subnet (.5.x) from the backend (.1.x), so the
-// TCP session crosses a router/NAT that silently kills idle sessions after ~15-60 min.
-// Without keepalive, backend never sees the drop until the next write fails. This
-// is especially bad when the browser tab is backgrounded — setInterval throttles to
-// 1s+ and eventually stops feeding the 50ms status poll, leaving the TCP idle.
+// Reason: a bridge crossing a router/NAT can have its TCP session silently
+// killed after an idle period. Without keepalive, backend never sees the drop
+// until the next write fails. This is especially bad when the browser tab is
+// backgrounded — setInterval throttles to 1s+ and eventually stops feeding the
+// status poll, leaving the TCP idle.
 //
 // Belt + suspenders:
 //   (1) OS-level TCP keepalive on every bridge socket (setKeepAlive)
@@ -205,7 +226,7 @@ function makeBridge(name, ip, port) {
 
     // App-level keepalive — send `ping\n` every BRIDGE_PING_MS regardless of browser
     // activity. Guarantees the NAT stays open and write-path failures surface fast.
-    // ping is idempotent and supported by all three targets (washrobot / crane-shim / easy_crane).
+    // ping is idempotent and supported by washrobot / crane-shim.
     setInterval(() => { send('ping'); }, BRIDGE_PING_MS);
 
     connect();
@@ -214,7 +235,6 @@ function makeBridge(name, ip, port) {
 
 const washrobot  = makeBridge('washrobot',  WASHROBOT_IP,  WASHROBOT_PORT);
 const crane      = makeBridge('crane',      CRANE_IP,      CRANE_PORT);
-const easy_crane = makeBridge('easy_crane', EASY_CRANE_IP, EASY_CRANE_PORT);
 // Connectivity-indicator only. cleaning_arm's motor_api doesn't accept `ping`
 // (rejects with ERR), but that's OK — the TCP socket itself staying open is
 // what isConnected() reports, and the ERR reply just gets broadcast on src=arm
@@ -246,7 +266,6 @@ function broadcastStatus() {
         src: 'status',
         washrobot:  washrobot.isConnected(),
         crane:      crane.isConnected(),
-        easy_crane: easy_crane.isConnected(),
         arm:        arm.isConnected()
     });
 }
@@ -261,7 +280,6 @@ wss.on('connection', (ws) => {
         src: 'status',
         washrobot:  washrobot.isConnected(),
         crane:      crane.isConnected(),
-        easy_crane: easy_crane.isConnected(),
         arm:        arm.isConnected()
     }));
 
@@ -275,7 +293,6 @@ wss.on('connection', (ws) => {
 
         const target = msg.target === 'washrobot'  ? washrobot
                      : msg.target === 'crane'      ? routeCrane(msg.cmd)
-                     : msg.target === 'easy_crane' ? easy_crane
                      : msg.target === 'arm'        ? arm
                      : null;
         if (!target) return ws.send(JSON.stringify({ src: 'error', line: 'unknown_target' }));
@@ -309,6 +326,5 @@ server.listen(HTTP_PORT, () => {
     console.log(`[web_backend] listening http://0.0.0.0:${HTTP_PORT}`);
     console.log(`[web_backend] washrobot  target = ${WASHROBOT_IP}:${WASHROBOT_PORT}`);
     console.log(`[web_backend] crane      target = ${CRANE_IP}:${CRANE_PORT} (main + intr connection for stop/status bypass)`);
-    console.log(`[web_backend] easy_crane target = ${EASY_CRANE_IP}:${EASY_CRANE_PORT}`);
     console.log(`[web_backend] cameras: ${Object.keys(CAMERAS).map(k => `${k}→${CAMERAS[k]}`).join(', ')}`);
 });

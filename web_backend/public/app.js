@@ -3,18 +3,16 @@
 const logEl        = document.getElementById('log');
 const dotW         = document.getElementById('dot-washrobot');
 const dotC         = document.getElementById('dot-crane');
-const dotE         = document.getElementById('dot-easy-crane');
 const dotA         = document.getElementById('dot-arm');
 const bannerEl     = document.getElementById('banner');
 const panelsRobot  = document.querySelectorAll('.panel-washrobot');
 const panelsCrane  = document.querySelectorAll('.panel-crane');
-const panelsEasy   = document.querySelectorAll('.panel-easy_crane');
 const panelsArm    = document.querySelectorAll('.panel-arm');
 const modalBalance = document.getElementById('modal-balance');
 const modalReturn  = document.getElementById('modal-return');
 
 let ws = null;
-let lastStatus = { washrobot: null, crane: null, easy_crane: null, arm: null }; // null = not yet known
+let lastStatus = { washrobot: null, crane: null, arm: null }; // null = not yet known
 let pendingHomeStatus = null; // { resolve, timeoutId }
 
 //=========== connection ===========
@@ -36,7 +34,7 @@ function connectWs() {
         // Force-sync state from backend on every (re)connect — otherwise
         // frontend may show stale STATUS / vacuum readings if a state_changed
         // EVT was missed during the WS outage. status reply contains state=...
-        // + p1..p9 + crane_attached + roll/pitch which all auto-update via
+        // + p1..p4 + crane_attached + roll/pitch which all auto-update via
         // existing parsers in onWashrobotLine.
         setTimeout(() => {
             send('washrobot', 'status');
@@ -47,10 +45,9 @@ function connectWs() {
         logSys('ws closed — retrying in 2s');
         setDot(dotW, false);
         setDot(dotC, false);
-        setDot(dotE, false);
         setDot(dotA, false);
         updateArmButtonStates(false);
-        applyMode(false, false, false, false);
+        applyMode(false, false, false);
         setTimeout(connectWs, 2000);
     };
     ws.onerror = () => logSys('ws error');
@@ -68,27 +65,23 @@ function connectWs() {
         if (m.src === 'status') {
             setDot(dotW, m.washrobot);
             setDot(dotC, m.crane);
-            setDot(dotE, m.easy_crane);
             setDot(dotA, m.arm);   // cleaning arm dot — connectivity only (no cross-device debounce)
             updateArmButtonStates(!!m.arm);
             // Arm uses its own panel-arm class (applyMode handles disable).
             // No debounce — apply immediately on change. handleStatusChange()
-            // only re-runs applyMode when w/c/e change, so we must trigger it
+            // only re-runs applyMode when w/c change, so we must trigger it
             // ourselves when only arm flips (otherwise panel stays disabled
             // even after the dot turns green).
             const armChanged = (lastStatus.arm !== !!m.arm);
             lastStatus.arm = !!m.arm;
-            handleStatusChange(!!m.washrobot, !!m.crane, !!m.easy_crane);
+            handleStatusChange(!!m.washrobot, !!m.crane);
             if (armChanged) {
-                applyMode(lastStatus.washrobot, lastStatus.crane, lastStatus.easy_crane, lastStatus.arm);
+                applyMode(lastStatus.washrobot, lastStatus.crane, lastStatus.arm);
             }
             return;
         }
         // Mute high-frequency status poll replies to keep log clean;
         // manual refresh reply looks identical but losing one log line is OK UX.
-        const isEasyPoll = m.src === 'easy_crane' &&
-                           m.line.startsWith('OK weight=') &&
-                           m.line.includes('up_stop_kg=');
         const isCranePoll = m.src === 'crane' &&
                             m.line.startsWith('OK length_left=') &&
                             m.line.includes('tension_left=');
@@ -100,11 +93,10 @@ function connectWs() {
                                 m.line.startsWith('OK state=') &&
                                 m.line.includes('p1=') &&
                                 m.line.includes('pitch=');
-        if (!isEasyPoll && !isCranePoll && !isWashrobotPoll) logRx(m.src, m.line);
+        if (!isCranePoll && !isWashrobotPoll) logRx(m.src, m.line);
 
         if (m.src === 'washrobot')       onWashrobotLine(m.line);
         else if (m.src === 'crane')      onCraneLine(m.line);
-        else if (m.src === 'easy_crane') onEasyCraneLine(m.line);
     };
 }
 
@@ -129,14 +121,13 @@ function updateArmButtonStates(connected) {
 // or just the 1s server reconnect cycle would otherwise flicker the UI and
 // trigger spurious cross-device emergency_stop.
 const DEBOUNCE_DOWN_MS = 3000;
-let pendingRawStatus = { washrobot: null, crane: null, easy_crane: null };
-let pendingDownTimers = { washrobot: null, crane: null, easy_crane: null };
+let pendingRawStatus = { washrobot: null, crane: null };
+let pendingDownTimers = { washrobot: null, crane: null };
 
-function handleStatusChange(wNew, cNew, eNew) {
-    pendingRawStatus = { washrobot: wNew, crane: cNew, easy_crane: eNew };
+function handleStatusChange(wNew, cNew) {
+    pendingRawStatus = { washrobot: wNew, crane: cNew };
     debounceDeviceTransition_('washrobot', wNew);
     debounceDeviceTransition_('crane',     cNew);
-    debounceDeviceTransition_('easy_crane', eNew);
 }
 
 function debounceDeviceTransition_(name, newVal) {
@@ -186,23 +177,12 @@ function applyDeviceTransition_(name, newVal) {
         }
     }
     lastStatus[name] = newVal;
-    applyMode(lastStatus.washrobot, lastStatus.crane, lastStatus.easy_crane, lastStatus.arm);
+    applyMode(lastStatus.washrobot, lastStatus.crane, lastStatus.arm);
 }
 
-// States during which manual easy_crane control is locked out (frontend safety
-// belt — easy_crane has hardware interlock that would interrupt shim's open-loop
-// timed motion if user clicks buttons during auto operation).
-const AUTO_BUSY_STATES = new Set(['running', 'balancing', 'paused_on_error', 'returning_home']);
-function isWashrobotAutoBusy() {
-    return AUTO_BUSY_STATES.has(washrobotState);
-}
-
-function applyMode(w, c, e, a) {
+function applyMode(w, c, a) {
     panelsRobot.forEach(p => p.classList.toggle('panel-disabled', !w));
     panelsCrane.forEach(p => p.classList.toggle('panel-disabled', !c));
-    // easy_crane disabled if (TCP down) OR (washrobot in auto-busy state)
-    const easyLocked = !e || isWashrobotAutoBusy();
-    panelsEasy .forEach(p => p.classList.toggle('panel-disabled', easyLocked));
     // cleaning arm panel: disabled only when arm motor_api is down.
     // (panel-arm only contains buttons that go DIRECTLY to motor_api — INIT /
     // DEPLOY / PARK / STATUS. washrobot-orchestrated arm commands like
@@ -210,7 +190,7 @@ function applyMode(w, c, e, a) {
     // and disable when washrobot is down via panelsRobot above.)
     panelsArm  .forEach(p => p.classList.toggle('panel-disabled', !a));
 
-    // Banner 只反映主系統（washrobot + crane），easy crane 獨立子系統不影響
+    // Banner 只反映主系統（washrobot + crane）
     bannerEl.className = 'banner';
     if (!w && !c) {
         bannerEl.classList.add('banner-err');
@@ -503,9 +483,15 @@ function onCraneLine(line) {
     const hhm = line.match(/\bhold_hz=(-?\d+\.?\d*)/);
     const hmm = line.match(/\bmotion_hz=(-?\d+\.?\d*)/);
     const hwm = line.match(/\bmiddle_hz=(-?\d+\.?\d*)/);
+    const hfm = line.match(/\bfine_adjust_hz=(-?\d+\.?\d*)/);
+    const hkm = line.match(/\bkick_hz=(-?\d+\.?\d*)/);
+    const hrm = line.match(/\broll_correct_hz=(-?\d+\.?\d*)/);
     if (hhm) updateHzCell('crane-hold-hz-current',   hhm[1]);
     if (hmm) updateHzCell('crane-motion-hz-current', hmm[1]);
     if (hwm) updateHzCell('crane-middle-hz-current', hwm[1]);
+    if (hfm) updateHzCell('crane-fine-adjust-hz-current', hfm[1]);
+    if (hkm) updateHzCell('crane-kick-hz-current', hkm[1]);
+    if (hrm) updateHzCell('crane-roll-correct-hz-current', hrm[1]);
 
     // DSZL scale current values (small numbers can be in scientific notation)
     const dsLm = line.match(/\bdsz_left_scale=(-?\d+\.?\d*(?:[eE][+-]?\d+)?)/);
@@ -635,6 +621,41 @@ function onWashrobotLine(line) {
         hideObstacleModal();
     }
 
+    // [2026-07-20] run_depth_avoid modal trigger.
+    //   EVT depth_obstacle_result iter=N candidates=N max_height_cm=X.X
+    //       max_protrusion_cm=Y.Y min_distance_cm=Z.Z remaining_travel_cm=W.W
+    //       big_obstacle=yes|no default_step_cm=Z
+    if (line.startsWith('EVT depth_obstacle_result')) {
+        const iter   = line.match(/iter=(\S+)/);
+        const cand   = line.match(/candidates=(\S+)/);
+        const height = line.match(/max_height_cm=(\S+)/);
+        const prot   = line.match(/max_protrusion_cm=(\S+)/);
+        const dist   = line.match(/min_distance_cm=(\S+)/);
+        const remain = line.match(/remaining_travel_cm=(\S+)/);
+        const big    = line.match(/big_obstacle=(\S+)/);
+        const step   = line.match(/default_step_cm=(\S+)/);
+        const gait   = line.match(/next_step_gait=(\S+)/);
+        showDepthObstacleModal(
+            iter   ? iter[1]   : '?',
+            cand   ? cand[1]   : '?',
+            height ? height[1] : '?',
+            prot   ? prot[1]   : '?',
+            big    ? big[1] === 'yes' : false,
+            step   ? step[1]   : '30',
+            dist   ? dist[1]   : '?',
+            remain ? remain[1] : '?',
+            gait   ? gait[1] === 'cross' : false
+        );
+    }
+    // Auto-close modal if loop ended (stop/abort/done/fail)
+    if (line.startsWith('EVT depth_avoid_done') ||
+        line.startsWith('EVT depth_avoid_user_cancel') ||
+        line.startsWith('EVT depth_avoid_detector_fail') ||
+        line.startsWith('EVT depth_avoid_step_fail') ||
+        line.startsWith('EVT depth_avoid_user_timeout')) {
+        hideDepthObstacleModal();
+    }
+
     // [2026-06-05] Scripted run — replies + progress EVTs.
     //   OK scripts=[a,b,c]     ← list_scripts reply
     //   OK csv=<csv>           ← load_script reply (refill textarea)
@@ -672,8 +693,6 @@ function onWashrobotLine(line) {
     if (sm) {
         washrobotState = sm[1];
         updateErrorPauseUI();
-        // Re-evaluate easy_crane lock (auto-busy state changes lock state)
-        applyMode(lastStatus.washrobot, lastStatus.crane, lastStatus.easy_crane, lastStatus.arm);
     }
 
     // Capture the failure context when entering PausedOnError
@@ -737,6 +756,34 @@ function onWashrobotLine(line) {
             badge.classList.toggle('link-ok',   on);
             badge.classList.toggle('link-down', !on);
         }
+    }
+
+    // [2026-07-09] Sync follower (step 2nd-leg) leveling mode: follower_mode=imu|meter
+    const fm = line.match(/\bfollower_mode=(imu|meter)/);
+    if (fm) {
+        const mode  = fm[1];
+        const isImu = (mode === 'imu');
+        const btn = document.getElementById('btn-follower-mode');
+        if (btn) {
+            btn.dataset.mode  = mode;   // click handler reads this to send the opposite
+            btn.textContent   = isImu ? '對平模式: IMU（依IMU）' : '對平模式: METER（計米同步）';
+            btn.classList.toggle('primary', isImu);   // highlight when IMU mode active
+        }
+        const st = document.getElementById('follower-mode-status');
+        if (st) st.textContent = isImu ? '(currently: imu — 第二腳依 IMU 精對平)'
+                                       : '(currently: meter — 第二腳計米同步/原本方法)';
+    }
+
+    // [2026-07-09] Sync first-step lead side: first_step=left|right
+    const fs = line.match(/\bfirst_step=(left|right)/);
+    if (fs) {
+        const side = fs[1];
+        const bl = document.getElementById('btn-first-left');
+        const br = document.getElementById('btn-first-right');
+        if (bl) bl.classList.toggle('primary', side === 'left');
+        if (br) br.classList.toggle('primary', side === 'right');
+        const st = document.getElementById('first-step-status');
+        if (st) st.textContent = `(currently: ${side} 腳先)`;
     }
 }
 
@@ -1112,46 +1159,6 @@ function parseBalanceCalibration(line) {
     });
 })();
 
-function onEasyCraneLine(line) {
-    // Parse weight: "OK weight=-3.2 up=0 down=0 up_stop_kg=-20 weight_valid=1"
-    const mw = line.match(/weight=(-?\d+\.?\d*)/);
-    if (mw) {
-        const el = document.getElementById('easy-weight');
-        if (el) el.textContent = parseFloat(mw[1]).toFixed(2);
-    }
-    const ms = line.match(/up_stop_kg=(-?\d+\.?\d*)/);
-    if (ms) {
-        const el = document.getElementById('easy-up-stop-current');
-        if (el) el.textContent = parseFloat(ms[1]).toFixed(2);
-    }
-    // Sync button state from server — one-way: only clear stale local claims when
-    // server cleared the relay (safety tripped / external stop). We don't flip
-    // local ON state from server ON, to avoid races right after a click.
-    // UP=0 resets both easyUpActive (HOLD) and easyAutoActive (AUTO), since both
-    // drive the same physical relay.
-    const mu = line.match(/up=(\d)/);
-    const md = line.match(/down=(\d)/);
-    if (mu && md && typeof releaseAllEasyHolds !== 'undefined') {
-        const serverUp   = mu[1] === '1';
-        const serverDown = md[1] === '1';
-        if (!serverUp) {
-            if (easyUpActive)   { easyUpActive   = false; btnEasyUp.classList.remove('active');   }
-            if (easyAutoActive) { easyAutoActive = false; btnEasyAuto.classList.remove('active'); }
-        }
-        if (!serverDown && easyDownActive) {
-            easyDownActive = false;
-            btnEasyDown.classList.remove('active');
-        }
-        updateEasyButtonLabels();
-    }
-    // Any safety EVT: locally release button state to match server-side all_off
-    if (line.startsWith('EVT watchdog_timeout') ||
-        line.startsWith('EVT weight_limit') ||
-        line.startsWith('EVT weight_read_fail')) {
-        releaseAllEasyHolds();
-    }
-}
-
 //=========== composed commands ===========
 
 function readStepCm() {
@@ -1168,6 +1175,54 @@ document.getElementById('btn-step-down').onclick = () => {
     if (cm === null) return;
     send('washrobot', `step_down ${cm}`);
 };
+
+// [2026-07-13] 跨障礙物 — stand legs off wall to 2×preset, cross, realign back.
+document.getElementById('btn-cross-down').onclick = () => {
+    const cm = readStepCm();
+    if (cm === null) return;
+    send('washrobot', `cross_obstacle_down ${cm}`);
+};
+document.getElementById('btn-cross-up').onclick = () => {
+    const cm = readStepCm();
+    if (cm === null) return;
+    send('washrobot', `cross_obstacle_up ${cm}`);
+};
+
+// [2026-07-22] 同步步伐 — 4 顆吸盤同時放開/放繩/重伸，跟 step_down/up 交替走法不同，
+// 沒有清洗選項（純移動）。見 WASH_ROBOT.cpp do_step_sync_ 的安全性註解。
+document.getElementById('btn-step-down-sync').onclick = () => {
+    const cm = readStepCm();
+    if (cm === null) return;
+    send('washrobot', `step_down_sync ${cm}`);
+};
+document.getElementById('btn-step-up-sync').onclick = () => {
+    const cm = readStepCm();
+    if (cm === null) return;
+    send('washrobot', `step_up_sync ${cm}`);
+};
+
+// [2026-07-09] Toggle step 2nd-leg leveling mode (imu ⇄ meter). dataset.mode is
+// kept in sync by the follower_mode= parser above; click sends the opposite then
+// refreshes status to re-sync the label.
+{
+    const btnFollowerMode = document.getElementById('btn-follower-mode');
+    if (btnFollowerMode) {
+        btnFollowerMode.onclick = () => {
+            const next = (btnFollowerMode.dataset.mode === 'imu') ? 'meter' : 'imu';
+            send('washrobot', `set_follower_mode ${next}`);
+            send('washrobot', 'status');   // re-sync label/badge
+        };
+    }
+}
+
+// [2026-07-09] First-step lead-foot selection (left / right). Active side is
+// highlighted by the first_step= parser above.
+{
+    const btnFirstLeft  = document.getElementById('btn-first-left');
+    const btnFirstRight = document.getElementById('btn-first-right');
+    if (btnFirstLeft)  btnFirstLeft.onclick  = () => { send('washrobot', 'set_first_step left');  send('washrobot', 'status'); };
+    if (btnFirstRight) btnFirstRight.onclick = () => { send('washrobot', 'set_first_step right'); send('washrobot', 'status'); };
+}
 
 document.getElementById('btn-step-up').onclick = () => {
     const cm = readStepCm();
@@ -1269,7 +1324,10 @@ document.getElementById('btn-run').onclick = () => {
     const cm = readStepCm();
     if (cm === null) return;
     const dir = document.getElementById('run-direction').value;   // "down" | "up"
-    send('washrobot', `run ${n} ${cm} ${dir}`);
+    // [2026-07-23] gait: "alt" (交替，預設) | "sync" (同步，4 顆一起)
+    const gaitEl = document.getElementById('run-gait');
+    const gait = gaitEl ? gaitEl.value : 'alt';
+    send('washrobot', `run ${n} ${cm} ${dir} ${gait}`);
 };
 
 // ↓ 走到地面（含清洗）— 從 crane-remaining 算 N 步、confirm、跑 run ... down_sweep_af
@@ -1311,9 +1369,10 @@ document.getElementById('btn-descend-to-ground').onclick = () => {
 // See .claude/scripted_run_plan.md for the full spec.
 //
 // Token grammar (mirror C++ parse_script_csv_):
-//     <int>[n]['*'<count>]
+//     <int>[n][x]['*'<count>]
 // - <int>   : cm (5..50)
 // - 'n'     : (optional) marks step as no-sweep (transit only)
+// - 'x'     : (optional) marks step as 跨障礙物 cross-obstacle (down); overrides sweep
 // - '*<N>'  : (optional) repeat shorthand
 // Default = sweep (matches 99% use case + preserves backward-compat).
 // ====================================================================
@@ -1342,11 +1401,13 @@ function parseScriptCsv(csv) {
             count = parseInt(cntStr, 10);
         }
 
-        // Peel optional trailing 'n' = no-sweep flag.
-        let sweep = true;
-        if (head && (head.endsWith('n') || head.endsWith('N'))) {
-            sweep = false;
-            head = head.slice(0, -1);
+        // Peel optional trailing flags (order-independent): 'n'=no-sweep, 'x'=cross.
+        let sweep = true, cross = false;
+        while (head) {
+            const f = head[head.length - 1];
+            if (f === 'n' || f === 'N')      { sweep = false; head = head.slice(0, -1); }
+            else if (f === 'x' || f === 'X') { cross = true;  head = head.slice(0, -1); }
+            else break;
         }
 
         if (!head || !/^-?\d+$/.test(head)) {
@@ -1359,15 +1420,16 @@ function parseScriptCsv(csv) {
         if (count < 1 || count > 1000)
             return { ok: false, err: `token #${i+1} count=${count} 超出 1..1000` };
         for (let k = 0; k < count; ++k) {
-            steps.push({ cm, sweep });
+            steps.push({ cm, sweep, cross });
             if (steps.length > 1000) return { ok: false, err: '總 step 數 > 1000' };
         }
     }
     if (!steps.length) return { ok: false, err: '展開後 0 步' };
     const totalCm   = steps.reduce((a, s) => a + s.cm, 0);
-    const nSweep    = steps.filter(s => s.sweep).length;
-    const nTransit  = steps.length - nSweep;
-    return { ok: true, steps, totalCm, nSweep, nTransit };
+    const nCross    = steps.filter(s => s.cross).length;
+    const nSweep    = steps.filter(s => s.sweep && !s.cross).length;
+    const nTransit  = steps.length - nSweep - nCross;
+    return { ok: true, steps, totalCm, nSweep, nTransit, nCross };
 }
 
 const $scriptCsv      = document.getElementById('script-csv');
@@ -1391,8 +1453,8 @@ function updateScriptPreview() {
         $scriptPreview.className = 'script-preview-err';
     } else {
         // Show breakdown when mixed; collapse when all-sweep (the common case).
-        const mix = r.nTransit > 0
-            ? ` (${r.nSweep} sweep + ${r.nTransit} transit)`
+        const mix = (r.nTransit > 0 || r.nCross > 0)
+            ? ` (${r.nSweep} sweep + ${r.nTransit} transit${r.nCross ? ' + ' + r.nCross + ' cross' : ''})`
             : '';
         $scriptPreview.textContent =
             `✓ ${r.steps.length} 步${mix}，總 ${r.totalCm} cm`;
@@ -1406,16 +1468,21 @@ document.getElementById('btn-run-script').onclick = () => {
     if (!csv) { alert('CSV 是空的'); return; }
     const r = parseScriptCsv(csv);
     if (!r.ok) { alert('CSV 不正確：\n' + r.err); return; }
-    const mix = r.nTransit > 0
-        ? ` (${r.nSweep} sweep + ${r.nTransit} transit)`
+    const mix = (r.nTransit > 0 || r.nCross > 0)
+        ? ` (${r.nSweep} sweep + ${r.nTransit} transit${r.nCross ? ' + ' + r.nCross + ' cross' : ''})`
         : '';
-    const msg = `▶ Run Script\n\n`
+    const dir = document.getElementById('script-direction').value === 'up' ? 'up' : 'down';
+    // [2026-07-23] gait: "alt" (交替，預設) | "sync" (同步，4 顆一起)
+    const gaitEl = document.getElementById('script-gait');
+    const gait = gaitEl ? gaitEl.value : 'alt';
+    const msg = `▶ Run Script（${dir === 'up' ? '往上 ↑' : '往下 ↓'}，`
+              + `${gait === 'sync' ? '同步走法' : '交替走法'}）\n\n`
               + `${r.steps.length} 步${mix}，總 ${r.totalCm} cm\n\n`
               + `CSV: ${csv}\n\n`
               + `確認開始?`;
     if (!confirm(msg)) return;
-    // Server reads rest-of-line as CSV — spaces tolerated; we send as-is.
-    send('washrobot', `run_script ${csv}`);
+    // Server: run_script [up|down] [alt|sync] <csv>. CSV read as rest-of-line (spaces ok).
+    send('washrobot', `run_script ${dir} ${gait} ${csv}`);
 };
 
 document.getElementById('btn-save-script').onclick = () => {
@@ -1460,8 +1527,12 @@ function renderSavedScripts(names) {
     });
     $scriptList.querySelectorAll('.saved-script-run').forEach(b => {
         b.onclick = () => {
-            if (!confirm(`執行 saved script "${b.dataset.name}"?`)) return;
-            send('washrobot', `run_saved ${b.dataset.name}`);
+            const dir = document.getElementById('script-direction').value === 'up' ? 'up' : 'down';
+            const gaitEl = document.getElementById('script-gait');
+            const gait = gaitEl ? gaitEl.value : 'alt';
+            if (!confirm(`執行 saved script "${b.dataset.name}"（${dir === 'up' ? '往上 ↑' : '往下 ↓'}，`
+                       + `${gait === 'sync' ? '同步走法' : '交替走法'}）?`)) return;
+            send('washrobot', `run_saved ${b.dataset.name} ${dir} ${gait}`);
         };
     });
     $scriptList.querySelectorAll('.saved-script-delete').forEach(b => {
@@ -1479,7 +1550,8 @@ function showScriptProgress(step, total, cm, mode) {
         ? `準備中 — 共 ${total} 步`
         : `Step ${step} / ${total}`;
     if (cm > 0) {
-        const modeLbl = mode === 'transit' ? ' transit' : (mode === 'sweep' ? ' sweep' : '');
+        const modeLbl = mode === 'transit' ? ' transit'
+                      : (mode === 'cross' ? ' 🧗cross' : (mode === 'sweep' ? ' sweep' : ''));
         $scriptProgCm.textContent = `(${cm} cm${modeLbl})`;
         $scriptProgCm.className = 'script-progress-cm' +
             (mode === 'transit' ? ' script-progress-mode-transit' : '');
@@ -1498,24 +1570,8 @@ function finishScriptProgress(ok) {
     setTimeout(() => { $scriptProgRow.hidden = true; }, 8000);
 }
 
-document.getElementById('btn-dm2j-group').onclick = () => {
-    const group = document.getElementById('dm2j-group').value;
-    const cm = parseFloat(document.getElementById('dm2j-group-cm').value);
-    if (isNaN(cm)) return;
-    if (group === 'arm') {
-        // arm = single slave, use existing cmd_move
-        send('washrobot', `move arm ${cm}`);
-    } else {
-        // feet / wheels = group sync, use new cmd_dm2j_group
-        send('washrobot', `dm2j_group ${group} ${cm}`);
-    }
-};
-
-document.getElementById('btn-dm2j-zero').onclick = () => {
-    const group = document.getElementById('dm2j-group').value;
-    if (!confirm(`Set current position as zero for ${group}? This shifts the coordinate frame and cannot be auto-undone.`)) return;
-    send('washrobot', `dm2j_zero ${group}`);
-};
+// [v2 2026-07-08] btn-dm2j-group / btn-dm2j-zero handlers removed —
+// DM2J feet/wheel rails retired (move/dm2j_group/dm2j_zero → ERR removed_in_v2).
 
 document.getElementById('btn-payout').onclick = () => {
     const cm = parseInt(document.getElementById('crane-cm').value, 10);
@@ -1642,6 +1698,72 @@ if (btnObstacleCancel) {
     };
 }
 
+// [2026-07-20] run_depth_avoid modal (D435i depth camera)
+const modalDepthObstacle = document.getElementById('modal-depth-obstacle');
+function showDepthObstacleModal(iter, candidates, heightCm, protrusionCm, bigObstacle, defaultStepCm, distanceCm, remainingCm, nextIsCross) {
+    document.getElementById('modal-depth-iter').textContent       = iter;
+    document.getElementById('modal-depth-candidates').textContent = candidates;
+    document.getElementById('modal-depth-height').textContent     = heightCm;
+    document.getElementById('modal-depth-protrusion').textContent = protrusionCm;
+    document.getElementById('modal-depth-step-input').value       = defaultStepCm;
+
+    // [2026-07-21] distance/remaining-clearance readout — informational only,
+    // the step-cm input above stays a manual field (per the original 2026-07-20
+    // "no automatic step_cm suggestion — user decides every time" design in
+    // WASH_ROBOT.h); this just gives the operator the number to decide with
+    // instead of eyeballing the photo.
+    const distEl = document.getElementById('modal-depth-distance');
+    const remainEl = document.getElementById('modal-depth-remaining');
+    if (distEl) distEl.textContent = distanceCm;
+    if (remainEl) remainEl.textContent = remainingCm;
+
+    document.getElementById('modal-depth-big-warning').classList.toggle('modal-hidden', !bigObstacle);
+    // [2026-07-23 per user] candidates>0 this AFTER → next step auto-switches
+    // to do_cross_obstacle_ (fully automatic, no confirm — this is purely
+    // informational so the operator isn't surprised when it happens).
+    document.getElementById('modal-depth-cross-notice').classList.toggle('modal-hidden', !nextIsCross);
+
+    // [2026-07-21] Always fetch all three — before / after (raw) / result
+    // (annotated) — regardless of candidates/big_obstacle, so a "nothing
+    // detected" step is still visually debuggable instead of showing nothing.
+    // cache-bust: these are fixed paths, browser would otherwise keep
+    // showing whatever it fetched for a previous step's photo.
+    const t = Date.now();
+    document.getElementById('modal-depth-photo-before').src = '/snap/depth_before?t=' + t;
+    document.getElementById('modal-depth-photo-after').src  = '/snap/depth_after?t='  + t;
+    document.getElementById('modal-depth-photo-result').src = '/snap/depth?t='        + t;
+
+    modalDepthObstacle.classList.remove('modal-hidden');
+}
+function hideDepthObstacleModal() { modalDepthObstacle.classList.add('modal-hidden'); }
+
+const btnRunDepthAvoid = document.getElementById('btn-run-depth-avoid');
+if (btnRunDepthAvoid) {
+    btnRunDepthAvoid.onclick = () => {
+        if (!confirm(
+            '開始深度相機持續避障行走？\n\n' +
+            '第一步固定走 5cm，之後每走一步會跳出偵測結果讓你決定下一步。\n' +
+            '隨時可按 STOP (robot) 中斷。'
+        )) return;
+        send('washrobot', 'run_depth_avoid');
+    };
+}
+const btnDepthContinue = document.getElementById('btn-depth-continue');
+if (btnDepthContinue) {
+    btnDepthContinue.onclick = () => {
+        const cm = document.getElementById('modal-depth-step-input').value;
+        send('washrobot', 'depth_avoid_continue ' + cm);
+        hideDepthObstacleModal();
+    };
+}
+const btnDepthStop = document.getElementById('btn-depth-stop');
+if (btnDepthStop) {
+    btnDepthStop.onclick = () => {
+        send('washrobot', 'depth_avoid_stop');
+        hideDepthObstacleModal();
+    };
+}
+
 //=========== press-and-hold helper ===========
 
 // Generic press-and-hold binding.
@@ -1702,145 +1824,12 @@ bindHold(btnEmergency,
     }
 );
 
-//=========== easy crane buttons ===========
-//
-// Three buttons:
-//   ↑ UP   — press-and-hold: `up on` on press, `up off` + `stop` on release
-//   ↓ DOWN — press-and-hold: `down on` on press, `down off` + `stop` on release
-//   🤖 AUTO — click toggle: click 1 starts `up on` and lets server auto-stop when
-//     weight < up_stop_kg (server-side weight_loop issues all_off + EVT weight_limit);
-//     click 2 = manual cancel. EVT weight_limit / watchdog_timeout / weight_read_fail
-//     all reset AUTO button state via releaseAllEasyHolds().
-//
-// Server is authoritative on all three buttons — status poll (every 50ms) parses
-// up=/down= and resets stale local state if a safety tripped between clicks.
-
-const btnEasyAuto = document.getElementById('btn-easy-auto');
-const btnEasyUp   = document.getElementById('btn-easy-up');
-const btnEasyDown = document.getElementById('btn-easy-down');
-
-let easyUpActive   = false;   // held via UP button (HOLD)
-let easyDownActive = false;   // held via DOWN button (HOLD)
-let easyAutoActive = false;   // started via AUTO button (click toggle)
-
-function updateEasyButtonLabels() {
-    btnEasyUp.textContent   = easyUpActive   ? '↑ 拉繩中…'         : '↑ 拉繩（按住）';
-    btnEasyDown.textContent = easyDownActive ? '↓ 釋放繩中…'       : '↓ 釋放繩（按住）';
-    btnEasyAuto.textContent = easyAutoActive ? '🤖 AUTO 拉繩中…（點擊停止）' : '🤖 AUTO 拉到上限（點擊）';
-}
-
-// Press-and-hold UP
-function easyStartUpHold() {
-    if (easyUpActive) return;
-    easyUpActive = true;
-    btnEasyUp.classList.add('active');
-    send('easy_crane', 'up on');
-    updateEasyButtonLabels();
-}
-function easyStopUpHold() {
-    if (!easyUpActive) return;
-    easyUpActive = false;
-    btnEasyUp.classList.remove('active');
-    send('easy_crane', 'up off');
-    send('easy_crane', 'stop');
-    updateEasyButtonLabels();
-}
-
-// Press-and-hold DOWN
-function easyStartDownHold() {
-    if (easyDownActive) return;
-    easyDownActive = true;
-    btnEasyDown.classList.add('active');
-    send('easy_crane', 'down on');
-    updateEasyButtonLabels();
-}
-function easyStopDownHold() {
-    if (!easyDownActive) return;
-    easyDownActive = false;
-    btnEasyDown.classList.remove('active');
-    send('easy_crane', 'down off');
-    send('easy_crane', 'stop');
-    updateEasyButtonLabels();
-}
-
-// AUTO toggle — click to start UP motion, server auto-stops at weight threshold
-function easyStartAuto() {
-    if (easyAutoActive) return;
-    easyAutoActive = true;
-    btnEasyAuto.classList.add('active');
-    send('easy_crane', 'up on');
-    updateEasyButtonLabels();
-}
-function easyStopAuto() {
-    if (!easyAutoActive) return;
-    easyAutoActive = false;
-    btnEasyAuto.classList.remove('active');
-    send('easy_crane', 'up off');
-    send('easy_crane', 'stop');
-    updateEasyButtonLabels();
-}
-
-// Called on EVT weight_limit / watchdog_timeout / weight_read_fail — server already
-// did all_off; this just resyncs client-side button state.
-function releaseAllEasyHolds() {
-    if (easyUpActive)   { easyUpActive   = false; btnEasyUp.classList.remove('active'); }
-    if (easyDownActive) { easyDownActive = false; btnEasyDown.classList.remove('active'); }
-    if (easyAutoActive) { easyAutoActive = false; btnEasyAuto.classList.remove('active'); }
-    updateEasyButtonLabels();
-}
-
-btnEasyAuto.addEventListener('click', () => {
-    easyAutoActive ? easyStopAuto() : easyStartAuto();
-});
-
-// UP/DOWN event wiring — pure press-and-hold.
-function onUpPress(e)     { if (e) e.preventDefault(); easyStartUpHold(); }
-function onUpRelease(e)   { if (e) e.preventDefault(); easyStopUpHold(); }
-function onDownPress(e)   { if (e) e.preventDefault(); easyStartDownHold(); }
-function onDownRelease(e) { if (e) e.preventDefault(); easyStopDownHold(); }
-
-btnEasyUp.addEventListener('mousedown',    onUpPress);
-btnEasyUp.addEventListener('touchstart',   onUpPress,   { passive: false });
-btnEasyUp.addEventListener('mouseup',      onUpRelease);
-btnEasyUp.addEventListener('mouseleave',   onUpRelease);
-btnEasyUp.addEventListener('touchend',     onUpRelease);
-btnEasyUp.addEventListener('touchcancel',  onUpRelease);
-
-btnEasyDown.addEventListener('mousedown',   onDownPress);
-btnEasyDown.addEventListener('touchstart',  onDownPress,  { passive: false });
-btnEasyDown.addEventListener('mouseup',     onDownRelease);
-btnEasyDown.addEventListener('mouseleave',  onDownRelease);
-btnEasyDown.addEventListener('touchend',    onDownRelease);
-btnEasyDown.addEventListener('touchcancel', onDownRelease);
-
-updateEasyButtonLabels();
-
-// Auto-poll easy_crane weight every 50ms for live display (only when connected).
-// Uses silent send + muted log on the reply path to avoid flooding the log panel.
-// Backend cost is minimal — cmd_status reads atomics, weight_loop itself already
-// polls DY500 at WEIGHT_POLL_MS; status poll just returns the cached value.
+// Generic silent-send helper (no log line) — used by the crane/washrobot
+// high-frequency status polls below.
 function sendSilent(target, cmd) {
     if (!ws || ws.readyState !== 1) return;
     ws.send(JSON.stringify({ target, cmd }));
 }
-setInterval(() => {
-    if (lastStatus.easy_crane) sendSilent('easy_crane', 'status');
-}, 50);
-
-// UP stop threshold — live input, no set button.
-// Debounce 150ms so typing "-5" doesn't send intermediate "-" as an invalid value.
-(function () {
-    const input = document.getElementById('easy-up-stop-input');
-    let timer = null;
-    input.addEventListener('input', () => {
-        clearTimeout(timer);
-        timer = setTimeout(() => {
-            const v = parseFloat(input.value);
-            if (isNaN(v)) return;
-            send('easy_crane', `set_up_stop_kg ${v}`);
-        }, 150);
-    });
-})();
 
 //=========== crane hold-to-pull (real crane) ===========
 
@@ -1893,8 +1882,8 @@ wireCraneHold('btn-crane-down-left',  'down_left on',  'down_left off');
 wireCraneHold('btn-crane-down-right', 'down_right on', 'down_right off');
 
 // Auto-poll crane status every 200ms when crane is connected, to refresh
-// tension display + sync hold flag state. Lower freq than easy_crane (50ms)
-// because real crane has more devices on shared cli_30 — keep bus load light.
+// tension display + sync hold flag state. Real crane has more devices on
+// shared cli_30 — keep bus load light (200ms, not faster).
 setInterval(() => {
     if (lastStatus.crane) sendSilent('crane', 'status');
 }, 200);
@@ -1947,6 +1936,9 @@ function wireFreqInput(inputId, cmd) {
 wireFreqInput('crane-hold-hz-input',   'set_hold_hz');
 wireFreqInput('crane-motion-hz-input', 'set_motion_hz');
 wireFreqInput('crane-middle-hz-input', 'set_middle_hz');
+wireFreqInput('crane-fine-adjust-hz-input', 'set_fine_adjust_hz');
+wireFreqInput('crane-kick-hz-input', 'set_kick_hz');
+wireFreqInput('crane-roll-correct-hz-input', 'set_roll_correct_hz');
 
 // DSZL scale inputs — same debounce pattern as freq inputs. Negative values
 // allowed (default -0.01 sign-flips the wiring-inverted raw reading).
@@ -2052,6 +2044,78 @@ function wireCamera(camId) {
 wireCamera('cam1');
 wireCamera('cam2');
 // To add more: wireCamera('cam3'); wireCamera('cam4');
+
+//=========== depth camera (snapshot-only, 辨識避障用) ===========
+//
+// D435i has no /mjpeg endpoint (depth_cam_service.py only serves /snap/depth,
+// see CAMERAS.depth comment in server.js) — not worth a continuous stream for
+// an obstacle-detection still. Button just fetches one JPEG and shows it
+// inline; no reconnect/offline-retry logic since there's no persistent
+// connection to lose.
+
+function wireDepthCamera() {
+    const img         = document.getElementById('depth-stream');
+    const placeholder = document.getElementById('depth-placeholder');
+    const imgDepth         = document.getElementById('depth-stream-map');
+    const placeholderDepth = document.getElementById('depth-placeholder-map');
+    const status      = document.getElementById('depth-status');
+    const snapBtn     = document.getElementById('depth-snap');
+    if (!img || !snapBtn) return;
+
+    // { url } wrapper so fetchInto can update the caller's "last blob URL"
+    // by reference (plain vars can't be passed by reference in JS).
+    const lastUrl      = { url: null };
+    const lastUrlDepth = { url: null };
+
+    function setStatus(text, cls) {
+        if (!status) return;
+        status.textContent = text;
+        status.classList.remove('live', 'offline');
+        if (cls) status.classList.add(cls);
+    }
+
+    async function fetchInto(url, imgEl, placeholderEl, lastUrlRef) {
+        const r = await fetch(`${url}?t=${Date.now()}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const blob = await r.blob();
+        if (lastUrlRef.url) URL.revokeObjectURL(lastUrlRef.url);
+        lastUrlRef.url = URL.createObjectURL(blob);
+        imgEl.src = lastUrlRef.url;
+        imgEl.style.display = '';
+        if (placeholderEl) placeholderEl.classList.remove('visible');
+    }
+
+    snapBtn.addEventListener('click', async () => {
+        const orig = snapBtn.textContent;
+        snapBtn.disabled = true;
+        snapBtn.textContent = '📸 拍照中…';
+        // depth_live/depth_live_depth = raw color + colorized depth map of
+        // THIS instant (no BEFORE/AFTER analysis needed first). Plain
+        // /snap/depth is the last run_depth_avoid AFTER result — used by the
+        // modal, not this manual button. allSettled so one endpoint being
+        // down (e.g. depth map encode fail) doesn't blank out the other.
+        const results = await Promise.allSettled([
+            fetchInto('/snap/depth_live', img, placeholder, lastUrl),
+            fetchInto('/snap/depth_live_depth', imgDepth, placeholderDepth, lastUrlDepth),
+        ]);
+        const okCount = results.filter(r => r.status === 'fulfilled').length;
+        if (okCount === results.length) {
+            setStatus('已更新 ' + new Date().toLocaleTimeString(), 'live');
+            snapBtn.textContent = '✓ 完成';
+        } else if (okCount > 0) {
+            console.error('[depth] one snapshot failed:', results);
+            setStatus('部分失敗 ' + new Date().toLocaleTimeString(), 'live');
+            snapBtn.textContent = '△ 部分失敗';
+        } else {
+            console.error('[depth] snapshot failed:', results);
+            setStatus('offline', 'offline');
+            snapBtn.textContent = '✗ 失敗';
+        }
+        setTimeout(() => { snapBtn.textContent = orig; }, 1500);
+        snapBtn.disabled = false;
+    });
+}
+wireDepthCamera();
 
 //=========== page navigation (left sidebar) ===========
 //

@@ -255,13 +255,13 @@ Socket timeouts: 100-500ms per device. TCP monitor thread: 500ms reconnect polli
 | `DSZL_107` | 張力感測器 × 2（X518 採集板） | Modbus-TCP (獨佔 gateway) | 左 (USR_C.32 slave 1) / 右 (USR_D.33 slave 1)，各獨佔一條 RS485 bus；scale factor 預設 0.01（待實機校正）。Washrobot 透過 `crane_cmd_("tension")` 跨 PI 拿 kg。 |
 | `CLV900_inverter` | 變頻器 × 1 | Modbus-TCP (USR_A.30 slave 3) | 中間絞盤變頻器，控制 bus 上（未安裝） |
 | `SE3_inverter` | 士林變頻器 × 2 | Modbus-TCP (USR_A 控制 bus) | 左 (USR_A.30 slave 1) / 右 (USR_A.30 slave 2)；2026-05-07 取代原 ZS_DIO_R_RLY 繼電器；2026-05-15 re-layout 右 SE3 從 USR_B 移到 USR_A、slave 1→2；hold 預設 20Hz / 自動運動 30Hz；reg 0x1101 控制位元、0x1002 頻率（RAM）、0x100A 輸出頻率 |
+| `QX_DO24` | 4 路 PWM 輸出模組 × 1（新硬體，2026-08） | Modbus-TCP (gateway 待定，暫定 .22 slave 6) | 四川旗芯 QX-DO24，4 通道獨立占空比/頻率/控制（0=關/65535=持續輸出/1~65534=脈衝數）；2026-08 補了 FC0x03 讀回（duty/freq/control/版本號），`Linux_test` menu 34 已接。**bench 用廠商 QX-ModbusRTU 工具（USB-485 直連，非透過網路 gateway）確認過可正常運作**：baud 改成 115200（非出廠預設 9600）、slave ID 6、channel 1 @ 50Hz、占空比 5~10% 驅動舵機成功。**尚未接上實際網路 RS485 bus**——slave 6 在 .22 這條 bus 上是否會撞到既有 JC_100_METER（slave 1~9）要接線前再次確認 |
 
 **未使用：**
 
 | Class | Description |
 |---|---|
 | `DIHOOL_control` | 馬達定位控制器，已編譯未整合 |
-| `QX_DO24` | 數位輸出模組，已編譯未整合 |
 | `ZS_DIO_R_RLY` | 8CH 繼電器模組（之前用作吊機左右收/放繩，2026-05-07 改用 SE3_inverter；class 保留供未來其他用途） |
 
 ### Driver Initialization Pattern

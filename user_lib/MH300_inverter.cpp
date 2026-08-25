@@ -160,8 +160,17 @@ bool MH300_inverter::writeParam(uint16_t reg, uint16_t value)
         return true;
     }
     // Echo: 8-byte copy of the request (slave + 0x06 + reg + val + crc).
+    // A Modbus exception reply is 5 bytes: slave + (0x06|0x80=0x86) + code + crc,
+    // so surface the exception code — it says WHY the drive rejected the write.
     if (respLen < 8 || resp[0] != deviceID || resp[1] != 0x06) {
-        LOG_ERR(_log_tag, "writeParam reg=0x%04X bad reply len=%d", reg, respLen);
+        if (respLen >= 3 && resp[1] == 0x86) {
+            LOG_ERR(_log_tag, "writeParam reg=0x%04X REJECTED — Modbus exception 0x%02X "
+                              "(01=illegal func, 02=illegal addr, 03=illegal value, "
+                              "04=dev fail, 06=busy)", reg, resp[2]);
+        } else {
+            LOG_ERR(_log_tag, "writeParam reg=0x%04X bad reply len=%d", reg, respLen);
+        }
+        LOG_HEX(_log_tag, "writeParam RX", resp, respLen);
         return true;
     }
     return false;

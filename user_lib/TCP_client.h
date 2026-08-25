@@ -57,10 +57,22 @@ public:
 	void close();
 	bool isConnected() { return connected; }
 
+	// [2026-07-23 per user] reconnectLoop's "reconnecting.../reconnect success"
+	// lines are intentionally unconditional (bypass debug_mode — see .cpp
+	// comment) so real connection drops are always visible. But that means an
+	// endpoint that's KNOWN not to be installed/running yet (e.g. the cleaning
+	// arm's motor_api before the arm is physically mounted) spams that log
+	// every ~500ms with nothing actionable in it. This mutes just those three
+	// lines for a specific instance without touching the unconditional-log
+	// design for instances you DO want it for (e.g. depth_cam during active
+	// testing). Does not affect reconnect behavior itself, only the logging.
+	void set_quiet_reconnect_log(bool quiet) { quiet_reconnect_log_ = quiet; }
+
 private:
 	socket_t sock;
 	bool initialized = false;
 	bool debug_mode = false;
+	bool quiet_reconnect_log_ = false;
 	std::atomic<bool> connected;
 
 	std::string last_ip;

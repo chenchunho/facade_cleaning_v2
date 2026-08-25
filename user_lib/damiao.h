@@ -429,10 +429,31 @@ namespace damiao
         void control_mit(Motor& DM_Motor, float kp, float kd, float q, float dq, float tau)
         {
             // 位置、速度和扭矩采用线性映射的关系将浮点型数据转换成有符号的定点数据
+            // [2026-08-17 BUGFIX] Added the missing input clamp. Without it, an x
+            // outside [xmin,xmax] produced a data_uint wider than `bits`, and the
+            // packing below (data_buf[5] = kd_uint >> 4, into a uint8_t) silently
+            // dropped the high bits — so the value WRAPPED AROUND to an unrelated
+            // small number instead of saturating.
+            // Real impact on this project: kd encodes over [0,5]. Callers had been
+            // raising M1's kd past 5 to fight sag, and every such value decoded to
+            // far LESS damping than the previous one:
+            //     kd=5.5  -> motor actually received 0.50
+            //     kd=6.0  -> 1.00
+            //     kd=7.0  -> 2.00
+            //     kd=10.0 -> 5.00
+            //     kd=12.0 -> 2.00
+            // That is why "increase the damping" kept making DEPLOY oscillate, the
+            // arm drop under its own weight, and PARK feel powerless. With the clamp
+            // an out-of-range input now saturates at the limit (kd>5 -> 5.0), which
+            // is wrong-but-monotonic rather than wrong-and-random.
+            // NOTE: 5.0 is a hard protocol ceiling for kd. More holding force must
+            // come from kp (range [0,500]) or the tau feedforward, never from kd.
             static auto float_to_uint = [](float x, float xmin, float xmax, uint8_t bits) -> uint16_t {
                 float span = xmax - xmin;
+                if (x < xmin) x = xmin;
+                if (x > xmax) x = xmax;
                 float data_norm = (x - xmin) / span;
-                uint16_t data_uint = data_norm * ((1 << bits) - 1);
+                uint16_t data_uint = (uint16_t)(data_norm * ((1 << bits) - 1));
                 return data_uint;
                 };
             Motor_id id = DM_Motor.GetSlaveId();

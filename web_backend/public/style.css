@@ -384,17 +384,6 @@ select {
     transform: scale(0.98);
 }
 
-/* ========== easy crane panel ========== */
-.panel-easy_crane {
-    border-color: rgba(0, 229, 255, 0.32);
-}
-.panel-easy_crane h2          { color: var(--cyan); }
-.panel-easy_crane h2::before  { color: var(--cyan); }
-.panel-easy_crane::before {
-    background: linear-gradient(90deg, transparent, var(--cyan), transparent);
-    opacity: 0.7;
-}
-
 /* highlighted value (weight / remaining cm) */
 .hl {
     color: var(--cyan);
@@ -404,7 +393,7 @@ select {
     letter-spacing: 1px;
 }
 
-/* press-and-hold (easy up / down) */
+/* press-and-hold (crane up / down) */
 .btn-hold {
     padding: 18px 24px;
     font-size: 13px;
@@ -421,25 +410,6 @@ select {
     color: #fff;
     border-color: var(--cyan);
     transform: scale(0.98);
-}
-
-/* AUTO toggle */
-.btn-auto {
-    padding: 10px 18px;
-    font-size: 12px;
-    font-weight: 600;
-    background: #251e44;
-    border: 1px solid var(--panel-border);
-    color: var(--fg-dim);
-}
-.btn-auto:hover {
-    border-color: var(--warn);
-    color: var(--warn);
-}
-.btn-auto.active {
-    background: #4a3000;
-    border-color: var(--warn);
-    color: var(--warn);
 }
 
 /* hint lists */
@@ -492,6 +462,22 @@ ul.hint li::marker { color: var(--cyan); }
 .modal-content p { margin: 10px 0; color: var(--fg); }
 .modal-content .hl { font-size: 22px; }
 .modal-content .warn { color: var(--warn); font-size: 12px; }
+.modal-content-wide { max-width: 900px; }
+.modal-depth-photos {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 10px 0;
+}
+.modal-depth-photo-cell { flex: 1 1 260px; min-width: 200px; }
+.modal-depth-photo-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 1px;
+    color: var(--fg-dim);
+    margin-bottom: 4px;
+}
+.modal-depth-photo { width: 100%; max-width: 100%; display: block; border-radius: var(--r-lg); margin: 0; background: #000; min-height: 120px; }
 .modal-content ul {
     margin: 10px 0;
     padding-left: 26px;
@@ -726,6 +712,15 @@ button.error-action:disabled:hover {
     color: var(--cyan);
     margin-bottom: 6px;
 }
+/* small caption above a .cam-stage when a cell has more than one stage
+   stacked (e.g. depth camera's 全彩/深度圖 pair) */
+.cam-stage-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 1px;
+    color: var(--fg-dim);
+    margin-bottom: 4px;
+}
 
 .cam-stage {
     position: relative;
@@ -763,6 +758,8 @@ button.error-action:disabled:hover {
     letter-spacing: 1px;
 }
 .cam-overlay-offline.visible { display: flex; }
+/* neutral "no snapshot yet" variant (depth cam) vs. the red "offline" meaning */
+.cam-overlay-offline.placeholder { color: var(--fg-dim); }
 
 .cam-controls {
     display: flex;

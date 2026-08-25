@@ -2,7 +2,7 @@
 <html lang="zh-TW">
 <head>
 <meta charset="UTF-8">
-<title>washrobot control</title>
+<title>facade cleaning control</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -19,11 +19,10 @@
 </nav>
 
 <header>
-  <h1>washrobot control</h1>
+  <h1>facade cleaning control</h1>
   <div id="status">
-    <span class="dot" id="dot-washrobot"></span>washrobot
+    <span class="dot" id="dot-washrobot"></span>robot
     <span class="dot" id="dot-crane"></span>crane
-    <span class="dot" id="dot-easy-crane"></span>easy
     <span class="dot" id="dot-arm"></span>arm
   </div>
 </header>
@@ -31,25 +30,20 @@
 <div id="banner" class="banner banner-hidden"></div>
 
 <main>
+  <!-- [2026-08-04 per user] 原本單一個 auto cycle panel 拆成三個：共用參數
+       （原位）→ 同步上下移動 → 左右輪流移動。按鈕 id / data-cmd 都不變，只是
+       搬到不同 section，app.js 靠 id/選擇器綁定不受影響。 -->
   <section class="panel panel-washrobot" data-page="home">
-    <h2>auto cycle (washrobot)</h2>
+    <h2>auto cycle</h2>
     <div class="row">
       <label>step cm: <input type="number" id="step-cm" value="30" min="5" max="60" step="1"></label>
-      <span class="label">(5-60，套用到 step_down / run)</span>
+      <span class="label">(5-60，套用到 step_down / run，同步與交替走法共用)</span>
     </div>
     <div class="row">
       <button data-tgt="washrobot" data-cmd="init">init</button>
       <button data-tgt="washrobot" data-cmd="attach">attach</button>
       <button data-tgt="washrobot" data-cmd="detach">detach</button>
       <button data-tgt="washrobot" data-cmd="arm_sweep">arm_sweep</button>
-      <button id="btn-step-down">step_down</button>
-      <button id="btn-step-down-sweep" class="primary">↓ 下移 + 連續清洗</button>
-      <button id="btn-step-down-sweep-af" class="primary">↓ 下移 + 清洗(腳組後)</button>
-      <button id="btn-step-down-sweep-ba" class="primary">↓ 下移 + 移動前後各刷</button>
-      <button id="btn-step-up">step_up</button>
-      <button id="btn-step-up-sweep" class="primary">↑ 上移 + 連續清洗</button>
-      <button id="btn-step-up-sweep-af" class="primary">↑ 上移 + 清洗(腳組後)</button>
-      <button id="btn-step-up-sweep-ba" class="primary">↑ 上移 + 移動前後各刷</button>
     </div>
     <div class="row">
       <label>run steps: <input type="number" id="run-steps" value="1" min="1"></label>
@@ -57,6 +51,12 @@
         <select id="run-direction">
           <option value="down" selected>down ↓</option>
           <option value="up">up ↑</option>
+        </select>
+      </label>
+      <label title="alt=左右輪流走（交替 inchworm）；sync=4 顆同時放開/放繩/重伸">走法:
+        <select id="run-gait">
+          <option value="alt" selected>交替（左右輪流）</option>
+          <option value="sync">同步（4 顆一起）</option>
         </select>
       </label>
       <button id="btn-run">run</button>
@@ -79,8 +79,6 @@
       <button data-tgt="washrobot" data-cmd="status">status</button>
       <button data-tgt="washrobot" data-cmd="reset">reset</button>
       <button data-tgt="washrobot" data-cmd="shutdown">shutdown</button>
-      <button data-tgt="washrobot" data-cmd="tilt_mode on">tilt ON</button>
-      <button data-tgt="washrobot" data-cmd="tilt_mode off">tilt OFF</button>
       <button data-tgt="washrobot" data-cmd="zdt_release_stall">解除 ZDT 堵轉</button>
       <button data-tgt="washrobot" data-cmd="realign">手動 Realign</button>
     </div>
@@ -89,20 +87,81 @@
     </div>
   </section>
 
-  <!-- [2026-06-05] scripted run — CSV of per-step cm, fixed down_sweep_af direction -->
+  <section class="panel panel-washrobot" data-page="home">
+    <h2>同步上下移動</h2>
+    <div class="row">
+      <span class="label">同步步伐（4 顆同時放開→吊機兩側同步放/收繩→IMU 微調→4 顆同時重新吸附，純移動不清洗）：</span>
+      <button id="btn-step-down-sync" class="primary">⇅ 同步 ↓</button>
+      <button id="btn-step-up-sync" class="primary">⇅ 同步 ↑</button>
+      <ul class="hint">
+        <li>⚠ 放繩期間 4 顆吸盤全放開，完全靠吊機繩索承重（其他步伐都保持至少一側黏牆防墜）</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="panel panel-washrobot" data-page="home">
+    <h2>左右輪流移動</h2>
+    <div class="row">
+      <button id="btn-step-down">step_down</button>
+      <button id="btn-step-down-sweep" class="primary">↓ 下移 + 連續清洗</button>
+      <button id="btn-step-down-sweep-af" class="primary">↓ 下移 + 清洗(腳組後)</button>
+      <button id="btn-step-down-sweep-ba" class="primary">↓ 下移 + 移動前後各刷</button>
+      <button id="btn-step-up">step_up</button>
+      <button id="btn-step-up-sweep" class="primary">↑ 上移 + 連續清洗</button>
+      <button id="btn-step-up-sweep-af" class="primary">↑ 上移 + 清洗(腳組後)</button>
+      <button id="btn-step-up-sweep-ba" class="primary">↑ 上移 + 移動前後各刷</button>
+    </div>
+    <div class="row">
+      <span class="label">跨障礙物（伸腳 2× 站離牆跨越後縮回）：</span>
+      <button id="btn-cross-down" class="primary">🧗 跨障礙物 ↓</button>
+      <button id="btn-cross-up" class="primary">🧗 跨障礙物 ↑</button>
+    </div>
+    <div class="row">
+      <span class="label">step 第二腳對平：</span>
+      <button id="btn-follower-mode" title="切換 step 第二隻腳的對平方式（點一下切換）">對平模式: ?</button>
+      <span class="label" id="follower-mode-status">(currently: ?)</span>
+      <ul class="hint">
+        <li><b>IMU</b>：第二腳粗走後再依 IMU roll 精對平（長繩計米不準時用）（預設）</li>
+        <li><b>METER</b>：第二腳只走計米同步＝原本方法</li>
+      </ul>
+    </div>
+    <div class="row">
+      <span class="label">第一步先走：</span>
+      <button id="btn-first-left">左腳先</button>
+      <button id="btn-first-right">右腳先</button>
+      <span class="label" id="first-step-status">(currently: ?)</span>
+      <ul class="hint">
+        <li>選第一步先動哪隻腳，之後每步左右交替（右先→左→右…／左先→右→左…）</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- [2026-06-05] scripted run — CSV of per-step cm. [2026-07-14] direction (up/down) selectable -->
   <section class="panel panel-washrobot panel-script" data-page="home">
-    <h2>auto run</h2>
+    <h2>SCRIPT RUN</h2>
     <div class="row">
       <label class="script-csv-label">
         CSV
         <textarea id="script-csv" rows="2" spellcheck="false"
-                  placeholder="例如：30*5,20*3 或 30n,30,30 （n 後綴 = 不刷洗）"></textarea>
+                  placeholder="例如：30*5,20*3 或 30n,30,30 （n=不刷洗；x=跨障礙物，如 30x）"></textarea>
       </label>
     </div>
     <div class="row script-preview-row">
       <span id="script-preview-text" class="script-preview-dim">— 等待輸入 —</span>
     </div>
     <div class="row">
+      <label>direction:
+        <select id="script-direction">
+          <option value="down" selected>down ↓</option>
+          <option value="up">up ↑</option>
+        </select>
+      </label>
+      <label title="alt=左右輪流走（交替 inchworm）；sync=4 顆同時放開/放繩/重伸（cross 步驟不受影響，一律照原邏輯）">走法:
+        <select id="script-gait">
+          <option value="alt" selected>交替（左右輪流）</option>
+          <option value="sync">同步（4 顆一起）</option>
+        </select>
+      </label>
       <button id="btn-run-script" class="primary">▶ Run</button>
       <button id="btn-save-script">💾 Save as…</button>
       <button id="btn-list-scripts">↻ 重新整理列表</button>
@@ -137,14 +196,14 @@
       <button data-tgt="washrobot" data-cmd="vacuum feet off">OFF</button>
     </div>
     <div class="row">
-      <span class="label">body:</span>
-      <button data-tgt="washrobot" data-cmd="vacuum body on">ON</button>
-      <button data-tgt="washrobot" data-cmd="vacuum body off">OFF</button>
+      <span class="label">right (slave 1,2):</span>
+      <button data-tgt="washrobot" data-cmd="vacuum right on">ON</button>
+      <button data-tgt="washrobot" data-cmd="vacuum right off">OFF</button>
     </div>
     <div class="row">
-      <span class="label">center:</span>
-      <button data-tgt="washrobot" data-cmd="vacuum center on">ON</button>
-      <button data-tgt="washrobot" data-cmd="vacuum center off">OFF</button>
+      <span class="label">left (slave 3,4):</span>
+      <button data-tgt="washrobot" data-cmd="vacuum left on">ON</button>
+      <button data-tgt="washrobot" data-cmd="vacuum left off">OFF</button>
     </div>
     <div class="row">
       <span class="label">all:</span>
@@ -203,22 +262,14 @@
   <section class="panel panel-washrobot" data-page="home">
     <h2>manual — vacuum readings <button id="btn-refresh-vacuum">refresh</button></h2>
     <div class="row">
-      <span class="label">feet:</span>
-      <span class="vac-cell" id="vac-1">p1 = ?</span>
-      <span class="vac-cell" id="vac-2">p2 = ?</span>
-      <span class="vac-cell" id="vac-3">p3 = ?</span>
-      <span class="vac-cell" id="vac-4">p4 = ?</span>
+      <span class="label">right:</span>
+      <span class="vac-cell" id="vac-1">p1 (右上) = ?</span>
+      <span class="vac-cell" id="vac-2">p2 (右下) = ?</span>
     </div>
     <div class="row">
-      <span class="label">body:</span>
-      <span class="vac-cell" id="vac-5">p5 = ?</span>
-      <span class="vac-cell" id="vac-6">p6 = ?</span>
-      <span class="vac-cell" id="vac-7">p7 = ?</span>
-      <span class="vac-cell" id="vac-8">p8 = ?</span>
-    </div>
-    <div class="row">
-      <span class="label">center:</span>
-      <span class="vac-cell" id="vac-9">p9 = ?</span>
+      <span class="label">left:</span>
+      <span class="vac-cell" id="vac-3">p3 (左上) = ?</span>
+      <span class="vac-cell" id="vac-4">p4 (左下) = ?</span>
     </div>
     <ul class="hint">
       <li>單位 kPa：≤ -50 綠（吸住）/ -50~-10 黃（弱）/ ≥ -10 紅（脫離）</li>
@@ -245,212 +296,6 @@
     </div>
     <ul class="hint">
       <li>顯示相對 init baseline 的偏移：±2° 綠 / ±5° 黃 / 超過橘紅</li>
-    </ul>
-  </section>
-
-  <section class="panel panel-washrobot" data-page="manual">
-    <h2>manual — pusher</h2>
-    <div class="row">
-      <span class="label">feet:</span>
-      <button data-tgt="washrobot" data-cmd="pusher feet extend">EXTEND</button>
-      <button data-tgt="washrobot" data-cmd="pusher feet retract">RETRACT</button>
-    </div>
-    <div class="row">
-      <span class="label">body:</span>
-      <button data-tgt="washrobot" data-cmd="pusher body extend">EXTEND</button>
-      <button data-tgt="washrobot" data-cmd="pusher body retract">RETRACT</button>
-    </div>
-    <div class="row">
-      <span class="label">center:</span>
-      <button data-tgt="washrobot" data-cmd="pusher center extend">EXTEND</button>
-      <button data-tgt="washrobot" data-cmd="pusher center retract">RETRACT</button>
-    </div>
-    <div class="row">
-      <span class="label">single slave:</span>
-      <select id="zdt-slave-select">
-        <option value="1">1 (右腳1 / RF1)</option>
-        <option value="2">2 (右腳2 / RF2)</option>
-        <option value="3">3 (左腳1 / LF1)</option>
-        <option value="4">4 (左腳2 / LF2)</option>
-        <option value="5">5 (右身上 / RB1)</option>
-        <option value="6">6 (左身上 / LB1)</option>
-        <option value="7">7 (右身下 / RB2)</option>
-        <option value="8">8 (左身下 / LB2)</option>
-        <option value="9">9 (中心 / C)</option>
-      </select>
-      <button id="btn-zdt-extend">EXTEND</button>
-      <button id="btn-zdt-retract">RETRACT</button>
-    </div>
-    <div class="row">
-      <span class="label">zero（當前位置 = 0）:</span>
-      <button data-tgt="washrobot" data-cmd="zdt_zero feet">feet</button>
-      <button data-tgt="washrobot" data-cmd="zdt_zero body">body</button>
-      <button data-tgt="washrobot" data-cmd="zdt_zero center">center</button>
-      <button data-tgt="washrobot" data-cmd="zdt_zero all">all</button>
-    </div>
-    <ul class="hint">
-      <li>set_zero 必須在 pusher 完全縮回時按，否則後續 abs 0 不會回真實底</li>
-    </ul>
-  </section>
-
-  <section class="panel panel-washrobot" data-page="manual">
-    <h2>manual — wheels</h2>
-    <div class="row">
-      <span class="label">slave 2, 4（平行同動）:</span>
-      <button data-tgt="washrobot" data-cmd="wheels retract">收輪 (abs 0)</button>
-      <button data-tgt="washrobot" data-cmd="wheels lower">放輪 (abs -7)</button>
-    </div>
-    <div class="row">
-      <span class="label">輪子是否已安裝:</span>
-      <button data-tgt="washrobot" data-cmd="wheels_attached on">attached ON</button>
-      <button data-tgt="washrobot" data-cmd="wheels_attached off">attached OFF</button>
-    </div>
-    <ul class="hint">
-      <li>OFF = 所有輪子動作 no-op（bench 沒裝輪用）</li>
-    </ul>
-  </section>
-
-  <section class="panel panel-washrobot" data-page="manual">
-    <h2>manual — DM2J group sync (cm, absolute)</h2>
-    <div class="row">
-      <label>group:
-        <select id="dm2j-group">
-          <option value="feet" selected>feet (slave 1, 3)</option>
-          <option value="wheels">wheels (slave 2, 4)</option>
-          <option value="arm">arm (slave 5)</option>
-        </select>
-      </label>
-      <label>cm: <input type="number" id="dm2j-group-cm" value="0" step="0.5"></label>
-      <button id="btn-dm2j-group">move</button>
-      <button id="btn-dm2j-zero">set zero (current = 0)</button>
-    </div>
-  </section>
-
-  <section class="panel panel-arm" data-page="manual">
-    <h2>🦾 清潔手臂 (cleaning arm)</h2>
-    <ul class="hint">
-      <li>本面板直連 motor_api (127.0.0.1:9527)，不需 washrobot</li>
-    </ul>
-    <div class="row">
-      <button data-tgt="washrobot" data-cmd="arm_init">INIT（啟動 + 工具頭校正 + 標記 arm_calibrated）</button>
-      <button data-tgt="arm" data-cmd="PARK">PARK（歸位 + disable）</button>
-      <button data-tgt="arm" data-cmd="STATUS">STATUS</button>
-    </div>
-    <div class="row">
-      <span class="label">DEPLOY：牆距</span>
-      <input type="number" id="arm-wall-mm" value="300" min="1" step="10">
-      <span class="label">mm　／　工具頭</span>
-      <select id="arm-slot">
-        <option value="LEFT">LEFT</option>
-        <option value="CENTER" selected>CENTER</option>
-        <option value="RIGHT">RIGHT</option>
-      </select>
-      <button id="btn-arm-deploy">DEPLOY</button>
-    </div>
-    <ul class="hint">
-      <li>⚠ INIT 時請遠離（工具頭校正力道大）</li>
-    </ul>
-  </section>
-
-  <section class="panel panel-washrobot" data-page="home">
-    <h2>🦾🚿 arm 整合操作 (washrobot 編排)</h2>
-    <ul class="hint">
-      <li>由 washrobot 編排：水/刷/滑台 + arm 連動，需 washrobot + arm 都連線</li>
-    </ul>
-    <div class="row">
-      <span class="label">arm 驅動狀態:</span>
-      <span class="link-badge" id="arm-link-badge">? unknown</span>
-    </div>
-    <div class="row">
-      <span class="label">washrobot 是否驅動 arm:</span>
-      <button data-tgt="washrobot" data-cmd="arm_attached on">attached ON</button>
-      <button data-tgt="washrobot" data-cmd="arm_attached off">attached OFF</button>
-      <span class="label" id="arm-attached-status">(currently: ?)</span>
-    </div>
-    <ul class="hint">
-      <li>OFF = arm_cmd_ no-op（bench 沒裝 arm 或 motor_api 沒跑）</li>
-    </ul>
-    <div class="row">
-      <button data-tgt="washrobot" data-cmd="arm_init" class="arm-action">INIT（啟動 + 工具頭校正 + 標記 arm_calibrated）</button>
-    </div>
-    <ul class="hint">
-      <li>⚠ INIT 時請遠離，會設 arm_calibrated_ flag 後 sweep 才跳過 ENABLE</li>
-    </ul>
-    <hr>
-    <div class="row">
-      <span class="label">🧽 清潔 sweep：牆距</span>
-      <input type="number" id="arm-clean-wall-mm" value="300" min="1" step="10">
-      <span class="label">mm　／　回合數</span>
-      <input type="number" id="arm-clean-rounds" value="1" min="1" max="20" step="1">
-      <button id="btn-arm-clean-sweep" class="danger arm-action">CLEAN SWEEP（補水→INIT→滾筒+刮刀）</button>
-    </div>
-    <ul class="hint">
-      <li>流程：A 補水 → B arm INIT → C × N rounds（LEFT 滾筒+水 → RIGHT 刮刀乾）→ D cleanup</li>
-      <li>任何 abort / fail 都會跑 cleanup (PARK + 刷/泵/球閥 OFF)</li>
-    </ul>
-  </section>
-
-  <section class="panel panel-washrobot" data-page="home">
-    <h2>⚖️ 重心校正 (balance calibration)</h2>
-    <ul class="hint">
-      <li>釋放所有 cup → 純鋼索吊 → IMU roll 自動歸零。⚠ 第一次校正建議離地 ≤50cm</li>
-      <li>校正完只記錄 ΔL，不自動 attach</li>
-    </ul>
-    <div class="row">
-      <span class="label">狀態:</span>
-      <span class="link-badge" id="balcal-state-badge">⚪ idle</span>
-      <span class="label" id="balcal-phase-text">phase: —</span>
-    </div>
-    <div class="row">
-      <span class="label">即時讀數:</span>
-      <span class="label">IMU roll:</span>
-      <span class="hl" id="balcal-roll">— °</span>
-      <span class="label">／ L:</span>
-      <span class="hl" id="balcal-tension-l">— kg</span>
-      <span class="label">／ R:</span>
-      <span class="hl" id="balcal-tension-r">— kg</span>
-      <span class="label">／ iter:</span>
-      <span class="hl" id="balcal-iter">—</span>
-    </div>
-    <div class="row" id="balcal-awaiting-banner" style="display:none;">
-      <span class="label" style="color:#ff5e5e;font-weight:bold;">
-        ⚠ 校正已收斂 — 請按 <span style="color:#5eff7a">RECORD</span> 保存或
-        <span style="color:#ff5e5e">ABORT</span> 取消，才能執行其他動作
-      </span>
-    </div>
-    <div class="row">
-      <button id="btn-balcal-start" class="danger">▶ START CALIBRATION (跑 Phase 1-4)</button>
-      <button id="btn-balcal-record">💾 RECORD ΔL (Phase 5)</button>
-      <button id="btn-balcal-abort" class="danger">⛔ ABORT</button>
-    </div>
-    <div class="row">
-      <span class="label">上次校正結果:</span>
-      <span class="hl" id="balcal-last-offset">— cm</span>
-      <span class="label" id="balcal-last-time"></span>
-    </div>
-    <ul class="hint">
-      <li>收斂門檻 |roll| &lt; 0.5°；watchdog: 張力&lt;30kg 或 roll&gt;15° 立即 abort</li>
-      <li>校正完後機體純鋼索吊，需手動 ATTACH 重新吸牆</li>
-    </ul>
-  </section>
-
-  <section class="panel panel-washrobot" data-page="home">
-    <h2>🎥 窗框避障 (camera obstacle detect)</h2>
-    <ul class="hint">
-      <li>底部相機偵測窗框，動態調 step_cm；OFF=不影響現有流程</li>
-    </ul>
-    <div class="row">
-      <span class="label">avoidance 驅動狀態:</span>
-      <span class="link-badge" id="obstacle-link-badge">? unknown</span>
-    </div>
-    <div class="row">
-      <span class="label">啟用窗框避障:</span>
-      <button data-tgt="washrobot" data-cmd="obstacle_detect on">avoidance ON</button>
-      <button data-tgt="washrobot" data-cmd="obstacle_detect off">avoidance OFF</button>
-      <span class="label" id="obstacle-detect-status">(currently: ?)</span>
-    </div>
-    <ul class="hint">
-      <li>⚠ FrameAnalyzer 未整合，目前 ON 只是 flag — 無實際偵測</li>
     </ul>
   </section>
 
@@ -574,14 +419,27 @@
       <input type="number" id="crane-hold-hz-input" value="10" step="0.5" min="0.5" max="50">
       <span class="label">Hz （目前:</span> <span id="crane-hold-hz-current" class="hl">?</span> <span class="label">）　</span>
       <span class="label">自動 motion</span>
-      <input type="number" id="crane-motion-hz-input" value="10" step="0.5" min="0.5" max="50">
+      <input type="number" id="crane-motion-hz-input" value="15" step="0.5" min="0.5" max="50">
       <span class="label">Hz （目前:</span> <span id="crane-motion-hz-current" class="hl">?</span> <span class="label">）　</span>
       <span class="label">中間絞盤</span>
       <input type="number" id="crane-middle-hz-input" value="10" step="0.5" min="0.5" max="50">
       <span class="label">Hz （目前:</span> <span id="crane-middle-hz-current" class="hl">?</span> <span class="label">）</span>
     </div>
+    <div class="row">
+      <span class="label">計米器微調-衝刺</span>
+      <input type="number" id="crane-kick-hz-input" value="20" step="0.5" min="0.5" max="50">
+      <span class="label">Hz （目前:</span> <span id="crane-kick-hz-current" class="hl">?</span> <span class="label">）　</span>
+      <span class="label">計米器微調-精調</span>
+      <input type="number" id="crane-fine-adjust-hz-input" value="10" step="0.5" min="0.5" max="50">
+      <span class="label">Hz （目前:</span> <span id="crane-fine-adjust-hz-current" class="hl">?</span> <span class="label">）　</span>
+      <span class="label">IMU 微調（同步走法）</span>
+      <input type="number" id="crane-roll-correct-hz-input" value="5" step="0.5" min="0.5" max="50">
+      <span class="label">Hz （目前:</span> <span id="crane-roll-correct-hz-current" class="hl">?</span> <span class="label">）</span>
+    </div>
     <ul class="hint">
       <li>hold = ↑/↓ 按住按鈕；motion = pay_out/retract cm；中間絞盤 = CLV900</li>
+      <li>計米器微調分兩段：落後距離 ≥15cm 先用「衝刺」速度衝 500ms（這段是盲衝、中途不檢查位置——偶爾沒對平多半是這段太快造成的，建議先調低這個），再降到「精調」速度邊走邊檢查收斂</li>
+      <li>IMU 微調 = 同步步伐（step_down_sync/up_sync/run...sync）的差動抓平速度（roll_correct），跟上面「自動 motion」分開調，不會互相影響</li>
       <li>輸入後 200ms 自動送，下個 motor-start 才生效（運轉中不會即時改）</li>
     </ul>
     <div class="row">
@@ -619,6 +477,195 @@
     </div>
   </section>
 
+  <section class="panel panel-washrobot" data-page="manual">
+    <h2>manual — pusher</h2>
+    <div class="row">
+      <span class="label">feet:</span>
+      <button data-tgt="washrobot" data-cmd="pusher feet extend">EXTEND</button>
+      <button data-tgt="washrobot" data-cmd="pusher feet retract">RETRACT</button>
+    </div>
+    <div class="row">
+      <span class="label">right:</span>
+      <button data-tgt="washrobot" data-cmd="pusher right extend">EXTEND</button>
+      <button data-tgt="washrobot" data-cmd="pusher right retract">RETRACT</button>
+    </div>
+    <div class="row">
+      <span class="label">left:</span>
+      <button data-tgt="washrobot" data-cmd="pusher left extend">EXTEND</button>
+      <button data-tgt="washrobot" data-cmd="pusher left retract">RETRACT</button>
+    </div>
+    <div class="row">
+      <span class="label">single slave:</span>
+      <select id="zdt-slave-select">
+        <option value="1">1 (右上 / RF1)</option>
+        <option value="2">2 (右下 / RF2)</option>
+        <option value="3">3 (左上 / LF1)</option>
+        <option value="4">4 (左下 / LF2)</option>
+      </select>
+      <button id="btn-zdt-extend">EXTEND</button>
+      <button id="btn-zdt-retract">RETRACT</button>
+    </div>
+    <div class="row">
+      <span class="label">zero（當前位置 = 0）:</span>
+      <button data-tgt="washrobot" data-cmd="zdt_zero right">right</button>
+      <button data-tgt="washrobot" data-cmd="zdt_zero left">left</button>
+      <button data-tgt="washrobot" data-cmd="zdt_zero all">all</button>
+    </div>
+    <ul class="hint">
+      <li>set_zero 必須在 pusher 完全縮回時按，否則後續 abs 0 不會回真實底</li>
+    </ul>
+  </section>
+
+  <!-- [v2 2026-07-08] manual — wheels + DM2J group sync panels removed
+       (DM2J feet/wheel rails retired; wheels/wheels_attached/move/dm2j_group/
+       dm2j_zero all return ERR removed_in_v2). -->
+
+  <section class="panel panel-arm" data-page="manual">
+    <h2>🦾 清潔手臂 (cleaning arm)</h2>
+    <ul class="hint">
+      <li>PARK / STATUS / DEPLOY 直連 motor_api (:9527)，washrobot 沒跑也能用</li>
+      <li>INIT（直連）— 只做手臂本身的校正，單獨測手臂時用這顆</li>
+      <li>INIT（經 washrobot）— 同時標記 arm_calibrated，之後要跑 sweep / 自動流程必須用這顆，否則 sweep 會被擋下來</li>
+    </ul>
+    <div class="row">
+      <button data-tgt="arm" data-cmd="INIT">INIT（直連 · 單獨測手臂）</button>
+      <button data-tgt="washrobot" data-cmd="arm_init">INIT（經 washrobot · 標記 arm_calibrated）</button>
+    </div>
+    <div class="row">
+      <button data-tgt="arm" data-cmd="PARK">PARK（歸位 + disable）</button>
+      <button data-tgt="arm" data-cmd="STATUS">STATUS</button>
+    </div>
+    <div class="row">
+      <span class="label">DEPLOY：牆距</span>
+      <input type="number" id="arm-wall-mm" value="300" min="1" step="10">
+      <span class="label">mm　／　工具頭</span>
+      <select id="arm-slot">
+        <option value="LEFT">LEFT</option>
+        <option value="CENTER" selected>CENTER</option>
+        <option value="RIGHT">RIGHT</option>
+      </select>
+      <button id="btn-arm-deploy">DEPLOY</button>
+    </div>
+    <ul class="hint">
+      <li>⚠ INIT 時請遠離（工具頭校正力道大）</li>
+    </ul>
+  </section>
+
+  <section class="panel panel-washrobot" data-page="home">
+    <h2>🦾🚿 arm 整合操作 (washrobot 編排)</h2>
+    <ul class="hint">
+      <li>由 washrobot 編排：水/刷/滑台 + arm 連動，需 washrobot + arm 都連線</li>
+    </ul>
+    <div class="row">
+      <span class="label">arm 驅動狀態:</span>
+      <span class="link-badge" id="arm-link-badge">? unknown</span>
+    </div>
+    <div class="row">
+      <span class="label">washrobot 是否驅動 arm:</span>
+      <button data-tgt="washrobot" data-cmd="arm_attached on">attached ON</button>
+      <button data-tgt="washrobot" data-cmd="arm_attached off">attached OFF</button>
+      <span class="label" id="arm-attached-status">(currently: ?)</span>
+    </div>
+    <ul class="hint">
+      <li>OFF = arm_cmd_ no-op（bench 沒裝 arm 或 motor_api 沒跑）</li>
+    </ul>
+    <div class="row">
+      <button data-tgt="washrobot" data-cmd="arm_init" class="arm-action">INIT（啟動 + 工具頭校正 + 標記 arm_calibrated）</button>
+    </div>
+    <ul class="hint">
+      <li>⚠ INIT 時請遠離，會設 arm_calibrated_ flag 後 sweep 才跳過 ENABLE</li>
+    </ul>
+    <hr>
+    <div class="row">
+      <span class="label">🧽 清潔 sweep：牆距</span>
+      <input type="number" id="arm-clean-wall-mm" value="300" min="1" step="10">
+      <span class="label">mm　／　回合數</span>
+      <input type="number" id="arm-clean-rounds" value="1" min="1" max="20" step="1">
+      <button id="btn-arm-clean-sweep" class="danger arm-action">CLEAN SWEEP（補水→INIT→滾筒+刮刀）</button>
+    </div>
+    <ul class="hint">
+      <li>流程：A 補水 → B arm INIT → C × N rounds（LEFT 滾筒+水 → RIGHT 刮刀乾）→ D cleanup</li>
+      <li>任何 abort / fail 都會跑 cleanup (PARK + 刷/泵/球閥 OFF)</li>
+    </ul>
+  </section>
+
+  <section class="panel panel-washrobot" data-page="home">
+    <h2>⚖️ 重心校正 (balance calibration)</h2>
+    <ul class="hint">
+      <li>釋放所有 cup → 純鋼索吊 → IMU roll 自動歸零。⚠ 第一次校正建議離地 ≤50cm</li>
+      <li>校正完只記錄 ΔL，不自動 attach</li>
+    </ul>
+    <div class="row">
+      <span class="label">狀態:</span>
+      <span class="link-badge" id="balcal-state-badge">⚪ idle</span>
+      <span class="label" id="balcal-phase-text">phase: —</span>
+    </div>
+    <div class="row">
+      <span class="label">即時讀數:</span>
+      <span class="label">IMU roll:</span>
+      <span class="hl" id="balcal-roll">— °</span>
+      <span class="label">／ L:</span>
+      <span class="hl" id="balcal-tension-l">— kg</span>
+      <span class="label">／ R:</span>
+      <span class="hl" id="balcal-tension-r">— kg</span>
+      <span class="label">／ iter:</span>
+      <span class="hl" id="balcal-iter">—</span>
+    </div>
+    <div class="row" id="balcal-awaiting-banner" style="display:none;">
+      <span class="label" style="color:#ff5e5e;font-weight:bold;">
+        ⚠ 校正已收斂 — 請按 <span style="color:#5eff7a">RECORD</span> 保存或
+        <span style="color:#ff5e5e">ABORT</span> 取消，才能執行其他動作
+      </span>
+    </div>
+    <div class="row">
+      <button id="btn-balcal-start" class="danger">▶ START CALIBRATION (跑 Phase 1-4)</button>
+      <button id="btn-balcal-record">💾 RECORD ΔL (Phase 5)</button>
+      <button id="btn-balcal-abort" class="danger">⛔ ABORT</button>
+    </div>
+    <div class="row">
+      <span class="label">上次校正結果:</span>
+      <span class="hl" id="balcal-last-offset">— cm</span>
+      <span class="label" id="balcal-last-time"></span>
+    </div>
+    <ul class="hint">
+      <li>收斂門檻 |roll| &lt; 0.5°；watchdog: 張力&lt;30kg 或 roll&gt;15° 立即 abort</li>
+      <li>校正完後機體純鋼索吊，需手動 ATTACH 重新吸牆</li>
+    </ul>
+  </section>
+
+  <section class="panel panel-washrobot" data-page="home">
+    <h2>🎥 窗框避障 (camera obstacle detect)</h2>
+    <ul class="hint">
+      <li>底部相機偵測窗框，動態調 step_cm；OFF=不影響現有流程</li>
+    </ul>
+    <div class="row">
+      <span class="label">avoidance 驅動狀態:</span>
+      <span class="link-badge" id="obstacle-link-badge">? unknown</span>
+    </div>
+    <div class="row">
+      <span class="label">啟用窗框避障:</span>
+      <button data-tgt="washrobot" data-cmd="obstacle_detect on">avoidance ON</button>
+      <button data-tgt="washrobot" data-cmd="obstacle_detect off">avoidance OFF</button>
+      <span class="label" id="obstacle-detect-status">(currently: ?)</span>
+    </div>
+    <ul class="hint">
+      <li>⚠ FrameAnalyzer 未整合，目前 ON 只是 flag — 無實際偵測</li>
+    </ul>
+  </section>
+
+  <!-- [2026-07-20] D435i depth-camera continuous obstacle-avoid walk -->
+  <section class="panel panel-depth-avoid" data-page="home">
+    <h2>📷 AUTO RUN - 深度相機避障行走 (D435i)</h2>
+    <ul class="hint">
+      <li>持續往下走，每走一步偵測完跳出結果，由你決定是否繼續、要走多長</li>
+      <li>第一步固定走 5cm（還沒有前一步的照片可比對）</li>
+      <li>候選物高度超過 10cm 時，彈窗會多附上偵測截圖</li>
+    </ul>
+    <div class="row">
+      <button id="btn-run-depth-avoid" class="primary">開始持續避障行走</button>
+    </div>
+  </section>
+
   <section class="panel panel-emergency" data-page="home">
     <h2>🆘 緊急收繩（救援模式）</h2>
     <ul class="hint">
@@ -627,42 +674,13 @@
     <button id="btn-emergency" class="btn-emergency" data-required="vfd_left,vfd_right">🆘 按住收繩</button>
   </section>
 
-  <section class="panel panel-easy_crane" data-page="manual">
-    <h2>easy crane（獨立簡易吊車）</h2>
-    <div class="row">
-      <span class="label">重量:</span>
-      <span id="easy-weight" class="hl">?</span>
-      <span class="label">kg</span>
-      <button data-tgt="easy_crane" data-cmd="status">refresh</button>
-      <button class="danger" data-tgt="easy_crane" data-cmd="stop">STOP</button>
-    </div>
-    <div class="row">
-      <span class="label">收繩停止門檻:</span>
-      <input type="number" id="easy-up-stop-input" value="-20" step="0.5">
-      <span class="label">kg</span>
-      <span class="label">（目前:</span>
-      <span id="easy-up-stop-current" class="hl">?</span>
-      <span class="label">kg）</span>
-    </div>
-    <div class="row">
-      <button id="btn-easy-up"   class="btn-hold primary">↑ 拉繩（按住）</button>
-      <button id="btn-easy-down" class="btn-hold primary">↓ 釋放繩（按住）</button>
-    </div>
-    <div class="row">
-      <button id="btn-easy-auto" class="btn-auto">🤖 AUTO 拉到上限（點擊）</button>
-    </div>
-    <ul class="hint">
-      <li>↑/↓ 按住拉/放，AUTO 一鍵到門檻自動停</li>
-      <li>DY500 失聯 / 網路 2s 掉線 → 自動停所有動作</li>
-    </ul>
-  </section>
-
   <section class="panel panel-raw" data-page="home">
     <h2>raw command</h2>
     <div class="row">
       <select id="raw-tgt">
         <option value="washrobot">washrobot</option>
         <option value="crane">crane</option>
+        <option value="arm">arm</option>
       </select>
       <input type="text" id="raw-cmd" placeholder="type command, Enter to send">
       <button id="btn-raw">send</button>
@@ -705,6 +723,30 @@
           <button id="cam2-snap"    class="cam-btn">📸 截圖</button>
           <button id="cam2-reload"  class="cam-btn" title="重新載入串流">↻ 重連</button>
           <span id="cam2-status" class="cam-status">streaming</span>
+        </div>
+      </div>
+      <!-- D435i 深度攝影機（辨識避障用）— 不常駐拉流，按「拍照」才取一張目前畫面 -->
+      <div class="cam-cell" data-cam-id="depth">
+        <div class="cam-cell-head">深度攝影機 D435i — 辨識避障用</div>
+        <div class="cam-stage-label">全彩</div>
+        <div class="cam-stage">
+          <img id="depth-stream" class="cam-video" alt="depth camera color snapshot" style="display:none;">
+          <div class="cam-overlay-offline placeholder visible" id="depth-placeholder">
+            <span>尚未拍照</span>
+            <small>按下方「📸 拍照」取得目前畫面</small>
+          </div>
+        </div>
+        <div class="cam-stage-label">深度圖（近-遠著色）</div>
+        <div class="cam-stage">
+          <img id="depth-stream-map" class="cam-video" alt="depth map snapshot" style="display:none;">
+          <div class="cam-overlay-offline placeholder visible" id="depth-placeholder-map">
+            <span>尚未拍照</span>
+            <small>按下方「📸 拍照」取得目前畫面</small>
+          </div>
+        </div>
+        <div class="cam-controls">
+          <button id="depth-snap" class="cam-btn">📸 拍照</button>
+          <span id="depth-status" class="cam-status">idle</span>
         </div>
       </div>
     </div>
@@ -830,6 +872,43 @@
     <div class="modal-btns">
       <button id="btn-obstacle-confirm" class="primary">確認往下走</button>
       <button id="btn-obstacle-cancel" class="danger">取消停止</button>
+    </div>
+  </div>
+</div>
+
+<!-- [2026-07-20] run_depth_avoid modal — pops on EVT depth_obstacle_result per step -->
+<!-- [2026-07-21] Always shows BEFORE/AFTER/結果 三張照片（不再只有 big_obstacle 才顯示），
+     方便在 candidates=0（完全沒偵測到）時也能看到相機實際拍到什麼、判斷為什麼認不出來 -->
+<div id="modal-depth-obstacle" class="modal modal-hidden">
+  <div class="modal-content modal-content-wide">
+    <h3>📷 深度相機偵測結果（第 <span id="modal-depth-iter">?</span> 步）</h3>
+    <p>候選物數量：<strong id="modal-depth-candidates" class="hl">?</strong></p>
+    <p>最大高度：<strong id="modal-depth-height" class="hl">?</strong> cm　最大凸出量：<strong id="modal-depth-protrusion" class="hl">?</strong> cm</p>
+    <p>相機到障礙物斜距：<strong id="modal-depth-distance" class="hl">?</strong> cm　機器人前緣尚可安全走：<strong id="modal-depth-remaining" class="hl">?</strong> cm</p>
+    <p id="modal-depth-big-warning" class="warn modal-hidden">⚠ 偵測到高度超過 10cm 的障礙物，請確認下方截圖</p>
+    <p id="modal-depth-cross-notice" class="warn modal-hidden">🧗 偵測到候選物 — 下一步將自動改用「跨障礙物」步伐（一側伸腳 2× 站離牆跨越）</p>
+    <div class="modal-depth-photos">
+      <div class="modal-depth-photo-cell">
+        <div class="modal-depth-photo-label">走之前 BEFORE</div>
+        <img id="modal-depth-photo-before" class="modal-depth-photo" alt="depth camera before this step">
+      </div>
+      <div class="modal-depth-photo-cell">
+        <div class="modal-depth-photo-label">走之後 AFTER（原始）</div>
+        <img id="modal-depth-photo-after" class="modal-depth-photo" alt="depth camera after this step (raw)">
+      </div>
+      <div class="modal-depth-photo-cell">
+        <div class="modal-depth-photo-label">偵測結果（masked depth）</div>
+        <img id="modal-depth-photo-result" class="modal-depth-photo" alt="depth camera detection result">
+      </div>
+    </div>
+    <div class="row">
+      <span class="label">下一步走幾公分：</span>
+      <input type="number" id="modal-depth-step-input" value="30" min="1" max="200" step="1">
+      <span class="label">cm</span>
+    </div>
+    <div class="modal-btns">
+      <button id="btn-depth-continue" class="primary">繼續往下走</button>
+      <button id="btn-depth-stop" class="danger">停止</button>
     </div>
   </div>
 </div>

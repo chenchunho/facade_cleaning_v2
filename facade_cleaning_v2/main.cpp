@@ -5,7 +5,11 @@
 // This file owns only the TCP server and routes incoming commands to robot.cmd_*().
 //
 // Command server @ :5001 (line-based, multi-client):
-//   init / attach / detach / step_down [cm] / step_up [cm] / run <n> [cm] [down|up]
+//   init / attach / detach / step_down [cm] / step_up [cm]
+//   run <n> [cm] [down|up] [alt|sync]   (2026-07-23: 4th arg 選走法，預設 alt=交替，sync=同步)
+//   run_script [up|down] [alt|sync] <csv>   / run_saved <name> [up|down] [alt|sync]
+//     (2026-07-23: gait 同 run；cross 步驟一律走 do_cross_obstacle_，不受 gait 影響)
+//   step_down_sync [cm] / step_up_sync [cm]   (2026-07-22: 4 顆吸盤同時放開/放繩/重伸，非交替步伐)
 //   pause / resume / continue / skip / emergency_stop / reset / recover / realign / ping
 //   vacuum <group> <on|off>   pump <on|off>   pusher <group> <extend|retract>
 //   zdt_pusher <1..9> <extend|retract>     (single-slave manual, GUI 單支按鈕)
@@ -60,6 +64,25 @@ static std::string dispatch(const std::string& line) {
         int cm = 0; iss >> cm;          // optional; 0 = use current step_cm_
         return robot.cmd_step_up(cm);
     }
+    // [2026-07-13 per user] 跨障礙物 — stand legs off wall to 2×preset, cross, realign back.
+    if (cmd == "cross_obstacle_down") {
+        int cm = 0; iss >> cm;
+        return robot.cmd_cross_obstacle_down(cm);
+    }
+    if (cmd == "cross_obstacle_up") {
+        int cm = 0; iss >> cm;
+        return robot.cmd_cross_obstacle_up(cm);
+    }
+    // [2026-07-22 per user] 同步步伐 — 4 顆吸盤同時放開/縮回、吊機兩側同步放繩、
+    // IMU 差動微調、4 顆一起重新伸出。純移動，不含清洗。見 WASH_ROBOT.cpp do_step_sync_。
+    if (cmd == "step_down_sync") {
+        int cm = 0; iss >> cm;
+        return robot.cmd_step_down_sync(cm);
+    }
+    if (cmd == "step_up_sync") {
+        int cm = 0; iss >> cm;
+        return robot.cmd_step_up_sync(cm);
+    }
     if (cmd == "step_up_with_sweep") {
         int cm = 0; iss >> cm;
         return robot.cmd_step_up_with_sweep(cm);
@@ -86,7 +109,7 @@ static std::string dispatch(const std::string& line) {
     if (cmd == "emergency_stop") return robot.cmd_emergency_stop();
     if (cmd == "reset")          return robot.cmd_reset();
     if (cmd == "recover")        return robot.cmd_recover();
-    if (cmd == "realign")        return "ERR removed_in_v2\n";   // [v2] cmd_realign retired
+    if (cmd == "realign")        return robot.cmd_realign();   // [v2 2026-07-08] feet-only sealed retract to preset
     if (cmd == "ping")           return robot.cmd_ping();
     if (cmd == "pause")          return robot.cmd_pause();
     if (cmd == "resume")         return robot.cmd_resume();
@@ -138,6 +161,19 @@ static std::string dispatch(const std::string& line) {
     if (cmd == "balance_calibrate_abort")  return "ERR removed_in_v2\n";
     if (cmd == "balance_calibrate_status") return "ERR removed_in_v2\n";
 
+    // [2026-07-20] D435i depth-camera continuous obstacle-avoid walk (v2 —
+    // new commands, distinct from the retired run_avoid/obstacle_response
+    // above since the reply semantics differ: no action/step_cm suggestion,
+    // pure candidate geometry + user-chosen next step_cm).
+    if (cmd == "run_depth_avoid") return robot.cmd_run_depth_avoid();
+    if (cmd == "depth_avoid_continue") {
+        int cm = 0;
+        iss >> cm;
+        if (iss.fail()) return "ERR usage:depth_avoid_continue_<cm>\n";
+        return robot.cmd_depth_avoid_continue(cm);
+    }
+    if (cmd == "depth_avoid_stop") return robot.cmd_depth_avoid_stop();
+
     // [2026-05-29] Runtime settings (wall-tune) — see WashRobot::Settings struct.
     if (cmd == "get_settings") {
         return robot.cmd_get_settings();
@@ -156,11 +192,13 @@ static std::string dispatch(const std::string& line) {
     if (cmd == "run") {
         int n = 0, cm = 0;
         std::string direction = "down";
+        std::string gait = "alt";       // [2026-07-23] "alt" (交替) | "sync" (同步)
         iss >> n;
-        if (iss.fail()) return "ERR usage:run_<steps>_[cm]_[down|up]\n";
+        if (iss.fail()) return "ERR usage:run_<steps>_[cm]_[down|up]_[alt|sync]\n";
         iss >> cm;                      // optional 2nd arg (default 0 = use step_cm_)
         iss >> direction;               // optional 3rd arg (default "down")
-        return robot.cmd_run(n, cm, direction);
+        iss >> gait;                    // optional 4th arg (default "alt")
+        return robot.cmd_run(n, cm, direction, gait);
     }
     // [2026-06-05] Scripted run — CSV of per-step cm. Fixed down_sweep_af.
     // CSV grammar: <int> | <int>*<count>, comma-separated. e.g. "30*5,20*3".
@@ -171,9 +209,23 @@ static std::string dispatch(const std::string& line) {
         std::getline(iss, csv);
         // Trim leading space left by `iss >> cmd`.
         size_t p = csv.find_first_not_of(" \t");
-        if (p == std::string::npos) return "ERR usage:run_script_<csv>\n";
+        if (p == std::string::npos) return "ERR usage:run_script_[up|down]_[alt|sync]_<csv>\n";
         csv = csv.substr(p);
-        return robot.cmd_run_script(csv);
+        // [2026-07-14 per user] optional leading direction token (up/down); default
+        // down. CSV tokens are numeric so this is unambiguous. Backward-compat:
+        // "run_script <csv>" (no direction) still runs down.
+        bool up = false;
+        if      (csv.rfind("up ", 0)   == 0) { up = true;  csv = csv.substr(3); }
+        else if (csv.rfind("down ", 0) == 0) { up = false; csv = csv.substr(5); }
+        // [2026-07-23 per user] optional leading gait token (alt/sync), same
+        // prefix-strip pattern as direction above; default alt (backward-compat).
+        std::string gait = "alt";
+        if      (csv.rfind("alt ", 0)  == 0) { gait = "alt";  csv = csv.substr(4); }
+        else if (csv.rfind("sync ", 0) == 0) { gait = "sync"; csv = csv.substr(5); }
+        size_t q = csv.find_first_not_of(" \t");
+        if (q == std::string::npos) return "ERR usage:run_script_[up|down]_[alt|sync]_<csv>\n";
+        csv = csv.substr(q);
+        return robot.cmd_run_script(csv, up, gait);
     }
     if (cmd == "save_script") {
         std::string name;
@@ -199,8 +251,25 @@ static std::string dispatch(const std::string& line) {
     }
     if (cmd == "run_saved") {
         std::string name; iss >> name;
-        if (iss.fail() || name.empty()) return "ERR usage:run_saved_<name>\n";
-        return robot.cmd_run_saved(name);
+        if (iss.fail() || name.empty()) return "ERR usage:run_saved_<name>_[up|down]_[alt|sync]\n";
+        std::string dir; iss >> dir;   // [2026-07-14] optional direction, default down
+        std::string gait; iss >> gait; // [2026-07-23] optional gait, default alt
+        if (gait.empty()) gait = "alt";
+        return robot.cmd_run_saved(name, dir == "up", gait);
+    }
+    // [2026-07-09] Follower (2nd-moving leg) leveling mode: imu (IMU fine-level)
+    // or meter (方案B meter-sync, original method). Reported in status follower_mode=.
+    if (cmd == "set_follower_mode") {
+        std::string mode; iss >> mode;
+        if (iss.fail() || mode.empty()) return "ERR usage:set_follower_mode_<imu|meter>\n";
+        return robot.cmd_set_follower_mode(mode);
+    }
+    // [2026-07-09] Which foot leads the first step: left | right. Reported in
+    // status first_step=. Multi-step runs alternate from this seed.
+    if (cmd == "set_first_step") {
+        std::string side; iss >> side;
+        if (iss.fail() || side.empty()) return "ERR usage:set_first_step_<left|right>\n";
+        return robot.cmd_set_first_step(side);
     }
     if (cmd == "vacuum") {
         std::string g, s; iss >> g >> s;

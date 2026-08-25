@@ -125,11 +125,15 @@ void TCP_client::reconnectLoop() {
 			// Reconnect events are operationally critical (every reconnect ~500ms-1s
 			// during which all sendAndReceive calls fail) — log unconditionally so
 			// diagnosis doesn't depend on debug_mode being enabled at startup.
-			std::fprintf(stderr,
-			    "[%s] [WRN] [%s] reconnecting %s:%d ...\n",
-			    ::user_lib_log::now_ts().c_str(),
-			    _log_tag.c_str(),
-			    last_ip.c_str(), last_port);
+			// quiet_reconnect_log_ is a separate, explicit per-instance opt-out
+			// (see header) — not gated by debug_mode.
+			if (!quiet_reconnect_log_) {
+				std::fprintf(stderr,
+				    "[%s] [WRN] [%s] reconnecting %s:%d ...\n",
+				    ::user_lib_log::now_ts().c_str(),
+				    _log_tag.c_str(),
+				    last_ip.c_str(), last_port);
+			}
 			LOG_INF(_log_tag, "Attempting to reconnect...");
 
 			socket_t new_sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -189,10 +193,12 @@ void TCP_client::reconnectLoop() {
 				apply_keepalive(new_sock);
 				sock = new_sock;
 				connected = true;
-				std::fprintf(stderr,
-				    "[%s] [INF] [%s] reconnect success\n",
-				    ::user_lib_log::now_ts().c_str(),
-				    _log_tag.c_str());
+				if (!quiet_reconnect_log_) {
+					std::fprintf(stderr,
+					    "[%s] [INF] [%s] reconnect success\n",
+					    ::user_lib_log::now_ts().c_str(),
+					    _log_tag.c_str());
+				}
 				LOG_INF(_log_tag, "Reconnect success");
 			}
 			else {
@@ -201,10 +207,12 @@ void TCP_client::reconnectLoop() {
 #else
 				::close(new_sock);
 #endif
-				std::fprintf(stderr,
-				    "[%s] [ERR] [%s] reconnect failed (will retry in 500ms)\n",
-				    ::user_lib_log::now_ts().c_str(),
-				    _log_tag.c_str());
+				if (!quiet_reconnect_log_) {
+					std::fprintf(stderr,
+					    "[%s] [ERR] [%s] reconnect failed (will retry in 500ms)\n",
+					    ::user_lib_log::now_ts().c_str(),
+					    _log_tag.c_str());
+				}
 			}
 			}
 		}
@@ -268,7 +276,17 @@ bool TCP_client::sendData(const char* buf, int len, int timeout_ms) {
 #endif
 
 	int result = send(sock, buf, len, 0);
-	if (result > 0) LOG_HEX(_log_tag, "TX", buf, len);
+	if (result > 0) {
+		LOG_HEX(_log_tag, "TX", buf, len);
+	} else {
+		// send() failing (EPIPE/ECONNRESET/...) means the socket is dead, not
+		// just slow. Without this, `connected` stays true forever whenever
+		// available()'s health check doesn't happen to catch the same break
+		// first — reconnectLoop only fires on `!connected`, so a caller-side
+		// send failure must itself demote the flag or the client never
+		// self-heals (see reconnectLoop's design comment above apply_keepalive).
+		connected = false;
+	}
 	return result > 0;
 }
 
@@ -286,7 +304,16 @@ int TCP_client::receiveData(char* buf, int bufSize, int timeout_ms) {
 #endif
 
 	int received = recv(sock, buf, bufSize - 1, 0);
-	if (received <= 0) return (received == 0) ? -1 : 0;
+	if (received <= 0) {
+		// received == 0 is an orderly remote close (real disconnect) — demote
+		// so reconnectLoop notices, same reasoning as sendData() above.
+		// received < 0 here (timeout/EWOULDBLOCK from SO_RCVTIMEO) is just
+		// "no reply yet", normal for a slow device — must NOT mark the
+		// connection dead over that or every timeout would force a needless
+		// reconnect on an otherwise-fine socket.
+		if (received == 0) connected = false;
+		return (received == 0) ? -1 : 0;
+	}
 
 	LOG_HEX(_log_tag, "RX", buf, received);
 	buf[received] = 0;
@@ -340,7 +367,10 @@ int TCP_client::sendAndReceive(const char* tx_buf, int tx_len,
 	setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 #endif
 	int sent = send(sock, tx_buf, tx_len, 0);
-	if (sent <= 0) return 0;
+	if (sent <= 0) {
+		connected = false;   // dead socket, not just slow — see sendData()'s comment
+		return 0;
+	}
 	LOG_HEX(_log_tag, "TX", tx_buf, tx_len);
 
 	// Receive (mutex still held from before the send → atomic transaction)
@@ -352,7 +382,13 @@ int TCP_client::sendAndReceive(const char* tx_buf, int tx_len,
 	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 #endif
 	int received = recv(sock, rx_buf, rx_size - 1, 0);
-	if (received <= 0) return (received == 0) ? -1 : 0;
+	if (received <= 0) {
+		// == 0: orderly remote close, real disconnect. < 0: timeout/EWOULDBLOCK,
+		// just "no reply yet" — see receiveData()'s comment for why only the
+		// former should demote `connected`.
+		if (received == 0) connected = false;
+		return (received == 0) ? -1 : 0;
+	}
 	LOG_HEX(_log_tag, "RX", rx_buf, received);
 	rx_buf[received] = 0;
 	return received;
@@ -374,9 +410,23 @@ int TCP_client::available() {
 	if (err == WSAEWOULDBLOCK) return 0;
 	return -1;
 #else
-	int count = 0;
-	if (ioctl(sock, FIONREAD, &count) < 0) return -1;
-	return count;
+	// MSG_PEEK (not ioctl FIONREAD) so a peer-closed connection (orderly FIN,
+	// recv() returns 0) is actually detected. FIONREAD only reports queued
+	// byte count and reads 0 for "no data yet" and "peer closed, no data"
+	// alike — it never signals the close itself, so reconnectLoop's
+	// `available() < 0` check silently never fired on a clean remote
+	// shutdown and the connection stayed "connected" forever. Mirrors the
+	// Windows branch above.
+	int flags = fcntl(sock, F_GETFL, 0);
+	fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+	char tmp;
+	int r = recv(sock, &tmp, 1, MSG_PEEK);
+	int err = errno;
+	fcntl(sock, F_SETFL, flags);
+	if (r > 0) return 1;
+	if (r == 0) return -1;                                // peer closed
+	if (err == EWOULDBLOCK || err == EAGAIN) return 0;     // no data, still open
+	return -1;
 #endif
 }
 

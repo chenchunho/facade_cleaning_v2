@@ -52,7 +52,10 @@ bool QX_DO24::setChannel(int channel, double duty, int freq, uint16_t control) {
 
 // 1. set duty ratio — supports fractional (3.8 -> 38 = 0x26)
 bool QX_DO24::setPWM_Duty(int channel, double duty_percent) {
-	if (!client || channel < 0 || channel > 23) return false;
+	// ch>3 would write into 0x04+ = channel-1 frequency registers, silently
+	// corrupting frequency instead of failing. QX-DO24 has 4 channels only.
+	if (!client || channel < 0 || channel > 3) return false;
+	if (duty_percent < 0.0 || duty_percent > 100.0) return false;   // reg range 0~1000
 
 	uint16_t val = static_cast<uint16_t>(std::round(duty_percent * 10.0));
 	uint16_t addr = 0x0000 + channel;
@@ -74,12 +77,18 @@ bool QX_DO24::setPWM_Duty(int channel, double duty_percent) {
 //=========== control: PWM Frequency (0x10, 32-bit register write) ===========
 
 bool QX_DO24::setPWM_Freq(int channel, int freq) {
-	if (!client || channel < 0 || channel > 23) return false;
+	if (!client || channel < 0 || channel > 3) return false;
+	if (freq < 1 || freq > 200000) return false;   // manual: 1~200000 Hz
 	uint16_t addr = 0x0004 + (channel * 2);
 
+	// ABCD byte order: reg[addr]=high word, reg[addr+1]=low word. The high word
+	// must carry bits 31..16 — hardcoding it to 0 silently truncated every
+	// frequency above 65535 (e.g. 100000 -> 34464) with no error reported.
 	std::vector<uint8_t> req = {
 		(uint8_t)deviceID, 0x10, (uint8_t)(addr >> 8), (uint8_t)(addr & 0xFF),
-		0x00, 0x02, 0x04, 0x00, 0x00, (uint8_t)(freq >> 8), (uint8_t)(freq & 0xFF)
+		0x00, 0x02, 0x04,
+		(uint8_t)((freq >> 24) & 0xFF), (uint8_t)((freq >> 16) & 0xFF),
+		(uint8_t)((freq >> 8) & 0xFF),  (uint8_t)(freq & 0xFF)
 	};
 	uint16_t crc = modbusCRC(req.data(), (int)req.size());
 	req.push_back(crc & 0xFF); req.push_back(crc >> 8);
@@ -93,7 +102,8 @@ bool QX_DO24::setPWM_Freq(int channel, int freq) {
 //=========== control: PWM Control (0x06) ===========
 
 bool QX_DO24::setPWM_Control(int channel, uint16_t val) {
-	if (!client || channel < 0 || channel > 23) return false;
+	// ch>3 would run past 0x0F into 0x10 = [保存输出] (limited flash write cycles).
+	if (!client || channel < 0 || channel > 3) return false;
 	uint16_t addr = 0x000C + channel;
 
 	std::vector<uint8_t> req = {
@@ -107,6 +117,66 @@ bool QX_DO24::setPWM_Control(int channel, uint16_t val) {
 	return (sendAndReceive(req, res) && res == req);
 }
 
+//=========== control: readback (FC 0x03) ===========
+
+bool QX_DO24::getPWM_Duty(int channel, double& duty_percent) {
+	if (channel < 0 || channel > 3) return false;
+	std::vector<uint16_t> regs;
+	if (!readRegs(0x0000 + channel, 1, regs)) return false;
+	duty_percent = regs[0] / 10.0;
+	return true;
+}
+
+bool QX_DO24::getPWM_Freq(int channel, uint32_t& freq) {
+	if (channel < 0 || channel > 3) return false;
+	std::vector<uint16_t> regs;
+	if (!readRegs(0x0004 + (channel * 2), 2, regs)) return false;
+	freq = (static_cast<uint32_t>(regs[0]) << 16) | regs[1];   // ABCD order, matches setPWM_Freq
+	return true;
+}
+
+bool QX_DO24::getPWM_Control(int channel, uint16_t& val) {
+	if (channel < 0 || channel > 3) return false;
+	std::vector<uint16_t> regs;
+	if (!readRegs(0x000C + channel, 1, regs)) return false;
+	val = regs[0];
+	return true;
+}
+
+bool QX_DO24::getVersion(uint16_t& version) {
+	std::vector<uint16_t> regs;
+	if (!readRegs(0x0022, 1, regs)) return false;
+	version = regs[0];
+	return true;
+}
+
+//=========== utility: read holding registers (FC 0x03) ===========
+
+bool QX_DO24::readRegs(uint16_t addr, uint16_t count, std::vector<uint16_t>& out) {
+	if (!client) return false;
+
+	std::vector<uint8_t> req = {
+		(uint8_t)deviceID, 0x03,
+		(uint8_t)(addr >> 8), (uint8_t)(addr & 0xFF),
+		(uint8_t)(count >> 8), (uint8_t)(count & 0xFF)
+	};
+	uint16_t crc = modbusCRC(req.data(), (int)req.size());
+	req.push_back(crc & 0xFF); req.push_back(crc >> 8);
+
+	std::vector<uint8_t> res;
+	if (!sendAndReceive(req, res)) return false;
+
+	// expect: slave, 0x03, byteCount, data..., crcLo, crcHi
+	size_t expected = 5 + (size_t)count * 2;
+	if (res.size() < expected || res[1] != 0x03 || res[2] != count * 2) return false;
+
+	out.clear();
+	for (uint16_t i = 0; i < count; ++i) {
+		out.push_back((uint16_t)((res[3 + i * 2] << 8) | res[4 + i * 2]));
+	}
+	return true;
+}
+
 //=========== utility: send/receive (500ms window) ===========
 
 bool QX_DO24::sendAndReceive(const std::vector<uint8_t>& request, std::vector<uint8_t>& response) {
@@ -118,7 +188,10 @@ bool QX_DO24::sendAndReceive(const std::vector<uint8_t>& request, std::vector<ui
 
 	response.clear();
 	uint8_t buf[256];
-	size_t expected_len = (request[1] == 0x10) ? 8 : request.size();
+	size_t expected_len;
+	if (request[1] == 0x10)      expected_len = 8;                                             // write-multi fixed reply
+	else if (request[1] == 0x03) expected_len = 5 + ((request[4] << 8) | request[5]) * 2;       // read reply: hdr+data+crc
+	else                          expected_len = request.size();                                // write-single: echo
 	auto start = std::chrono::steady_clock::now();
 
 	while (true) {

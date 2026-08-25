@@ -1,5 +1,125 @@
 # Work Log
 
+## 2026-08-17 — 新增操作說明：M2（工具頭馬達）重裝後的校正流程
+
+> **規範權威：** `.claude/changelog.md` 2026-08-14a（手動量測 + `SET_HALF_RANGE`）/ 2026-08-14b（`lr_calibrated` flag）/ 2026-08-14c（`lr_half_range` 預設值 0.7275）；程式位置 `cleaning_arm/main_api.h:225-251`、`cleaning_arm/main_api.cpp:1992-2028`。這塊目前沒有獨立規格文件，權威就是原始碼本身 + 上述 changelog 條目。
+
+### 背景
+
+比對舊版（`D:\洗窗戶機器人\cleaning_arm`）跟現行版手臂控制邏輯時，使用者問「馬達重新旋轉安裝過，是不是要重新找 M2 位置」，追出 M1/M2 在這件事上行為不一樣：
+
+- **M1：不用擔心。** `cmd_init_sequence()`（main_api.cpp:1992）每次 INIT 都無條件重跑 `calibrate_arm_slot(m1_)`（往負方向頂機械停點、重設零點），不管怎麼拆裝，每次 INIT 都是現場重新量。
+- **M2：有風險，不會自動抓到。** `lr_half_range=0.7275`（main_api.h:241）是寫死常數、`lr_calibrated` 預設 `true`（信任舊值）。INIT 只有在 `|M2 位置| > 1.5 rad`（main_api.cpp:1997-2017，防的是程式當機後回報離譜殘值）才會強制歸零重新校正；只要重裝後讀到的位置還落在 ±1.5 rad 內，INIT 會直接信任舊零點+舊 half_range 移到它以為的「CENTER」——**這不會報錯，是靜默移到錯的位置。**
+
+零點本身是用 CAN 指令 `0xFE`（`set_zero_position`）寫進 damiao 馬達內部，重開機/重啟程式都還在，所以問題不是「零點會不會消失」，是「零點還對不對得上新的實體安裝角度」。
+
+### M2 重裝後的校正步驟（手動流程，目前唯一可靠路徑；`LR_CALIBRATE` 自動雙向尋邊仍不穩定，見上述 changelog）
+
+1. `M2 DISABLE`（卸力，可徒手轉動）
+2. 手動把工具頭轉到真實物理正中間
+3. `M2 MIT 0 0 0 0 0`（zero kp/kd，刷新 `Get_Position()` 的被動快取——`DISABLE` 不會像 `ENABLE` 一樣補送 MIT frame 刷新，直接 `STATUS` 會讀到轉動前的舊值）
+4. 在物理正中間位置下 `M2 ZERO`（設新零點）
+5. 手動轉到 LEFT / RIGHT 兩側極限，各自 `M2 MIT 0 0 0 0 0` + `STATUS` 量出 `CENTER→LEFT` 與 `CENTER→RIGHT` 的距離
+6. 取兩者**較小值**當 half_range（較大值會讓另一側只剩極小緩衝、太貼近硬停點，風險高）
+7. `M2 SET_HALF_RANGE <算出來的較小值>`（同時把 `lr_calibrated` 設為 `true`，往後 INIT 才會信任這組新值）
+
+### 待確認 / 尚未處理
+
+- 沒有機制會自動偵測「M2 被重新安裝過」——上述步驟完全靠人記得去做，重裝後如果忘記走這流程、且重裝後讀到的位置剛好落在 ±1.5 rad 內，系統不會有任何警告。
+- `LR_CALIBRATE` 自動兩邊尋邊本身仍不可靠（假觸發撞牆、或衝很大距離都撞不到東西），還沒修，手動流程是目前建議路徑。
+
+## 2026-07-22~23 — 📌 depth camera 窗框辨識：從「完全測不到」到「距離算對」的整趟除錯（下次接手讀這條）
+
+> **規範權威：** `.claude/changelog.md` 2026-07-21e ~ 2026-07-23f 一大串條目（逐筆有檔案+行為說明，這節只整理「現在到哪、還缺什麼」）。
+
+### 這兩天的除錯順序（用真實 bench log 一路追出來的，不是憑空猜參數）
+
+實機 bench 場景：木板架在**鏡子反射**的雜亂工作室前（模擬真實玻璃帷幕的鏡面反光情境，這是刻意選的測試條件，user 的目標本來就是鏡面反光跟一般窗戶都要能處理）。
+
+1. **完全偵測不到（candidates=0，無 log）** → depth_cam_service.py 沒被啟動（scripts/wr.sh 沒接這支服務）
+2. **`protrusion std` 爆炸** → bbox 重新取樣漏掉距離門檻，遠處反光雜訊污染近物凸出量統計 → 修
+3. **背景平面把木板自己拉平（凸出量≈0）** → 鏡面場景下畫面裡「近距離+有效」的像素幾乎全是木板本身，沒有獨立背景可擬合 → 加兩階段重擬合（`fit_plane_two_pass`），但這個場景仍常常沒有足夠背景點
+4. **關鍵設計轉向**：user 明確表態「最主要需要距離（算下一步步伐），凸出量次要」→ 候選物判準整個改成**距離+形狀為主**，背景平面擬合失敗不再等於偵測失敗（退回純距離+形狀判斷）
+5. **雜物被誤判成候選物** → 加「只留最寬」過濾（window sill 本來就該是畫面最寬的水平特徵）
+6. **距離被不相干的 rejected 小碎片搶走** → `min_distance_cm` 改成有候選物就一定用候選物自己的距離
+7. **`remaining_travel_cm` 系統性高估**（user 現場皮尺量測跟算出來的差 10cm）→ 追出 `near_m`（候選框內最近像素）不保證落在畫面正中央，偏心像素被公式誤當成「往前距離」→ 改用 `center_distance_m`（畫面水平中心窄帶內最近距離）
+8. **修完中心點問題後，數字還是差很多**（算出 19.8cm，實測 3~4cm）→ 回推發現是安裝幾何常數本身錯了：`DEPTH_CAM_LEAD_OFFSET_CM` 應該是 32cm 不是 16cm（原本可能量到機身中間某個點，不是真正吸盤前緣），`DEPTH_CAM_STANDOFF_CM` 也更新成 56cm（原 50cm）——user 重新量測後確認
+
+### 順便做的兩個功能
+
+- **跨越障礙物步幅建議**：`remaining_travel_cm < DEPTH_AVOID_LOW_CLEARANCE_CM(20cm)` 時，GUI「下一步走幾公分」預設值自動算成 `remaining + max_height + 吸盤直徑20cm + 緩衝5cm`（user 提供公式），夾到 `STEP_CM_MAX`。只改預設值，2026-07-20 原設計「使用者每次自己決定」沒變
+- **Camera 頁面「拍照」按鈕**：同時顯示全彩 + 深度圖兩張，独立於 BEFORE/AFTER 分析週期（`/snap/depth_live` + `/snap/depth_live_depth`）
+
+### 意外撈到的獨立 bug（跟窗框辨識無關，但影響全專案）
+
+`user_lib/TCP_client.cpp`：Linux 上 `available()` 用 `ioctl FIONREAD` 偵測不到對方正常關閉連線，`sendData`/`receiveData` 失敗時也不會把 `connected` 設回 false——導致連線斷了以後 `reconnectLoop()` 永遠不會觸發重連，client 卡死在假的「已連線」狀態。已修（改用 `recv(MSG_PEEK)` 比照 Windows 分支），**影響所有用 `TCP_client` 的裝置**，不只 depth cam。
+
+### ⚠ 還沒做完、下次要接的
+
+- **這兩天全部改動都還沒編譯驗證**（本機無法 remote build）：`user_lib/TCP_client.cpp`、`user_lib/WASH_ROBOT.h/.cpp`（含這次更新的安裝幾何常數）都要重新編譯 `facade_cleaning_v2` 才會生效
+- **`remaining_travel_cm` 修完新常數（32cm/56cm）後，還沒實機重新驗證過**——上次驗證的 3~4cm 案例是用來反推常數的，還沒有拿修正後的常數重新測一輪、確認算出來的數字跟皮尺一致
+- **跨越障礙物步幅建議公式（remaining+height+20+5）本身還沒實機測試過**——只驗證過算式邏輯，沒驗證過「照這個步幅走，機器人是不是真的能安全跨過去」
+- **一般（非鏡面）窗戶場景還沒測過**——這兩天全部驗證都是鏡面反光場景，「只留最寬候選物」「距離優先」這些新邏輯在乾淨背景場景下的行為還沒確認過，理論上不會變差但沒有實機證據
+- **`frame_capture/depth_cam_service.py`、`depth_reflection_bench.py`、`depth_cam_test_client.py` 三個檔案都還是 git untracked**，這批修改都沒進版控，換人接手前記得先 commit 這幾個檔案
+
+## 2026-07-23 — 修 step_down_sync 真空判準（過嚴，已對齊「每側 ≥1」慣例）
+
+> **規範權威：** `.claude/changelog.md` 2026-07-23 條目。
+
+user 實機測 `step_down_sync` 回報 `partial_seal count=2` 卻直接進了 `State::Error`（log 顯示其實左右各有 1 顆吸住，照 v2 既有「每側 ≥1 算過」慣例不該進 Error）。追出是 2026-07-22 新增 `do_step_sync_` 時，最終真空判準誤寫成「4 顆全吸」而非既有的 `group_seal_ok_`「每側 ≥1」規則——已修正，改成只有整側全掉才判失敗。`recover` 那邊回的 `ERR recover_vacuum_fail` 是另一個獨立、刻意設計成嚴格的既有函式（`cmd_recover`，2026-06-02 決策），沒有動它。
+
+**⚠ 還沒做完：** 這批修改連同 2026-07-22 的同步步伐一起，完全未編譯驗證（本機無法 remote build）。部署後除了原本要測的方向/收斂，還要確認這次修的 partial-seal 判準真的會正常回 OK 而不是進 Error。
+
+## 2026-07-22 — 新增同步步伐（step_down_sync/step_up_sync）
+
+> **規範權威：** `.claude/motion_flow.md` §4b「同步步伐」+ `.claude/changelog.md` 2026-07-22e 條目。
+
+### 這次做了什麼
+新增一組跟現有 `step_down`/`step_up`（交替式 inchworm 走法）並行的新走路方式：`step_down_sync <cm>` / `step_up_sync <cm>`。流程是 4 顆吸盤同時解真空縮腳 → 吊機兩側同步放/收繩 → IMU 差動微調水平 → 4 顆同時重新吸附，不含清洗。
+
+**⚠ 重要安全性質變動，下次接手務必先讀：** 這是本專案第一個「重複執行、且會讓 4 顆吸盤同時全部放開」的走法。現有所有其他重複走法（`do_step_down_`/`do_step_up_`/`do_cross_obstacle_`）都保持「至少一側 ≥1 顆吸盤黏牆」當防墜落錨點；這個新走法在吊機放繩期間**完全靠鋼索承重，沒有任何吸盤錨定**。**這是使用者明確確認過的刻意設計**（2026-07-21/22 對話），不是疏漏——但任何人之後要改這塊邏輯，務必記得這個前提已經跟其他所有走法不一樣，不要假設「至少一側黏牆」這個 v2 一路以來的不變式在這裡也成立。
+
+IMU 微調用的是「雙邊差動」（兩側繩子同時反向調），呼叫 crane 端既有的 `roll_correct <delta_cm>` 指令——這條指令本來就存在且是活的（只是 WASH_ROBOT.cpp 這邊呼叫它的 v1 舊 code `do_phase5_roll_correct_` 被 retired 了，這次是重新用 v2 的方式呼叫，沒有復用那段舊 code 本身，因為它綁定了 v2 已經沒有的 body/center valve）。
+
+### ⚠ 還沒做完、下次要接的
+- **完全未編譯驗證**（本機無法 remote build）——`user_lib/WASH_ROBOT.h/.cpp`、`facade_cleaning_v2/main.cpp`、`web_backend/public/*` 都是本機未 commit 的修改
+- **IMU 差動微調的方向還沒實機驗證**——sign convention 是照抄 `follower_imu_level_`（單邊微調）的既有邏輯推算出來的「兩側同時反向」版本，還沒實際測過方向是否真的抓平，第一次上機建議先在小角度、有人在旁邊看著的情況下測
+- **沒有做角度限制的地面淨空檢查**——目前這個新指令跟 Phase 4 一樣完全信任使用者輸入的 cm，沒有額外檢查「這一步放繩期間附近是否有已知障礙物」，跟 depth camera 避障是分開的兩件事，沒有整合
+
+## 2026-07-21 — depth camera 上線除錯 + TCP_client 殭屍連線 bug 修復
+
+> **規範權威：** `.claude/changelog.md` 2026-07-21 / 2026-07-21b 兩筆條目。
+
+### 這次 session 做了什麼
+
+1. **depth_cam_service.py 沒被啟動** — `run_depth_avoid` 按下去秒失敗在 `before_capture_failed`（空訊息），追出 `scripts/wr.sh` 從沒開過 `depth_cam_service.py` 這個 window（新檔案，未接進腳本）。已補上 `depth` window（`scripts/wr.sh`），cam1/cam2 暫時沒實體攝影機先註解掉。
+2. **Camera 頁面「拍照」按鈕永遠 offline** — 追出 `/snap/depth` 是「上一次 run_depth_avoid AFTER 分析結果圖」，服務剛啟動、從沒跑過 BEFORE/AFTER 時 buffer 是空的、回 503。已加獨立的 `/snap/depth_live`（即時原始畫面，不需要先跑分析）：`depth_cam_service.py` 新增 endpoint、`server.js` CAMERAS 加 `depth_live`、`app.js` 拍照按鈕改打新 endpoint。
+3. **`unknown_cam`** — web_backend 沒重啟，還在跑改動前的 `server.js`（純部署问题，非程式 bug）。
+4. **真正的根因（TCP_client 層級 bug）**：即使 depth_cam_service.py 確認活著、`run_depth_avoid` 還是一直 `send fail`，且主程式完全沒印 reconnect 訊息。追到 `user_lib/TCP_client.cpp` 的 `available()` 在 Linux 上用 `ioctl FIONREAD`，偵測不到對方正常關閉連線；`sendData`/`receiveData`/`sendAndReceive` 失敗時也不會把 `connected` 設回 `false`。兩者疊加造成連線斷了以後 `reconnectLoop()` 永遠不會觸發、client 卡死在假的「已連線」狀態，只能重開主程式。**已修**（詳見 changelog 2026-07-21b），影響所有用 `TCP_client` 的裝置連線，不只 depth cam。
+
+### ⚠ 還沒做完、下次要接的
+
+- **TCP_client 這批修改全部未編譯驗證**（本機無法 remote build），部署到 Pi 後要重跑一次 `run_depth_avoid` 確認真的恢復自癒（不需要再手動重開主程式）
+- cam1/cam2 目前在 `scripts/wr.sh` 裡是註解掉的狀態，之後攝影機接回去記得取消註解（腳本裡有留位置跟說明）
+
+## 2026-07-15 — 📌 crane 通訊/傾斜/退繩三個實機事故的除錯與修復（下次接手讀這條）
+
+> **規範權威：** `.claude/changelog.md` 2026-07-15b~f 六筆條目（逐筆有檔案+行為說明）；本節只整理「現在進度到哪、還缺什麼」。
+
+### 這次 session 做了什麼（起因都是 user 回報的實機現象）
+
+1. **吊機通訊頻繁 PAUSE-ON-ERROR + 快速重試** → 追出 client timeout 太短會強制斷線重送、且 `cmd_side_measured` 沒有 `motion_mtx` 保護會被重複驅動 → 已補鎖 + 補 log（changelog 07-15b）
+2. **傾斜 49.6° 觸發 IMU 緊急停** → 追出 corrupted meter 讀數（3.36941e+07）沒做 sanity check，讓方向判斷反過來 → 已加範圍檢查（changelog 07-15c）；`crane_abs_target_cmd_` 的方向/target 公式本身有回推驗算過，是對的
+3. **退繩比原位還低** → 追出退繩重試預算用固定 `step` 而非「這側實際前進量」→ 已改用 `out_mv_cm`（changelog 07-15f）
+4. **順手做的功能需求**：feet top-up 改背景執行、換邊不等它（changelog 07-15e）；首頁吊機面板搬到 IMU 下面（changelog 07-15d）
+
+### ⚠ 還沒做完、下次要接的
+
+- **`abort_flag` 沒有在 `cmd_side_measured` 進入時重置**（`Crane_control_PI/main.cpp`）——已經跟 user 討論出修法（補一行 `abort_flag = false;`，仿照 `motion_rope`/`cmd_roll_correct`），**但還沒實際套用**。症狀：吊機被 stop 過一次之後，所有 v2 step 指令永遠秒回 `ERR aborted`，只能重開吊機程式。詳見 changelog 07-15b 的「待辦」段。
+- **左/右 follower 移動時 IMU 沒對平** — user 回報過，懷疑是 `follower_use_imu_` 被切到 `meter` 模式（該欄位在 `status` 指令的 `follower_mode=` 顯示）。**還沒確認實際值**，也還沒改任何程式碼。
+- **`.vcxproj.user`（`facade_cleaning_v2/`、`Linux_test/`）被 git 追蹤，導致不同人/不同 bench 網路的 Remote Target 互相覆蓋**，這次 user 編譯時遇到 Connection Manager 遠端主機顯示空白就是這個原因。已建議 `git rm --cached` + 加 `.gitignore`，**user 尚未回覆是否要做**。
+- **全部改動都還沒編譯驗證**（remote build，本機編不了）——`user_lib/WASH_ROBOT.h/.cpp`、`Crane_control_PI/main.cpp`、`web_backend/public/index.html` 都是本機未 commit 的修改。
+
 ## 2026-07-07 — 📌 v2 SESSION HANDOFF（下次接手讀這條）
 
 > **規範權威：** `.claude/v2_app_redesign_plan.md`（應用層重寫）+ `.claude/mh300_migration_plan.md`（吊機變頻器）+ memory `project_v2_mechanical_gait` / `project_new_crane_vfd_mh300`

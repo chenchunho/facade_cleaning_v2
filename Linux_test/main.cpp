@@ -16,6 +16,8 @@
 #include "SD76_length_meters.h"
 #include "ZS_DIO_R_RLY.h"
 #include "SE3_inverter.h"
+#include "MH300_inverter.h"
+#include "QX_DO24.h"
 #include "TCP_client.h"
 
 #include <iostream>
@@ -535,17 +537,20 @@ static void test_pqw() {
         cli.close(); return;
     }
 
-    bool state[9] = {false};   // index 1..8
+    bool state[17] = {false};   // index 1..16 (2026-07-23 per user: 8→16, PQW_IO_16O_RLY / controlRelay itself already allows 1..16)
 
-    cout << "\nPQW " << slave << " (8CH) — washrobot channel map:\n"
-         << "  CH1: dp0105 真空泵浦 (shared, 9 cups)\n"
-         << "  CH2: VT307 腳組電磁閥\n"
-         << "  CH3: VT307 身體組電磁閥\n"
-         << "  CH4: VT307 中心電磁閥\n"
+    // 2026-07-23 per user: 對齊 WASH_ROBOT.h 目前實際的 v2 4-cup channel map
+    // (2026-07-07 rewiring)。舊 v1 三分區(腳組/身體組/中心)已退役。
+    cout << "\nPQW " << slave << " (8CH) — washrobot channel map (v2, WASH_ROBOT.h):\n"
+         << "  CH1: VT307 右腳電磁閥 (cups slave 1,2)\n"
+         << "  CH2: dp0105 真空泵浦 (shared) — v1 是 CH1，2026-07-07 搬到這\n"
+         << "  CH3: VT307 左腳電磁閥 (cups slave 3,4)\n"
+         << "  CH4: 保留 (v1 中心電磁閥，v2 無中心吸盤，已退役)\n"
          << "  CH5: 刷洗滾筒馬達\n"
          << "  CH6: 水箱泵浦\n"
          << "  CH7: 保留 (was 水箱進水球閥, 2026-06-05 搬到 crane PQW .34 slave 12 CH4)\n"
          << "  CH8: 保留\n"
+         << "  CH16: 破真空閥 (menu 31 專用，尚未進 WASH_ROBOT 生產流程)\n"
          << "\n"
          << "Note: Modbus echo check is unreliable on some PQW firmware.\n"
          << "      ALWAYS verify via physical LED / click / device response.\n\n";
@@ -562,19 +567,19 @@ static void test_pqw() {
             bool err = drv.controlAll(true);
             cout << "  [SENT] all ON — " << (err ? "echo too short" : "echo-len OK, content NOT verified")
                  << " → check LEDs physically\n";
-            for (int i = 1; i <= 8; ++i) state[i] = true;
+            for (int i = 1; i <= 16; ++i) state[i] = true;
             continue;
         }
         if (in == "o") {
             bool err = drv.controlAll(false);
             cout << "  [SENT] all OFF — " << (err ? "echo too short" : "echo-len OK, content NOT verified")
                  << " → check LEDs physically\n";
-            for (int i = 1; i <= 8; ++i) state[i] = false;
+            for (int i = 1; i <= 16; ++i) state[i] = false;
             continue;
         }
         if (in == "s") {
             cout << "  state: ";
-            for (int i = 1; i <= 8; ++i) cout << "CH" << i << "=" << (state[i] ? "ON " : "OFF ");
+            for (int i = 1; i <= 16; ++i) cout << "CH" << i << "=" << (state[i] ? "ON " : "OFF ");
             cout << "\n"; continue;
         }
 
@@ -586,7 +591,7 @@ static void test_pqw() {
         if      (verb == "on")  want_on = true;
         else if (verb == "off") want_on = false;
         else { cout << "  [!] usage: on N | off N | a | o | s | q\n"; continue; }
-        if (ch < 1 || ch > 8) { cout << "  [!] channel out of range 1..8\n"; continue; }
+        if (ch < 1 || ch > 16) { cout << "  [!] channel out of range 1..16\n"; continue; }
 
         // controlRelay does write + readback verification. If physical write succeeded
         // but readback returns garbled Modbus frame, it reports error falsely.
@@ -599,8 +604,9 @@ static void test_pqw() {
         state[ch] = want_on;   // optimistic: trust write regardless of readback
     }
 
-    cout << "[CLEANUP] turning all channels OFF\n";
-    drv.controlAll(false);
+    // 2026-07-23 per user: do NOT auto-off on quit — this drives the washrobot
+    // vacuum pump/valves (CH1-4). Auto-off here would release live-attached cups.
+    // Leave channels exactly as the user left them.
     cli.close();
 }
 
@@ -2064,7 +2070,6 @@ static void test_full_step_no_rail() {
 //
 // Live-reads the meter display value. Supports reset/pause/resume.
 // Main crane has 3 meters: slave 2 (左鋼索), 3 (右鋼索), 4 (中間管線) on gateway .30.
-// Easy crane doesn't use SD76.
 // ============================================================
 static void test_sd76() {
     cout << "\n--- SD76 length meter ---\n";
@@ -2206,14 +2211,13 @@ static void test_sd76() {
 
 //=========== 10. ZS_DIO winch relay (捲揚機) ===========
 //
-// Controls the winch direction relays. Supports:
-//   - Main crane: slave 1 on .1.30, CH1=左收繩 / CH2=右收繩 / CH3=左放繩 / CH4=右放繩
-//   - Easy crane: slave 1 on .1.21,  CH7=DOWN(放繩) / CH8=UP(拉繩)
+// Controls the winch direction relays. Main crane: slave 1 on .1.30,
+// CH1=左收繩 / CH2=右收繩 / CH3=左放繩 / CH4=右放繩
 // ============================================================
 static void test_zsdio() {
     cout << "\n--- ZS_DIO winch relay ---\n";
     string ip;
-    cout << "Gateway IP (main crane=.1.30 / easy crane=.1.21) [192.168.1.30]: ";
+    cout << "Gateway IP [192.168.1.30]: ";
     getline(cin, ip);
     if (ip.empty()) ip = "192.168.1.30";
 
@@ -2221,7 +2225,7 @@ static void test_zsdio() {
     string s; getline(cin, s);
     int slave = s.empty() ? 1 : stoi(s);
 
-    cout << "Total relay count (main crane 8 / easy crane 16) [8]: ";
+    cout << "Total relay count [8]: ";
     getline(cin, s);
     int total_relay = s.empty() ? 8 : stoi(s);
 
@@ -2240,7 +2244,6 @@ static void test_zsdio() {
 
     cout << "\nChannel hints (depending on config):\n"
          << "  Main crane (.1.30): CH1=左收繩  CH2=右收繩  CH3=左放繩  CH4=右放繩\n"
-         << "  Easy crane (.1.21): CH7=DOWN(放繩)  CH8=UP(拉繩)\n"
          << "\n"
          << "⚠ SAFETY: turn off all channels (press 'o') before leaving.\n"
          << "  Verify LED / winch physically — readback is not always reliable.\n\n";
@@ -3682,6 +3685,155 @@ static void test_se3_inverter() {
 }
 
 
+//=========== 30. MH300 inverter (rope winch, NEW Delta VFD) ===========
+//
+// Direct control of a Delta VFD-MH300 inverter via Modbus-RTU over USR-TCP232.
+// This is the v2 replacement for the Shihlin SE3 rope-winch inverters. Pure
+// winch control — NO meter needed, just set frequency + run fwd/rev/stop.
+//
+// Register basis (driver MH300_inverter): cmd 0x2000, freq 0x2001, status 0x2101,
+// output Hz 0x2102, error code 0x2100. Run/freq SOURCE must be RS485 — use the
+// 'c' command below (configureModbusControl → P00-20=RS485 freq, P00-21=RS485
+// run) once before the motor will accept run commands. If a fault is latched,
+// 'a' (clearAlarm) resets it.
+//
+// Operations:
+//   f <hz>  run FORWARD at hz (0x2000=0x0012)
+//   r <hz>  run REVERSE at hz (0x2000=0x0022)
+//   s       stop (decel per 01-13)
+//   e       emergency stop (0x2002 B.B — immediate output cutoff)
+//   h <hz>  set frequency only (don't change run state)
+//   c       one-time: set run+freq source to RS485 (configureModbusControl)
+//   a       clear alarm / reset fault
+//   m       monitor: output Hz / current / voltage / status word / error code
+//   q       back to menu (auto-stops motor before exit)
+//
+// ⚠ FWD vs REV = 收繩 / 放繩 depends on motor wiring — VERIFY at low Hz (e.g. 5)
+//   before running fast. The MH300 direction convention is NOT assumed here.
+// ============================================================
+static void test_mh300_inverter() {
+    cout << "\n--- MH300 inverter (rope winch, NEW Delta VFD) ---\n";
+    string ip;
+    cout << "Gateway IP [192.168.1.30]: ";
+    getline(cin, ip);
+    if (ip.empty()) ip = "192.168.1.30";
+
+    cout << "Port [4001]: ";
+    string s; getline(cin, s);
+    int port = s.empty() ? 4001 : stoi(s);
+
+    cout << "Slave ID [1]: ";
+    getline(cin, s);
+    int slave = s.empty() ? 1 : stoi(s);
+
+    cout << "Max Hz (nameplate, default upper limit) [50]: ";
+    getline(cin, s);
+    double max_hz = s.empty() ? 50.0 : stod(s);
+
+    if (!quick_tcp_probe(ip, port)) {
+        cerr << "[ERR] " << ip << ":" << port << " unreachable (2s timeout)\n"; return;
+    }
+    TCP_client cli;
+    if (!cli.connectToServer(ip, port, false)) {
+        cerr << "[ERR] Cannot connect to " << ip << ":" << port << "\n"; return;
+    }
+
+    MH300_inverter inv;
+    if (inv.init(cli, slave, true)) {
+        cerr << "[ERR] MH300 slave " << slave << " init fail\n"; cli.close(); return;
+    }
+
+    cout << "\n⚠ SAFETY:\n"
+         << "  - Run 'c' ONCE first to set run+freq source to RS485 (else run cmds are rejected).\n"
+         << "  - Verify motor direction with low Hz (e.g. 5) before running fast — wiring\n"
+         << "    決定 FWD/REV 對應 收繩/放繩.\n"
+         << "  - 'q' auto-stops before exit. If anything looks wrong press 'e' (emergency B.B).\n"
+         << "  - After a fault, press 'a' to clear before re-running.\n\n";
+
+    while (true) {
+        cout << "[MH300 slave=" << slave << "] f <hz> | r <hz> | s | e | h <hz> | c | a | m | q : ";
+        string in; getline(cin, in);
+        if (in.empty()) continue;
+        if (in == "q") break;
+
+        if (in == "s") {
+            cout << (inv.stopDecel() ? "  [WARN] stopDecel reported error\n"
+                                       : "  [OK] stop (decel)\n");
+            continue;
+        }
+        if (in == "e") {
+            cout << (inv.emergencyStop() ? "  [WARN] emergencyStop reported error\n"
+                                            : "  [OK] EMERGENCY STOP (B.B output cutoff)\n");
+            continue;
+        }
+        if (in == "c") {
+            cout << (inv.configureModbusControl() ? "  [WARN] configureModbusControl reported error\n"
+                                                    : "  [OK] run+freq source set to RS485 (Modbus)\n");
+            continue;
+        }
+        if (in == "a") {
+            cout << (inv.clearAlarm() ? "  [WARN] clearAlarm reported error\n"
+                                        : "  [OK] alarm/fault reset\n");
+            continue;
+        }
+        if (in == "m") {
+            double out_hz = 0, out_a = 0, out_v = 0;
+            uint16_t status = 0, errc = 0;
+            bool e1 = inv.readOutputFreqHz(out_hz);
+            bool e2 = inv.readOutputCurrentA(out_a);
+            bool e3 = inv.readOutputVoltageV(out_v);
+            bool e4 = inv.readStatusWord(status);
+            bool e5 = inv.readErrorCode(errc);
+            cout << "  Hz: "       << (e1 ? "ERR" : std::to_string(out_hz)) << "\n"
+                 << "  Current A: " << (e2 ? "ERR" : std::to_string(out_a)) << "\n"
+                 << "  Voltage V: " << (e3 ? "ERR" : std::to_string(out_v)) << "\n"
+                 << "  StatusWord: ";
+            if (e4) cout << "ERR\n";
+            else    cout << "0x" << std::hex << status << std::dec << "\n";
+            cout << "  ErrorCode: ";
+            if (e5) cout << "ERR\n";
+            else if (errc) cout << "0x" << std::hex << errc << std::dec << " (FAULT — press 'a' to reset)\n";
+            else cout << "0 (no fault)\n";
+            continue;
+        }
+
+        // f / r / h all take a hz arg
+        istringstream iss(in);
+        string verb; double hz = 0;
+        iss >> verb >> hz;
+
+        if (verb == "h") {
+            if (inv.setFreqHz(hz, max_hz))
+                cerr << "  [WARN] setFreqHz reported error\n";
+            else
+                cout << "  [OK] freq set to " << hz << " Hz (run state unchanged)\n";
+            continue;
+        }
+        if (verb == "f") {
+            if (inv.setFreqHz(hz, max_hz)) {
+                cerr << "  [WARN] setFreqHz reported error — abort run\n"; continue;
+            }
+            cout << (inv.runForward() ? "  [WARN] runForward reported error\n"
+                                          : "  [OK] running FORWARD at " + std::to_string(hz) + " Hz (verify 收/放)\n");
+            continue;
+        }
+        if (verb == "r") {
+            if (inv.setFreqHz(hz, max_hz)) {
+                cerr << "  [WARN] setFreqHz reported error — abort run\n"; continue;
+            }
+            cout << (inv.runReverse() ? "  [WARN] runReverse reported error\n"
+                                          : "  [OK] running REVERSE at " + std::to_string(hz) + " Hz (verify 收/放)\n");
+            continue;
+        }
+        cout << "  [!] usage: f <hz> | r <hz> | s | e | h <hz> | c | a | m | q\n";
+    }
+
+    cout << "[CLEANUP] sending stopDecel before exit\n";
+    inv.stopDecel();
+    cli.close();
+}
+
+
 //=========== 24. X518 tension sensor (Modbus TCP :502 direct) ===========
 //
 // X518 is a multi-channel acquisition board reading load cells (DSZL-107).
@@ -4841,6 +4993,729 @@ static void test_se3_inspect() {
     cli_r.close();
 }
 
+//=========== 31. Break-vacuum valve (CH16) + ZDT leg release ===========
+// [2026-07-23 per user] New device on PQW .22: CH16 = 破真空閥 (air-charge
+// valve — ON = charge air into the cup to force-break the seal, OFF = closed).
+// Tests the release sequence for ONE leg: release its own vacuum valve ->
+// charge CH16 + two-stage retract to ~0.1cm running concurrently (retract
+// mirrors WASH_ROBOT.cpp's pusher_two_stage_retract_, same production
+// constants) -> poll JC-100 pressure, close CH16 the moment vacuum reads
+// broken (> -50, same raw-unit convention as production DETACH_THRESHOLD_KPA)
+// -> done. Own-leg valve channel is derived from the ZDT slave id, matching
+// WASH_ROBOT.h's CH_VALVE_RIGHT(1)=slave{1,2} / CH_VALVE_LEFT(3)=slave{3,4}.
+static void test_break_vacuum_leg() {
+    cout << "\n--- Break-vacuum valve (CH16) + ZDT leg release ---\n";
+
+    string zdt_ip;
+    // [!] project topology has ZDT pushers on .21 (RS485_2) — .20 is DM2J's bus
+    // (RS485_1). Using the default you asked for; override at the prompt if
+    // that was a typo.
+    cout << "ZDT gateway IP [192.168.1.20]: ";
+    getline(cin, zdt_ip);
+    if (zdt_ip.empty()) zdt_ip = "192.168.1.20";
+
+    cout << "ZDT slave ID [3]: ";
+    string s; getline(cin, s);
+    int zdt_slave = s.empty() ? 3 : stoi(s);
+
+    int own_valve_ch;
+    if      (zdt_slave == 1 || zdt_slave == 2) own_valve_ch = 1;   // CH_VALVE_RIGHT
+    else if (zdt_slave == 3 || zdt_slave == 4) own_valve_ch = 3;   // CH_VALVE_LEFT
+    else {
+        cout << "  slave " << zdt_slave << " not in the usual 1-4 feet range"
+             << " — enter its vacuum valve channel manually: ";
+        string vch; getline(cin, vch);
+        try { own_valve_ch = stoi(vch); }
+        catch (...) { cerr << "[ERR] invalid channel\n"; return; }
+    }
+
+    string pqw_ip;
+    cout << "PQW gateway IP [192.168.1.22]: ";
+    getline(cin, pqw_ip);
+    if (pqw_ip.empty()) pqw_ip = "192.168.1.22";
+
+    cout << "PQW slave ID [12]: ";
+    string ps; getline(cin, ps);
+    int pqw_slave = ps.empty() ? 12 : stoi(ps);
+
+    constexpr int BREAK_VACUUM_CH              = 16;   // 2026-07-23 新設備
+
+    if (!quick_tcp_probe(zdt_ip, 4001)) { cerr << "[ERR] " << zdt_ip << ":4001 unreachable\n"; return; }
+    if (!quick_tcp_probe(pqw_ip, 4001)) { cerr << "[ERR] " << pqw_ip << ":4001 unreachable\n"; return; }
+
+    TCP_client cli_zdt, cli_pqw;
+    if (!cli_zdt.connectToServer(zdt_ip, 4001, false)) { cerr << "[ERR] " << zdt_ip << " connect fail\n"; return; }
+    if (!cli_pqw.connectToServer(pqw_ip, 4001, false)) { cerr << "[ERR] " << pqw_ip << " connect fail\n"; cli_zdt.close(); return; }
+
+    ZDT_motor_control zdt;
+    PQW_IO_16O_RLY    pqw;
+    JC_100_METER      jc;
+    if (zdt.init(cli_zdt, zdt_slave, true))    { cerr << "[ERR] ZDT slave "    << zdt_slave << " init fail\n"; cli_zdt.close(); cli_pqw.close(); return; }
+    if (pqw.init(cli_pqw, pqw_slave, 16, true)){ cerr << "[ERR] PQW slave "    << pqw_slave << " init fail\n"; cli_zdt.close(); cli_pqw.close(); return; }
+    if (jc.init(cli_pqw, zdt_slave, true))     { cerr << "[ERR] JC-100 slave " << zdt_slave << " init fail\n"; cli_zdt.close(); cli_pqw.close(); return; }
+
+    cout << "\n  ZDT slave " << zdt_slave << " @ " << zdt_ip
+         << " | own vacuum valve CH" << own_valve_ch
+         << " | break-vacuum valve CH" << BREAK_VACUUM_CH
+         << " | JC-100 slave " << zdt_slave << " @ " << pqw_ip << "\n"
+         << "  Sequence: CH" << own_valve_ch << " OFF (release, parallel w/ ZDT prep)  ->  "
+         << "CH" << BREAK_VACUUM_CH << " ON  ->  80ms  ->  direct retract to ~0.1cm  ->  "
+         << "CH" << BREAK_VACUUM_CH << " OFF at 500ms total (fixed schedule, no pressure gating)\n";
+    cout << "Press Enter to start, 'q' to abort: ";
+    string ack; getline(cin, ack);
+    if (ack == "q" || ack == "Q") { cli_zdt.close(); cli_pqw.close(); return; }
+
+    constexpr int RETRACT_TARGET_PULSE = 300;   // ~0.1cm, = production PUSHER_RETRACT_PULSE
+    constexpr int RPM_RETRACT_FULL     = 1000;  // [2026-07-24 per user] 900→1200→1000→800→1000
+    constexpr int ACC_RETRACT          = 255;   // = production PUSHER_ACC_RETRACT
+
+    // [2026-07-23 per user] Step 1 (release own vacuum, on cli_pqw) and ZDT
+    // prep (stall clear + enable, on cli_zdt) touch two INDEPENDENT devices
+    // on independent connections — run them concurrently; CH16 only fires
+    // once BOTH are done.
+    //
+    // [2026-07-23 REVERTED per user] This prep used to skip the enable+200ms
+    // settle whenever ZDT was already enabled (a speedup requested earlier
+    // this session), collapsing the gap between CH3-OFF and CH16-ON to near
+    // zero. Confirmed on bench: since that speedup landed, CH16 stopped
+    // actuating — the ~300ms this sequence unconditionally used to take was
+    // apparently the real reason those two PQW commands never collided. A
+    // separate explicit 200ms settle was tried afterward and STILL wasn't
+    // enough. Reverted to the original unconditional timing (always
+    // release_stall_flag + 100ms + enable + 200ms) rather than guessing at
+    // another number — CH16 actually working takes priority over that
+    // earlier speedup.
+    bool zdt_prep_enable_failed = false;
+    std::thread prep_thread([&]() {
+        zdt.release_stall_flag();
+        this_thread::sleep_for(chrono::milliseconds(100));
+        if (zdt.motion_control_driver_EN(true)) zdt_prep_enable_failed = true;
+        this_thread::sleep_for(chrono::milliseconds(200));
+    });
+
+    cout << "\n  -> CH" << own_valve_ch << " OFF (release own vacuum)\n";
+    if (pqw.controlRelay(own_valve_ch, false))
+        cerr << "  [WARN] CH" << own_valve_ch << " OFF readback mismatch — check LED physically\n";
+
+    prep_thread.join();
+    if (zdt_prep_enable_failed) {
+        cerr << "  [ERR] ZDT enable failed — abort (break-vacuum valve not touched yet)\n";
+        return;
+    }
+
+    // [2026-07-24 per user] Removed the post-release quiet hold entirely —
+    // CH16 now fires immediately after own-valve OFF, no rest in between.
+    // [2026-07-23 per user: 沒關破真空閥很危險] RAII guard — guarantees CH16
+    // gets closed on ANY exit from here on, no matter which return statement
+    // fires. The previous bug: an abort branch (readback-says-OFF /
+    // pressure-wait-timeout) returned WITHOUT closing CH16 first, leaving the
+    // valve charging indefinitely AND the leg unretracted — exactly the
+    // "very dangerous" state reported on bench. Fixing that one return
+    // statement isn't enough (the next new abort branch could repeat the
+    // same mistake) — make it structural instead: arm the guard the moment
+    // CH16 actually goes ON, disarm it only at the ONE place that deliberately
+    // closes it as part of the normal flow (right before firing the retract).
+    // Any other exit path (there are several) falls through to the
+    // destructor, which closes CH16 unconditionally.
+    struct Ch16Guard {
+        PQW_IO_16O_RLY* pqw;
+        int ch;
+        bool armed;
+        Ch16Guard(PQW_IO_16O_RLY* p, int c) : pqw(p), ch(c), armed(false) {}
+        ~Ch16Guard() {
+            if (armed) {
+                cerr << "  [SAFETY] closing CH" << ch << " on exit (guard)\n";
+                pqw->controlRelay(ch, false);
+            }
+        }
+    } ch16_guard(&pqw, BREAK_VACUUM_CH);
+
+    // [2026-07-23 per user] Fixed-schedule redesign — no longer gated on
+    // pressure at all: CH16 ON -> wait -> fire retract -> stay open until
+    // total time (from CH16 ON) has elapsed -> CH16 OFF. Replaces the
+    // pressure-confirm-then-close design (which needed the CH16_MIN_ON_MS/
+    // bus-quiet/debounce machinery above to get CH16 to actuate reliably at
+    // all — all of that is gone now, along with the JC-100 poll loop). CH16
+    // deliberately stays ON through part of the retract motion this time
+    // (the pull itself can help peel the seal while air is still charging in),
+    // rather than requiring the seal to be confirmed broken before pulling.
+    constexpr int CH16_PRE_RETRACT_MS = 80;    // [2026-07-24 per user] 100→80 — CH16 ON -> retract fires
+    constexpr int CH16_TOTAL_ON_MS    = 500;   // [2026-07-24 per user] 800→500→200→500 — CH16 ON -> CH16 OFF (retract fires partway through this)
+
+    cout << "  -> CH" << BREAK_VACUUM_CH << " ON (break-vacuum charge)\n";
+    if (pqw.controlRelay(BREAK_VACUUM_CH, true))
+        cerr << "  [WARN] CH" << BREAK_VACUUM_CH << " send failed (TCP-level) — definitely not on\n";
+    ch16_guard.armed = true;   // from here on, ANY return path closes CH16 automatically
+    const auto ch16_on_at = chrono::steady_clock::now();
+
+    this_thread::sleep_for(chrono::milliseconds(CH16_PRE_RETRACT_MS));
+
+    cout << "  -> direct retract to " << RETRACT_TARGET_PULSE << " pulses (~0.1cm) @ " << RPM_RETRACT_FULL << "rpm\n";
+    if (zdt.motion_control_pos_mode_nowait(0, ACC_RETRACT, RPM_RETRACT_FULL, RETRACT_TARGET_PULSE, 1, 0, 1)) {
+        cerr << "  [ERR] pos_mode_nowait FAIL\n";
+        cli_zdt.close(); cli_pqw.close(); return;
+    }
+
+    // CH16 stays on until CH16_TOTAL_ON_MS has elapsed since it was turned on
+    // (retract is already running concurrently by now — this wait just times
+    // how much longer CH16 itself needs to stay open).
+    {
+        const auto held_ms = chrono::duration_cast<chrono::milliseconds>(
+            chrono::steady_clock::now() - ch16_on_at).count();
+        if (held_ms < CH16_TOTAL_ON_MS)
+            this_thread::sleep_for(chrono::milliseconds(CH16_TOTAL_ON_MS - held_ms));
+    }
+    cout << "  -> CH" << BREAK_VACUUM_CH << " OFF\n";
+    if (pqw.controlRelay(BREAK_VACUUM_CH, false))
+        cerr << "  [WARN] CH" << BREAK_VACUUM_CH << " OFF readback mismatch — check LED physically\n";
+    ch16_guard.armed = false;   // closed deliberately above — guard no longer needs to (harmless no-op either way)
+
+    // Step 2c/3: poll ZDT until it reaches target (stall-recovery loop mirrors
+    // test_zdt()). CH16 is already off by this point — nothing pressure-
+    // related left to watch here.
+    constexpr int MAX_STALL_RETRIES      = 3;
+    constexpr int POLL_INTERVAL_MS       = 50;
+    constexpr int PER_ATTEMPT_TIMEOUT_MS = 10000;
+    int  retries      = 0;
+    bool pos_reached  = false;
+    auto t0 = chrono::steady_clock::now();
+
+    while (true) {
+        this_thread::sleep_for(chrono::milliseconds(POLL_INTERVAL_MS));
+
+        if (zdt.get_system_status()) { cerr << "  [ERR] get_system_status failed\n"; break; }
+        if (zdt.status.pos_reached) { pos_reached = true; break; }
+
+        if (zdt.status.stall_flag) {
+            cout << "  [STALL] detected at real_pos=" << zdt.status.real_pos
+                 << "°, attempt " << (retries + 1) << "/" << MAX_STALL_RETRIES << "\n";
+            if (retries >= MAX_STALL_RETRIES) {
+                cerr << "  [ABORT] stall persists after " << MAX_STALL_RETRIES << " retries\n";
+                break;
+            }
+            zdt.emergency_stop(true);
+            this_thread::sleep_for(chrono::milliseconds(200));
+            zdt.release_stall_flag();
+            this_thread::sleep_for(chrono::milliseconds(100));
+            if (zdt.motion_control_driver_EN(true)) { cerr << "  [ERR] re-enable failed during recovery\n"; break; }
+            this_thread::sleep_for(chrono::milliseconds(200));
+            if (zdt.motion_control_pos_mode_nowait(0, ACC_RETRACT, RPM_RETRACT_FULL, RETRACT_TARGET_PULSE, 1, 0, 1)) {
+                cerr << "  [ERR] re-send pos_mode failed during recovery\n"; break;
+            }
+            retries++;
+            t0 = chrono::steady_clock::now();
+            continue;
+        }
+
+        auto elapsed_ms = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - t0).count();
+        if (elapsed_ms > PER_ATTEMPT_TIMEOUT_MS) {
+            cerr << "  [WARN] attempt timeout (" << elapsed_ms << " ms) without stall or pos_reached\n";
+            break;
+        }
+    }
+
+    zdt.get_system_status();
+    cout << "\n  final: pos_reached=" << pos_reached
+         << " real_pos=" << zdt.status.real_pos << "°"
+         << " stall=" << zdt.status.stall_flag
+         << " | final pressure=" << jc.read_pressure() << " (raw units)\n";
+
+    cli_zdt.close();
+    cli_pqw.close();
+}
+
+//=========== 32. Leg release WITHOUT break-vacuum (no CH16) ===========
+// [2026-07-23 per user] Identical to test_break_vacuum_leg() (menu 31) except
+// CH16 is never touched at all — no ON, no OFF, no Ch16Guard. Same inputs,
+// same own-valve-release + ZDT prep, same rest timings before firing the
+// retract, same retract speed/target, same stall-recovery poll loop. Kept as
+// a separate function (not a flag on menu 31) so the two can be compared
+// side by side without one affecting the other.
+static void test_leg_release_no_break_vacuum() {
+    cout << "\n--- Leg release, no break-vacuum (no CH16) ---\n";
+
+    string zdt_ip;
+    cout << "ZDT gateway IP [192.168.1.20]: ";
+    getline(cin, zdt_ip);
+    if (zdt_ip.empty()) zdt_ip = "192.168.1.20";
+
+    cout << "ZDT slave ID [3]: ";
+    string s; getline(cin, s);
+    int zdt_slave = s.empty() ? 3 : stoi(s);
+
+    int own_valve_ch;
+    if      (zdt_slave == 1 || zdt_slave == 2) own_valve_ch = 1;   // CH_VALVE_RIGHT
+    else if (zdt_slave == 3 || zdt_slave == 4) own_valve_ch = 3;   // CH_VALVE_LEFT
+    else {
+        cout << "  slave " << zdt_slave << " not in the usual 1-4 feet range"
+             << " — enter its vacuum valve channel manually: ";
+        string vch; getline(cin, vch);
+        try { own_valve_ch = stoi(vch); }
+        catch (...) { cerr << "[ERR] invalid channel\n"; return; }
+    }
+
+    string pqw_ip;
+    cout << "PQW gateway IP [192.168.1.22]: ";
+    getline(cin, pqw_ip);
+    if (pqw_ip.empty()) pqw_ip = "192.168.1.22";
+
+    cout << "PQW slave ID [12]: ";
+    string ps; getline(cin, ps);
+    int pqw_slave = ps.empty() ? 12 : stoi(ps);
+
+    if (!quick_tcp_probe(zdt_ip, 4001)) { cerr << "[ERR] " << zdt_ip << ":4001 unreachable\n"; return; }
+    if (!quick_tcp_probe(pqw_ip, 4001)) { cerr << "[ERR] " << pqw_ip << ":4001 unreachable\n"; return; }
+
+    TCP_client cli_zdt, cli_pqw;
+    if (!cli_zdt.connectToServer(zdt_ip, 4001, false)) { cerr << "[ERR] " << zdt_ip << " connect fail\n"; return; }
+    if (!cli_pqw.connectToServer(pqw_ip, 4001, false)) { cerr << "[ERR] " << pqw_ip << " connect fail\n"; cli_zdt.close(); return; }
+
+    ZDT_motor_control zdt;
+    PQW_IO_16O_RLY    pqw;
+    JC_100_METER      jc;
+    if (zdt.init(cli_zdt, zdt_slave, true))    { cerr << "[ERR] ZDT slave "    << zdt_slave << " init fail\n"; cli_zdt.close(); cli_pqw.close(); return; }
+    if (pqw.init(cli_pqw, pqw_slave, 16, true)){ cerr << "[ERR] PQW slave "    << pqw_slave << " init fail\n"; cli_zdt.close(); cli_pqw.close(); return; }
+    if (jc.init(cli_pqw, zdt_slave, true))     { cerr << "[ERR] JC-100 slave " << zdt_slave << " init fail\n"; cli_zdt.close(); cli_pqw.close(); return; }
+
+    cout << "\n  ZDT slave " << zdt_slave << " @ " << zdt_ip
+         << " | own vacuum valve CH" << own_valve_ch
+         << " | JC-100 slave " << zdt_slave << " @ " << pqw_ip << " (reference read only)\n"
+         << "  Sequence: CH" << own_valve_ch << " OFF (release, parallel w/ ZDT prep)  ->  "
+         << "rest  ->  direct retract to ~0.1cm  (no break-vacuum / CH16 at all)\n";
+    cout << "Press Enter to start, 'q' to abort: ";
+    string ack; getline(cin, ack);
+    if (ack == "q" || ack == "Q") { cli_zdt.close(); cli_pqw.close(); return; }
+
+    constexpr int RETRACT_TARGET_PULSE = 300;   // ~0.1cm, = production PUSHER_RETRACT_PULSE
+    constexpr int RPM_RETRACT_FULL     = 800;   // matches menu 31's current value
+    constexpr int ACC_RETRACT          = 255;   // = production PUSHER_ACC_RETRACT
+
+    bool zdt_prep_enable_failed = false;
+    std::thread prep_thread([&]() {
+        zdt.release_stall_flag();
+        this_thread::sleep_for(chrono::milliseconds(100));
+        if (zdt.motion_control_driver_EN(true)) zdt_prep_enable_failed = true;
+        this_thread::sleep_for(chrono::milliseconds(200));
+    });
+
+    cout << "\n  -> CH" << own_valve_ch << " OFF (release own vacuum)\n";
+    if (pqw.controlRelay(own_valve_ch, false))
+        cerr << "  [WARN] CH" << own_valve_ch << " OFF readback mismatch — check LED physically\n";
+
+    prep_thread.join();
+    if (zdt_prep_enable_failed) {
+        cerr << "  [ERR] ZDT enable failed — abort\n";
+        cli_zdt.close(); cli_pqw.close(); return;
+    }
+
+    // Same two rest stages as menu 31 (80ms + 100ms), just with no CH16
+    // write in between — kept identical so the two menus stay comparable.
+    constexpr int PRE_RETRACT_REST1_MS = 80;
+    constexpr int PRE_RETRACT_REST2_MS = 100;
+    this_thread::sleep_for(chrono::milliseconds(PRE_RETRACT_REST1_MS));
+    this_thread::sleep_for(chrono::milliseconds(PRE_RETRACT_REST2_MS));
+
+    cout << "  -> direct retract to " << RETRACT_TARGET_PULSE << " pulses (~0.1cm) @ " << RPM_RETRACT_FULL << "rpm\n";
+    if (zdt.motion_control_pos_mode_nowait(0, ACC_RETRACT, RPM_RETRACT_FULL, RETRACT_TARGET_PULSE, 1, 0, 1)) {
+        cerr << "  [ERR] pos_mode_nowait FAIL\n";
+        cli_zdt.close(); cli_pqw.close(); return;
+    }
+
+    // Poll ZDT until it reaches target (stall-recovery loop mirrors menu 31 /
+    // test_zdt()).
+    constexpr int MAX_STALL_RETRIES      = 3;
+    constexpr int POLL_INTERVAL_MS       = 50;
+    constexpr int PER_ATTEMPT_TIMEOUT_MS = 10000;
+    int  retries      = 0;
+    bool pos_reached  = false;
+    auto t0 = chrono::steady_clock::now();
+
+    while (true) {
+        this_thread::sleep_for(chrono::milliseconds(POLL_INTERVAL_MS));
+
+        if (zdt.get_system_status()) { cerr << "  [ERR] get_system_status failed\n"; break; }
+        if (zdt.status.pos_reached) { pos_reached = true; break; }
+
+        if (zdt.status.stall_flag) {
+            cout << "  [STALL] detected at real_pos=" << zdt.status.real_pos
+                 << "°, attempt " << (retries + 1) << "/" << MAX_STALL_RETRIES << "\n";
+            if (retries >= MAX_STALL_RETRIES) {
+                cerr << "  [ABORT] stall persists after " << MAX_STALL_RETRIES << " retries\n";
+                break;
+            }
+            zdt.emergency_stop(true);
+            this_thread::sleep_for(chrono::milliseconds(200));
+            zdt.release_stall_flag();
+            this_thread::sleep_for(chrono::milliseconds(100));
+            if (zdt.motion_control_driver_EN(true)) { cerr << "  [ERR] re-enable failed during recovery\n"; break; }
+            this_thread::sleep_for(chrono::milliseconds(200));
+            if (zdt.motion_control_pos_mode_nowait(0, ACC_RETRACT, RPM_RETRACT_FULL, RETRACT_TARGET_PULSE, 1, 0, 1)) {
+                cerr << "  [ERR] re-send pos_mode failed during recovery\n"; break;
+            }
+            retries++;
+            t0 = chrono::steady_clock::now();
+            continue;
+        }
+
+        auto elapsed_ms = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - t0).count();
+        if (elapsed_ms > PER_ATTEMPT_TIMEOUT_MS) {
+            cerr << "  [WARN] attempt timeout (" << elapsed_ms << " ms) without stall or pos_reached\n";
+            break;
+        }
+    }
+
+    zdt.get_system_status();
+    cout << "\n  final: pos_reached=" << pos_reached
+         << " real_pos=" << zdt.status.real_pos << "°"
+         << " stall=" << zdt.status.stall_flag
+         << " | final pressure=" << jc.read_pressure() << " (raw units, reference only)\n";
+
+    cli_zdt.close();
+    cli_pqw.close();
+}
+
+//=========== 33. Break-vacuum ALL 4 legs simultaneously ===========
+// [2026-07-31 per user] Starts from "腳伸長且抽真空" (all 4 cups extended +
+// sealed) and releases all 4 at once using the same break-vacuum-assisted
+// single-stage retract now used in production (WASH_ROBOT.cpp's
+// pusher_two_stage_retract_, post-2026-07-31 rewrite): both valves (CH1
+// right + CH3 left) OFF -> CH14 ON -> 80ms -> direct retract all 4 slaves
+// (1,2,3,4) together via ONE trigger_sync_move() -> CH14 stays on until
+// 500ms total elapsed -> OFF -> poll all 4 to completion. Menu 31 only
+// exercises ONE leg at a time; this is the 4-leg group version matching
+// what a real step/detach actually does.
+static void test_break_vacuum_all_legs() {
+    cout << "\n--- Break-vacuum ALL 4 legs (CH14) simultaneously ---\n";
+
+    string zdt_ip;
+    cout << "ZDT gateway IP [192.168.1.20]: ";
+    getline(cin, zdt_ip);
+    if (zdt_ip.empty()) zdt_ip = "192.168.1.20";
+
+    string pqw_ip;
+    cout << "PQW gateway IP [192.168.1.22]: ";
+    getline(cin, pqw_ip);
+    if (pqw_ip.empty()) pqw_ip = "192.168.1.22";
+
+    cout << "PQW slave ID [12]: ";
+    string ps; getline(cin, ps);
+    int pqw_slave = ps.empty() ? 12 : stoi(ps);
+
+    constexpr int BREAK_VACUUM_CH = 14;   // production CH_BREAK_VACUUM
+    constexpr int CH_VALVE_RIGHT  = 1;    // slave 1,2
+    constexpr int CH_VALVE_LEFT   = 3;    // slave 3,4
+
+    if (!quick_tcp_probe(zdt_ip, 4001)) { cerr << "[ERR] " << zdt_ip << ":4001 unreachable\n"; return; }
+    if (!quick_tcp_probe(pqw_ip, 4001)) { cerr << "[ERR] " << pqw_ip << ":4001 unreachable\n"; return; }
+
+    TCP_client cli_zdt, cli_pqw;
+    if (!cli_zdt.connectToServer(zdt_ip, 4001, false)) { cerr << "[ERR] " << zdt_ip << " connect fail\n"; return; }
+    if (!cli_pqw.connectToServer(pqw_ip, 4001, false)) { cerr << "[ERR] " << pqw_ip << " connect fail\n"; cli_zdt.close(); return; }
+
+    ZDT_motor_control zdt[5];       // index 1..4 in use; [0] unused
+    JC_100_METER      jc[5];        // index 1..4, reference pressure only
+    PQW_IO_16O_RLY    pqw;
+    for (int s = 1; s <= 4; ++s) {
+        if (zdt[s].init(cli_zdt, s, false)) {
+            cerr << "[ERR] ZDT slave " << s << " init fail\n"; cli_zdt.close(); cli_pqw.close(); return;
+        }
+        if (jc[s].init(cli_pqw, s, false)) {
+            cerr << "[ERR] JC-100 slave " << s << " init fail\n"; cli_zdt.close(); cli_pqw.close(); return;
+        }
+    }
+    if (pqw.init(cli_pqw, pqw_slave, 16, true)) {
+        cerr << "[ERR] PQW slave " << pqw_slave << " init fail\n"; cli_zdt.close(); cli_pqw.close(); return;
+    }
+
+    cout << "\n  ZDT slaves 1,2,3,4 @ " << zdt_ip
+         << " | valves CH" << CH_VALVE_RIGHT << "(right)/CH" << CH_VALVE_LEFT << "(left)"
+         << " | break-vacuum CH" << BREAK_VACUUM_CH
+         << " | PQW/JC-100 @ " << pqw_ip << "\n"
+         << "  pre-check pressure (raw units, expect sealed/negative):";
+    for (int s = 1; s <= 4; ++s) cout << "  p" << s << "=" << jc[s].read_pressure();
+    cout << "\n  Sequence: CH" << CH_VALVE_RIGHT << "+CH" << CH_VALVE_LEFT << " OFF (release both sides)  ->  "
+         << "CH" << BREAK_VACUUM_CH << " ON  ->  80ms  ->  direct retract ALL 4 together  ->  "
+         << "CH" << BREAK_VACUUM_CH << " OFF at 500ms total (fixed schedule, no pressure gating)\n";
+    cout << "Press Enter to start, 'q' to abort: ";
+    string ack; getline(cin, ack);
+    if (ack == "q" || ack == "Q") { cli_zdt.close(); cli_pqw.close(); return; }
+
+    constexpr int RETRACT_TARGET_PULSE = 300;   // ~0.1cm, = production PUSHER_RETRACT_PULSE
+    constexpr int RPM_RETRACT_FULL     = 500;   // [2026-07-31 per user] 1000→900→700→500
+    constexpr int ACC_RETRACT          = 255;   // = production PUSHER_ACC_RETRACT
+    constexpr int PRE_RETRACT_MS       = 80;    // = production BREAK_VACUUM_PRE_RETRACT_MS
+    constexpr int TOTAL_ON_MS          = 500;   // = production BREAK_VACUUM_TOTAL_ON_MS
+
+    cout << "\n  -> CH" << CH_VALVE_RIGHT << "+CH" << CH_VALVE_LEFT << " OFF (release both sides)\n";
+    if (pqw.controlRelay(CH_VALVE_RIGHT, false))
+        cerr << "  [WARN] CH" << CH_VALVE_RIGHT << " OFF readback mismatch — check LED physically\n";
+    if (pqw.controlRelay(CH_VALVE_LEFT, false))
+        cerr << "  [WARN] CH" << CH_VALVE_LEFT << " OFF readback mismatch — check LED physically\n";
+
+    for (int s = 1; s <= 4; ++s) zdt[s].release_stall_flag();
+
+    // [2026-07-31 per user] Missing on the first pass — CH14 never actually
+    // fired. Root cause: this is the SAME bus-timing quirk menu 31 hit and
+    // fixed on 2026-07-23 ("CH16 stopped actuating" once the gap between the
+    // own-valve-OFF write and the CH16-ON write collapsed to near-zero — see
+    // that menu's comment history). Menu 31 got its ~300ms gap "for free" from
+    // the ZDT-prep thread (release_stall_flag+100ms+enable+200ms) running
+    // CONCURRENTLY with the valve-off write. Here the two valve-off writes are
+    // immediately followed by CH14-ON with no gap at all — same collapse,
+    // same failure to actuate. Add the same ~300ms unconditional rest before
+    // touching CH14, rather than guessing at a smaller number.
+    this_thread::sleep_for(chrono::milliseconds(300));
+
+    // [2026-07-23 per user: 沒關破真空閥很危險] Same RAII guard pattern as menu 31 —
+    // guarantees CH14 gets closed on ANY exit from here on.
+    struct Ch14Guard {
+        PQW_IO_16O_RLY* pqw;
+        int ch;
+        bool armed;
+        Ch14Guard(PQW_IO_16O_RLY* p, int c) : pqw(p), ch(c), armed(false) {}
+        ~Ch14Guard() {
+            if (armed) {
+                cerr << "  [SAFETY] closing CH" << ch << " on exit (guard)\n";
+                pqw->controlRelay(ch, false);
+            }
+        }
+    } ch14_guard(&pqw, BREAK_VACUUM_CH);
+
+    cout << "  -> CH" << BREAK_VACUUM_CH << " ON (break-vacuum charge)\n";
+    if (pqw.controlRelay(BREAK_VACUUM_CH, true))
+        cerr << "  [WARN] CH" << BREAK_VACUUM_CH << " send failed (TCP-level) — definitely not on\n";
+    ch14_guard.armed = true;
+    const auto ch14_on_at = chrono::steady_clock::now();
+
+    this_thread::sleep_for(chrono::milliseconds(PRE_RETRACT_MS));
+
+    cout << "  -> direct retract ALL 4 to " << RETRACT_TARGET_PULSE << " pulses (~0.1cm) @ " << RPM_RETRACT_FULL << "rpm\n";
+    for (int s = 1; s <= 4; ++s) {
+        if (zdt[s].motion_control_pos_mode_nowait(0, ACC_RETRACT, RPM_RETRACT_FULL, RETRACT_TARGET_PULSE, 1, 1, 1)) {
+            cerr << "  [ERR] slave " << s << " pos_mode_nowait FAIL\n";
+            cli_zdt.close(); cli_pqw.close(); return;
+        }
+    }
+    zdt[1].trigger_sync_move();   // single broadcast fires all 4 together
+
+    {
+        const auto held_ms = chrono::duration_cast<chrono::milliseconds>(
+            chrono::steady_clock::now() - ch14_on_at).count();
+        if (held_ms < TOTAL_ON_MS)
+            this_thread::sleep_for(chrono::milliseconds(TOTAL_ON_MS - held_ms));
+    }
+    cout << "  -> CH" << BREAK_VACUUM_CH << " OFF\n";
+    if (pqw.controlRelay(BREAK_VACUUM_CH, false))
+        cerr << "  [WARN] CH" << BREAK_VACUUM_CH << " OFF readback mismatch — check LED physically\n";
+    ch14_guard.armed = false;
+
+    // Poll all 4 slaves to completion — per-slave stall recovery, mirrors
+    // menu 31's single-leg loop generalized to 4.
+    constexpr int MAX_STALL_RETRIES      = 3;
+    constexpr int POLL_INTERVAL_MS       = 50;
+    constexpr int PER_ATTEMPT_TIMEOUT_MS = 10000;
+    bool pos_reached[5] = {};
+    int  retries[5]     = {};
+    bool done[5]        = {};
+    auto t0 = chrono::steady_clock::now();
+
+    while (true) {
+        bool all_done = true;
+        for (int s = 1; s <= 4; ++s) if (!done[s]) { all_done = false; break; }
+        if (all_done) break;
+
+        this_thread::sleep_for(chrono::milliseconds(POLL_INTERVAL_MS));
+
+        for (int s = 1; s <= 4; ++s) {
+            if (done[s]) continue;
+            if (zdt[s].get_system_status()) { cerr << "  [ERR] slave " << s << " get_system_status failed\n"; done[s] = true; continue; }
+            if (zdt[s].status.pos_reached) { pos_reached[s] = true; done[s] = true; continue; }
+
+            if (zdt[s].status.stall_flag) {
+                cout << "  [STALL] slave " << s << " at real_pos=" << zdt[s].status.real_pos
+                     << "°, attempt " << (retries[s] + 1) << "/" << MAX_STALL_RETRIES << "\n";
+                if (retries[s] >= MAX_STALL_RETRIES) {
+                    cerr << "  [ABORT] slave " << s << " stall persists after " << MAX_STALL_RETRIES << " retries\n";
+                    done[s] = true; continue;
+                }
+                zdt[s].emergency_stop(true);
+                this_thread::sleep_for(chrono::milliseconds(200));
+                zdt[s].release_stall_flag();
+                this_thread::sleep_for(chrono::milliseconds(100));
+                if (zdt[s].motion_control_driver_EN(true)) { cerr << "  [ERR] slave " << s << " re-enable failed during recovery\n"; done[s] = true; continue; }
+                this_thread::sleep_for(chrono::milliseconds(200));
+                if (zdt[s].motion_control_pos_mode_nowait(0, ACC_RETRACT, RPM_RETRACT_FULL, RETRACT_TARGET_PULSE, 1, 0, 1)) {
+                    cerr << "  [ERR] slave " << s << " re-send pos_mode failed during recovery\n"; done[s] = true; continue;
+                }
+                retries[s]++;
+                continue;
+            }
+        }
+
+        auto elapsed_ms = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - t0).count();
+        if (elapsed_ms > PER_ATTEMPT_TIMEOUT_MS) {
+            cerr << "  [WARN] overall timeout (" << elapsed_ms << " ms) — marking remaining slaves done\n";
+            for (int s = 1; s <= 4; ++s) done[s] = true;
+        }
+    }
+
+    cout << "\n  final:\n";
+    for (int s = 1; s <= 4; ++s) {
+        zdt[s].get_system_status();
+        cout << "    slave " << s << ": pos_reached=" << pos_reached[s]
+             << " real_pos=" << zdt[s].status.real_pos << "°"
+             << " stall=" << zdt[s].status.stall_flag
+             << " | pressure=" << jc[s].read_pressure() << " (raw units)\n";
+    }
+
+    cli_zdt.close();
+    cli_pqw.close();
+}
+
+//=========== 34. QX-DO24 4-channel PWM output (Modbus-RTU) ===========
+//
+// 四川旗芯 QX-DO24：4 路獨立 PWM 輸出模組。用途舉例（詳見手冊）：
+//   - 無刷電機/PWM風扇調速：control=65535(持續輸出) + 調 duty% 控制轉速
+//   - 步進馬達驅動器脈衝：duty=50% + control=脈衝數(1~65534)，單路最大 50K脈衝/s，
+//     四路同時用脈衝模式時最大 10K脈衝/s，超過會有計數偏差
+//   - 伺服舵機：freq 通常 50~330Hz + duty% 對應轉角（duty%=脈寬/週期），
+//     control=65535(舵機多半要求持續輸出)
+//
+// control 值意義：0=關閉(等同duty 0%) / 65535=持續輸出 / 1~65534=脈衝模式(輸出這麼多
+// 個脈衝後停，讀回=剩餘脈衝數)
+//
+// ⚠ 通道編號本測試用 0-based（channel 0~3 對應手冊的通道 1~4，driver 內部就是這樣編的）
+static void test_qx_do24() {
+    cout << "\n--- QX-DO24 4-channel PWM output ---\n";
+    string ip;
+    cout << "Gateway IP [192.168.1.22]: ";
+    getline(cin, ip);
+    if (ip.empty()) ip = "192.168.1.22";
+
+    cout << "Port [4001]: ";
+    string s; getline(cin, s);
+    int port = s.empty() ? 4001 : stoi(s);
+
+    cout << "Slave ID [6]: ";
+    getline(cin, s);
+    int slave = s.empty() ? 6 : stoi(s);
+
+    if (!quick_tcp_probe(ip, port)) {
+        cerr << "[ERR] " << ip << ":" << port << " unreachable (2s timeout)\n"; return;
+    }
+    TCP_client cli;
+    if (!cli.connectToServer(ip, port, false)) {
+        cerr << "[ERR] Cannot connect to " << ip << ":" << port << "\n"; return;
+    }
+
+    QX_DO24 pwm;
+    if (!pwm.init(cli, slave, true)) {
+        cerr << "[ERR] QX_DO24 slave " << slave << " init fail\n"; cli.close(); return;
+    }
+
+    // ⚠ QX_DO24 returns true = SUCCESS (inverted vs the rest of the project —
+    // see the banner in QX_DO24.h). All checks below follow the driver, NOT the
+    // project convention.
+    // ch here is the USER-FACING channel number 1~4 (same as the manual and the
+    // vendor QX-ModbusRTU tool); the driver API is 0-based, hence the -1.
+    auto print_channel = [&](int ch) {
+        double duty = 0; uint32_t freq = 0; uint16_t ctrl = 0;
+        bool ok1 = pwm.getPWM_Duty(ch - 1, duty);
+        bool ok2 = pwm.getPWM_Freq(ch - 1, freq);
+        bool ok3 = pwm.getPWM_Control(ch - 1, ctrl);
+        cout << "  通道" << ch << ": duty=";
+        if (!ok1) cout << "ERR"; else cout << duty << "%";
+        cout << "  freq=";
+        if (!ok2) cout << "ERR"; else cout << freq << "Hz";
+        cout << "  control=";
+        if (!ok3) cout << "ERR";
+        else if (ctrl == 0) cout << "0(關閉)";
+        else if (ctrl == 65535) cout << "65535(持續輸出)";
+        else cout << ctrl << "(脈衝模式，剩餘脈衝數)";
+        cout << "\n";
+    };
+
+    cout << "\n指令（<ch> = 通道 1~4，跟手冊/原廠工具同編號）：\n"
+         << "  d <ch> <percent>   設占空比 (0~100.0)\n"
+         << "  f <ch> <hz>        設頻率 (1~200000)\n"
+         << "  c <ch> <val>       設控制 (0=關閉 / 65535=持續輸出 / 1~65534=脈衝數)\n"
+         << "  on <ch>            捷徑：持續輸出 (control=65535)\n"
+         << "  off <ch>           捷徑：關閉 (control=0)\n"
+         << "  pulse <ch> <n>     捷徑：輸出 n 個脈衝 (control=n)\n"
+         << "  r <ch>             讀回單一通道 (duty/freq/control)\n"
+         << "  r all              讀回全部 4 通道\n"
+         << "  v                  讀版本號\n"
+         << "  q                  離開 (自動關閉全部 4 通道)\n"
+         << "\n舵機範例 (bench 驗證過: 50Hz, 脈寬1~2ms):\n"
+         << "  f 1 50   → 週期20ms\n"
+         << "  c 1 65535 → 持續輸出\n"
+         << "  d 1 7.5  → 脈寬1.5ms (中位)；5.0=1ms、10.0=2ms\n\n";
+
+    while (true) {
+        cout << "[QX_DO24 slave=" << slave << "] > ";
+        string in; getline(cin, in);
+        if (in.empty()) continue;
+        if (in == "q") break;
+
+        if (in == "v") {
+            uint16_t ver = 0;
+            if (pwm.getVersion(ver)) cout << "  firmware V" << ver << "\n";
+            else cerr << "  [WARN] getVersion failed\n";
+            continue;
+        }
+
+        istringstream iss(in);
+        string verb; iss >> verb;
+
+        if (verb == "r") {
+            string arg; iss >> arg;
+            if (arg == "all") { for (int ch = 1; ch <= 4; ++ch) print_channel(ch); }
+            else {
+                int ch = arg.empty() ? -1 : stoi(arg);
+                if (ch < 1 || ch > 4) { cout << "  [!] 通道必須是 1~4\n"; continue; }
+                print_channel(ch);
+            }
+            continue;
+        }
+
+        int ch = -1; iss >> ch;
+        if (ch < 1 || ch > 4) { cout << "  [!] usage: <cmd> <通道 1~4> [...] — see menu above\n"; continue; }
+        const int dch = ch - 1;             // driver API is 0-based
+        const string tag = "  [OK] 通道" + std::to_string(ch) + " ";
+
+        if (verb == "d") {
+            double duty; iss >> duty;
+            cout << (pwm.setPWM_Duty(dch, duty) ? tag + "duty=" + std::to_string(duty) + "%\n"
+                                                : "  [WARN] setPWM_Duty failed (range 0~100.0?)\n");
+        } else if (verb == "f") {
+            int freq; iss >> freq;
+            cout << (pwm.setPWM_Freq(dch, freq) ? tag + "freq=" + std::to_string(freq) + "Hz\n"
+                                                : "  [WARN] setPWM_Freq failed (range 1~200000?)\n");
+        } else if (verb == "c") {
+            int val; iss >> val;
+            cout << (pwm.setPWM_Control(dch, (uint16_t)val) ? tag + "control=" + std::to_string(val) + "\n"
+                                                             : "  [WARN] setPWM_Control failed\n");
+        } else if (verb == "on") {
+            cout << (pwm.setPWM_Control(dch, 65535) ? tag + "continuous output ON\n"
+                                                    : "  [WARN] setPWM_Control failed\n");
+        } else if (verb == "off") {
+            cout << (pwm.setPWM_Control(dch, 0) ? tag + "OFF\n"
+                                                : "  [WARN] setPWM_Control failed\n");
+        } else if (verb == "pulse") {
+            int n; iss >> n;
+            if (n < 1 || n > 65534) { cout << "  [!] pulse count must be 1~65534\n"; continue; }
+            cout << (pwm.setPWM_Control(dch, (uint16_t)n) ? tag + "pulse burst " + std::to_string(n) + "\n"
+                                                          : "  [WARN] setPWM_Control failed\n");
+        } else {
+            cout << "  [!] unknown command '" << verb << "' — see menu above\n";
+        }
+    }
+
+    cout << "[CLEANUP] turning off all 4 channels before exit\n";
+    for (int dch = 0; dch < 4; ++dch) pwm.setPWM_Control(dch, 0);
+    cli.close();
+}
+
 //=========== main: menu loop ===========
 static void print_menu() {
     cout << "\n========== Linux_test ==========\n"
@@ -4853,7 +5728,7 @@ static void print_menu() {
          << "  7  Full step seq   — 8 pushers staged 7/10cm + rail + vacuum + retry grip\n"
          << "  8  Step no-rail    — pushers + vacuum only (report, no verify)\n"
          << "  9  SD76 meter      — length meter live read + reset/pause/resume\n"
-         << " 10  ZS_DIO winch    — crane winch relay (main/easy crane)\n"
+         << " 10  ZS_DIO winch    — crane winch relay (main crane)\n"
          << " 11  Step no-rail +v — pushers + vacuum with verify + retry grip\n"
          << " 12  Full step report — rail + pushers + vacuum (report only, no verify)\n"
          << " 13  Water tank     — PQW CH5/6/7 手動 + 補水/刷洗/循環腳本\n"
@@ -4873,6 +5748,11 @@ static void print_menu() {
          << " 27  DM2J clear PR   — 清掉壞掉的 PR1/PR2 → mode 0 (從測試的 bad 'safe PR' 復原 slave 卡死)\n"
          << " 28  DM2J slide bench — 上滑台 (.22 slave 14) 0→X→0 來回 × N round,自選 RPM/ACC/DEC/行程/次數,印 drift\n"
          << " 29  SE3 inspect       — 遠端讀 L+R 的 P.7/P.8/DC brake (10-00~02) 並比對\n"
+         << " 30  MH300 inverter  — 新版台達 VFD 捲揚機 fwd/rev/stop + 設頻率 + 設Modbus來源(c) + 清故障(a) + monitor (無需計米)\n"
+         << " 31  Break-vacuum leg — ZDT IP+slave, PQW CH16 破真空閥 + 兩段式縮腳(比照 pusher_two_stage_retract_) + 真空監測自動關閥\n"
+         << " 32  Leg release no-CH16 — 跟 31 一模一樣，但完全不碰破真空閥（CH16），純解真空+縮腳對照組\n"
+         << " 33  Break-vacuum ALL 4 legs — 從腳伸長+抽真空狀態開始，CH14 破真空 + 4 顆同時單段直收（比照正式 pusher_two_stage_retract_）\n"
+         << " 34  QX-DO24 PWM output — 4路PWM輸出，設占空比/頻率/控制(持續/脈衝) + 讀回 (無刷電機/步進/舵機)\n"
          << "  q  Quit\n"
          << "================================\n"
          << "Select: ";
@@ -4914,6 +5794,11 @@ int main() {
         else if (line == "27") test_dm2j_clear_pr();
         else if (line == "28") test_dm2j_slide_bench();
         else if (line == "29") test_se3_inspect();
+        else if (line == "30") test_mh300_inverter();
+        else if (line == "31") test_break_vacuum_leg();
+        else if (line == "32") test_leg_release_no_break_vacuum();
+        else if (line == "33") test_break_vacuum_all_legs();
+        else if (line == "34") test_qx_do24();
         else if (line.empty()) continue;
         else cout << "[!] unknown selection '" << line << "'\n";
     }

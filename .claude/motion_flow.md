@@ -321,6 +321,29 @@
 - 對 Phase 4 而言，rail_baseline 是進入 Phase 4 **自動循環** 前的鐵軌位置（Phase 3 吸附啟動結束的位置）
 - 若 Phase 4 被人工中斷又恢復，rail_baseline 要重讀一次
 
+### Phase 4b — 同步步伐（v2 新增，2026-07-22 per user）
+
+**跟上面 Phase 4 的交替式 inchworm 走法是兩條平行、互不取代的走路方式**——使用者兩個都要，依現場情況挑一種用。指令：`step_down_sync <cm>` / `step_up_sync <cm>`（`WashRobot::cmd_step_down_sync`/`cmd_step_up_sync`，engine 在 `do_step_sync_(bool up)`，`user_lib/WASH_ROBOT.cpp`）。
+
+**流程（以 step_down_sync 20cm 為例）：**
+1. 兩個 valve channel（`CH_VALVE_RIGHT`/`CH_VALVE_LEFT`）同時關閉 → 等 4 顆吸盤全部真空釋放 → 4 顆推桿一起兩段式縮回（不分左右側，同一批一起做，仿照 `cmd_return_home` 的收尾動作）
+2. 吊機**兩側同步**放繩 20cm——直接送 crane 端既有的裸指令 `pay_out 20`（crane 端 `dual_vfd_sync_start` 兩顆 SE3/MH300 VFD 幾乎同時啟動，含張力安全監控），**不是** Phase 4 那種一次只走一側、量另一側計米對齊的交替法
+3. IMU 差動微調水平：`do_sync_imu_roll_correct_()` 讀 roll 平均值，用 crane 端既有的 `roll_correct <delta_cm>` 差動指令（+delta = 左放右收），兩側繩子同時反向微調，最多 `FOLLOWER_IMU_MAX_PASSES`（3）輪收斂；收斂不了非致命，殘餘傾角留到下一步。**速度獨立可調（2026-07-23 加）：** `roll_correct` 用 `g_roll_correct_hz`（預設 5Hz，`set_roll_correct_hz` 指令 / GUI「IMU 微調」輸入框），跟一般 `pay_out`/`retract`（step 2 用的 `g_vfd_motion_hz`，預設 15Hz）分開，調其中一個不會影響另一個
+4. 兩個 valve channel 一起打開（真空恢復）
+5. 4 顆推桿一起伸出重新吸附（`smart_extend_subset_("all", ...)`，仿照 `cmd_attach` 的「hanging on crane rope, no side needs to anchor」手法），未密封的 cup 依左右分組重伸一次補救
+
+**⚠ 安全性質跟 Phase 4 不同（使用者已於 2026-07-21/22 明確確認、刻意如此）：**
+
+Phase 4 的交替走法（以及 2026-07-13 加的跨障礙物走法）**永遠保持至少一側 ≥1 顆吸盤黏牆**當防墜落錨點——這是本文件 Phase 4 一路以來的預設安全前提。**同步步伐是本專案第一個「重複執行、且會讓 4 顆全部同時放開」的走法**：第 2 步吊機放繩期間，機器完全靠吊機繩索承重，沒有任何吸盤錨定在牆上。現有能找到全放開的先例只有兩個一次性動作——`cmd_attach`（第一次貼牆前，本來就沒東西可錨）跟 `cmd_return_home`（最後一次性降到地面，不會再重新吸附）——都不是「重複執行」的走路方式。crane 端 `motion_rope()`/`roll_correct` 本身有張力安全監控（VFD 故障偵測、雙邊 DSZL-107 張力監控、超載/不平衡自動中止），但那是張力/通訊層的安全網，不是機械上的第二錨點；放繩期間唯一的支撐就是吊機鋼索本身。
+
+**不含清洗**：純移動用途，跟 Phase 4 的 sweep 變體（`cmd_step_down_with_sweep` 等）不同，沒有對應的 sweep 版本。
+
+**規範權威：** 本節（motion_flow.md §4b）+ `.claude/work_log.md` 2026-07-22 條目。
+
+**連續跑多步（2026-07-23 加）：** `run <n> [cm] [down|up] [alt|sync]` 第 4 個參數選走法——`alt`（預設，向下相容）= 原本左右交替；`sync` = 每步都用本節的同步走法（`do_step_sync_`）。兩者共用同一個 for-loop（`WashRobot::cmd_run`），只有每步呼叫哪個 engine 不同；abort/pause/state 轉換邏輯完全共用，沒有另外寫一套。**同一份零錨點安全性質**（見上）套用到 `run ... sync` 的每一步，不是只有單步 `step_down_sync` 才有這個風險。
+
+**CSV 腳本一樣可選（2026-07-23 加）：** `run_script [up|down] [alt|sync] <csv>` / `run_saved <name> [up|down] [alt|sync]` 的 gait 參數跟 `run` 同一套規則、同一個零錨點安全性質。**例外：CSV 裡的 cross 步驟（`x` 標記）一律走 `do_cross_obstacle_`，不受 gait 影響**——同步走法目前沒有對應的跨障礙物版本，混合 `sync 30,30x,30` 這種腳本時，一般步用同步、cross 步仍是原本的交替式跨障礙物邏輯。
+
 ### Phase 5 — 平衡校正模式（Roll 軸，吊機左右鋼索差動）
 
 **觸發條件：** `balance_deg > IMU_ASK_DEG` (15°) 且使用者回覆 Yes 同意執行。
@@ -736,7 +759,10 @@ GUI 在 crane 區塊提供獨立的「🆘 緊急收繩」分區，**即使 wash
   - 設計理由：防誤觸（點一下就收會危險）；按著才動、放開就停是最安全的人因邏輯
 - **視覺：** 大紅按鈕、獨立區塊、文字「按住收繩」；按下中顯示秒數計時
 - **不走 SD76 自動停：** 緊急模式下不信任自動邏輯，完全由操作員眼睛判定何時放開
-- **張力保護仍在：** Crane C++ 端的 `tension_alarm` safety monitor 不受 GUI 模式影響，超張力照樣強制停 + 回 EVT
+- **⚠ 不受張力感測門檻限制：** `retract_left/right on` 底層走 `cmd_manual()`（`Crane_control_PI/main.cpp`），只是直接呼叫 `vfdStartRopeHold()` 驅動變頻器，**不會**設定 `hold_up_left/hold_up_right/hold_down_left/hold_down_right` 這幾個 flag。
+  背景張力監控執行緒 `hold_loop()` 的張力檢查（`tension_safety_check_values` → 超標 `hold_all_off()` + 廣播 `EVT tension_alarm`）整段包在 `if (any_hold_active())` 裡，而 `any_hold_active()` 只看上述 4 個 flag——緊急收繩期間這 4 個 flag 全是 false，所以**張力檢查完全不會執行，超張力也不會自動停**。
+  這是**故意的設計取捨**：救援情境下不希望軟體門檻卡住操作員，改成完全交給操作員肉眼判斷何時放開（見上一條「不走 SD76 自動停」）。換句話說，緊急收繩的安全防線只剩「操作員自己盯著看、覺得不對就放開按鈕」，沒有任何軟體 backstop。
+  一般吊機區塊的「↑/↓ 拉繩」按鈕（`cmd_hold()`）才有這層張力保護，跟緊急收繩是兩條不同路徑，不要混為一談。
 
 **失聯模式下，下列 crane 手動指令也保持可用**（操作員或許需要調整姿態才能收）：
 - `pay_out_left/right <on|off>`、`retract_left/right <on|off>`、`middle_set`、`roll_correct`、`stop`

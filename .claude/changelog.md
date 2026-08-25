@@ -13,6 +13,3054 @@
 
 ---
 
+## 2026-08-25 Claude (Sadie) — QX-DO24 PWM 輸出模組接進 Linux_test（menu 34）
+
+### 背景
+
+`D:\洗窗戶機器人\電控設備資料\pwm` 下新增了 QX-DO24（四川旗芯，4 路獨立 PWM 輸出，Modbus-RTU）的手冊。`user_lib/QX_DO24.{h,cpp}` 之前就寫好了 duty/freq/control 三個寫入函式（CLAUDE.md 標「已編譯未整合」），這次補齊讀回、接進 Linux_test，讓它從「寫好但沒人用」變成可以實際 bench 測試。
+
+### 修改檔案
+- `user_lib/QX_DO24.h` / `.cpp`：加 FC 0x03 讀回（`getPWM_Duty`/`getPWM_Freq`/`getPWM_Control`/`getVersion`），`sendAndReceive` 的 `expected_len` 判斷加上 0x03 讀取回覆長度分支（原本只認 0x06 echo / 0x10 固定8 bytes）
+- `Linux_test/main.cpp`：新增 menu 34 `test_qx_do24()`——設定/讀回 4 通道占空比/頻率/控制，`on`/`off`/`pulse` 捷徑對應手冊的持續輸出/關閉/脈衝模式，離開時自動關閉全部 4 通道
+- `Linux_test/Linux_test.vcxproj`：加入 `QX_DO24.cpp/.h`
+- `CLAUDE.md`：QX_DO24 從「未使用」搬到「使用中」
+
+### Bench 驗證現況（user 用廠商 QX-ModbusRTU 工具直測，非透過 Linux_test）
+用 USB-485 直連（不是走網路 gateway）測試成功：baud **115200**（模組出廠預設是 9600，這台已經被改過）、slave ID **6**、通道1 @ 50Hz、占空比 5~10% 成功驅動一顆舵機（脈寬 1~2ms，週期 20ms）。
+
+### ⚠ 交付前逐 byte 核對封包，抓到 4 個錯（user 要求「這千萬不能出錯」）
+
+用 Python 重算 CRC + 逐欄位對照手冊 register map 後修正：
+
+1. **menu 34 回傳值判斷全部反向（最嚴重，是這次新寫的 code 引入的）**：`QX_DO24` 這個 driver **違反專案 `false=成功` 慣例**，它是 `true=成功`。呼叫端照專案習慣寫 → 寫入成功印 `[WARN] error`、失敗印 `[OK]`，讀回成功顯示 `ERR`、失敗顯示未初始化的垃圾值。整個 bench 讀數的成功/失敗是相反的。已全部改成跟 driver 實際極性一致，並在 `QX_DO24.h` 開頭加大字警告 banner，避免下一個人再踩。
+2. **頻率 > 65535Hz 被靜默截斷**：`setPWM_Freq` 把 32-bit ABCD 的高 16 位寫死 `0x0000`，只送低位 → 設 200000Hz 實際變 3392Hz、100000Hz 變 34464Hz，不報錯。已改成正確送出 bit31..16。（手冊自己的例子 200000Hz=0x00030D40 → reg0x04=0x0003/reg0x05=0x0D40，已用該例驗證。）50Hz 的舵機用例不受影響。
+3. **通道範圍檢查寫成 `> 23`，實際只有 4 通道**：傳 channel=5 時 `setPWM_Duty` 會寫到位址 0x05 = **通道1 頻率的低位暫存器**，默默改掉頻率而不是拒絕；`setPWM_Control` 則會越過 0x0F 打到 0x10 =「保存輸出」（只有 1~2 千次擦寫壽命）。已全部改成 `> 3`，讀回函式也補上同樣檢查，並補 duty 0~100 / freq 1~200000 範圍驗證。
+4. **通道編號會誤導**：手冊與原廠工具都用「通道 1~4」，但 driver API 是 0-based，menu 原本直接沿用 0-based → user 照習慣打 `1` 會控到通道2。menu 已改成對外 1~4（跟手冊一致）、內部才 -1 轉給 driver。
+
+驗證後的實際封包（slave 6、通道1）：占空比5% = `06 06 00 00 00 32 09 A8`；50Hz = `06 10 00 04 00 02 04 00 00 00 32 69 FD`；持續輸出 = `06 06 00 0C FF FF 49 CE`。可跟原廠工具「手動測試」頁顯示的指令對照確認。
+
+### 尚未解決
+- **QX-DO24 還沒接上任何實際的專案內 RS485 bus**——目前 `test_qx_do24()` 的 IP/slave 預設值（`192.168.1.22` / `6`）只是先照 user 決定的目標值填上去，實際接線前務必確認 `.22` 這條 bus 上（JC_100_METER 佔 slave 1~9）slave 6 有沒有衝突，CLAUDE.md 那份 v1 硬體表對 v2 是否還準確也要一併核對（`.22` bus 上實際還有幾顆 JC-100 在用是未知數，見另一筆「規範文件與程式碼落差」的未解決事項）
+- baud 115200 是接上網路 gateway 前，USR-TCP232 也要跟著設成 115200，不能沿用其他裝置慣用的 9600，否則透傳會對不上
+
+---
+
+## 2026-08-20 Claude (Sadie) — 修正 Crane VFD 型號切換巨集 (CraneVFD.h 不存在)
+
+### 起因
+
+整理吊機變頻器 driver 現況要寫進 Notion 交接文件時發現：`Crane_control_PI/main.cpp` 用
+`CRANE_VFD_IS_SE3` 巨集切換 SE3/MH300，註解宣稱「flip 這一個巨集就能切到 MH300」，但
+`#else` 分支實際上：
+
+```cpp
+#include "CraneVFD.h"        // 這個檔案根本不存在
+using CraneVFD = CraneVFD;   // typedef 自己指自己
+```
+
+真的把巨集設成 0 編譯會直接失敗——這條「一鍵切換」路徑從沒被驗證過能編譯，因為 bench 一直
+維持 `CRANE_VFD_IS_SE3=1` 沒切過。
+
+### 修改檔案
+- `Crane_control_PI/main.cpp`：`#else` 分支改成 `#include "MH300_inverter.h"` +
+  `using CraneVFD = MH300_inverter;`
+
+### 驗證方式
+沒有本機編譯環境，改用比對法：grep 出 main.cpp 裡所有透過 `CraneVFD` 型別呼叫的方法
+（`runForward/runReverse/stopDecel/emergencyStop/setFreqHz/readStatusWord/readFaultCode/
+invalidateCuModeCache/clearAlarm/init` 等），逐一確認 `MH300_inverter.h` 都有同名同簽名的
+public method，兩顆 class 已知是照這個介面設計成 drop-in 的，比對結果一致。
+
+### 現況（尚未解決）
+巨集切換現在編譯上是對的。原本在這裡寫「MH300 分支從沒在真實硬體上跑過」——經 user (Sadie)
+確認**不正確**：2026-07 有拿真實 MH300 實機測試過 OK。
+
+`OUTPUT_CURRENT_SCALE`/`OUTPUT_VOLTAGE_SCALE` 兩個小數位換算、方向
+(`VFD_DIR_PAY_OUT/RETRACT`)、DC brake (07-XX)、fault code 對照表這幾項程式裡仍標著
+`⚠ verify`/待驗——這不是「當時測試沒做」，而是這幾項**本質上跟現場接線/裝機狀況綁定**（方向
+由接線決定、DC brake 跟負載/馬達現況有關），所屬性是「每次重新安裝都要重新確認」，不是一次
+測過就永久有效。所以下次換裝/重裝時，把這幾項當作標準複查清單即可，不代表之前測試不完整。
+
+---
+
+## 2026-08-18p Claude (Sadie) — M2 甩頭：加 creep + 阻尼拉到協定上限
+### 現象（user）
+「M2 有沒有辦法稍微慢慢轉一點，才不會有一點甩頭的感覺」
+
+### Bench 現場
+```
+[M2 lr_move_to_slot] Done.  pos=-0.1429  target=0.0000  start=0.0750
+[INIT DIAG] M2 after calibrate: pos=-0.1429 vel=0.0659 tau=4.4650
+```
+INIT 從 `pos=0.0750` 回 CENTER(0)，**移動距離僅 0.075 rad，卻衝到 −0.1429——過衝量是移動距離的兩倍**，且 `tau=+4.4650` 是馬達在反向硬拉。那個回拉就是「甩頭」的手感。
+
+### 兩個成因
+1. **`lr_move_to_slot_impl` 沒有 creep**：全程等速直衝 target。短距離特別糟——`speed=0.6` 讓命令 6 個 tick（0.12s）就到位，手臂純靠慣性衝過去。
+2. **阻尼不足**：`m2_.hold_kd=3.0`，而協定上限是 5.0，**還有空間沒用**（M1 是撞到 5.0 才沒得加）。
+
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `lr_move_to_slot_impl()`：ramp 加入 creep——`M2_CREEP_ZONE=0.15` / `M2_CREEP_SPEED=0.20`，並取 `min(CREEP_SPEED, speed_rad_s)` 避免 creep 反而快過呼叫端指定的速度
+- `cleaning_arm/main_api.cpp` `init()`：`m2_.hold_kd` 3.0 → **5.0**（協定上限）
+
+### 為什麼 creep 對這個場景特別有效
+長距離換槽（約 1.3 rad）只有最後 0.15 rad 減速，影響有限（估計 +0.4~0.6s）；而短距離移動會**整段落在 zone 內、全程慢速**——正好就是最容易甩頭、也最需要溫和的那種情況。
+
+### 順帶記錄：M2 的 converged 標準很寬
+`CONV_TOL = 0.15`，所以先前觀察到的穩態誤差 0.148 仍會被判 `converged`（0.148 < 0.15，剛好擦過）。M2 穩態誤差的演進 0.08 → 0.10 → 0.148 有一部分是 08-18j fade 的副作用。本次提高 kd + 加 creep 後應一併改善；若仍偏大，下一步是把 `FRICTION_FADE_VEL` 從 0.35 降到 0.2（收尾補償退得慢一點）。
+
+### 待驗證（未編譯）
+1. 甩頭是否消失（INIT 回 CENTER 應不再衝過 target）
+2. 硬轉動聲是否維持 08-18j 改善後的狀態（kd 提高不影響摩擦補償，理論上不會回來）
+3. 長距離換槽慢多少，是否可接受
+4. 穩態誤差是否收斂回 0.10 以內
+
+## 2026-08-18n Claude (Sadie) — settle 補上摩擦補償（PARK NOT HOME）
+### 上一輪成果（08-18m 上機驗證）
+**DEPLOY 400 LEFT 成功了。** MOVE 結束於 `pos=0.9119`，HOLD 後被繼續推到 **0.9325**（target 0.9754，誤差 0.043 < 0.08 容差），無 FAIL。對照先前連續兩次卡在 0.8867（err 0.0818 / 0.0822）——`hold_pos` 改鎖 `move_target` + `M1_FRICTION_TAU` 提到 2.5 確實補完了最後一段。
+
+摩擦補償在 ramp 生效也已驗證：`cmd=0.0551 pos=0.1844 vel=0.0061 tau_ff=-2.3473`，反推 `2.5 × (1−0.0061/0.10) × (−1) = −2.348` ✓
+
+### 新問題：PARK NOT HOME
+```
+ramp ARRIVED after 184 loops pos=0.1040 target=0.0500
+settle TIMEOUT after 100/100 loops (2000ms) pos=0.1040
+NOT HOME: pos=0.103952 target=0.05 (short by 0.0539524 rad)
+```
+兩次 PARK 皆如此（另一次停在 0.1165）。同批第一次 PARK 正常（0.0689）——差別在那次 ramp 直接走進 `ARRIVE_TOL` 內、settle 三圈就 DONE，並未真的需要 settle 出力。
+
+### 根因：settle 是唯一沒有摩擦補償的階段
+補償先前加進了 ramp 與 `feedback_loop` 的 MOVE，**漏了 settle**，於是 ramp 一結束那份推力就消失：
+
+| 階段 | 推力 | 對比 ~2.3 Nm 靜摩擦 |
+|---|---|---|
+| ramp（有補償）| `kp×誤差` + 2.5 | 夠 |
+| **settle（無補償）** | `26 × 0.054 = 1.40 Nm` | **不足** |
+| HOLD（無補償）| `34 × 0.054 + proxy ≈ −2.00`（log −2.0024 ✓）| **不足** |
+
+三階段皆不足，故卡死在 0.104。此風險在 08-18i 已被指出（「settle 目前靠較大的 kp 誤差就夠了，但若低角度摩擦再變大，那裡會是下一個卡點」），現已兌現。
+
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `go_home_slot()` settle 迴圈：加入與 ramp 相同的 faded 摩擦補償，推力 1.40 → 約 **3.9 Nm**
+
+`M1_FRICTION_DEADBAND_RAD(0.02)` 負責收斂：誤差進入 0.02 內即關閉該項，手臂停住而不會在 target 兩側來回推。
+
+### HOLD 仍刻意不加
+靜止撐住本就靠靜摩擦幫忙，補了會造成緩慢漂移。只要 settle 能推到位，HOLD 就不需要這份補償。若之後仍出現 HOLD 階段被摩擦鎖在 target 外，再考慮。
+
+### 安全性說明（此故障不危險）
+`NOT HOME` 會讓 `cmd_park_sequence` 回 `ERR` 且**不執行 `disable_slot`**（08-18c 加的保護），手臂保持 enabled + HOLD 停在 0.104，不會落下。這是刻意設計正常運作的結果，不是新的危險。
+
+### 待驗證（未編譯）
+settle 是否能把手臂推進 `ARRIVE_TOL`、PARK 回 `OK` 而非 `ERR`；以及 target 附近是否有來回推的震盪（DEADBAND 應已擋下）。
+
+## 2026-08-18m Claude (Sadie) — 📌 推翻「馬達扭力不足」的誤判 + DEPLOY 收尾改鎖 target
+### 起因（user 質疑）
+「奇怪是扭力額定上限是 40Nm 不是嗎」——這個質疑是對的，先前 08-18i「500mm 超出手臂物理能力」的結論**是錯的**，該節已加註推翻。
+
+### 錯在哪
+把 log 的 `tau` 讀成「馬達扭力上限」。但 MIT 模式下馬達輸出的就是我們算給它的：
+```
+tau = kp×誤差 + kd×(−vel) + tau_ff
+```
+回報值在未飽和時**等於命令值**。拿 DEPLOY 卡住那一刻驗算（`pos=0.8867 move_target=0.9754 vel=0.1526`）：
+- `kp×誤差 = 34 × 0.0887 = +3.016`
+- `kd×(−vel) = 5 × (−0.1526) = −0.763`
+- `tau_ff = 20.87×sin(0.8867−3.317) = −13.626`（摩擦項因 `vel > M1_FRICTION_FADE_VEL(0.10)` 被 fade 成 0）
+- 合計 **−11.37**，log 實測 **−10.70** ✓
+
+**馬達完全沒飽和**，額定 40 Nm 只用了約 27%。「log 最大只到 −17 Nm」代表的是我們只要求了那麼多。（另註：`damiao.h` 的 `TAU_MAX=200` 是 CAN 編碼範圍，與馬達額定無關，不可用來判斷能力。）
+
+### 真正的瓶頸：`kp × 誤差` 太小
+卡住時位置誤差僅 0.0887 rad，`kp=34` 只換到 3.0 Nm 位置回饋力；`tau_ff` 的 −13.6 是在抵銷重力、不提供前進的力。淨力 = `重力 13.63 − |命令| 11.37 = +2.26 Nm`，被該處 ≥4.6 Nm 的靜摩擦擋死。
+
+反推 `kp` 能突破的靜摩擦：`淨力 = kp × 0.0887 − 0.763` → kp=34 → **2.25 Nm**（恰好卡在邊緣）、kp=45 → 3.23、kp=60 → 4.56。
+
+同一個誤判也讓「400mm 接近極限、500mm 超出能力」失效——撐住 500mm 的 target 只要 19.3 Nm，遠低於額定。**問題從頭到尾是移動過程中命令的推力不足，不是牆距太遠。**
+
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `feedback_loop()` move-complete 分支：M1 的 `hold_pos` 由 `Get_Position()`（停在哪就鎖哪）改為 **`move_target`**
+- `cleaning_arm/main_api.h`：`M1_FRICTION_TAU` 1.5 → **2.5**
+
+### 為什麼這兩項能解
+`hold_pos` 鎖當下位置，等於 touch_wall 一停就放棄——bench 上 DEPLOY 400 LEFT 連續兩次 `err=0.0818 / 0.0822`，是系統性停止而非噪訊。改鎖 `move_target` 後手臂在 ramp 結束後仍持續被推，並且能用上**只有停下來才拿得到的幫助**：摩擦前饋隨 `|vel|→0` 回滿（卡住當下 `vel=0.1526` 已把它 fade 成 0）。
+
+淨力試算：`1.5` → 約 4.5 Nm（仍略低於 4.6 靜摩擦）；`2.5` → 約 **5.5 Nm**，才真的越過。摩擦前饋只在低速生效，中高速段完全不參與，因此不會加劇過衝。
+
+原本 `hold_pos = Get_Position()` 的理由（避免 `hold_tau_ff` 污染造成 backward pull）已不成立：`hold_tau_ff` 只在 `pos ≤ M1_GRAVITY_MIN_VALID_RAD(0.20)` 時被使用，而所有 DEPLOY target 都遠高於此，該區間由擬合的重力模型接管。此改動也讓 M1 與 M2 一致（M2 一向使用 `move_target`）。
+
+### 未採用：提高 `hold_kp`
+34 → 45~60 也能解，但它同時改變 HOLD 剛性，而 `kd` 已卡在協定上限 5.0 **無法再加**——kp 34→60 會讓阻尼比降到約 75% 且無法補償。留作方案 1+2 不足時的後手。
+
+### 待驗證（未編譯）
+1. DEPLOY 400 LEFT 是否收斂（err 應由 0.082 降到 0.08 容差內）
+2. HOLD 期間是否出現持續推力導致的發熱或震盪——若 DEPLOY 始終到不了 target，現在會一直推而不是停下來
+3. 是否出現過補償（手臂自己往前溜）——`M1_FRICTION_TAU` 已到 2.5，若有則退回 2.0
+
+## 2026-08-18k Claude (Sadie) — PARK 第三次提速（瓶頸已從 creep 移回巡航段）
+### 上一輪成果（08-18i + 08-18j 上機驗證）
+PARK **3.94s**，且 `pos=0.0742 / target=0.0500`（誤差 0.024）走的是**第一條**判斷（`< ARRIVE_TOL` 連續 3 次），不再是踩 `×1.5` 的線；另一次甚至到 `pos=0.0391`（誤差 0.011）。演進：18s TIMEOUT → 6.8s → 5.3s → **3.94s，精度反而更好**。
+
+摩擦補償在該次 PARK 全程未作用（實際 vel 一路 0.17~0.29，遠超 fade 上限 0.10）——正是預期行為：運動順暢時自動退場，不留過剩推力。
+
+### 這次的依據：時間分配翻轉了
+`CREEP_ZONE` 由 0.15 縮到 0.10 之後：
+
+| 段落 | 距離 | 耗時 | 佔比 |
+|---|---|---|---|
+| 巡航 @0.25 | 0.72 rad | ~3.1s | **79%** |
+| creep @0.08 | 0.13 rad | ~1.0s | 24% |
+
+瓶頸已從 creep 移回主速度（與 08-18i 當時的結論相反，因為那時 zone 還是 0.15）。所以這次動主速度才有效。
+
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `init()`：`m1_.park_speed` 0.25 → **0.35**
+- `cleaning_arm/main_api.cpp` `go_home_slot()`：`CREEP_SPEED` 0.08 → **0.12**（`CREEP_ZONE` 維持 0.10）
+
+預估 3.94s → **3.0s 上下**。DEPLOY 的 Step 1 retract 也走 `park_speed`，會一併加快。
+
+### 為什麼 CREEP_ZONE 不再縮
+0.10 rad 已是主速度 0.35 降到 creep 速度所需的減速距離下限，再縮會讓慣性直接帶著手臂衝過 target。
+
+### 過衝風險（已有徵兆，需盯）
+上一輪 log 末段已出現 `tau` 翻正（`pos=0.1329 vel=-0.2869 tau=+0.6349`），代表馬達在反向煞車、手臂有輕微過衝傾向。最低到 `pos=0.0738`，且 `PARK_STOP_MARGIN=0.05` 到硬停點只有 0.05 rad 緩衝。提速後要盯：
+1. ramp `ARRIVED` 時 `pos` 是否掉到 target 以下（過衝）
+2. 最低 `pos` 是否逼近 0（撞硬停點）
+3. `tau` 翻正幅度是否顯著變大
+
+過衝變嚴重時的處置順序：先退 `CREEP_SPEED` 回 0.08，再退 `park_speed`。**不建議加大 `PARK_STOP_MARGIN`**——那會讓 disable 後的自由落差變大（0.05 rad ≈ 末端 16mm、0.08 ≈ 26mm）。settle 以 target 下命令，輕微過衝本來就會被拉回，不必為此犧牲落差。
+
+### 現場調參
+`M1 SET_PARK_SPEED <v>`（08-18i 新增）可在 bench 直接掃最佳值不必重編；找到滿意值後應回寫 `init()`。`CREEP_SPEED` 目前沒有對應 setter。
+
+## 2026-08-18i Claude (Sadie) — 二次提速、執行期調速、creep 才是真瓶頸、摩擦隨角度變化
+### 這一輪累積的四批改動
+1. **二次提速**：`m1_.park_speed` 0.15 → **0.25**、DEPLOY 預設 0.10 → **0.15**（已上機驗證可行）
+2. **執行期調速**：新增 `M1 SET_PARK_SPEED <v>` / `M1 SET_DEPLOY_SPEED <v>`（範圍 (0, 0.50]，>0.20 附警告），`deploy_speed` 從 local 變數改為 `MotorSlot` 成員。**刻意不持久化**——重啟回到 `init()` 預設，滿意的值應該回頭寫進 `init()` 而不是只活在 RAM
+3. **creep 提速**：`CREEP_ZONE` 0.15 → **0.10**、`CREEP_SPEED` 0.05 → **0.08**
+4. **摩擦與容差**：`M1_FRICTION_TAU` 0.8 → **1.5**、`M1_TOUCH_WALL_TOL` 0.05 → **0.08**
+
+### 📌 關鍵發現一：PARK 的瓶頸是 creep，不是巡航速度
+`park_speed` 0.15 → 0.25（+67%）只讓 PARK 從 5.54s 縮到 **5.32s（4%）**。從 `cmd` 斜率看得很清楚：
+```
+0.6204 → 0.2004   每行 -0.0600  = 0.25 rad/s（巡航）
+0.2004 → 0.0644   每行 -0.0120  = 0.05 rad/s（CREEP）
+```
+creep 那 0.15 rad 吃掉約 3 秒，**佔總時間 56%**。再怎麼調 `park_speed` 都無感。
+
+敢動 creep 的理由：2026-07-24 導入 creep 的原始理由是「target(0 rad) 就是機械硬停點，帶殘速撞上去會反彈」，但後來加入的 `PARK_STOP_MARGIN=0.05` 已讓 target 停在硬停點前，主動控制下根本不接觸硬停點——creep 要防的碰撞已被 margin 擋掉，不需要第二層這麼慢的保險。預估 PARK 降到 3.5s 上下。
+
+### 📌 關鍵發現二：靜摩擦隨角度大幅變化
+| 位置 | 靜摩擦 | 依據 |
+|---|---|---|
+| pos ≈ 0.22 | ~2.3 Nm | 淨推力 2.33 仍推不動 |
+| pos ≈ 0.52 | ~1.0 Nm | 淨推力 1.28 突破 |
+| pos ≈ 0.83 | **≥4.6 Nm** | HOLD 淨力 +4.64 往上卻停住 |
+
+手臂伸得越遠、軸承側向負載越大，摩擦跟著漲。`M1_FRICTION_TAU=0.8` 是照中段的 1.0 訂的，只夠應付最輕的一段，於是 PARK 兩道關卡都只以 0.002~0.004 rad 餘裕擦過。提到 1.5 是折衷，不是精確補償；真要精準得讓它隨角度變化（複雜度高，非必要不做）。這也一次解釋了先前 3.8 / 1.0 / 2.3 幾個互相打架的摩擦估計——**都對，只是位置不同**。
+
+### ~~DEPLOY 500mm 超出手臂物理能力（非程式問題）~~ ❌ 此結論錯誤，已於 2026-08-18m 推翻
+> **⚠ 這一節的結論是錯的，保留供對照，不要據以決策。** 當時把 log 裡的 `tau` 讀成「馬達扭力上限」，但 MIT 模式下 `tau = kp×誤差 + kd×(−vel) + tau_ff`，回報值在未飽和時**就等於我們命令的值**——「最大只出到 −17 Nm」代表的是我們只要求了那麼多，不是馬達出不了更多。DM10010L 額定約 40 Nm，實際只用到約 27%。真正的瓶頸是 `kp×誤差` 太小（誤差 0.0887 × kp 34 僅 3.0 Nm），與牆距上限無關。完整推翻過程見 2026-08-18m。
+
+（原文保留）bench 下了約 500mm → `target=1.35827`，實際只到 `pos=0.97715`（err 0.381）。撐住各角度所需的重力矩：
+
+| 牆距 | θ | 所需重力矩 |
+|---|---|---|
+| 300mm | 0.586 | 8.3 Nm |
+| 400mm | 0.923 | 14.2 Nm |
+| **500mm** | **1.358** | **19.3 Nm** |
+
+（此表本身正確——19.3 Nm 遠低於額定 40 Nm，撐得住；錯的是當時「超出能力」的判讀。）
+
+### 容差放寬的理由
+一次 DEPLOY 300 以 `err=0.0501738` 對 0.05 判失敗——超出 **0.0002 rad = 手臂末端 0.06 mm**，屬量測噪訊。0.05 rad 只有末端 16 mm，而 washrobot 端的鏡像檢查 `ARM_DEPLOY_POS_TOL_RAD` 一向是 0.15，motor_api 這側嚴得沒有理由。0.08（末端約 26 mm）仍足以攔下真正卡死／無回應的馬達。
+
+### 待驗證（未編譯）
+1. PARK 是否降到約 3.5s，且 ramp 仍 `ARRIVED` 而非 TIMEOUT——creep 提速會讓手臂落後更多，靠 `FRICTION_TAU` 提高來補，兩者互相抵銷，需實測確認淨效果
+2. 末段 tau 是否翻正（翻正=衝過頭，退 `CREEP_SPEED`）
+3. `pos≈0.22` 那處停頓是否消失
+4. 中段是否出現過補償跡象（手臂自己往前溜）——若有，`M1_FRICTION_TAU` 退到 1.2
+
+### 後續處理（同日）
+- **M2「硬轉動的聲音」→ 已加 fade**，見下方 2026-08-18j
+- **M2 穩態誤差**：每次 `lr_move_to_slot` 都停在 target 外約 0.08 rad（`pos=0.0822 target=0.0000`），一直存在，user 表示目視無異狀，暫不處理。
+
+## 2026-08-18j Claude (Sadie) — M2 摩擦補償改用速度衰減，消除硬轉動聲
+### 現象（user）
+「M2 只是會有個硬轉動的聲音，其他目視都 ok」——能到位、動作正常，只是有聲音。
+
+### 根因：固定滿載的摩擦前饋
+`lr_move_to_slot_impl()` 的補償是：
+```cpp
+if (std::abs(pos_err_to_target) > CONV_TOL)
+    tau_ff = (pos_err_to_target > 0.0f ? FRICTION_TAU : -FRICTION_TAU);   // 固定 ±4.0，無衰減
+```
+只要還沒到位就一路補滿 4.0 Nm。馬達動起來後動摩擦遠小於靜摩擦，這 4.0 就成為純過剩推力，機構被持續硬頂——聲音由此而來。跟隨本身沒問題（`MIT_KP=31` 夠高），所以目視看不出異狀。
+
+**這 4.0 的來歷與 M1 那批過度調校同源**：1.5→2.3→2.8→3.0→4.0 一路為了「M2 轉不過去」加上來，但 2026-08-13g 已查明那些轉不過去有一部分其實是 `half_range=0.013` 假觸發害 LEFT/RIGHT target 正負互換算錯，不是扭力不足。target 改用手量的 `lr_half_range=0.7275` 修正後，這些堆上去的扭力就過剩了。
+
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `lr_move_to_slot_impl()`：新增 local `FRICTION_FADE_VEL = 0.35f`；摩擦前饋改為 `±FRICTION_TAU × (1 − min(|vel|/0.35, 1))`，並在迴圈內一併讀取 `Get_Velocity()`
+
+`FRICTION_TAU=4.0` 與 `MIT_KP=31.0` 都**不動**：前者的起動能力仍需要（vel≈0 時照樣補滿），後者有 32 附近的暴衝歷史（2026-07-24）是刻意避開的。
+
+### 為什麼 0.35
+照 M2 的速度尺度取：M2 slot 移動命令速度 0.6~0.8 rad/s，比例上對應 M1 的 `FADE_VEL 0.10 / 命令速度 0.15~0.25`。
+
+### 安全性
+機制自帶負回饋：若中途減速將要卡住，`vel` 下降會讓 fade 回升、補償自動加回來，不會因為衰減而轉不到位。最壞情況是速度略降，`MIT_KP=31` 的跟隨能力足以吸收。
+
+### 待驗證（未編譯）
+硬轉動聲應明顯減輕或消失，且 `lr_move_to_slot` 仍回報 `converged`。若出現轉不到位／耗時變長，把 `FRICTION_FADE_VEL` 往上調（0.5 → 衰減更慢 → 補償更多）。
+
+## 2026-08-18h Claude (Sadie) — M1 DEPLOY / PARK 提速（降速的根因已修掉）
+### 需求（user）
+「可以稍微再把 M1 deploy、park 的速度增加嗎」
+
+### 為什麼現在可以提
+`park_speed` 0.45→0.07、DEPLOY `spd` 0.55→0.05 這兩串降速，全都是在根因未明時用來壓制暴衝／頓挫的補償手段。那些根因這兩天已查明並修掉：
+- **kd 編碼溢位**（08-17c）：`hold_kd` 名目 5.5 實際只有 **0.50**、`park_kd` 名目 12 實際 **2.00**，等於長期在無阻尼狀態下跑
+- **ramp 重力前饋用 `cur_cmd` 而非 `pos`**（08-18e）：手臂落後時補償反而歸零
+- **stick-slip**（08-18g）：已加庫倫摩擦補償
+
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `init()`：`m1_.park_speed` 0.07 → **0.15**
+- `cleaning_arm/main_api.cpp` `cmd_deploy_sequence()`：`spd` 預設 0.05 → **0.10**
+
+### 兩者幅度不同的理由（風險不對稱）
+`tau_ff` 全程為負（往收回方向出力），代表**重力是把手臂往「伸出」方向拉**：
+- **DEPLOY = 順著重力** → 一旦失控會被重力持續加速，正是當年暴衝的那條路徑 → 只給 2×
+- **PARK = 逆著重力** → 不可能順坡失控，且末段 `CREEP_ZONE`(0.15 rad) 仍會降到 `CREEP_SPEED`(0.05) 才靠近硬停點 → 給 2.1× 且風險較低
+
+`M1_VEL_SAFETY_LIMIT = 0.4` 維持不動：對 DEPLOY 的新命令速度 0.10 仍有 4 倍餘裕，真失控照樣攔得住。`MAX_LOOPS=900`(18s) 也不需調——PARK 提速後只會更早結束。
+
+### 待驗證（未編譯）
+PARK 預期由 6.8s 縮短到約 3.5s。觀察重點：(1) tau trace 是否仍平順、末段 tau 不翻正（翻正=衝過頭）；(2) DEPLOY 是否出現 `[M1 SAFETY] ... emergency brake`——若出現代表 0.10 對這條順重力路徑仍偏快，退回 0.08。反之若兩者都穩，可再往上試。
+
+## 2026-08-18g Claude (Sadie) — M1 加庫倫摩擦補償，消除 stick-slip 分段感
+### 現象（user）
+08-18e 的 `tau_ff` 修正上機後「好多了」，PARK 從 18s TIMEOUT 變成 **6.8s ARRIVED 且真正到位**（`pos=0.0910 / target=0.0500`，誤差 0.041 < 0.05）。但 DEPLOY 與 PARK 都還殘留「停一下再突然滑一段」的分段感。
+
+### 診斷：stick-slip
+把 bench trace 的 `pos` 逐行差分（每行 240ms，命令速度應為 0.0168 rad/行）：
+
+```
+Δ=-0.0011  ← 幾乎停住
+Δ=-0.0271  ← 突然滑
+Δ=-0.0004  ← 停
+Δ=-0.0190  ← 突然滑
+Δ= 0.0000  ← 停
+Δ=-0.0344 / -0.0400  ← 末段加速，遠超命令的 0.012（creep），tau 由 -0.1465 翻正到 +0.6349（反向煞車），ARRIVED 時 vel=+0.0183 被往回拉
+```
+中段（0.3531→0.2016）Δ 穩定在 0.011~0.019 是正常跟隨，問題集中在起停之間。
+
+以「總 tau 減去該點重力」量淨推力：
+
+| 位置 | 淨推力 | 結果 |
+|---|---|---|
+| pos=0.5217 | 7.86 − 7.08 = **0.78 Nm** | 推不動 |
+| pos=0.4522 | 6.98 − 5.70 = **1.28 Nm** | 突破 |
+| pos=0.4946（滑動中） | 6.69 − 6.55 = **0.14 Nm** | 維持 0.1 rad/s |
+
+→ **靜摩擦約 1.0 Nm、動摩擦約 0.15 Nm，相差 6~7 倍**，這個落差就是 stick-slip 的成因。這是機構特性，不是程式缺陷，但可用控制手段緩解。
+
+**更正：** 08-18c 曾估靜摩擦 3.8 Nm，那是拿 `tau_ff` 還算錯的舊 log 推的，基準不對，作廢；以本次為準。
+
+### 修改檔案
+- `cleaning_arm/main_api.h`：新增 `M1_FRICTION_TAU=0.8f`、`M1_FRICTION_FADE_VEL=0.10f`、`M1_FRICTION_DEADBAND_RAD=0.02f`，含完整量測依據與設計理由
+- `cleaning_arm/main_api.cpp` `go_home_slot()` ramp 迴圈（PARK）：重力前饋之後疊加摩擦補償
+- `cleaning_arm/main_api.cpp` `feedback_loop()` MOVE 分支（DEPLOY）：同上
+
+### 設計取捨
+- **用速度線性衰減，不用 on/off 開關**：`scale = 1 − min(|vel| / 0.10, 1)`。vel=0 補滿 0.8 Nm、vel=0.05 補一半、vel≥0.10 完全不補。硬切換會在門檻附近反覆進出，製造新的抖動。
+- **只在快動不動時補，動起來就退場**：全速期間持續補償反而會加劇末段衝過頭——動摩擦只有 0.15 Nm，多推的力沒有東西吸收。
+- **取 0.8 而非量到的 1.0**：寧可欠補讓它慢一點鬆動，也不要過補造成手臂自己往前溜。
+- **方向取自 `target − pos`（整體誤差）而非 `cur_cmd − pos`**：後者在跟隨良好時很小且有噪訊，正負號會抖動。
+- **HOLD 分支刻意不加**：靜止撐住本來就靠靜摩擦幫忙，補了只會造成緩慢漂移。
+- **與緊急煞車不衝突**：煞車在 |vel| > 0.4 rad/s 觸發，該處補償已衰減為 0（fade 上限 0.10），不可能與煞車對抗。
+
+### 待驗證（未編譯）
+預期那幾處「停住 → 突然滑」被抹平、末段不再衝過頭（tau 不該再翻正）。若仍偶有卡頓可把 `M1_FRICTION_TAU` 往 1.0 靠；若出現手臂自己緩慢下溜或末段過衝變嚴重，則是補過頭，往 0.5~0.6 調降。
+
+**⚠ 本次要編三個目標才會全部生效**：`main_api.cpp`（摩擦補償）、`main_api.h`（摩擦常數 + 08-18f 的 TOOL_EXT 交換）、`user_lib/WASH_ROBOT.h`（08-18f 鏡像交換，屬 washrobot 主程式）。08-18f 的交換在上一輪 bench log 中尚未生效（`DEPLOY 300 RIGHT` 仍顯示 `theta_target=0.6310`，交換後應為 0.586）。
+
+## 2026-08-18f Claude (Sadie) — 工具頭實體左右對調，TOOL_EXT 常數跟著交換
+### 需求（user）
+工具頭實體上左右交換了，要求把對應的牆距參數也左右交換，CENTER 不動。
+
+### 修改檔案（兩份必須同步，缺一會不一致）
+- `cleaning_arm/main_api.h`：`TOOL_EXT_LEFT_MM` 148.09 → **134.07**、`TOOL_EXT_RIGHT_MM` 134.07 → **148.09**（`TOOL_EXT_CENTER_MM` 160.00 不動）
+- `user_lib/WASH_ROBOT.h`：鏡像常數 `ARM_M2_TOOL_LEFT_MM` / `ARM_M2_TOOL_RIGHT_MM` 同步交換
+
+**為什麼兩份都要改**：motor_api 的 `touch_wall_slot()` 用自己那份算實際目標角度；washrobot 的 `verify_arm_deploy_()`（`WASH_ROBOT.cpp:2637`）用鏡像那份算 expected θ 來驗證 DEPLOY 是否到位（公差 `ARM_DEPLOY_POS_TOL_RAD=0.15`）。只改一邊 → 兩邊算出的角度差 14.02mm 對應約 0.044 rad，雖然還在公差內不會直接誤判，但等於驗證基準悄悄偏掉，之後任何收緊公差的改動都會爆。
+
+### 交換後的角度（clearance=0）
+| wall_mm | LEFT | CENTER | RIGHT |
+|---|---|---|---|
+| 300 | 0.586 → **0.631** | 0.548（不變）| 0.631 → **0.586** |
+| 400 | 0.923 → **0.975** | 0.880（不變）| 0.975 → **0.923** |
+
+臨界牆距（低於此值 `usable≤0`，**靜默** clamp 成 0.38 不伸出）也跟著換：LEFT 234.6 → **220.5**、RIGHT 220.5 → **234.6**、CENTER 246.5 不變。
+
+### 需要重編的目標
+- `cleaning_arm`（motor_api）— `main_api.h` 改了
+- `facade_cleaning_v2`（washrobot 主程式）— `WASH_ROBOT.h` 改了，且它是 header 常數，所有 include 它的 translation unit 都要重建
+
+### 未解（沿用 2026-08-18 稍早的觀察，交換並未改變這件事）
+這兩個值是 2026-05-21 在 `lr_move_to_slot_impl` 還用固定 `±ZERO_OFFSET=±0.8` 時定的；2026-08-13/14 已改成 `±lr_half_range=±0.7275`（少 0.0725 rad ≈ 4.2°），**TOOL_EXT 從未跟著重新量測**。交換只是把兩個值對調位置，沒有修正它們本身的準確度。若 LEFT/RIGHT 實際貼牆距離與輸入對不上（理論上會偏近），需在各 slot 用 `STATUS` 讀 θ 搭配皮尺量末端到牆的實距，反解真值。
+
+## 2026-08-18e Claude (Sadie) — 📌 PARK 兩段式停頓：ramp 的重力前饋用「命令位置」而非「實際位置」
+### 現象（user）
+08-18c 修完後手臂已明顯改善（不再掉落），但 PARK 變成兩段式，中間會停一下。
+
+### 根因
+`go_home_slot()` ramp 迴圈的重力前饋是用 `cur_cmd`（命令位置）算的：
+
+```cpp
+if (s.id == SlotId::M1 && cur_cmd > M1_GRAVITY_MIN_VALID_RAD)
+    tau_ff = M1_GRAVITY_K * std::sin(cur_cmd - M1_GRAVITY_PHASE_RAD);
+```
+
+**重力矩取決於手臂實際在哪，不是命令它去哪。** 手臂落後 ramp 時（正是最需要力的時候），前饋卻按「還沒到達的那個點」計算而嚴重不足；`cur_cmd` 一旦跌破 `M1_GRAVITY_MIN_VALID_RAD`(0.20)，補償更是整個關掉，而手臂還舉在 0.66。
+
+這是自我強化的循環：補償不足 → 推不動 → 落後加大 → `cur_cmd` 更低 → 補償更少。直到 `kp × 誤差` 單獨大到突破靜摩擦，手臂才「啪」地跳一段——即 user 看到的停頓後突進。
+
+這個錯誤來自 2026-08-14b（當時的意圖註解寫的是「即時計算**當下角度**需要的補償扭力」，但實作寫成了 `cur_cmd`）。先前一直被 08-18c 修掉的假 ARRIVED 遮住——ramp 根本沒機會跑到後段就提早收工；加上 PARK 全程無 tau log，所以從未現形。
+
+### Bench 數據（每一行都對得上 `tau = kp×(cmd−pos) + tau_ff`）
+| cmd | pos | log tau_ff | 正確值（用 pos） | 缺口 | log tau | 驗算 |
+|---|---|---|---|---|---|---|
+| 0.6202 | 0.6357 | −8.98 | −9.26 | 0.3 | −9.04 | −9.04 ✓ |
+| 0.5026 | 0.6678 | −6.71 | **−9.79** | **3.1** | −11.09 | 26×(−0.1652)+(−6.71) = −11.01 ✓ |
+| 0.1878 | 0.6601 | **0.00** | **−9.66** | **9.7** | −12.36 | 26×(−0.4723)+0 = −12.28 ✓ |
+| 0.0500 | 0.2535 | 0.00 | −1.63 | 1.6 | −5.42 | 26×(−0.2035)+0 = −5.29 ✓ |
+
+### settle 迴圈本身就是這個修法的實證
+同一次 bench run：`ramp TIMEOUT ... pos=0.2535` 之後 `settle DONE after 73/100 loops pos=0.0959`。settle 的前饋（08-18c 新增）**本來就是用 pos 算**，於是在完全相同的 kp 命令（target=0.05）下多拿到 −1.63 Nm，總扭力 −5.29 → −6.92，一舉突破靜摩擦走到位。同一顆馬達、同一個位置、同一組增益，ramp 卡死而 settle 走得動，唯一差別就是 `tau_ff` 的算法。
+
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `go_home_slot()` ramp 迴圈：`tau_ff` 的判斷與計算由 `cur_cmd` 改為 `pos`，與 `feedback_loop()` 的 MOVE/HOLD 分支（一向使用 `Get_Position()`）及 settle 迴圈對齊
+
+PARK 路徑的 warmup（`tau_warm`）不需改：passive 探測段結尾已把 `start_pos` 刷新成 `Get_Position()`，本來就是實際位置。
+
+### 修正 08-18c 的一項推論
+08-18c 從「停在 0.218」反推靜摩擦 ≈1 Nm，該推論建立在「passive、tau=0」的假設上。這次 tau trace 顯示**全程 tau 在 −5～−13 Nm，馬達一直有出力，完全沒有 passive**（`passive suspected MID-RAMP` 未觸發）。以本次數據重算：卡死點推力 5.42 Nm、該處重力 1.63 Nm → **靜摩擦約 3.8 Nm**（末端約 1.2 kgf，符合 user 手推「有點緊」的描述）。即症狀是「靜摩擦偏大 + 前饋算錯」的組合，不是 passive。08-18c 新增的 passive 監控仍屬有效防護（feedback_loop 的盲區確實存在），只是這次的故障不是它負責的那類。
+
+### 預期效果
+`cmd=0.5026 / pos=0.6678` 那點的總扭力將由 −11.0 提升為 **−14.1 Nm**，穩定超過「重力 9.79 + 靜摩擦 3.8 = 13.6」的門檻，手臂應平順跟隨 ramp，兩段停頓與 900 loops(18s) TIMEOUT 一併消失。峰值扭力 −14 Nm 遠低於 DM10010L 的 `TAU_MAX=200`，且低於既有 HOLD 已出現過的 −12.9，無新增電源風險。
+
+### 待驗證
+未編譯（本機無法 remote build）。下次 PARK 請確認：(1) tau trace 中 `tau_ff` 是否隨 `pos` 平滑變化而不再提早歸零；(2) ramp 是否 ARRIVED 而非 TIMEOUT；(3) 中途停頓是否消失。
+
+## 2026-08-18d Claude (Sadie) — 還原 2026-08-18 的寬鬆初始化模式
+### 需求（user）
+確認單獨測手臂不需要主程式之後，要求把主程式改回原狀。
+
+### 修改檔案（全部還原到加旗標之前）
+- `user_lib/WASH_ROBOT.cpp` `init()`：移除 lenient 旗標讀取、`abort_or_skip_` lambda、安全警告註解區塊、缺席清單總結；7 個失敗點恢復原本的 `return true`
+- `facade_cleaning_v2/main.cpp`：移除 `--lenient-init` CLI 分支與說明註解
+- `facade_cleaning_v2/facade_cleaning_v2.vcxproj.user`：Program Arguments 移除 `--lenient-init`
+
+昨天 kd 溢位那批修正（`user_lib/damiao.h`、`cleaning_arm/main_api.*`）**不在還原範圍**，全部保留——實機已確認手臂明顯改善。
+
+## 2026-08-18c Claude (Sadie) — 📌 PARK 假 ARRIVED + ramp 期間 passive 監控盲區（手臂掉落根因）
+### 現象（user）
+kd 修正後手臂已明顯改善，但剩兩個問題：(1) PARK 稍微沒力；(2) M1 回原點途中 M2 突然抽動一下，M1 就失力往下掉。
+
+### Bench log（決定性證據）
+```
+[M1 tau] mode=HOLD pos=0.5987 vel=0.0061 tau=-8.7424 Nm
+[DamiaoAPI] recv: PARK
+[M1 go_home] ramp ARRIVED after 473/900 loops (9460ms) pos=0.2180 vel=0.0061 target=0.0500
+[M1 go_home] settle DONE after 1/100 loops (20ms) pos=0.2180 vel=0.0061
+[M2 lr_move_to_slot] Done.  pos=0.0822  target=0.0000  start=0.5220 (converged)
+```
+
+### 診斷
+**1. 假 ARRIVED。** `pos=0.2180` 距 `target=0.0500` 還有 0.168 rad 卻宣告到達。`go_home_slot` 第三條判斷是 `|pos-target| < ARRIVE_TOL*4 && |vel| < VEL_TOL`，`ARRIVE_TOL=0.05` → 窗口 **0.20 rad**，0.168 落在裡面；而卡死的馬達速度也是低的，這組條件無法區分「停穩」與「卡死」。settle 迴圈的 `arrive_cnt>=N || |vel|<VEL_TOL` 更糟——速度那半單獨成立，所以第一圈（20ms）就退出，整個 settle 形同不存在。
+
+**2. 馬達其實是 passive，不是推不動。** 當下命令扭力 = `kp 26 × 誤差 0.168 = 4.37 Nm` 加 `tau_ff −0.889`，共約 **5.26 Nm**（方向已驗算，都朝原點）。但解 `20.87·sin(pos−3.317) = 靜摩擦` 得：靜摩擦 1.0 Nm → 平衡點 pos=0.223、1.5 Nm → 0.247、2.0 Nm → 0.271。**實測停在 0.2180，反推靜摩擦僅約 1 Nm**（末端 ≈320 克力，與 user 手推「稍微有點緊」吻合）。推 5.26 Nm 的馬達停在只需 1 Nm 就撐得住的位置 → 實際輸出 ≈ 0。順帶驗證重力模型：HOLD 實測 `pos=0.5987 tau=−8.7424`，模型算 −8.508，誤差 2.7%，模型是準的。
+
+**3. 根因是監控盲區。** `go_home_slot` 的 passive 探測只在 ramp 開始前跑一次（3 frame / 60ms）；而 2026-08-17b 加在 `feedback_loop()` 的**持續** passive 監控在這裡完全不生效——`go_home_slot:511` 的 `s.enabled.exchange(false)` 讓 `feedback_loop` 直接 `continue` 跳過 M1。於是這段 473 loops / 9.5 秒的 ramp 沒有任何 passive 監控，**也沒有任何 tau log**（ramp 迴圈不印，feedback_loop 被跳過），所以馬達靜默停止出力 9.5 秒完全看不見。2026-08-17b 的本意正是「passive 會在運作途中發生」，但只覆蓋了 MOVE/HOLD 兩條路徑，PARK 的 ramp 剛好是漏掉的那條。
+
+**4. 為什麼看起來是 M2 害的。** `cmd_park_sequence` 是完全序列的：M1 `go_home_slot` → `disable_slot(m1_)` → M2 才動。M1 在 disable 當下沒有立刻掉，是因為那 1 Nm 靜摩擦撐著；M2 開始移動的震動打破了這個平衡，手臂才滑落。**M2 是觸發，不是原因**——原因是放開了一顆從未真正到家的馬達。（先前一版分析說「M2 與掉落無因果」是過度武斷，已更正。）
+
+### 修改檔案
+- `cleaning_arm/main_api.h`：`go_home_slot` 簽名 `void` → `bool`（true = 確實到位）
+- `cleaning_arm/main_api.cpp` `go_home_slot()`：
+  - ramp 第三條判斷 `ARRIVE_TOL*4` → `ARRIVE_TOL*1.5`（0.20 → 0.075 rad），保留「略短即可收工」的原意但讓真正的 stall 塞不進去
+  - settle 判斷 `arrive_cnt>=N || |vel|<VEL_TOL` → 只看 `arrive_cnt>=N`（位置連續達標），移除單獨成立的速度條件
+  - ramp 迴圈新增**持續** passive 監控：誤差 >0.1 rad 且 |tau| <0.3 Nm → `dm_->enable()` 重新啟用，300ms cooldown（`dm_->enable()` 本身 block ~100ms），閾值與 feedback_loop 一致
+  - ramp 迴圈新增 ~4Hz 節流 tau trace（`cmd/pos/vel/tau/tau_ff`），補掉 PARK 全程無 log 的盲區
+  - 結尾比對 `Get_Position()` 與 target 回傳是否到位，未到位時印 `NOT HOME` 與 ramp 期間 passive 恢復次數
+- `cleaning_arm/main_api.cpp` `cmd_park_sequence()`：**只在 M1 確實到家時才 `disable_slot(m1_)`**；未到家則保留 enabled + holding 並回 `ERR PARK: M1 did not reach home...`。失敗路徑刻意不 disable，因為 `go_home_slot` 結尾已恢復 `s.enabled`，feedback_loop 會接手服務該 slot，其持續 passive 監控仍有機會救回來——遠優於把手臂交給重力。M2 仍照常回中心（此時 M1 有力，震動不再能撼動它）。
+
+其餘 5 個 `go_home_slot` 呼叫點忽略新回傳值，行為不變。
+
+### 待驗證（未編譯，本機無法 remote build）
+- 新的 tau trace 是這次的關鍵觀測點：PARK 時若出現 `passive suspected MID-RAMP`，即證實 passive 診斷；若 tau 一路維持在 −5 Nm 左右卻仍推不動，則反而是靜摩擦遠大於估計，兩者修法不同
+- 收緊 ARRIVED 門檻的副作用：passive 若未被成功救回，PARK 會跑滿 900 loops（18 秒）才 TIMEOUT，接著回 `ERR` 且**手臂保持舉著不放開**（刻意設計，安全優先）。這是預期行為，不是新的故障
+- 尚未處理：passive 的**根因**（DM 馬達為何會中途停止輸出）仍不明，目前全部機制都是偵測後搶救
+
+## 2026-08-18b Claude (Sadie) — 手臂面板 INIT 按鈕走 washrobot 導致單獨測手臂時無反應
+### 現象（user）
+只想單獨測手臂，`motor_api` 已跑起來、web_backend 也顯示 `[arm] connected 192.168.5.34:9527`，但從網頁按 INIT 沒反應。motor_api 端只看得到 server.js 的 `ping` 心跳，收不到任何實際指令。
+
+### 根因
+`web_backend/public/index.html` 手臂面板裡，INIT 是唯一標 `data-tgt="washrobot"` 的按鈕（送 washrobot 的 `arm_init`），PARK / STATUS / DEPLOY 都是直連 `data-tgt="arm"`。washrobot 主程式沒跑（bench 上設備沒全上電），這顆按鈕就石沉大海。
+
+面板說明文字當時寫的是「本面板直連 motor_api (127.0.0.1:9527)，不需 washrobot」——跟實際行為矛盾，也是誤導的來源。
+
+### 為什麼原本要走 washrobot（保留它的理由）
+`WashRobot::cmd_arm_init()`（`user_lib/WASH_ROBOT.cpp:834`）= `arm_cmd_("INIT", 60)` 再加兩個 washrobot 端狀態：`arm_stow_state_ = Unknown`、`arm_calibrated_ = true`。後者是 sweep 的前置條件（`WASH_ROBOT.cpp:2811` 會擋下未校正的 sweep）。所以**不能**直接把這顆改成直連，否則 washrobot 有跑時 sweep 會被擋。
+
+### 修改檔案
+- `web_backend/public/index.html` 手臂面板：**新增**一顆「INIT（直連 · 單獨測手臂）」（`data-tgt="arm" data-cmd="INIT"`），原本那顆保留並改名為「INIT（經 washrobot · 標記 arm_calibrated）」；兩顆 INIT 獨立一行，PARK / STATUS 移到下一行
+- 同面板 hint 改寫成三條列點，講清楚哪些按鈕直連、兩顆 INIT 差在哪、以及不用「經 washrobot」那顆的後果（sweep 會被擋）
+
+`app.js` 不需改動——`app.js:251` 的通用 handler 會綁定任何 `button[data-tgt][data-cmd]`。`server.js` 也沒動。
+
+### 部署
+只改靜態前端檔，**web_backend 不用重啟**，瀏覽器 hard refresh（Ctrl+Shift+R）即可。
+
+### 順帶記錄兩個 bench 觀察
+- `motor_api` 啟動時印 `[config] Not found (cannot open: damiao.cfg); using built-in defaults.`——內建預設剛好與 cfg 內容一致（ttyACM0 / 921600 / 9527）所以目前無影響，但改 `damiao.cfg` 不會生效，除非把它放進**執行時的工作目錄**（非執行檔所在目錄）
+- 2026-08-18 稍早加的 `--lenient-init` 對「單獨測手臂」是不需要的（手臂是獨立 process，不經過 washrobot 主程式）。該旗標仍保留給「要跑主程式但部分設備沒上電」的情境
+
+## 2026-08-18 Claude (Sadie) — 臨時：寬鬆初始化模式，部分設備沒上電也能開機測試
+### 需求（user）
+「臨時改一下主程式，因為目前只有幾個設備有上電，不要再 init 時因為某些設備連不上線就跳出失敗」
+
+### 做法：加旗標，不動既有失敗邏輯
+沒有把錯誤處理刪掉或註解掉，而是加一個開關——**不帶旗標時行為與先前完全相同**，所以不需要事後還原程式碼，避免「臨時改動忘記改回來」這個典型風險。
+
+啟用方式二選一：
+- 主程式旗標：`./facade_cleaning_v2 --lenient-init`
+- 環境變數：`WR_LENIENT_INIT=1`
+
+`WashRobot::init()` 開頭讀旗標，並提供 `abort_or_skip_()` lambda：嚴格模式回 `true`（呼叫端照舊 `return true` 中止開機），寬鬆模式則記錄裝置名稱、印 `[LENIENT]` 警告並繼續。
+
+### 降級的 7 個硬失敗點（原本任一失敗就 `[FATAL]` + exit）
+| 位置 | 裝置 |
+|---|---|
+| `cli_20_.connectToServer` | USR .20 gateway（ZDT 推桿）|
+| `cli_22_.connectToServer` | USR .22 gateway（JC100/PQW/arm-rail/XKC）|
+| `D_(DM2J_ARM).init` | DM2J 上滑台 slave 14 |
+| `Z_(i).init` ×4 | ZDT 推桿 slave 1~4 |
+| `M_(i).init` ×4 | JC-100 壓力 slave 1~4 |
+| `pqw_.init` | PQW 繼電器 slave 12 |
+| `imu_serial_.init` | IMU serial |
+
+crane / arm / depth_cam / XKC / DY500 本來就是 lazy-connect 只印 WARN，未改動。
+
+`init()` 結尾新增缺席清單總結（印在最後、command server banner 正上方），避免「半殘開機」被誤認為正常開機。
+
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `init()`：開頭新增 lenient 旗標讀取 + `abort_or_skip_` lambda + 安全警告註解區塊；7 個失敗點改用該 lambda；結尾新增缺席清單總結
+- `facade_cleaning_v2/main.cpp`：CLI 解析新增 `--lenient-init`（對齊既有 `--no-debug` 的 env-var 注入模式）
+
+### ⚠ 安全警告（已寫進 `init()` 開頭註解）
+1. **故障點會延後浮現**：缺席裝置不再於開機時被擋下，而是等到實際動作呼叫它時才失敗——對爬牆流程來說，等於把故障點從地面開機時移到半空中作業時
+2. **IMU 缺席時傾斜保護等同關閉**：`WT901BC_TTL::init()` 在 serial 沒開成功時不會啟動 worker thread（這點本身是安全的，不會 crash），但 `imu_.x/y` 會停在建構子的 0，`imu_monitor_loop_` 因此讀到「完全水平」而不是「讀不到」，`IMU_EMERGENCY_DEG` 傾斜急停在這個狀態下永遠不會觸發。清單裡這一項有特別標注
+3. **TCP gateway 缺席時**，掛在該 bus 上的驅動仍會 Mode-B init 成功（不 probe），靠 `TCP_client` 背景重連；設備補上電後會自動接回，但在那之前所有 I/O 都失敗
+
+**正式運行不要帶這個旗標。** 不帶 = 原本的嚴格行為。
+
+### 未驗證
+未編譯（本機無法 remote build）。新增程式碼用到的常數型別已逐一核對（`IP_485_1`/`IP_485_3`/`IMU_PORT` 為 `const char*`、`PQW_SLAVE` 為 `int`），`<string>`/`<vector>`/`<cstdlib>` 皆已 include。
+
+## 2026-08-17c Claude (Sadie) — 📌 找到根因：damiao MIT 編碼 kd 溢位，M1 阻尼長期形同虛設
+### 需求（user）
+「m1 在 deploy 時停停走走，有時無法撐住自己整個掉下去，park 無力把自己撐回原點」
+
+### 根因（不是調參問題，是驅動層的編碼 bug）
+`user_lib/damiao.h` `control_mit()` 把 kd 編碼成 12-bit、範圍固定 `[0,5]`，而編碼用的 `float_to_uint` lambda **完全沒有做輸入範圍限制**。kd 超過 5 時算出的 `data_uint` 會超過 12-bit 寬度，接著打包進 `data_buf[5] = kd_uint >> 4`（`uint8_t`）時高位被靜默砍掉——數值**繞回（wrap around）成一個不相干的小值，不是飽和**。
+
+把歷史上用過的值代進編碼算術，馬達實際收到的 kd：
+
+| 程式裡寫的 kd | raw = kd/5×4095 | `raw>>4` | 存進 uint8_t 後 | 馬達實收 kd |
+|---|---|---|---|---|
+| 4.5 | 3685 | 230 | 230 | 4.50 ✓ |
+| 5.0 | 4095 | 255 | 255 | 5.00 ✓ |
+| **5.5** | 4504 | 281 | **25** | **0.50** ✗ |
+| 6.0 | 4914 | 307 | **51** | **1.00** ✗ |
+| 7.0 | 5733 | 358 | **102** | **2.00** ✗ |
+| 8.5 | 6961 | 435 | **179** | **3.50** ✗ |
+| 10.0 | 8190 | 511 | **255** | 5.00（巧合）|
+| **12.0** | 9828 | 614 | **102** | **2.00** ✗ |
+| 20.0 | 16380 | 1023 | **255** | 5.00（巧合）|
+
+改動前的實際狀態：`m1_.hold_kd` 名目 5.5 → **實收 0.50**（DEPLOY MOVE + HOLD 幾乎無阻尼）；`m1_.park_kd` 名目 12.0 → **實收 2.00**。M2 因為一路都在 5 以下（`hold_kd=3.0`），是唯一沒中的。
+
+### 三個症狀如何對上
+1. **DEPLOY 停停走走** — kp=34 配實收 kd=0.50，阻尼比極低，位置環必然震盪／黏滑
+2. **撐不住整個掉下去** — 阻尼不足讓速度衝過 0.4 觸發緊急煞車，但煞車是 `control_mit(kp=0, kd=20, tau_ff=0)`：kd 實收 5.0、**且 tau_ff 硬傳 0 完全放掉重力補償**。煞車力 = 5.0×0.4 = **2 Nm**，而 pos≈0.8 處重力矩約 **12 Nm** → 淨力仍有 10 Nm 往下，會一路加速到 12/5 ≈ 2.4 rad/s 才平衡。**舊煞車在數學上不可能撐住手臂**，只能讓它以較慢的等速往下滑；bench 記錄的「煞車已介入卻仍衝到 ±2 rad/s」正好落在這個數量級
+3. **PARK 無力** — park_kd 實收只有名目的 1/6，另外疊加下面兩個獨立的重力前饋缺口
+
+### 為什麼舊版（`D:\洗窗戶機器人\cleaning_arm`）沒這問題
+舊版所有 kd 都在 5 以下：`m1_.hold_kd = 3.0`、`m2_.hold_kd = 1.2`、預設 `1.0`，且**沒有** `park_kd`（PARK 與 HOLD 共用一組）、**沒有**緊急煞車。這個 bug 一直存在於驅動裡，是 v2 一路「加大扭力」越過 5.0 那條看不見的線之後才引爆的。時間軸對照：`park_kd` 2026-07-24 引入時初始值就是 7.0（→2.00），**從第一天就沒正確過**；`hold_kd` 在 4.5→6.0 那次越線（實際從 4.50 掉到 1.00），之後 6.0→5.5 更是從 1.00 掉到 0.50。這解釋了 changelog 裡整段「hold_kp/kd from 26 to 40 (all failed)」「加大 kd 反而更糟」的歷史困惑——**每次把 kd 調過 5，阻尼就崩潰**，而且是非線性、不可預測的崩潰。2026-08-14 那筆「park_kd 10→12 再加大應急」實際是把阻尼從 5.0 砍到 2.0，方向完全是反的。
+
+### 修改檔案
+- `user_lib/damiao.h` `control_mit()` 的 `float_to_uint`：**補上輸入 clamp**（超範圍改為飽和而非繞回），並附完整踩坑說明與上表數字。這同時修正了 kp/q/dq/tau 所有欄位的同款風險（目前只有 kd 實際踩到）
+- `cleaning_arm/main_api.cpp` `init()`：`m1_.hold_kd` 5.5→**5.0**（協定上限；相對於先前實收的 0.50 是 10 倍阻尼）、`m1_.park_kd` 12.0→**5.0**（先前實收 2.00）
+- `cleaning_arm/main_api.cpp` `feedback_loop()` 緊急煞車：`M1_EMERGENCY_BRAKE_KD` 20.0→**5.0**（純表述修正，20 從來只生效成 5）、**tau_ff 從硬傳 0 改為即時計算重力補償**
+- `cleaning_arm/main_api.h`：`M1_GRAVITY_MIN_VALID_RAD` 0.55→**0.20**。舊門檻過度保守——`tau_ff = K·sin(pos−PHASE)` 的變號點是 `PHASE−π = 3.317−3.14159 = 0.1754 rad`，0.1754~0.55 這段方向其實正確卻被擋掉，而那正是 PARK 收回最吃力的一段（pos=0.4 需求 4.74 Nm，沒前饋要靠 kp 硬頂出 4.74/26 = 0.18 rad 的落後才生得出力）。舊門檻還有個副作用：跨越 0.55 瞬間 tau_ff 在 0 與 −7.53 Nm 之間**階躍**，手臂在門檻附近抖動就會被這 7.5 Nm 跳變放大成震盪
+- `cleaning_arm/main_api.cpp` `go_home_slot()` settle 迴圈：`tau_ff` 從硬傳 0 改為即時計算（PARK 收尾最後一哩原本完全裸奔）
+
+### 待驗證（全部未編譯、未實機）
+- **首次上機務必慢速 + 有人在旁**：M1 阻尼從實收 0.50 跳到 5.0 是 10 倍變化，系統動態會完全不同，不能假設「阻尼變大一定更好」
+- `M1_GRAVITY_MIN_VALID_RAD` 放寬後，0.1754~0.65 屬於**外推區**（實測點最低只到 0.6495）。sin 形式對單一剛體重力矩是正確的物理形式，但 K=20.87 若偏大，外推區會過補償——請留意 PARK 末段有沒有「自己往回衝」的跡象
+- `cmd_deploy_sequence()` 的 `spd=0.05` 與 `M1_VEL_SAFETY_LIMIT=0.4` 都是為了對付這個根因而一路降下來的補償措施（原始設計 0.35 rad/s）。根因修好後**也許**可以放寬回去，但這次刻意不動，等阻尼修正驗證過再說
+- 一個順帶被修正的隱藏錯誤：`feedback_loop()` move→hold 轉換時算 `hold_tau_ff = Get_tau() + hold_kd*vel` 是用**名目** hold_kd 去扣除阻尼分量，先前名目 5.5／實收 0.50 代表扣過頭 11 倍。clamp 修好後這行自動變正確，不需另外改（且該值現在只在 pos ≤ 0.20 時才會被用到）
+
+## 2026-08-17b Claude (Sadie) — M1 加上背景持續 passive 監控，不只是動作開始前測一次
+### 需求（user）
+提供了實機影片（`808631055.821958.mp4`）+ 說明：影片裡手臂盪到接近水平，是因為**運作途中突然完全無力（passive）、被重力拉到水平，靠人手/安全繩接住**，不是衝到一個設錯的目標。
+### 分析
+目前已經加過的 passive 偵測（`touch_wall_slot`、`go_home_slot`）都只在**動作開始前**探測一次，如果 passive 是在 HOLD 或 MOVE **運作途中**才發生，完全沒有機制會發現、也不會自動搶救，只能靠人眼看到、手動接住——這正是影片裡發生的事。
+### 修改檔案
+- `cleaning_arm/main_api.h` `MotorSlot`：新增 `passive_recover_cooldown_ticks`（M1 用，避免每 20ms 都呼叫一次 `dm_->enable()`——那個呼叫本身會 block ~100ms，太頻繁呼叫會拖慢整個 `feedback_loop`、連 M2 的服務也會被拖累）
+- `cleaning_arm/main_api.cpp` `feedback_loop()`：MOVE（含 emergency brake 的 else 分支）+ HOLD 兩個分支，各自的 `control_mit()` 呼叫之後新增持續監控——如果實際位置誤差 > 0.1 rad（代表理論上該出力）但量到的 `tau` 卻 < 0.3 Nm（幾乎沒出力），視為疑似 passive，立即 `dm_->enable()` 重新啟用，並進入 300ms 冷卻期（15 個 tick）避免洗版式重複呼叫
+### 效果與限制
+這樣即使 passive 發生在運作**途中**（不只是動作剛開始），也會在最多幾十 ms 內被偵測到並嘗試恢復，不用再等人眼發現、手動接住。但這仍然是**偵測後搶救**，不是預防 passive 本身發生的根因（DM 系列馬達為什�麼會進入這個狀態，目前還不清楚）——如果偵測到但恢復失敗（例如硬體真的斷電/斷線），這個機制還是救不回來，人員在旁仍然是必要的安全措施。
+
+## 2026-08-17a Claude (Sadie) — DEPLOY 暴衝仍未根治，先收緊安全邊界降低風險
+### 背景（user 要求根治，但目前資料不足以下定論）
+User 提供關鍵幾何資訊：M1 從水平算起約 45°→135°、頭重（M2+雙刷頭），是典型倒立擺配置，理論不穩定平衡點在中間（約物理 90°，換算軟體座標約 `pos≈0.75`）。但這個估計值（45° 只是粗估）跟我們之前擬合的重力模型（`K=20.87/φ=3.317`）換算出來的等效不穩定點（約 `pos≈0.18`，用倒立擺正負號重新推導）對不上。兩邊都有不確定性，不足以直接下定論調整公式方向——上次就是在信心不足的情況下調整前饋方向，反而讓 DEPLOY 暴衝更嚴重（惡化到 vel=1.78）。這次選擇不再對重力模型本身下手，改為收緊安全邊界。
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `feedback_loop()` M1 安全閘：`M1_VEL_SAFETY_LIMIT` 0.7→0.4（更早介入）、`M1_EMERGENCY_BRAKE_KD` 15→20（煞車力道加大）
+- `cleaning_arm/main_api.cpp` `cmd_deploy_sequence()`：`spd` 0.08→0.05（再降速）
+### 現況誠實說明
+這次的修改是**降低風險**，不是**根治**。DEPLOY 通過不穩定區時仍然可能晃動，只是希望晃動的幅度/速度比之前小、更早被安全閘攔下來。真正的根治需要更嚴謹的量測（見下方待辦）。
+### 待辦：真正根治需要的量測
+之前約好要測 `M1 MOVETO 0.15 0.1` / `M1 MOVETO 0.35 0.1` 兩個點（填補 0.05~0.5 這段空白，確認 PARK 目標區間是否也需要前饋），但被後續的暴衝事件插隊，還沒有實際完成。真正要根治，需要：
+1. 補完上述 2 個點
+2. 理想情況下用「手動撐著、卸力量測」的方式（而非靠 DEPLOY/TOUCHWALL 去撞出停留點），在整個 `[0,1.5]` 範圍內多測幾個點（5+ 個，涵蓋低、中、高角度），才能真正解出可信的 `K`/`φ`，而不是像現在只有 3 個彼此靠很近的點
+3. 精確測出（或至少更準確估計）物理角度跟軟體 `pos` 的對應關係，用幾何限制交叉驗證擬合結果
+
+## 2026-08-14t Claude (Sadie) — 重力前饋只在驗證過的範圍內套用，PARK 目標區間退回純 PD
+### 需求（user）
+「為什麼現在PARK不會停到最後面?」——上一筆把重力前饋套進 PARK 之後，PARK 反而收不到底
+### 根因
+量出來的 3 個乾淨資料點都落在 `0.65~0.83 rad`，但 PARK 目標（`PARK_STOP_MARGIN=0.05`）遠在這個範圍外——手算驗證：`pos=0.05` 外推出來的補償方向是「往伸出推」（+2.6 Nm），跟 PARK 想要的收回方向相反，會在接近終點前就跟 `park_kp` 打出一個新的（錯誤的）平衡點，卡住不再往終點走。這是外推到未驗證區域出錯，不是模型本身錯——3 個點在自己的範圍內驗證得還可以（~6% 誤差）。
+### 修改檔案
+- `cleaning_arm/main_api.h`：新增 `M1_GRAVITY_MIN_VALID_RAD=0.55f`（略低於最低量測點 0.6495，留一點餘裕）
+- `cleaning_arm/main_api.cpp`：`go_home_slot()` 的 warmup + 主 ramp、`feedback_loop()` 的 MOVE + HOLD，四處套用重力前饋的地方統一加上 `pos > M1_GRAVITY_MIN_VALID_RAD` 的門檻，範圍外一律不套用前饋（退回純 `kp`/`kd`，即改動前的行為）
+### 後續
+PARK 目標區間（0.05 附近）現在退回純 PD，跟量出這組重力模型之前的行為一致——如果 PARK 收回力道還是不夠，那是純 `park_kp`/`park_kd` 本身的問題，需要另外調大，不是前饋方向錯的問題。DEPLOY 那邊的目標角度（0.586、0.631）雖然略低於最低驗證點 0.6495，但門檻設在 0.55、留了一點餘裕，應該還在門檻內、能吃到前饋。如果之後想讓 PARK 目標區間也有前饋幫忙，需要在 0.05~0.5 這段另外補測乾淨資料點，不能直接放寬門檻了事。
+
+## 2026-08-14s Claude (Sadie) — PARK 往前小衝 + 全程無重力補償，兩個一起修
+### 需求（user）
+「park的瞬間會先稍微往前一點才回收? 而且park的力量還是不夠 撐不回去」
+### 問題 1：passive 探測造成不必要的往前小衝（我上一筆改動的副作用）
+剛加的 passive 探測用 `cur_cmd ± 0.3 rad` 判斷方向，如果 PARK 當下位置已經很接近目標（`PARK_STOP_MARGIN=0.05`），方向判斷可能反過來變成往前偏移，造成真實的、不必要的往前小衝（不是誤判，是探測用的位移方向在這個情境下选错、力道也偏大）。
+- 修改：`cleaning_arm/main_api.cpp` `go_home_slot()` passive 探測的偏移量從 0.3f 縮小到 0.05f，仍足夠產生超過 `TAU_LIVE_THRESHOLD` 的扭力差異判斷 passive，但實際移動量小很多
+### 問題 2：PARK 全程沒有重力補償，純靠 kp/kd 硬頂
+`go_home_slot()` 原本的 `init_tau_ff` 從 2026-07-24 就寫死 0.0f（舊的重力前饋因為被牆面反作用力污染而停用），代表 PARK 收回全程完全沒有前饋幫忙。現在已經用實測反推出 M1 真正的重力模型（`M1_GRAVITY_K`/`M1_GRAVITY_PHASE_RAD`，真正零點在硬體範圍外——代表收回全程都在對抗重力，跟伸出方向相反，DEPLOY 反而是被重力順勢帶著走），沒理由讓 PARK 繼續裸奔。
+- 修改：`cleaning_arm/main_api.cpp` `go_home_slot()` 的 warmup 跟主 ramp 迴圈，把原本因 `init_tau_ff=0` 而形同虛設的舊前饋邏輯，換成即時計算的 `M1_GRAVITY_K × sin(當下角度 − M1_GRAVITY_PHASE_RAD)`；移除已死的 `init_tau_ff` 變數
+### 效果
+PARK 全程應該會感覺比較「有力」（前饋主動分攤大部分重力負擔，不用全靠 `park_kp`/`park_kd` 硬頂），且不會再有那個往前的小衝。部署後請測試觀察：(1) PARK 開始瞬間還有沒有往前偏移，(2) 整段收回過程力道感覺有沒有改善。
+
+## 2026-08-14r Claude (Sadie) — go_home_slot 到位判定沒檢查速度，修掉真正的 bug
+### 需求（user）
+PARK 測試 log 顯示「ARRIVED」時 `vel=-0.7509`（還在高速移動），user 反饋「park直接軟掉沒力 完全沒辦法把自己拉起來」
+### 根因（跟前一筆的 passive 假設不同，是獨立的邏輯 bug）
+`go_home_slot()` 判斷「到位」有兩條路徑，其中一條（`arrive_cnt>=ARRIVE_CNT`）**只檢查位置有沒有接近目標，完全沒檢查速度**。如果手臂帶著速度快速通過目標附近，剛好連續 3 次（60ms）取樣都落在位置容忍範圍內，就會被誤判「ARRIVED」，直接跳過後面驗證速度真的降下來的安定迴圈（那段迴圈只在 `arrive_cnt<ARRIVE_CNT` 時才會跑），把還在用 -0.75 rad/s 移動的手臂直接交給 HOLD 接手——這就是「軟掉/接不住」的真正原因，跟前一筆猜的 passive 故障是兩件不同的事（這次 log 沒有 tau 驟降到 0 的 M1 passive 訊號，反而是 M2 那邊自己的 passive 偵測正常觸發+恢復，證明偵測機制本身有效）。
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `go_home_slot()`：`arrive_cnt` 那條路徑的判斷加上速度檢查（`&& std::abs(vel) < VEL_TOL`），位置跟速度都要同時滿足才算數
+### 效果
+之後只要手臂還在快速移動，就不會再被誤判「到位」提早交接給 HOLD；真正到位（位置接近 + 速度也降下來）才會被接受。
+
+## 2026-08-14q Claude (Sadie) — go_home_slot（PARK）也加上 passive 偵測，這次避開舊坑
+### 需求（user）
+「PARK 也拉不起來」／「PARK 也軟掉」，但因為使用者當場接住手臂手動搬回去，沒有留下可分析的 log——既然 M1 剛在 touch_wall 證實會進入 passive 故障，直接比照加到 PARK 用的 `go_home_slot()`，不等下一次現場 log
+### 重要：這裡曾經加過同款探測、後來被撤掉，這次要避開同樣的坑
+`go_home_slot()` 裡原本就留著一段 2026-07-27 的撤回說明，指出當初加 passive 探測失敗在兩點：
+1. 探測是無條件套用在**每一次** `go_home_slot` 呼叫，包含 DEPLOY 內部換手前的 M1 retract，造成每次移動前都有一次明顯頓挫
+2. 探測完沒有把 `cur_cmd`/`start_pos` 同步成探測後的實際位置，導致 ramp 從過時的參考點開始追，反而製造「到不了目標、走得怪怪的」的新 bug
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `go_home_slot()`：新增 passive 探測+自動 enable，但**只在 `use_park_profile==true`（真正的 PARK）才觸發**，不影響 DEPLOY 內部的 M1 retract 步驟；探測（不管有沒有觸發重新 enable）結束後一律重新讀 `Get_Position()` 同步 `cur_cmd`/`start_pos`，避免重演舊的錯位 bug
+### 待驗證
+部署後測試 PARK，確認：(1) 沒有重演之前的「每次頓一下」（因為現在只在 PARK 這條路徑觸發，DEPLOY 換手應該感覺不到差異），(2) 如果真的遇到 passive 故障，log 會印出 `[M1 go_home] motor passive` 並自動恢復，不會再軟掉掉落。
+
+## 2026-08-14p Claude (Sadie) — M1 touch_wall 加上 passive 偵測+自動重新 enable（比照 M2）
+### 需求（user）
+貼出的 log 顯示 DEPLOY touch_wall 整段 `tau` 幾乎維持在 0（~-0.05 Nm），`pos` 完全卡住不動，最後 `err=0.628`（幾乎沒走）——跟目標角度誤差這麼大，`kp*error` 理論上該有數十 Nm，實際卻幾乎不出力，這正是 M2 之前出現過的「passive 故障：MIT frame 有 ACK 但無實際扭力輸出」同款特徵，這次疑似輪到 M1
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `touch_wall_slot()`：在呼叫 `move_to_slot()` 之前，新增跟 M2 `lr_move_to_slot_impl()`（2026-06-06 那次）完全同款的 passive 偵測——送 3 個探測 frame 取樣 `tau`，低於門檻（0.3 Nm）就判定 passive、重新 `enable()` + 5 個熱身 frame，再開始真正的移動
+### 待確認
+使用者另外提到「PARK 回去時會軟掉」，但這次貼的 log 是 DEPLOY 的 touch_wall（伸出）卡住，不是 PARK（`go_home_slot` 沒有走這段新加的偵測）——如果 PARK 那邊也有同樣症狀，需要另外在 `go_home_slot()` 加同款保護，待使用者確認/提供對應 log 後再處理。
+
+## 2026-08-14o Claude (Sadie) — M1 重力前饋改用實測反推的 K/φ，取代錯誤的 ARM_MASS_KG 模型
+### 需求（user）
+「你幫我量出真正每個值 不要亂加」——不要用猜的重力常數，要用實際量測反推
+### 量測與計算
+用 `M1 TOUCHWALL ... 0.05`（慢速）分三次量到同一次 `ENABLE` 循環內的乾淨靜止點：
+- `(0.6495, -9.5238)`、`(0.7662, -12.3565)`、`(0.8330, -12.7473)`（pos rad, tau Nm）
+用最外側兩點解 `tau = K sin(pos-φ)`：`K≈20.87 Nm`、`φ≈3.317 rad`；用中間點驗證，預測 -11.64 vs 實測 -12.36，誤差約 6%（合理範圍內的雜訊，非完美擬合）。
+### 關鍵發現
+1. **真正的重力零點角度（φ≈3.32 rad）落在 M1 硬體範圍 `[0,1.5]` 之外**——代表整個可移動範圍內，重力都沒有天然平衡點，只會一路把手臂往外拉。這徹底解釋了先前 `VERTICAL_OFFSET_RAD=0.38` 假設下的補償方向錯誤（0.38 在可達範圍內、且遠不是真正的零點），也解釋了這幾天「一放手就衝」的現象——不是控制沒調好，是這個角度範圍內本來就沒有穩定點。
+2. 換算等效重量 ~6.65kg，比實秤 2.3kg 重 3 倍多——公式的「整重集中在末端」簡化跟實際重心分布/結構的落差，屬已知模型限制，不是秤重量錯誤。
+### 修改檔案
+- `cleaning_arm/main_api.h`：移除 `ARM_MASS_KG` 常數，改成 `M1_GRAVITY_K=20.87f`、`M1_GRAVITY_PHASE_RAD=3.317f`（獨立於 `VERTICAL_OFFSET_RAD`，那個常數維持只用在牆距三角函數，不跟這組重力常數混用）
+- `cleaning_arm/main_api.cpp` `feedback_loop()`：MOVE/HOLD 兩個分支的重力前饋計算都改用新常數 `M1_GRAVITY_K × sin(pos − M1_GRAVITY_PHASE_RAD)`
+### ⚠️ 順便發現一個獨立的既有安全疑慮（尚未處理）
+`lr_calibrate_slot()`（M2 校正時暫停 M1）裡有一行舊註解：「Pausing M1 is safe here because M1 is at VERTICAL_OFFSET_RAD where gravity torque ≈ 0」——這個安全假設現在被證明是錯的（VERTICAL_OFFSET_RAD 附近實測需要 -9~-13 Nm 才撐得住，完全不是重力≈0）。如果 M1 剛好在這附近被 M2 校正暫停失去主動力，理論上有掉落風險。目前 INIT 流程裡 M2 校正前 M1 通常已經回到接近 0 的收回位置，可能不會踩到，但如果之後有人單獨呼叫 `M2 LR_CALIBRATE`、且 M1 當下停在別的角度，就有風險。這個沒有動，需要另外評估要不要修。
+### 後續
+新的重力前饋公式風險比舊的（方向錯誤的）版本低很多，但擬合本身有 ~6% 誤差、且只用 3 個點——部署後**務必先用慢速 + 保留速度安全閘**重新測試 DEPLOY，觀察暴衝/overshoot 現象有沒有改善，不要直接跳回正常速度。
+
+## 2026-08-14n Claude (Sadie) — 降速+安全閘生效（不再暴衝）；park_kp/kd 再加大應付換手收回無力
+### 現況驗證（好消息）
+DEPLOY RIGHT（target=0.6310）測試：全程 `vel` 沒超過 0.5 rad/s，沒有觸發新加的 `M1_VEL_SAFETY_LIMIT` 安全閘，代表降速（0.55→0.08）本身就先解決了最危險的暴衝部分。
+### 新回報（user）
+「但現在DEPLOY LEFT換RIGHT後，M1要回原點，會有點拉不起來」
+### 分析
+底層「touch_wall 衝過目標停不下來」的問題還在——這次滑到 `pos=0.8997`，比目標 `0.6310` 多衝了 0.27 rad（只是現在速度可控、不危險）。這代表換手收回時，起點比預期更遠，同一組 `park_kp`/`park_kd` 面對這段多出來的距離自然更吃力——是衝過頭問題的下游症狀，不是新的獨立問題。
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `init()`：M1 `park_kp` 21.0→26.0、`park_kd` 10.0→12.0
+### 風險提示
+這只是治標。因為 touch_wall 每次衝過頭的距離不固定，收回起點也就不固定，這組 park_kp/kd 可能之後還要再調。真正要解的是 touch_wall 為什麼煞不住、停不到目標這件事本身（懷疑跟 VERTICAL_OFFSET_RAD 常數本身不準有關，見 2026-08-14 稍早的分析，尚待驗證修正）。
+
+## 2026-08-14m Claude (Sadie) — DEPLOY 預設速度大幅降低（配合速度安全閘）
+### 需求（user）
+「你幫我用一組動很慢的參數來改DEPLOY速度」
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `cmd_deploy_sequence()`：預設 `spd` 0.55→0.08
+### 說明
+單獨降速（先前測過 0.1）並沒有讓失控消失，所以這次降速搭配上一筆剛加的 `M1_VEL_SAFETY_LIMIT` 速度安全閘一起用——慢速降低失控時累積的動能與速度峰值，安全閘則在真的失控時即時介入煞車，兩者互補而不是只靠其中一個。
+
+## 2026-08-14l Claude (Sadie) — M1 加裝速度安全閘，攔住 DEPLOY 失控暴衝
+### 需求（user）
+「這個不是測試 這是DEPLOY 300MM，幫我改好DEPLOY!」——DEPLOY 300 LEFT 這個生產指令，連續多次嘗試（ramp 速度 0.55/0.1、hold_kp 26~40、重力前饋開/關）都在通過同一區間時失控暴衝，這次衝到目前最高的 vel=2.2 rad/s
+### 分析
+所有嘗試的共同點：真實速度都遠遠超過命令的 ramp 速度（0.55 rad/s 的命令，實測衝到 2.2 rad/s）。既然反覆調整 PD 增益/前饋都沒能解決根因，改用另一層防護：不管失控的根本原因是什麼，都用即時速度監控直接攔截。
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `feedback_loop()` 的 M1 MOVE 分支：新增速度安全閘——每一輪都先讀真實速度，若 `|vel| > M1_VEL_SAFETY_LIMIT(0.7 rad/s)`，立即放棄原本的 ramp+PD 追蹤指令，改送純阻尼煞車指令（`kp=0, kd=M1_EMERGENCY_BRAKE_KD(15.0)`），並把 `move_cur` 重新錨定到當下實際位置（避免煞停後 ramp 又想追一個已經跑掉很遠的舊參考點造成二次暴衝）。速度降回安全範圍才恢復正常 ramp 追蹤。log 標記從 `mode=MOVE` 改印 `mode=BRAKE` 方便辨識目前是不是在緊急煞車狀態。
+### 效果與限制
+這是攔截後果、不是修根因——沒有解決「為什麼真實速度會遠遠超過命令速度」這個底層謎團，但應該能把每次失控事件限制在小得多的速度範圍內（0.7 rad/s 左右就介入），不會再像這次一路衝到 2.2 rad/s 才被拉住。部署後測試 DEPLOY 300 LEFT，觀察 log 裡有沒有出現 `[M1 SAFETY]`/`mode=BRAKE`，以及煞車介入之後最終有沒有平順地轉回正常 HOLD。
+
+## 2026-08-14k Claude (Sadie) — 重力前饋反而讓暴衝更嚴重，緊急退回停用
+### 需求（user）
+開啟 ARM_MASS_KG=2.3 後測試 DEPLOY 300 LEFT，log 顯示比之前更嚴重：MOVE 階段 vel 衝到 1.78 rad/s（上次未開前饋是 1.5）、touch_wall FAIL 的 overshoot 從 0.117 惡化到 0.219 rad，最後一樣凍結/軟掉
+### 分析（先安全退回，根因待查）
+懷疑手臂通過 `VERTICAL_OFFSET_RAD` 之後 `sin(pos-VERTICAL_OFFSET_RAD)` 變號，這個方向算出來的前饋扭力可能剛好跟失控的方向疊加、而不是抵銷（前饋設計的本意是抵銷重力，但如果套用時機/正負號沒對準當下的實際運動方向，反而會加劇失控）。這只是假設，還沒有嚴謹驗證。
+### 修改檔案
+- `cleaning_arm/main_api.h`：`ARM_MASS_KG` 2.3f→0.0f（緊急停用，避免這個新機制繼續造成風險）
+### 後續
+根因还没查清楚前不建議重新開啟。下一步要先搞懂：(1) MOVE 階段的暴衝，是不是本來就跟 HOLD 的重力前饋無關、根源在別的地方（例如 ramp trajectory 本身在通過某個區域時的行為），(2) 如果真的是前饋方向的問題，需要重新推導正確的正負號/生效範圍，而不是直接調整數值大小。目前 `hold_kp=34.0`/`hold_kd=5.5`（2026-08-14i）維持不動。
+
+## 2026-08-14j Claude (Sadie) — 開啟 M1 重力前饋補償（ARM_MASS_KG=2.3）
+### 需求（user）
+「那我要根本解決問題」——針對 VERTICAL_OFFSET_RAD(0.38) 最高點附近失控震盪，要做根本的重力前饋補償，而不是繼續調 PD 增益
+### 資料來源
+User 實秤手臂本體+M2+工具頭（pivot 以外會轉動的部分）總重 = 2.3kg
+### 修改檔案
+- `cleaning_arm/main_api.h`：`ARM_MASS_KG` 0.0f→2.3f
+### 說明
+`feedback_loop()` 的 MOVE/HOLD 分支（DEPLOY 的 `touch_wall` 移動 + 之後的持續 HOLD，就是這次失控發生的路徑）本來就有寫好、只是被 `ARM_MASS_KG=0.0f` 關掉的前饋邏輯：`tau_ff = ARM_MASS_KG × 9.81 × (ARM_LENGTH_MM/1000) × sin(當下角度 − VERTICAL_OFFSET_RAD)`。現在填入實秤值就會啟用——這個公式把整重當「集中在手臂末端(320mm)」的點質量算力矩，實際重心通常比末端更靠近轉軸，可能讓補償量偏大一些，先套用觀察，靜止時 tau 有明顯殘留再依比例調小。
+`go_home_slot()`（PARK 用）有自己另一套更早、已經因為「汙染 hold_tau_ff、導致甩動」被 user 停用的前饋機制（`init_tau_ff` 目前寫死 0.0f），這次沒有動它——那是獨立的歷史決策，不在這次要修的路徑上，如果之後也想套用同一個乾淨的 sin 模型到 PARK，需要另外討論。
+### 後續
+部署後重新測試 DEPLOY 經過 VERTICAL_OFFSET_RAD 附近（先前失控震盪那個角度），確認：(1) 震盪/暴衝現象是否消失，(2) 手臂在各角度靜止時 `[M1 tau]` log 殘留扭力是否明顯變小（代表前饋確實在分攤大部分重力負擔，`hold_kp/kd` 不用再硬頂全部）。如果穩定下來，`hold_kp`/`hold_kd`（目前 34.0/5.5）之後或許可以視情況調回更保守的值，不用再靠純 PD 硬撐。
+
+## 2026-08-14i Claude (Sadie) — M1 hold_kp/kd 調降（VERTICAL_OFFSET 附近失控震盪）
+### 需求（user）
+描述手臂「撐到最高點後突然無力掉下來」，經討論確認：`theta_target=0.3800` 剛好等於 `VERTICAL_OFFSET_RAD=0.38`（弧形最高/垂直點），這個角度附近重力力矩趨近零、過了頂點方向反轉，純反應式 PD 控制在這種天生不穩定的點很難穩住，之前一路加大的 `hold_kp=40/hold_kd=6` 反而讓過衝更劇烈（log 顯示 HOLD 剛切換就衝到 vel=1.5 rad/s、tau 打到 -15Nm）。User 確認先調降應急。
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `init()`：M1 `hold_kp` 40.0→34.0、`hold_kd` 6.0→5.5（kd 相對少降，拉高阻尼比例抑制震盪）
+### 後續
+這只是降低震盪風險的應急措施，不是根本解法。根本問題是最高點附近缺乏重力前饋補償，純靠位置誤差反應式修正天生難穩——真正的修法是實作 `ARM_MASS_KG` 重力前饋（已跟 user 提過，待實作，需要先量測/估算手臂+工具頭重量）。
+
+## 2026-08-14h Claude (Sadie) — 換更大變壓器後，M1 扭力恢復回退前的值
+### 需求（user）
+「我換了一顆大一點的，幫我加大扭力」
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `init()`：M1 `hold_kp` 26.0→40.0、`hold_kd` 3.5→6.0、`park_kp` 15.0→21.0、`park_kd` 7.0→10.0（`park_speed` 維持 0.07 沒動）
+### 原因
+換更大顆變壓器後，之前因為懷疑電源容量不夠而退回的這組值（`40.0`/`6.0`/`21.0`/`10.0`）可以恢復——這組不是重新亂猜，是這個 session 已經驗證過確實解決「DEPLOY 400mm 撐不住掉下去」跟「PARK/換手收回原點無力」兩個症狀的數字，只是電源疑慮排除前先退回原值觀察。
+### 建議
+部署後留意新加的 `[M1 tau]` log（MOVE/HOLD 模式下每 250ms 印一次），確認新變壓器供電下這組扭力運作正常、沒有再出現斷電/跳脫；如果新變壓器下這組還是不夠，才需要再往上加。
+
+## 2026-08-14g Claude (Sadie) — M1 動作中連續印出 tau（電流替代訊號）
+### 需求（user）
+「幫我把m1馬達在動時的電流都印出Log可以嗎?」——為了排查變壓器跳脫問題
+### 說明（driver 沒有真電流可印，先講清楚）
+`damiao.h` 驅動只回傳 `Get_Position`/`Get_Velocity`/`Get_tau`，`tau` 是馬達內部估算的扭力（Nm），不是原始電流（安培），也沒有換算常數，沒辦法印出真正的電流值；真的要量電流需要鉗形電流錶夾實體電源線。User 確認後先用 tau 當替代訊號。
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `feedback_loop()`：M1 在 `move_act`（MOVE）跟 `hold_en`（HOLD）兩個分支各加一行 log，印 `pos`/`vel`/`tau`；節流到 4Hz（250ms 一次），只印 M1、只在真的有輸出（move 或 hold）時印，避免 50Hz 迴圈洗版
+### 用途
+`tau` 趨勢會跟電流大致同步變化，可以用來觀察 PARK/DEPLOY 撐著/移動時扭力有沒有異常飆高，輔助判斷是否接近變壓器過載邊緣；不是精確的電流數字，最終確認還是要靠實測電流。
+
+## 2026-08-14f Claude (Sadie) — M1 扭力全部退回 session 原始值（懷疑 24V 變壓器過載跳脫）
+### 需求（user）
+「我的事24v變壓器，順便幫我調回原始值」——PARK 第三次時 M1 拉不回來，發現變壓器電源消失、過一陣子才回來
+### 分析
+2026-08-13/14 這整個 session 一路把 M1 扭力越調越高（`hold_kp` 26→32→40、`hold_kd` 3.5→4.5→6.0、`park_kp` 15→18→21、`park_kd` 7→8.5→10），每次都是為了解決「撐不住/無力」的症狀。但這次確認電源是 24V 變壓器、故障現象是「電源消失、過一陣子才回來」——這是過載保護跳脫的典型行為，不是純粹的軟體扭力設定問題。這一路加扭力＝一路加大電流需求，很可能是把變壓器越推越接近跳脫門檻，而不是在解決根因；且高扭力狀態下斷電，手臂會直接摔得更重，風險更高。
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `init()`：M1 `hold_kp` 40.0→26.0、`hold_kd` 6.0→3.5、`park_kp` 21.0→15.0、`park_kd` 10.0→7.0（`park_speed` 維持 0.07 沒動過，不用退）
+### 後續
+先降低電流需求觀察變壓器還會不會跳脫；等電源那邊確認是否為過載保護設計、或需要更換更大瓦數的變壓器之後，視情況再重新評估扭力要不要往上調。ARM_MASS_KG 重力前饋補償（之前討論過但還沒做）在電源問題解決前更不建議做，因為那也會增加平均電流需求。
+
+## 2026-08-14e Claude (Sadie) — M1 hold_kp/kd 加大（DEPLOY 400mm 撐不住掉下去，安全問題）
+### 需求（user）
+「DEPLOY 400MM 時 M1撐不住直接掉下去!」
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `init()`：M1 `hold_kp` 32.0→40.0、`hold_kd` 4.5→6.0
+### 原因
+DEPLOY 400mm 比先前測的 300mm 手臂伸得更遠、對抗重力所需力矩更大，原本在 300mm 勉強撐住的 hold_kp 在 400mm 不夠、直接掉下去，立即加大應急。
+### 風險提示（尚未實作，先記錄）
+目前 `ARM_MASS_KG=0.0f`，M1 完全沒有重力前饋補償，全靠 PD 位置誤差硬撐——這代表撐得住與否會隨著伸出距離（重力力矩）變化，300mm 夠不代表 400mm 夠，之後若換更遠的牆距或更重的工具頭，可能還要再加。純加大 kp/kd 是應急手段，治標；比較根本的做法是量出手臂+工具實際重量、設定 `ARM_MASS_KG`，讓系統依角度算出理論重力力矩直接前饋補償（而不是全靠位置誤差硬撐），這樣不同伸出距離都能自動補償、不用每次伸更遠又重新加扭力。User 尚未決定要不要做這個，先用加大 kp/kd 應急。
+
+## 2026-08-14d Claude (Sadie) — M1 park_kp/kd 再加大（DEPLOY 換手 + PARK 收回無力）
+### 需求（user）
+「把DEPLOY換人時中間M1停回原點的力量在拉大一點點 有點無力的感覺，PARK也是」（另外提到「LEFT 對齊 DEPLOY RIGHT 的速度扭力」，但目前程式沒有分開的 LEFT/RIGHT 參數可以對齊，問了具體是哪一段動作後 user 回「算了 先等等」，這部分暫緩未處理）
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `init()`：M1 `park_kp` 18.0→21.0、`park_kd` 8.5→10.0（`park_speed` 維持 0.07 不動）
+### 原因
+DEPLOY 換 LEFT/RIGHT 前的 M1 retract 跟獨立 PARK 都走 `go_home_slot(use_park_profile=true)`、共用同一組 park_kp/kd，兩處反饋都是「無力」，延續同一組參數同步加大的既有模式（2026-08-13 也是這樣調過一次）。
+
+## 2026-08-14c Claude (Sadie) — lr_half_range 改用手動量測值當預設 + Phase 1 seek 預算放寬
+### 需求（user）
+「按一次INIT就自動左右OK後回中間」，且明確表示不要用執行期持久化檔案，要嘛修好自動尋找本身、要嘛直接寫在程式碼裡當預設值
+### 分析
+比對這次跟先前幾次「成功、有扎實撞牆證據」的自動校正，算出來的 `half_range`（0.6378、0.6254）彼此其實相當一致，只是比手動量到的真實值（0.7275/0.7603）系統性偏小——真正的問題不是「量到的數字亂跳」，是**這次 Phase 1/1B 常常直接跑到時間/距離上限、根本沒觸發任何撞牆偵測**。追查發現 Phase 1 的預算（`max_travel=1.5`／`75 loops=1.5s`）比 Phase 1B（`2.0`／`200 loops=4s`）小很多，但 Phase 1 的起跑點其實一樣不可靠（前面已知的零點污染問題），這次就實測到 Phase 1 從 `p_start=-0.9848` 出發、走了 1.17 rad 仍在 0.36 rad/s 移動中就被 75-loop timeout 攔下——單純是時間不夠，不是沒找到牆。
+### 修改檔案
+- `cleaning_arm/main_api.h` `MotorSlot`：`lr_half_range` 預設值 `ZERO_OFFSET(0.8)` → 手動量到的 `0.7275f`；`lr_calibrated` 預設 `false` → `true`（信任這組手動量測值，開機第一次 INIT 就直接用，不跑自動尋找）
+- `cleaning_arm/main_api.cpp` `lr_calibrate_slot()`：Phase 1 的 `max_travel`/`seek_max_loops` 從一開始就跟 Phase 1B 用同一組寬預算（`2.0 rad`／`200 loops=4s`），不再只放寬 Phase 1B
+### 假設與風險
+`lr_half_range` 預設值假設 M2 馬達自己的零點（`M2 ZERO` 設定的）在 `motor_api` 重開之後還會保留（從 log 觀察起來像是這樣，但沒有 100% 驗證來源文件）。如果這個假設有天不成立（重開後零點跟著跑掉），要重新走一次手動量測流程更新這個常數，或暫時退回 `ZERO_OFFSET` 預設 + 手動 `LR_CALIBRATE`。自動尋找本身（Phase 1/1B）不可靠的根本問題還在，只是現在預設不再依賴它。
+
+## 2026-08-14b Claude (Sadie) — INIT 不再每次重跑不穩定的自動校正
+### 需求（user）
+「INIT時應該是往左轉->往右轉->停在中間，但現在變成按三次INIT，第一次停左邊、第二次停右邊，最後一次才停中間」
+### 分析
+`cmd_init_sequence()` 每次都無條件重跑 `lr_calibrate_slot()`（那段還在抓漏洞、不穩定的自動兩邊尋找），就算剛剛才用手動量測 + `SET_HALF_RANGE` 設好一組可信的值，下一次 INIT 照樣會被自動尋找蓋掉、重新賭一次會不會假觸發/衝過頭——這就是為什麼要連續按三次才會準。
+### 修改檔案
+- `cleaning_arm/main_api.h` `MotorSlot`：新增 `lr_calibrated`（M2 only），標記 `lr_half_range` 是否已經是可信值
+- `cleaning_arm/main_api.cpp`：
+  - `lr_calibrate_slot()` 收斂成功（`phase2_ok`）時設 `lr_calibrated=true`
+  - `SET_HALF_RANGE` 指令設 `lr_calibrated=true`（信任手動量測）
+  - `cmd_init_sequence()`：M2 若已經 `lr_calibrated`，**跳過自動尋找**，直接 `lr_move_to_slot_impl(CENTER)` 用現有零點/範圍歸中；否則才跑完整自動校正（保留給第一次設定用）
+  - 既有「M2 pos 離譜強制歸零」安全機制觸發時，順便清掉 `lr_calibrated`（因為零點已經被蓋掉，不能再信任現有範圍，逼下一次 INIT 老實重新完整校正）
+### 效果
+只要校正過一次（自動收斂或手動 `SET_HALF_RANGE`），之後 INIT 應該每次都直接穩定歸中，不會再被自動尋找的不穩定性干擾。真的需要重新校正（懷疑機構被動過、或前述強制歸零觸發過）時，`LR_CALIBRATE` 仍可單獨手動呼叫。
+
+## 2026-08-14a Claude (Sadie) — M2 手動量測 + SET_HALF_RANGE 覆寫指令
+### 背景
+連續多次 `LR_CALIBRATE` 出現不可信結果（假觸發撞牆、或衝 1-2 rad 都撞不到東西、加上「M2 pos out of range 強制歸零」安全機制互相污染，導致每次 INIT 位置都不一樣）。改用手動量測繞過自動校正：
+1. `M2 DISABLE` 卸力手動轉動
+2. 發現 `STATUS` 讀到的 `Get_Position()` 只是被動快取，`DISABLE` 不會像 `ENABLE` 一樣補送 MIT frame 刷新，所以手動轉動後 `STATUS` 讀到的是凍結的舊值——改用 `M2 MIT 0 0 0 0 0`（zero kp/kd，數學上不出力）刷新快取後再 `STATUS`，才量到三個不同的真實值：LEFT=0.2504 / CENTER=1.0107 / RIGHT=1.7382
+3. 算出 CENTER→LEFT=0.7603、CENTER→RIGHT=0.7275，選較小值 0.7275 當 half_range（較大值會讓 LEFT target 只剩 0.005 rad 緩衝、幾乎貼著硬停點，風險太高）
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `dispatch_motor()`：新增 `SET_HALF_RANGE <rad>`（M2-only）直接寫入 `s.lr_half_range`，繞過目前不穩定的自動 seek；使用前需先在物理 CENTER 位置送 `M2 ZERO`
+### 後續
+`LR_CALIBRATE` 本身的不穩定（假觸發/衝過頭/歸零安全機制污染）還沒修，這組指令只是讓使用者能在自動校正修好之前，靠手動量測拿到可用的 half_range。已知的深層問題（`cmd_init_sequence` 裡 M2 `abs(pos)>1.5` 強制歸零會跟自動校正互相污染）待處理，暫不建議連續按 INIT。
+
+## 2026-08-13k Claude (Sadie) — raw command 下拉選單補上 arm 選項
+### 需求（user）
+「RAW COMMAND要在哪裡送」——要送 `M2 STATUS`/`M2 DISABLE` 等指令給 arm，但 GUI raw command 選單沒有 arm
+### 修改檔案
+- `web_backend/public/index.html`：`#raw-tgt` 下拉選單新增 `<option value="arm">arm</option>`
+### 原因
+`server.js`/`app.js` 的 `target:'arm'` 路徑（直連 washrobot:9527 motor_api）早就存在、DEPLOY 按鈕也在用，純粹是 raw command 選單忘記加這個選項，屬於遺漏不是新功能。
+
+## 2026-08-13j Claude (Sadie) — LR_CALIBRATE 中心點偏右查明；Phase 2 settle 容忍度收緊
+### 需求（user）
+「為甚麼中心點還是有點偏右」
+### 分析（驗算兩次 log 後確認根因，分兩部分）
+1. **好消息，非 bug**：這次 Phase 1（右，0.8471→0.8993，卡滿 10 圈）/ Phase 1B（左，0.9001→-0.3515，走了 1.25 rad、速度平滑降到 0）都是真的撞到機械停點，`half_range=0.6254` 跟先前成功的 `0.6378` 接近，可信。算出來 `midpoint=0.2739`（相對舊零點），代表**真正的機械中心其實在舊零點右邊 0.27 rad**——舊零點是之前跟假觸發奮戰時建立的，本來就沒對準，這次量得更準，所以「看起來往右移」，其實是校正變準了。
+2. **可修的小 bug**：`Phase 2 settled` 這次 `pos=0.2031 target=0.2739`，上次 `pos=0.5835 target=0.6514`——兩次都固定少走 **~0.07 rad**。原因是 vel-settle 迴圈的「夠接近 target」判斷沿用了 retry 階段的寬鬆容忍度 `CONV_TOL_RETRY=0.15f`，導致速度一降下來就提早收工，沒有真的推到 target，讓 `set_zero` 抓到的零點固定偏移。
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `lr_calibrate_slot()`：vel-settle 迴圈新增專用容忍度 `VEL_SETTLE_POS_TOL=0.03f`，取代原本沿用的 `CONV_TOL_RETRY(0.15f)`，逼迴圈真的接近 target 才算收工
+### 效果
+下次校正後，最終零點應該會比之前準 ~0.07 rad，但仍然會反映「真正的機械中心 vs 舊零點」的落差（這部分是正確行為，不是要消除的誤差）。
+
+## 2026-08-13i Claude (Sadie) — PARK 起步瞬間力量加大
+### 需求（user）
+「park在往後的第一個瞬間力量不太夠，幫我加大」
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `init()`：M1 `park_kp` 15.0→18.0、`park_kd` 7.0→8.5（`park_speed` 維持 0.07 不動，user 反饋的是起步力道不是速度問題）
+### 原因
+延續 2026-07-27 同一個 kp/kd 一起微調的模式；PARK 走 `go_home_slot(use_park_profile=true)`，全程用同一組 park_kp/kd，起步力道不足會反映在整段 retract 的 PD 增益上，故直接加大這組。
+
+## 2026-08-13h Claude (Sadie) — LR_CALIBRATE SEEK_KP 小幅加大 + STOP_CNT 拉長，減少假觸發
+### 需求（user）
+第二次校正又在某方向幾乎一開始（位移 0.0015 rad）就判定撞牆；user 目視/手揸確認過該方向沒有實體卡住，要求加大扭力
+### 分析（查證後鎖定真正的槓桿）
+`run_seek()` 的 `setpt` 是每圈用目前位置重算的移動式追蹤點（`cur_pos+dir*SEEK_RANGE`），所以 commanded 位置誤差幾乎恆等於 `SEEK_RANGE=2.8`，`tau≈kp*2.8` 基本是常數，跟馬達是否真的卡住幾乎無關——`RESIST_TAU=0.6` 這個門檻幾乎形同虛設（正常追蹤時 tau 就已經遠超過 0.6）。真正在判斷「撞牆」的幾乎只剩速度那一項（`STOP_CNT=3` 連續 60ms 低速），任何瞬間的 stick-slip/齒隙都可能被誤判。單純加大 `SEEK_KP` 有歷史風險（2026-06-09 曾試過 3.0 撞擊 tau 飆 8Nm、1.5 仍有甩頭感，才退到現在的 1.0）。
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `lr_calibrate_slot()`：`SEEK_KP` 1.0→1.3（小步加，避免重演歷史上的撞擊/甩頭問題）、`STOP_CNT` 3→10（60ms→200ms，拉長判定撞牆前要求的持續低速時間，濾掉瞬間的 stick-slip 誤判，這項不影響撞擊力道、風險比單純加扭力低）
+### 風險提示
+`SEEK_KP` 現在比 2026-06-09 判定「還有甩頭感」的 1.5 略低，但如果之後真的撞到機械停點時感覺撞擊力道變大/變硬，要退回 1.0（歷史證實 1.5 已經偏強）。`STOP_CNT` 拉長也代表 Phase 1 卡在真正撞牆時，判定時間會拉長到 200ms，MAX_LOOPS(75)/max_loops(200) 額度足夠涵蓋，不影響 timeout 判定。
+
+## 2026-08-13g Claude (Sadie) — LR_CALIBRATE 偶發假觸發「撞牆」，加合理性檢查擋掉
+### 需求（user）
+「m2往左邊的扭力不夠大轉不過去 加大!!!」
+### 分析（驗算後判定不是扭力問題，且加扭力反而危險）
+這次 log 兩次校正都量到 `half_range≈0.013 rad`——Phase 1/1B 都只移動 ~0.02 rad 就判定「Resistance/撞牆」。但同一個 M2 在前一輪測試已經成功移動並收斂到 `pos=-0.4957`、`pos=0.4164`（±0.5 rad 左右）的真實位置，物理上不可能存在「可動半徑只有 0.013 rad」這種機構，代表這次的「撞牆偵測」是假觸發（可能是 stick-slip 或量測 transient，不是真的碰到機械極限）。
+更嚴重的是：`half_range=0.013` 代入 `lr_move_to_slot_impl` 會讓 LEFT target 變成 `-0.013+0.05=+0.037`（正的）、RIGHT target 變成 `0.013-0.1=-0.087`（負的）——左右目標角度幾乎貼著 0 且正負號互換，跟真實 slot 位置差很多，這才是「轉不過去」的真正原因，不是扭力不夠。這種情況下加扭力只會讓 M2 更用力衝向一個錯誤方向的目標，風險更高，故沒有照要求加扭力。
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `lr_calibrate_slot()`：算出 `half_range`/`midpoint` 後新增合理性檢查，`half_range < MIN_PLAUSIBLE_HALF_RANGE(0.3f)` 就判定本次校正失敗——印出 FAIL log、**不覆蓋** `s.lr_half_range`（維持上次的合理值或預設 ZERO_OFFSET）、回傳 `false`（`LR_CALIBRATE`/`INIT` 會收到 ERR），不讓 LEFT/RIGHT slot 目標被這種假觸發污染
+### 後續
+這只是防止「用壞數字」的安全網，沒有修到假觸發本身的根因（懷疑 Phase 1/1B 的 resistance 判定窗口 `STOP_CNT=3`（60ms）/`RESIST_TAU=0.6` 太寬鬆，容易把短暫的 stick-slip 誤判成真正的機械停點）。如果之後校正常常撞到這個新的 FAIL、需要重跑好幾次才過，代表假觸發頻率偏高，屆時要回頭調緊 resistance 判定邏輯本身，而不是繼續在這裡加重試次數。
+
+## 2026-08-13f Claude (Sadie) — DEPLOY 時 M1 完全沒動；補真實位置驗證 + M1 扭力加大
+### 需求（user）
+「幫我看一下 init時中間的位置有問題，deploy時m1沒有動」+「幫我把m1的扭力也都加大!! 很重!」
+### 分析（驗算 log 後確認）
+連續三次 DEPLOY 的 `[M1 go_home]` log 都量到真實編碼器 `pos=-0.0002`（三次幾乎完全相同），即使中間 `touch_wall_slot` 已經分別下過 `theta_target=0.5860` 跟 `0.6310` 兩個不同目標。這個判定用的是真實 `Get_Position()`，不是軟體內部假設值，代表 M1 這幾次 DEPLOY 中完全沒有物理移動過。
+根因：M1 的移動路徑（`touch_wall_slot`→`move_to_slot`→背景 `feedback_loop` 跑 ramp）跟 M2 的 `lr_move_to_slot_impl` 不對稱——M2 會主動輪詢真實編碼器跟目標比對、卡住會重試/回報 FAIL；M1 這條路徑的 `wait_for_move()` 只檢查「軟體 ramp 內部計數跑完」，完全沒檢查馬達是否真的到位，所以即使 M1 完全沒回應指令，DEPLOY 仍然回 OK、不報錯。
+「位置凍結在同一個值、換了目標也不變」比較不像純扭力不夠（那樣通常還是會有部分位移/嘗試），較可能是根本沒收到/沒回應指令（disable、fault、CAN 問題）。此結論會由下面新加的驗證直接證實（如果之後還是報 ERR 且誤差接近整個 0.6 rad，代表確實不是扭力問題）。
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `init()`：M1 `hold_kp` 26.0→32.0、`hold_kd` 3.5→4.5（user 要求，手臂+刷頭變重）
+- `cleaning_arm/main_api.cpp` `cmd_deploy_sequence()`：`touch_wall_slot`+`wait_for_move(m1_)` 之後新增真實位置驗證——讀 `m1_.motor->Get_Position()` 跟 `m1_.move_target`（`touch_wall_slot` 算好、`feedback_loop` 完成 move 時不會動這個欄位，故可直接讀回不用改 `touch_wall_slot` 簽名）比對，誤差 > 0.05 rad 就回 `ERR DEPLOY: M1 touch_wall did not converge`，不再靜默回 OK
+### 風險提示 / 後續
+這次驗證只會讓問題「被看見」，不保證修好真正卡住的原因。下次部署測試時看誤差量級：接近 0（收斂）代表扭力加大有效；誤差接近整個 target 值（~0.6 rad）代表 M1 根本沒回應指令，需要往 M2 那套 passive/fault 偵測 + 重新 enable 的方向查（M1 目前完全沒有這層防護）。
+
+## 2026-08-13e Claude (Sadie) — LR_CALIBRATE 改成兩邊都探測機械停點，取代 ZERO_OFFSET 對稱假設
+### 需求（user）
+「init校正不應該事先往左->往右->再回到中間點?」
+### 分析（驗算後確認是根本問題，非扭力不足）
+`lr_calibrate_slot()` 原本只往一邊找一次機械停點，另一邊的位置靠寫死的 `ZERO_OFFSET=0.8 rad` 對稱假設推算。連續幾次 log 都顯示 Phase 2（退回假設位置）收斂失敗，卡在跟假設值差 ~0.3-0.4 rad 的地方；即使 retry 用 kp=33（比正常 seek 的 kp=1 高 33 倍）依然卡在幾乎同一個位置——量級一致、跟施力大小無關，判定是撞到真正的機械停點，代表真實可動範圍比假設的 1.6 rad（0.8+0.8）小，不是扭力不夠。之前幾輪加扭力（hold_kp/hold_kd/hold_ki、MIT_KP/FRICTION_TAU）方向是錯的，這個才是根因。
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `lr_calibrate_slot()`：
+  - 原本的 Phase 1 seek 邏輯包成 lambda `run_seek()`，重複呼叫兩次：Phase 1（原方向）+ Phase 1B（反方向，`max_travel`/`max_loops` 加大以橫跨整個機構範圍）
+  - Phase 2 目標從「假設停點 - dir×ZERO_OFFSET」改成「兩個實測停點的中點 midpoint」
+  - 校正完成後把實測 `half_range` 存進 `s.lr_half_range`（即使 Phase 2 沒完全收斂也存，因為兩個停點本身是真的撞出來的，比假設值準）
+  - `dir`/`MAX_TRAVEL`/`MAX_LOOPS` 從 const 改成可變（Phase 1B 要用不同方向與更大範圍重跑同一段邏輯）
+- `cleaning_arm/main_api.cpp` `lr_move_to_slot_impl()`：LEFT/RIGHT slot 目標從寫死的 `±ZERO_OFFSET∓margin` 改成 `±s.lr_half_range∓margin`（margin 維持原本不對稱的 0.05/0.1）
+- `cleaning_arm/main_api.h`：`MotorSlot` 新增 `lr_half_range`（預設值 = ZERO_OFFSET，兼容尚未跑過新版校正的情況）；移除已不再使用的 `LR_VEL_BUFFER_K`（舊版 dyn_buffer 邏輯已被 midpoint 取代）
+### 效果
+如果診斷正確，LEFT/RIGHT slot 目標會自動貼齊實測到的機械可動範圍，不會再往一個量不到的假設位置硬撞——應該能直接解決「移到 LEFT 卡住」的問題，且不需要再冒風險加大移動扭力。
+
+## 2026-08-13d Claude (Sadie) — 頭重很多，M2 持握+移動扭力全面加大
+### 需求（user）
+「幫我各方面都加大一點 因為頭重很多，數值要有辦法撐住重量並移動」
+### 分析（先告知 user 再改）
+分兩組風險不同處理：
+- 持握扭力組（hold_kp/kd/ki）：靜態撐住位置，風險較低，可以放心大幅加
+- 移動扭力組（MIT_KP/FRICTION_TAU）：2026-07-24 暴衝事故（衝到 2.27 rad、tau -21Nm）發生在 MIT_KP=32.0（當時 FRICTION_TAU 只有 2.6，比現在的 3.0 還低）——問題比較像是 MIT_KP 逼近/超過 32 這個區間本身的問題，不是 FRICTION_TAU 的鍋。User 確認後選擇 MIT_KP 固定不再往上、只加 FRICTION_TAU
+### 修改檔案
+- `cleaning_arm/main_api.cpp`：
+  - `m2_.hold_kp` 4.0→7.0、`hold_kd` 1.5→3.0、`hold_ki` 0.3→0.6（`park_kp`/`park_kd` 直接複製 hold 值自動跟隨）
+  - `lr_move_to_slot_impl()` `MIT_KP` 維持 31.0 不動、`FRICTION_TAU` 3.0→4.0
+### 風險提示
+`MIT_KP` 刻意固定在已知安全門檻（31.0）以下，避免重演暴衝；`FRICTION_TAU` 是固定值 feedforward、不隨 error 放大，加大風險相對可控，但仍是目前歷史最高值。若這次還是幾乎不動，強烈建議停止繼續加扭力，轉去物理檢查 M2 機構（見 2026-08-13c 的風險提示——目前證據更指向 passive/fault 而非扭力不足）。
+
+## 2026-08-13c Claude (Sadie) — FRICTION_TAU=2.8 實測無效，MIT_KP/FRICTION_TAU 再小步加
+### 需求（user）
+FRICTION_TAU 2.3→2.8 部署後實測，DEPLOY 300 LEFT 兩次都幾乎沒移動（0.02→-0.06、0.02→-0.08，2s 內僅 ~0.08 rad），比校正 Phase 2 用 kp=33 移動的量還小很多；且校正 Phase 2 offset 這次跟改參數前幾乎一樣（~0.40 rad，兩次數字幾乎重合）
+### 分析（告知 user 後，user 選擇仍要繼續加扭力）
+兩個現象合起來比較像 M2 進入 `main_api.cpp:1269-1274` 註解描述的 passive/fault 保護狀態（MIT frame 有 ACK 但無實際輸出扭力），而非單純扭力不足——若是純扭力不足，2s 迴圈時間內應該會看到持續爬升的位置變化，不會近乎原地不動。建議過的替代方案（先物理檢查 M2 機構 / 先偵測 fault 狀態）user 都沒選，選擇仍先試著加扭力
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `lr_move_to_slot_impl()`：`MIT_KP` 30.0→31.0、`FRICTION_TAU` 2.8→3.0（小步各加一點，刻意避開 2026-07-24 暴衝過的 32.0/2.6 組合）
+### 風險提示
+若下次仍幾乎不動，扭力方向大概率已經走不通，需要物理檢查 M2 機構是否卡住，或加 log 確認是否真的進入 fault 狀態，不建議再無限往上加扭力硬撞。
+
+## 2026-08-13b Claude (Sadie) — M2 移動到 LEFT slot 卡住，加大 FRICTION_TAU
+### 需求（user）
+校正 log 只往右探測停點，一開始懷疑校正邏輯有問題；確認後實際症狀是「校正後移到 LEFT slot 會卡住/過不去」
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `lr_move_to_slot_impl()`：`FRICTION_TAU` 2.3→2.8，`MIT_KP` 維持 30.0 不動
+### 原因
+`lr_calibrate_slot()` 只往「+」方向探測一次停點（RIGHT），LEFT 位置是用 `ZERO_OFFSET` 對稱假設算出來的——這是既有設計，不是這次的 bug。真正的問題是刷頭變重後 LEFT 方向移動阻力變大，卡在 target 前面。`MIT_KP` 是雙向都吃到的 PD 增益，2026-07-24 曾在 32.0/2.6 那組出現暴衝（pos 衝到 2.27 rad、tau -21Nm）被退回 28.0/2.3，故這次不動 `MIT_KP`，只加大針對移動阻力的 feedforward `FRICTION_TAU`，風險較低。若還是卡住，下一步可以再小步加 `FRICTION_TAU` 或改動 `MIT_KP`。
+
+## 2026-08-13 Claude (Sadie) — M2（工具頭）持握扭力拉高，因刷頭端變重
+### 需求（user）
+「刷頭那邊變重，幫我扭力拉高」
+### 修改檔案
+- `cleaning_arm/main_api.cpp`：`m2_.hold_kp` 2.5→4.0、`m2_.hold_kd` 1.0→1.5（`park_kp`/`park_kd` 直接複製 hold 值，DEPLOY/PARK 自動一起套用新值）
+### 原因
+刷頭實裝後重量增加，M2 撐在 LEFT/RIGHT slot 對抗重力的持握力不足會垮/撐不住；拉高 hold_kp 提升持握剛性，hold_kd 同步微調抑制震盪（沿用 M1 之前 kp/kd 同步調整的慣例）。使用者選擇中幅調整（4.0/1.5），若還是撐不住可再加大。
+
+## 2026-08-04j Claude (Sadie) — IMU 微調（roll_correct）預設頻率 5→10Hz
+### 需求（user）
+「imu微調預設改成10hz」
+### 修改檔案
+- `Crane_control_PI/main.cpp`：`ROLL_CORRECT_HZ_DEFAULT` 5.0 → 10.0（`cmd_roll_correct` 用的獨立速度旋鈕，跟 `motion_rope` 的 `VFD_MOTION_HZ_DEFAULT` 分開；runtime 仍可用 `set_roll_correct_hz` 覆蓋）
+### 原因
+使用者指定新的預設頻率。**規範權威：** 無新規範，純參數調整。
+### ⚠ 尚未編譯驗證
+
+## 2026-08-04i Claude (Sadie) — 吊機自動收放繩預設頻率 40→50Hz
+### 需求（user）
+「幫我把吊機自動收放繩的頻率直預設為50hz」
+### 修改檔案
+- `Crane_control_PI/main.cpp`：`VFD_MOTION_HZ_DEFAULT` 40.0 → 50.0（`motion_rope` 主速度，runtime 仍可用 `set_motion_hz` 覆蓋；`VFD_MAX_HZ`=120，50 在範圍內）
+### 原因
+使用者指定新的預設頻率。**規範權威：** 無新規範，純參數調整。
+### ⚠ 尚未編譯驗證
+
+## 2026-08-04h Claude (Sadie) — header 狀態燈文字改名
+### 需求（user）
+「網頁上的小指示燈washrobot名稱改成robot就好」
+### 修改檔案
+- `web_backend/public/index.html`：header 狀態燈顯示文字 "washrobot" → "robot"（`id="dot-washrobot"` 不變，app.js 綁定不受影響）
+### 原因
+使用者要求改名。**規範權威：** 無新規範，純文字調整。
+
+## 2026-08-04g Claude (Sadie) — Easy Crane 子系統整個退役：程式、規範文件、方案檔全部刪除
+### 需求（user）
+延續上一則「拿掉網頁上 easy crane」——「把easy crane的程式也刪乾淨好了 反正不用了」；確認 `Crane_easy_PI/` 硬體本體已拔掉，追問後也確認一起刪 `crane_shim/`（因為 `crane_shim.py` 其實是靠轉譯指令去驅動 `Crane_easy_PI` 硬體，兩者是配套的：沒有硬體 shim 也失去作用）
+### 刪除的檔案/目錄
+- `Crane_easy_PI/`（整個 C++ 專案：`.vcxproj`/`.vcxproj.user`/`main.cpp`/`obj/`）
+- `crane_shim/`（整個目錄：`crane_shim.py`/`field_card.md`/`README.md`）
+- `.claude/easy_crane_test_mode.md`（規範文件）
+### 修改檔案
+- `facade_cleaning_v2.sln`：拿掉 `crane_easy_PI` 專案的 `Project(...)...EndProject` 區塊 + `ProjectConfigurationPlatforms` 裡對應 GUID `{909DCE76-3882-475C-8853-EB344B428FF6}` 的全部 16 行組態
+- `user_lib/WASH_ROBOT.cpp`：
+  - `read_rope_weight_max_kg_()` 拿掉第 3 層 fallback（原本讀 easy crane 重量當張力備援，靠 crane_shim 轉譯），只保留「crane DSZL-107 → washrobot 端 DY-500 cache」兩層，都失敗回 `WEIGHT_NO_DATA_KG`
+  - `read_easy_weight_kg_()` 整個函式刪除（原本透過 estop channel 連 `CRANE_IP:CRANE_PORT`、送 `status`、解析 `weight=` 欄位——這條路徑本質是靠 crane_shim 把 easy crane 的 DY500 讀值轉譯進主吊車的 status 回覆，crane_shim 沒了這條路徑就完全失去意義）
+  - 拿掉一處指向已刪除 `.claude/easy_crane_test_mode.md` 的失效文件連結
+- `user_lib/WASH_ROBOT.h`：對應拿掉 `read_easy_weight_kg_()` 宣告 + 更新 `read_rope_weight_max_kg_()` 的說明註解
+- `Linux_test/main.cpp`：menu 9（SD76）/ menu 10（ZS_DIO winch）的說明文字跟輸入提示拿掉「easy crane」相關的範例（這兩個是通用硬體測試工具，不是 easy crane 專屬，只是原本順便把 easy crane 的接線當範例列出）
+- `.claude/runbook.md`：拿掉「1-alt 測試模式：用 crane_shim 取代 Crane_control_PI」整節、「3. Easy Crane RPi」啟動步驟、GUI 面板對照表的 easy crane 按鈕列、`C2b. Easy Crane 接受` 協定 + 四層防呆說明、失聯模式對照表的 easy crane 兩列
+### 原因
+使用者確認 `Crane_easy_PI` 硬體已physically 拔除，整個子系統（含 bench 測試用的 crane_shim 替代方案）不再需要。**規範權威：** 無新規範，整個功能退役，相關規範文件（`easy_crane_test_mode.md`）隨程式一起刪除，不是搬到別處。
+### ⚠ 尚未編譯驗證
+### 附註
+`.claude/mailbox.md`、`.claude/changelog.md`、`.claude/work_log.md` 裡歷史紀錄仍會提到 `Crane_easy_PI`/`crane_shim`（例如 2026-04-22 那則 SIGPIPE 修復記錄），這些是「當時做了什麼」的歷史留存，不是還在用的參照，故意不動。
+
+## 2026-08-04f Claude (Sadie) — 拿掉網頁上 easy crane control 相關的所有部分
+### 需求（user）
+「幫我把網頁上的easy crane control相關的部分都拿掉」
+### 修改檔案
+- `web_backend/public/index.html`：拿掉 header 的 `dot-easy-crane` 狀態燈、整個 `panel-easy_crane`（重量顯示、收繩停止門檻、↑/↓ 按住拉放、AUTO 按鈕）
+- `web_backend/public/app.js`：這個功能深度嵌在共用的連線狀態追蹤機制裡（`lastStatus`/`pendingRawStatus`/`pendingDownTimers`/`handleStatusChange`/`debounceDeviceTransition_`/`applyMode`），逐一拆除並確認不影響 washrobot/crane/arm 三個裝置原本的追蹤邏輯：
+  - `dotE`/`panelsEasy` 宣告、`lastStatus.easy_crane`/`pendingRawStatus.easy_crane`/`pendingDownTimers.easy_crane` 欄位都拿掉
+  - `applyMode(w,c,e,a)` 簽名改成 `applyMode(w,c,a)`（4 個呼叫點同步改），拿掉裡面的 `easyLocked`/`panelsEasy` 那段
+  - `handleStatusChange(wNew,cNew,eNew)` 改成 `handleStatusChange(wNew,cNew)`，拿掉 `debounceDeviceTransition_('easy_crane', ...)`
+  - `AUTO_BUSY_STATES`/`isWashrobotAutoBusy()`（原本只為了 `easyLocked` 存在）整段拿掉
+  - `onEasyCraneLine()` 整個函式、easy crane 按鈕區塊（`btnEasyUp/Down/Auto` + `easyStart*/easyStop*` + `releaseAllEasyHolds` + 對應 event listener + 50ms weight polling + up-stop-threshold input handler）整段拿掉；`sendSilent()` 是共用函式（crane/washrobot 狀態輪詢也在用），保留
+  - `washrobotState` 變動時觸發 `applyMode` 重跑那行（原本只是為了重新算 easyLocked）一併拿掉
+- `web_backend/public/style.css`：拿掉 `.panel-easy_crane` 相關規則、`.btn-auto` 相關規則（AUTO 按鈕專用）；`.hl`/`.btn-hold` 是跟 crane 拉繩按鈕共用的 class，保留不動
+### 原因
+使用者要求移除網頁上跟 easy crane 相關的所有介面。**規範權威：** 無新規範，純 GUI 移除。**⚠ 範圍提醒**：這次只拿掉「網頁上」的部分（`index.html`/`app.js`/`style.css`），`server.js` 裡 `easy_crane` 的 TCP 橋接（`EASY_CRANE_IP`/`EASY_CRANE_PORT` 等）跟後端沒有動——使用者說的是「網頁上」，這條 TCP 通道保留著，只是前端沒有任何 UI 會再送出 `easy_crane` 指令。
+### ⚠ 尚未實機驗證（GUI 大改動，建議開瀏覽器測一次確認沒有 console error、其他裝置狀態燈/panel 正常運作）
+
+## 2026-08-04e Claude (Sadie) — 網頁標題改名
+### 需求（user）
+「大標題的washrobot control幫我改成facade cleaning control」
+### 修改檔案
+- `web_backend/public/index.html`：`<title>` 跟 `<h1>` 的 "washrobot control" 都改成 "facade cleaning control"
+### 原因
+使用者要求改名。**規範權威：** 無新規範，純文字調整。
+
+## 2026-08-04d Claude (Sadie) — auto cycle 面板標題簡化
+### 需求（user）
+「auto cycle panel的主題文字幫我把後面中文拿掉、括號也拿掉」
+### 修改檔案
+- `web_backend/public/index.html`：共用 panel 標題 `auto cycle (washrobot) — 共用` → `auto cycle`
+### 原因
+使用者要求標題簡化。**規範權威：** 無新規範，純文字調整。
+
+## 2026-08-04c Claude (Sadie) — auto cycle 面板拆成三個：共用 / 同步移動 / 左右輪流移動
+### 需求（user）
+「幫我把auto cycle的按鈕地方，把同步上下移動的部分獨立成一個panel、左右輪流動的部分獨立成另一個panel，共用參數放在原位。由上往下的順序是共用參數->同步移動->左右輪流動」
+### 修改檔案
+- `web_backend/public/index.html`：原本單一個「auto cycle (washrobot)」panel 拆成三個 `<section>`（由上往下）：
+  1. **共用**（原位，標題改「auto cycle (washrobot) — 共用」）：step cm 輸入、init/attach/detach/arm_sweep、run steps+direction+走法(alt/sync)下拉+run/run-avoid/descend-to-ground/pause/resume/STOP、error-pause 列、status/reset/shutdown/zdt_release_stall/realign、召回回地面
+  2. **同步上下移動**（新 panel）：同步步伐 ⇅ 按鈕 + 安全性提示
+  3. **左右輪流移動**（新 panel）：step_down/step_up + 4 種清洗變體、跨障礙物、step 第二腳對平、第一步先走
+  - 所有按鈕的 `id`/`data-cmd`/`data-tgt` 完全不變，只是搬到不同 `<section>`，`app.js` 靠 id/`.panel-washrobot` class 選擇器綁定事件跟連線狀態灰階控制不受影響
+### 原因
+使用者要求依走法類型分區，方便操作時區分「這個按鈕是同步走法還是交替走法」。**規範權威：** 無新規範，純 GUI 排版調整，不涉及後端行為。跨障礙物（`do_cross_obstacle_`）歸類在「左右輪流移動」panel——它跟同步走法不同，仍保持至少一側錨定牆面的安全設計，結構上更接近交替走法家族。
+### ⚠ 尚未實機驗證（GUI 改動建議開瀏覽器實測一次確認排版跟按鈕都正常）
+
+## 2026-08-04b Claude (Sadie) — FOLLOWER_ROLL_TOL_DEG 1.0→2.0
+### 需求（user）
+「FOLLOWER_ROLL_TOL_DEG幫我改成2.0」
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`：`FOLLOWER_ROLL_TOL_DEG` 1.0 → 2.0
+### 原因
+使用者指定新的水平容忍值。**規範權威：** 無新規範，純參數調整。**⚠ 這個常數是共用的**：`do_sync_imu_roll_correct_`（同步 step）跟 `follower_imu_level_`（交替 step_down/up 的第二腳對平）都用同一個常數，這次調整兩邊都會受影響。
+### ⚠ 尚未編譯驗證
+
+## 2026-08-04a Claude (Sadie) — 恢復 do_step_sync_ 的 IMU 水平微調（2026-07-24 暫時註解的實驗結束）
+### 需求（user）
+「那你幫我恢復，並和我說一下現在會啟動校正的數值」
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `do_step_sync_()` step 3：取消註解 `do_sync_imu_roll_correct_();`（2026-07-24 因暫時實驗而註解掉的那行，現在使用者確認實驗結束要恢復）
+### 原因
+使用者確認之前的暫時性實驗已結束，要恢復正常的每步水平微調。**規範權威：** 無新規範，恢復既有行為。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-28b Claude (Sadie) — 窗框避障：candidates=0 卻建議走 5cm 的根因 + 修法
+### 需求（user）
+「幫我看一下窗框避障行走那邊，為什麼有時候候選物0，下一步卻走5cm而已」→ 確認要修「只在真的有候選物（candidates>0）時才觸發」
+### 診斷
+`suggested_step_cm` 的保守小步公式只看 `remaining_travel_cm < DEPTH_AVOID_LOW_CLEARANCE_CM(20cm)`，不管 `candidates`。`remaining_travel_cm` 是 2026-07-22 那次改動拿掉 candidates 限制後，純粹從「最近一團訊號」的距離算出來的（不管那團訊號有沒有被判定成正式候選物）。如果最近的非候選物訊號距離剛好落在 `DEPTH_CAM_STANDOFF_CM(56)`~64.5cm 左右，算出來的 `remaining_travel_cm` 會是小負值，`cross_cm = remaining_travel_cm + max_height_cm(0，因無候選物) + SUCKER_DIAMETER(20) + MARGIN(5)` 就可能被夾到 `STEP_CM_MIN=5cm`——這就是「candidates=0 卻建議 5cm」的來源。
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `cmd_run_depth_avoid()`：`suggested_step_cm` 的觸發條件加上 `candidates > 0 &&`。`remaining_travel_cm` 本身的計算（2026-07-22 那次改動）不受影響，仍然不管 candidates；這次只針對「要不要用保守小步建議公式」這一層加回候選物數量的判斷
+### 原因
+使用者要求候選物數量為 0 時一律建議預設 `step_cm_`，不要因為「附近有非候選物的東西靠近」就跳出很小的建議值造成混淆。**規範權威：** 無新規範，行為調整，回應使用者對 2026-07-22 決定的部分推翻（只推翻「觸發保守建議」這件事，不推翻「remaining_travel_cm 不看 candidates」那件事）。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-28a Claude (Sadie) — 窗框避障走法改成同步 step（兩邊同動）
+### 需求（user）
+「幫我改一下窗框避障行走那邊，step都改成和同步step一樣兩邊同動」
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `cmd_run_depth_avoid()`：一般 step 分支從 `do_step_down_(skip_cleaning_sweep=true, {}, {}, {}, {}, first_step_right_.load())` 改成 `do_step_sync_(/*up=*/false)`。cross-obstacle 分支（`run_as_cross`）維持不變，仍走 `do_cross_obstacle_`
+- `user_lib/WASH_ROBOT.h`：`cmd_run_depth_avoid` 上方的說明註解更新，反映改用 `do_step_sync_` 這件事（原本提到的「do_step_down_ hook 機制」其實已經是過時描述——BEFORE/AFTER 深度相機拍照本來就是包在整個 step 呼叫外面，不是 step 內部 hook，所以換 gait 不影響拍照時機）
+### 原因
+使用者要求窗框避障走法比照同步 step，兩邊同時放開/放繩/重伸。**規範權威：** 無新規範，純呼叫端 gait 切換。**⚠ 安全性質提醒**：`do_step_sync_` 放繩期間 4 顆吸盤全部同時放開、完全靠吊機繩索承重，沒有任何一側錨定牆面防墜——跟 `do_step_down_` 交替走法「至少一側保持黏牆」的安全設計不同（這是 `do_step_sync_` 本身既有、使用者已確認過的設計取捨，這次只是把窗框避障套用到這個既有 gait 上，沒有新增風險，但併用時要記得這個前提）。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-27r Claude (Sadie) — 上滑台速度放慢一點
+### 需求（user）
+「幫我把上滑台速度改慢一點點」
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`：`DM2J_ARM_STEP_SWEEP_RPM` 300 → 250
+### 原因
+使用者要求上滑台速度稍微放慢。因為前一輪已把 `do_arm_clean_sweep_()` 對齊成明確引用 `DM2J_ARM_STEP_SWEEP_RPM`，這一個常數同時套用到同步移動結尾跟 CLEAN SWEEP 兩邊。**規範權威：** 無新規範，純參數調整。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-27q Claude (Sadie) — DEPLOY 內部 M1 retract 改用 PARK profile + M2 扭力小幅加大
+### 需求（user）
+「DEPLOY LEFT→RIGHT 切換前的內部 retract可以改成和park依樣參數嗎 還有幫我把m2稍微扭力加大一點」
+### 修改檔案
+- `cleaning_arm/main_api.cpp`：
+  - `cmd_deploy_sequence()` Step 1（M1 retract before re-extend）：`go_home_slot(m1_, /*use_park_profile=*/false)` → `true`——推翻 2026-07-24 那次「這段不能跟 PARK 用同一組，會讓切槽位變太慢」的決定，改用 `park_kp/park_kd/park_speed`（15.0/7.0/0.07）。原本 `false` 分支的理由保留在註解裡，方便之後如果覺得太慢要改回去
+  - `lr_move_to_slot_impl()`：`MIT_KP` 28.0 → 30.0（保守小步加大，`FRICTION_TAU` 沒動）
+### 原因
+使用者直接要求。**規範權威：** 無新規範，純參數調整。**⚠ 風險提醒**：`MIT_KP` 之前拉到 32.0（+FRICTION_TAU 2.6）曾在實機出現 M2 暴衝到 2.27 rad、tau 飆 -21 Nm 的異常，這次只保守加到 30.0，沒有跳回當時的 32，如果要再往上調請小步進行、實機驗證每一步。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-27p Claude (Sadie) — PARK 力量微調（kp/kd 都加大，速度維持慢）
+### 需求（user）
+「幫我把park的兩個參數都稍微高一點點，慢但要撐住，不要直接後躺」
+### 修改檔案
+- `cleaning_arm/main_api.cpp`：`m1_.park_kp` 12.0→15.0、`m1_.park_kd` 6.0→7.0；`m1_.park_speed` 維持 0.07 不變（速度不變，只加大撐住的力）
+### 原因
+使用者反饋 PARK 時撐不住、會往後躺，要求加大力量但保持慢速。**規範權威：** 無新規範，純參數調整。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-27o Claude (Sadie) — 腳組 preset 統一 8.1cm + 手臂靠牆距離 360→380mm
+### 需求（user）
+「都幫我改成8.1cm,另外手臂靠牆距離是多少」→ 回報後「改成380mm」
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`：
+  - `PUSHER_EXTEND_FEET_PULSE_LOWER`（slave 2,4）：23400 → 24300 pulse（7.8cm → 8.1cm，跟 slave 1,3 統一）
+  - `DM2J_ARM_STEP_SWEEP_WALL_MM`：360 → 380
+  - `ARM_CLEAN_WALL_MM`：360 → 380
+  - `ARM_ROPE_PROTECT_WALL_MM`：360 → 380
+### 原因
+使用者指定新數值，手臂靠牆距離三處維持統一。**規範權威：** 無新規範，純參數調整。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-27n Claude (Sadie) — CLEAN SWEEP 上滑台速度也對齊同步移動
+### 需求（user）
+「幫我看一下上滑台速度也有對其嗎」
+### 發現
+新版 `do_arm_clean_sweep_` 的兩處 `arm_sweep_fire_nowait_` 呼叫沒傳參數、吃的是預設值 `ARM_SWEEP_RPM/ACC/DEC/EST_MS`（1000/100/100/3900），跟 `do_step_sync_rail_sweep_` 用的 `DM2J_ARM_STEP_SWEEP_RPM/ACC/DEC/EST_MS`（300/100/100/1000）不一樣——RPM 差 3 倍多、EST_MS 差快 4 倍；ACC/DEC 剛好都是 100 沒差。行程距離（`ARM_SWEEP_CM`/`DM2J_ARM_STEP_SWEEP_CM`）目前都已經是 -8，沒有落差。
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `do_arm_clean_sweep_()`：兩處 `arm_sweep_fire_nowait_` 呼叫改成明確傳入 `DM2J_ARM_STEP_SWEEP_RPM/ACC/DEC/EST_MS`，不再用預設的 `ARM_SWEEP_*`
+### 原因
+使用者要求上滑台速度也跟同步移動結尾對齊。**規範權威：** 無新規範，純參數對齊，延續 2026-07-27m 的簡化方向。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-27m Claude (Sadie) — CLEAN SWEEP 簡化，對齊同步移動結尾的清洗步驟
+### 需求（user）
+「網頁上有一個clean sweep功能 具體順序幫我對其同步上下移動最後的手臂清洗動作」；追問要對齊到什麼程度後，user 選「先註解掉就好 不用刪掉」——把舊版穩健機制整段保留但不編譯，換上跟 `do_step_sync_rail_sweep_` 一致的簡化流程
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp`：
+  - 舊版 `do_arm_clean_sweep_(int, int)` 整個函式本體（水補水/水泵開關、`verify_arm_deploy_`/`verify_arm_m2_at_slot_` DEPLOY 驗證+重試、障礙物 pause/retry/skip、RAII `ScopeExit` 收尾）改名成 `_retired_do_arm_clean_sweep_v1_`，包進 `#if 0 ... #endif`，不編譯但保留在檔案裡
+  - 新增簡化版 `do_arm_clean_sweep_(int wall_mm, int rounds)`：入口守衛（`arm_attached_`/`arm_sweep_skip_rest_of_run_`）不變，每個 round 內部改成跟 `do_step_sync_rail_sweep_` 完全一致的步驟：`arm_cmd_("INIT",60)` → DEPLOY LEFT → `CH_BRUSH` on → sleep 2.5s → `arm_sweep_fire_nowait_(ARM_SWEEP_CM)` → `CH_BRUSH` off → DEPLOY RIGHT → sleep 2.5s → `arm_sweep_fire_nowait_(0.0)` → PARK。沒有水、沒有 DEPLOY 驗證重試、沒有障礙物處理、沒有 RAII 收尾保證——這些全部保留在上面的 `#if 0` 區塊裡
+### 原因
+使用者要求兩邊清洗動作的具體順序一致，且明確要求用註解保留舊版而非刪除，方便之後需要時復原。**規範權威：** 無新規範，行為簡化 + 對齊。**⚠ 影響範圍提醒**：`do_arm_clean_sweep_()` 不只是網頁 CLEAN SWEEP 按鈕（`cmd_arm_clean_sweep`）在用，`do_step_up_`/`do_step_down_` 的 end-of-step 自動清洗掛鉤也共用同一個函式——這次簡化會同時影響這兩個呼叫路徑，不是只有獨立按鈕。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-27l Claude (Sadie) — DEPLOY 速度再加快
+### 需求（user）
+「deploy時速度可以再快一點嗎?」
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `cmd_deploy_sequence()`：`spd` 預設值 0.45 → 0.55
+### 原因
+使用者要求 DEPLOY 移動再快一點。**規範權威：** 無新規範，純參數調整。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-27k Claude (Sadie) — 修連結錯誤：undefined reference to WashRobot::STEP_SYNC_BACKOFF_CM
+### 需求（user）
+貼了連結錯誤 `(.text+0x30408): undefined reference to 'WashRobot::STEP_SYNC_BACKOFF_CM'`
+### 診斷
+`do_step_sync_()` 裡 `std::min(STEP_SYNC_BACKOFF_CM, cm - backed_off_cm)` 把這個 `static constexpr int` class member 綁定到 `std::min` 的 `const T&` 參數上，等於 ODR-use——pre-C++17 規則下 `static constexpr` member 若被這樣使用需要一份 out-of-class 定義，沒有補這行就會在連結期找不到符號。
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `do_step_sync_()`：把 `std::min(STEP_SYNC_BACKOFF_CM, ...)` 改成純數值比較的三元運算式（`remaining_cm < STEP_SYNC_BACKOFF_CM ? remaining_cm : STEP_SYNC_BACKOFF_CM`），只讀值不綁參考，不再 ODR-use 這個常數
+### 原因
+用純比較取代 `std::min` 是最小改動、不用管專案實際編到哪個 C++ 標準版本就能解掉這個連結錯誤。**規範權威：** 無新規範，純 build 修復。
+### ⚠ 尚未重新編譯驗證
+
+## 2026-07-27j Claude (Sadie) — do_step_sync_ 整側沒吸住不再直接 FAIL，改成退繩重試
+### 需求（user）
+「可以改成往回走10cm直到可以吸好或回到原點嗎」；追問細節後確認「退回前要先全部收縮，再同時重新伸」
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`：新增 `STEP_SYNC_BACKOFF_CM = 10`
+- `user_lib/WASH_ROBOT.cpp` `do_step_sync_()`：原本「重試一次後整側還是 0 顆吸住 → 直接 `return fail(\"ERR side_unsealed\")`」的路徑，改成一個退繩迴圈：
+  1. 4 顆全部收縮（真空關+等釋放+兩段收縮，跟 step 1 一樣）
+  2. 吊機往**反方向**退 `STEP_SYNC_BACKOFF_CM`（10cm，不超過剩餘距離）
+  3. 真空開 + 4 顆同時重新伸出（跟原本 extend 邏輯一樣，每側各自吸到 ≥1 顆就停）
+  4. 重新檢查 `group_seal_ok_`：兩側都 OK → 跳出迴圈、照原流程往下走（partial seal 邏輯不變）；還是有整側沒吸住 → 累加退回距離，重複步驟 1-3
+  5. 累計退回距離達到原本這一步的 `cm`（等於完全退回起點）還是吸不住 → 才真的 `return fail(\"ERR side_unsealed_at_origin\")`
+- 全程沿用既有 `try_or_pause_`/`check_abort_` 機制，中途 STOP/斷線一樣能正常中止
+### 原因
+使用者要求把「整側完全吸不住」的處理從立即判定失敗，改成主動嘗試退回找吸點，只有真的退到起點都吸不住才放棄。**規範權威：** 無新規範，純行為擴充；沒有動到「每側 ≥1 顆即算好」的既有 v2 慣例（partial seal 邏輯不變），也沒有改動退繩重試之外的其他流程（IMU/rail sweep 掛鉤點位置不變）。
+### ⚠ 尚未編譯驗證，也尚未實機驗證
+
+## 2026-07-27i Claude (Sadie) — DEPLOY 速度/力量微調（M1 hold_kp/kd + deploy 速度）
+### 需求（user）
+貼了一大段完整成功跑完的 log（INIT→DEPLOY LEFT→DEPLOY RIGHT→PARK 連續好幾輪都正常 converge，沒有 ERR——確認先前幾次修法在實機上有效）；追問「deploy時的速度可以稍微快一點點嗎? 還力量稍微大一點點，有點撐不住的感覺」
+### 修改檔案
+- `cleaning_arm/main_api.cpp`：
+  - `m1_.hold_kp`：22.0 → 26.0（M1 在 DEPLOY 移動中跟貼牆後的 hold 都是同一組 kp/kd，`feedback_loop()` 的 move 分支跟 hold 分支都用 `hold_kp`/`hold_kd`，沒有分開的「移動用」跟「hold 用」）
+  - `m1_.hold_kd`：3.0 → 3.5（跟著 kp 一起微調阻尼）
+  - `cmd_deploy_sequence()` 的 `spd` 預設值：0.35 → 0.45（M1 touch_wall 的移動速度；M2 slot 移動的 0.8 rad/s 沒動，那是另一個寫死的常數）
+### 原因
+使用者直接反饋 DEPLOY 時速度想再快一點、撐牆的力量感覺不夠。**規範權威：** 無新規範，純參數微調，數值是延續同一份程式碼裡既有的漸進式調整慣例（hold_kp 這條路本來就是 20→18→22 一路調上來的）。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-27h Claude (Sadie) — lr_calibrate_slot() 改回傳 bool，INIT 不再對 M2 校正失敗視而不見
+### 需求（user）
+確認要修「INIT 對 M2 校正失敗（Phase 1 timeout / MAX_TRAVEL / Phase 2 沒收斂）都無條件回 OK」這個問題（"ok"）
+### 修改檔案
+- `cleaning_arm/main_api.cpp`：
+  - `lr_calibrate_slot()` 簽名從 `void` 改成 `bool`：MAX_TRAVEL exceeded、Phase 1 timeout 兩個提早 return 都改成 `return false;`；新增 `phase2_ok` 變數追蹤 Phase 2（含 retry）有沒有真的收斂，沒收斂時 `phase2_ok=false`；函式最後 `return phase2_ok;`，"Done." log 收斂失敗時附加 `(WARN: zero shifted...)`
+  - `cmd_init_sequence()`：接住 `lr_calibrate_slot(m2_, true)` 的回傳值，`false` 就 `return "ERR INIT: M2 calibrate failed (stop not found / did not converge — see log)";`，不再無條件 `"OK"`
+- `cleaning_arm/main_api.h`：`lr_calibrate_slot` 宣告同步改成 `bool`
+### 原因
+跟先前 M1 touch_wall 的問題（changelog 2026-07-27g）是同一種模式——底層真的失敗了，但因為函式不回報結果，上層無條件當作成功。這次是 INIT 階段：user 貼的 log 顯示 M2 校正連續兩次完全卡死（Phase 1 timeout，位置 75 個 loop 紋風不動），但 INIT 依然回 `"OK"`。修完之後，M2 校正真的失敗時 washrobot 端會看到 `init_ok=false`，`do_step_sync_rail_sweep_` 會照原本設計跳過整段 DEPLOY，不會拿一個沒校正好的 M2 去用。**規範權威：** 無新規範，純 bug fix；不解決 M2 為什麼會間歇性完全無回應（硬體層級問題，仍待查），只是讓失敗不再被吞掉。
+### ⚠ 尚未編譯驗證，也尚未實機驗證
+### 附註
+`lr_calibrate_slot` 另外兩個呼叫點（`lr_calibrate()` 包裝函式、手動校正指令 handler）目前繼續丟棄回傳值（合法但沒利用新資訊），沒有一起改；如果之後這兩條路徑也要看到校正失敗，需要另外處理。
+
+## 2026-07-27g Claude (Sadie) — 找到 DEPLOY 距離牆面越跑越遠的根因：M1 touch_wall 從沒真的檢查有沒有到位
+### 需求（user）
+貼了一大段 log 問「為什麼中間有一次刮刀沒有DEPLOY下去? 還有deploy距離牆面越來越遠? 明明都是用同樣的mm數字」；追問後確認「越來越遠」是同一個槽位重複跑好幾輪、距離一次比一次遠（不是 LEFT/RIGHT 角度本來就不同那件事）
+### 診斷
+- log 顯示的失敗其實都是 **LEFT（滾筒）**的 M2 卡住（`lr_move_to_slot FAIL`、`motor may be jammed`），重複 4 輪 INIT+DEPLOY 才恢復——這段是 M2 硬體層級間歇性無回應，非本次改動範圍，已在回覆中說明
+- **距離越跑越遠的真正原因**：`cmd_deploy_sequence()`（`cleaning_arm/main_api.cpp:1704`）Step 3（`touch_wall_slot` 讓 M1 貼牆）呼叫完 `wait_for_move(m1_)` 後**回傳值直接被丟掉**（原本寫 `// best-effort`），不管 M1 有沒有真的轉到 `theta_target` 都繼續回傳 `"OK"`。對照 Step 2（M2 移動到槽位）明明有 `if (!wait_for_move(m2_)) return "ERR DEPLOY: M2 slot timeout";`，M1 這段少了同樣的檢查。`touch_wall_slot()`/`move_to_slot()` 本身只是設定目標角度就立刻回傳（實際轉動是背景執行緒處理 `move_act`/`move_target`），所以「DEPLOY 回 OK」不代表 M1 真的到位。如果 M1 沒轉到位，下一輪 Step 1 retract 是從「上次沒轉完停在哪」開始，一輪一輪誤差疊加，但因為沒有檢查，永遠不會冒出 ERR
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `cmd_deploy_sequence()`：M1 touch_wall 那段的 `wait_for_move(m1_)` 補上回傳值檢查，timeout 就 `return "ERR DEPLOY: M1 touch_wall timeout";`（跟 M2 那段對稱）。`wait_for_move` 預設 timeout=15000ms，餘裕足夠，正常情況不會誤判
+### 原因
+把原本會靜默吞掉的失敗變成看得到的 ERR，方便抓出「M1 到底有沒有真的轉到位」這件事；不修正 M1 為什麼沒轉到位（那可能跟 M2 一樣是出力/摩擦力問題，需要另外查），但至少讓問題浮出來而不是繼續累積誤差。**規範權威：** 無新規範，純 bug fix。
+### ⚠ 尚未編譯驗證，也尚未實機驗證這個修法後 DEPLOY 是否真的開始回報 ERR（如果 M1 真的常常卡住，之後可能要跟 M2 一樣進一步查根因）
+
+## 2026-07-27f Claude (Sadie) — 換 DEPLOY RIGHT（刮刀）同時關滾筒馬達，不用等到收尾
+### 需求（user）
+「手臂換成right deploy時(換成刮刀時)，應該要同時關掉滾筒馬達」
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `do_step_sync_rail_sweep_()`：`pqw_.controlRelay(CH_BRUSH, false)` 從收尾（PARK 前）搬到 DEPLOY RIGHT 呼叫之前，切換到刮刀的同時就關滾筒；原本收尾那行變成多餘的重複關閉，直接拿掉，`PARK` 維持在最後
+### 原因
+RIGHT（刮刀）是乾刮，滾筒（濕刷）沒理由繼續轉，兩者切換應該同時發生而不是拖到整段流程結束才關。**規範權威：** 無新規範，純流程調整；LEFT 階段的 abort 安全路徑（`check_abort_()` 那段）本來就在 RIGHT 之前，CH_BRUSH 此時仍合理維持開啟，不受影響。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-27e Claude (Sadie) — 上滑台行程改成 0→-8→0
+### 需求（user）
+「幫我改成-8」
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`：`ARM_SWEEP_CM` -6→-8、`DM2J_ARM_STEP_SWEEP_CM` -6.0→-8.0（維持兩個常數統一同一行程）
+### 原因
+使用者指定新行程。**規範權威：** 無新規範，純參數調整。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-27d Claude (Sadie) — 撤回 go_home_slot 的 passive-probe（造成移動前亂彈一下），已被 2026-07-27c 的修法取代
+### 需求（user）
+「改回上衣版，這版是在幹嘛? 要移動之前都會莫名其妙彈一下，而且也沒有到貼牆設定的距離，都亂跑」+ 貼了 DEPLOY LEFT/LEFT/RIGHT 的 log
+### 診斷
+2026-07-27b 加的 passive-state 探測（`go_home_slot()` 裡）用 3 個 frame 送一個 `cur_cmd ± 1.0 rad` 的探測 setpoint 來取樣 tau。問題是：
+1. 這個探測是**無條件**套用在每一次 `go_home_slot()` 呼叫上，不只 PARK——`cmd_deploy_sequence` 的 Step 1（M1 retract 準備切槽位，`go_home_slot(m1_, use_park_profile=false)`）也會先跑一次這個 ±1 rad 探測，透過真的 `control_mit` 送出 60ms，造成移動前「莫名其妙彈一下」
+2. 如果沒被判定 passive（這次 M2 PARK 卡住其實不是 passive，已經在 2026-07-27c 確認過），探測完 `cur_cmd`/`start_pos` 沒有跟著真實已經被探測動作偏移的位置同步，導致後續 ramp 基準跟實際位置對不上，跑起來「亂跑」、頂牆距離也對不準
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `go_home_slot()`：整段 passive-probe 拿掉，改成註解說明撤回原因；2026-07-27a 加的純觀察 diagnostic log（ARRIVED/TIMEOUT + loop 數 + pos/vel）保留，那段沒有送任何 control_mit、不是彈一下的原因
+### 原因
+passive-probe 這個假說已經被 2026-07-27c 的 log 推翻（M2 PARK 卡住是出力不足不是 passive，已改用 `lr_move_to_slot_impl(CENTER)` 解決），留著這段探測只剩副作用（無條件在每次 go_home_slot 呼叫前製造一次真實的物理彈跳），沒有任何好處，應該拿掉。**規範權威：** 無新規範，撤回一個已知無效又有副作用的修法。
+### ⚠ 尚未編譯驗證，也尚未實機驗證撤回後「彈一下」是否消失
+
+## 2026-07-27c Claude (Sadie) — 上次的 passive-state 修法沒解決；改成 PARK 的 M2 直接借用 lr_move_to_slot_impl(CENTER)
+### 需求（user）
+重新編譯部署後再測，log 顯示 M2 仍然 `ramp TIMEOUT after 900/900 loops`，且**沒有印出**上次加的 "motor passive...re-enabling" 訊息——代表上次的 passive-state 假說是錯的
+### 診斷
+既然 passive 探測沒觸發（tau 讀值不是接近 0），代表 M2 不是 CAN 層卡在 passive，而是**扭力不夠大**：`go_home_slot()` 對 M2 用 `park_kp`，數值等於 `hold_kp`（≈2.5），但同一份 log 裡 DEPLOY LEFT/RIGHT 用的 `lr_move_to_slot_impl()` 是寫死 `MIT_KP=28` + `FRICTION_TAU=2.3` 摩擦力前饋才能穩定推動 M2——兩者扭力差了 10 倍以上，2.5 Nm 對 M2 的靜摩擦力顯然不夠，卡住不是通訊/passive 問題而是出力不足。
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `cmd_park_sequence()`：M2 那一行從 `go_home_slot(m2_)` 改成 `lr_move_to_slot_impl(m2_, 0 /*CENTER*/, 0.6f)`——CENTER 的 target=0.0 跟原本 `go_home_slot` 對 M2 的 target 完全一樣，改用已經在同一份 log 裡驗證有效（DEPLOY LEFT/RIGHT 都成功 converge）的機制，而不是繼續猜 `go_home_slot` 的新 kp/kd 值。M1 維持原本的 `go_home_slot(m1_)` 不變（M1 這條路一直運作正常）
+### 原因
+避免發明新的 tuning 參數，直接重用已證實可靠、且自帶 passive 偵測 + 摩擦力前饋的既有機制。**規範權威：** 無新規範，純 bug fix。
+### ⚠ 尚未編譯驗證，也尚未實機驗證修法是否真的解決卡住問題
+
+## 2026-07-27b Claude (Sadie) — 找到並修復 M2 PARK 卡 18 秒的真正原因：go_home_slot 缺少 passive-state 偵測
+### 需求（user）
+貼了完整 log（`[M2 calibrate DIAG]`...`[M2 go_home] ramp TIMEOUT after 900/900 loops ... vel=-0.0024`），要求追查 M2 卡住原因
+### 診斷過程
+log 顯示：DEPLOY LEFT/RIGHT 期間 `lr_move_to_slot` 正常把 M2 推到 slot 附近（pos=0.6312 vs target=0.7000，算 converged），但緊接著 PARK 呼叫 `go_home_slot` 時 M2 完全凍結在 0.6628，18 秒內 vel 只有雜訊等級 -0.0024，target=0 完全沒收斂。對照發現 `lr_move_to_slot_impl()`（`cleaning_arm/main_api.cpp:1230` 附近）有一段 **2026-06-06 就記錄的已知問題**：M2 被高扭力（`MIT_KP=28`）頂在 slot 附近的機械 stop 時，會「latch 進 passive 狀態——MIT frame 有 ACK 但沒有實際扭力輸出」，`lr_move_to_slot_impl` 有對應的偵測+`dm_->enable()`重新啟用機制；但 `go_home_slot()`（PARK 專用）**完全沒有這段邏輯**——這就是卡 18 秒的根因。
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `go_home_slot()`：在 ramp 迴圈開始前，port 一份跟 `lr_move_to_slot_impl()` 完全對應的 passive-state 偵測 + 重新 enable 邏輯：送 3 個輕探測 frame 取樣 `tau`，若 `|tau| < 0.3 Nm`（判定 passive）→ `dm_->enable(*s.motor)` + 5 個 warmup frame 重建扭力迴路 → 重新讀取真實位置更新 `cur_cmd`/`start_pos` 再開始正式 ramp
+### 原因
+`go_home_slot()`（PARK）跟 `lr_move_to_slot_impl()`（DEPLOY）操作的是同一顆可能進入 passive 狀態的馬達，卻只有後者有救援機制——這是遺漏，不是設計取捨。**規範權威：** 無新規範；沿用已存在、已驗證過的 `lr_move_to_slot_impl` 修法，非新發明的 tuning。
+### ⚠ 尚未編譯驗證，也尚未實機驗證這個修法真的解決卡住問題（下次 PARK 卡住時看新增的 diagnostic log 是否還會印 TIMEOUT，或是否印出 "motor passive...re-enabling"）
+
+## 2026-07-27a Claude (Sadie) — cleaning_arm/main_api.cpp go_home_slot() 加診斷 log（純觀察，不改控制邏輯）
+### 需求（user）
+「我發現等很久的是這個指令 arm_cmd_("PARK", 30);」→ 確認要在 `go_home_slot()` 加診斷 log；並明確表示整個專案（含 `cleaning_arm/`）都是 Sadie 負責，沒有 Jim 的界線
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `go_home_slot()`：
+  - ramp 迴圈（M1/M2 回 target 的主迴圈）結束後印一行：`ARRIVED`（到位/低速判定提早跳出）或 `TIMEOUT`（跑滿 `MAX_LOOPS` 都沒到位跳出），附上用了幾個 loop、對應 ms、跳出時的 `pos`/`vel`/`target`
+  - settle 迴圈（ramp 完但還沒收斂時的額外等待）結束後同樣印 `DONE`/`TIMEOUT` + loop 數 + pos/vel
+  - 純新增 `std::cout`，沒有動任何控制邏輯（kp/kd/speed/target/迴圈條件全部不變）
+### 原因
+確認 PARK 卡住到底是「提早到位跳出」還是「跑滿 900 loops (18s) 超時跳出」，藉此判斷是本來就該這麼久（見下方附註）還是真的卡住。**規範權威：** 無新規範，純觀察用診斷 log。
+### 附註（重要，看到新 log 前請先知道這個背景）
+翻 `go_home_slot()` 現在的內容發現這一段已經被另一個 session/視窗持續調過（`2026-07-24 per user` 系列註解）：`MAX_LOOPS` 已經拉到 **900（18 秒）**，PARK 專用速度 `park_speed` 也一路調到很慢（註解提到 0.07 rad/s 左右），是為了修一個「M1 回到底時會反彈/用甩的」問題，刻意讓 PARK 用很慢的爬升速度、加了 `CREEP_ZONE`/`PARK_STOP_MARGIN` 這些新機制。換句話說：**現在 PARK 本來就被設計成很慢**——之前猜的「arrival 判定沒偵測到、跑滿迴圈」有可能只是「本來就跑很慢、要跑很久」，不一定是真的卡住的 bug。新加的診斷 log 印出來就能直接分辨這兩種情況。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-24n Claude (Sadie) — 上滑台行程改回 0→-6→0
+### 需求（user）
+「上滑台幫我行程改成0->-6->0」
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`：`DM2J_ARM_STEP_SWEEP_CM`（`do_step_sync_rail_sweep_` 用）：-4.0 → -6.0。`ARM_SWEEP_CM`（`do_arm_sweep_`/`do_arm_clean_sweep_`/`do_arm_clean_sweep_continuous_` 共用）本來就已經是 -6，未變動
+### 原因
+使用者指定上滑台行程統一回到 -6cm。**規範權威：** 無新規範，純參數調整。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-24m Claude (Sadie) — arm INIT 改成跟吊機放繩同時跑（原本是序列化在 rail sweep 裡）
+### 需求（user）
+「在同步step那邊 可以幫我邊放吊機繩子邊做arm init動作嗎」
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `do_step_sync_()`：在 step 2（吊機放/收繩）前，用 `std::async` launch 一個背景 `fut_arm_init` 執行 `arm_cmd_("INIT", 60)`（同步更新 `arm_calibrated_`），跟吊機繩子動作同時跑；新增 `ArmInitJoin` RAII guard（跟既有 `RailSweepJoin` 同款寫法）確保任何提早 `return fail(...)` 路徑都會等 INIT 收尾才真的離開函式，不會留著背景執行緒沒 join。到 step 5（4 顆同時伸出、launch rail sweep 之前）呼叫 `fut_arm_init.get()` 拿結果，把 `bool init_ok` 直接傳給 `do_step_sync_rail_sweep_`
+- `do_step_sync_rail_sweep_()`：簽名改成 `(const char* tag, bool init_ok)`，拿掉內部自己呼叫 `arm_cmd_("INIT",...)` 那段，改用呼叫端傳進來的結果
+- `user_lib/WASH_ROBOT.h`：`do_step_sync_rail_sweep_` 宣告同步加上 `bool init_ok` 參數
+### 原因
+INIT 只跟 motor_api（本機 :9527，M1/M2 關節）對話，不碰吊機/ZDT/PQW 的任何 bus，跟吊機放/收繩完全沒有資源衝突，讓兩者序列化執行純粹是浪費時間。改成一開始就平行跑，INIT 的 ~10s 延遲被蓋在吊機放繩的時間窗裡，到 rail sweep 要 DEPLOY 時 INIT 大概率已經跑完，省下等待時間。**規範權威：** 無新規範，純架構最佳化，不影響安全性（INIT 失敗一樣走原本「跳過 DEPLOY，只做純 rail 掃動」的容錯路徑）。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-24l Claude (Sadie) — feet pusher preset 上下兩顆分開：slave 1,3=8.1cm / slave 2,4=7.8cm
+### 需求（user）
+「幫我把slave 1,3改成8.1cm slave 2,4改成7.8cm」
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`：
+  - `PUSHER_EXTEND_FEET_PULSE`（slave 1,3）：23400 → 24300 pulse（7.8cm → 8.1cm）
+  - `PUSHER_EXTEND_FEET_PULSE_LOWER`（slave 2,4）：維持 23400 pulse（7.8cm，不變）
+### 原因
+使用者要求 feet 上下兩顆分開設定不同 preset。**規範權威：** 無新規範，純參數調整。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-24k Claude (Sadie) — ⚠ TEMP：do_step_sync_ 的 IMU 微調暫時註解掉（實驗用）
+### 需求（user）
+「先幫我暫時把吊機放繩後imu/張力感測氣微調的部分都註解掉，只是暫時而已 要做實驗用」
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `do_step_sync_()` step 3：`do_sync_imu_roll_correct_();` 呼叫註解掉（吊機放繩後唯一的微調步驟；純 IMU 驅動，`crane_cmd_("roll_correct ...")` 內部另有張力安全檢查但不是微調邏輯本身）
+### 原因
+使用者要做實驗，暫時不要這段自動水平微調介入。**⚠ 這是暫時性改動，不是規範變更** —— 拿掉之後 `do_step_sync_` 連續跑多步會失去每步的水平微調，傾斜可能逐步累積不會自動修正。實驗結束後記得把該行 uncomment 回來。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-24j Claude (Sadie) — feet pusher preset 統一改成 7.8cm
+### 需求（user）
+「幫我把present改成都7.8cm」
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`：
+  - `PUSHER_EXTEND_FEET_PULSE`（slave 1,3）：21000 → 23400 pulse（7.0cm → 7.8cm）
+  - `PUSHER_EXTEND_FEET_PULSE_LOWER`（slave 2,4）：21000 → 23400 pulse（7.0cm → 7.8cm）
+### 原因
+使用者直接指定新的 feet cup 伸長 preset 值。**規範權威：** 無新規範，純參數調整。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-24i Claude (Sadie) — DEPLOY 手臂後等待時間 +500ms
+### 需求（user）
+「幫我把deploy手臂後的等待時間多500ms」
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `do_step_sync_rail_sweep_()`：DEPLOY LEFT / DEPLOY RIGHT 後各自的 `sleep_ms_` 都從 2000 → 2500（兩處）
+### 原因
+使用者要求延長 DEPLOY 後、滑台開始移動前的等待時間。**規範權威：** 無新規範，純參數調整。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-24h Claude (Sadie) — feet pusher preset 上下兩顆統一成 7cm
+### 需求（user）
+「幫我把present都改成7cm」
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`：
+  - `PUSHER_EXTEND_FEET_PULSE`（slave 1,3）：19500 → 21000 pulse（6.5cm → 7.0cm）
+  - `PUSHER_EXTEND_FEET_PULSE_LOWER`（slave 2,4）：20400 → 21000 pulse（6.8cm → 7.0cm）
+### 原因
+使用者要求 feet 上下兩顆 preset 統一成同一值。**規範權威：** 無新規範，純參數調整。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-24g Claude (Sadie) — feet pusher preset 改成 6.5cm/6.8cm
+### 需求（user）
+「幫我把腳的present改成6.5cm/6.8cm」
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`：
+  - `PUSHER_EXTEND_FEET_PULSE`（slave 1,3）：17100 → 19500 pulse（5.7cm → 6.5cm）
+  - `PUSHER_EXTEND_FEET_PULSE_LOWER`（slave 2,4）：18000 → 20400 pulse（6.0cm → 6.8cm）
+### 原因
+使用者直接指定新的 feet cup 伸長 preset 值。**規範權威：** 無新規範，純參數調整。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-24f Claude (Sadie) — feet pusher preset 改回原本：3.5/3.8cm → 5.7/6.0cm
+### 需求（user）
+「幫我把zdt腳組的present改回原本的」——推翻本 session 稍早（changelog 2026-07-24a）改的 3.5cm/3.8cm
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`：
+  - `PUSHER_EXTEND_FEET_PULSE`（feet upper, slave 1,3）：10500 → 17100 pulse（3.5cm → 5.7cm，回到 2026-07-08 定案值）
+  - `PUSHER_EXTEND_FEET_PULSE_LOWER`（feet lower, slave 2,4）：11400 → 18000 pulse（3.8cm → 6.0cm，同上）
+### 原因
+使用者要求還原成 2026-07-08 定案的 preset 值。**規範權威：** 無新規範，純參數還原。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-24e Claude (Sadie) — do_step_sync_rail_sweep_ 改成每次真的 arm_cmd_("INIT")，覆蓋掉 ensure_arm_ready_()
+### 需求（user）
+「改成每次都要init」——推翻上一版（changelog 2026-07-24d）選的 `ensure_arm_ready_()`，明確要每次清洗前都真的重新 INIT
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `do_step_sync_rail_sweep_()`：DEPLOY LEFT 前呼叫 `arm_cmd_("INIT", 60)` 取代 `ensure_arm_ready_()`；INIT 結果同步寫回 `arm_calibrated_`（成功=true/失敗=false，跟 `cmd_arm_init`/`cmd_init_impl_` 一致）。INIT 失敗（no reply/校正異常）就跳過整段 DEPLOY/CH_BRUSH，只做純 rail 掃動，不擋這一步
+### 原因
+User 明確要求每次清洗前都重新做完整校正，覆蓋掉 2026-05-28 那次「INIT 只在系統 init 做一次、sweep 只用 ensure_arm_ready_() 重新 ENABLE」的設計（該設計原本是為了把「校正中途撞到東西、原點被搞歪」的風險收斂到系統開機、操作員在旁的時刻）。**規範權威：** 無新規範；這是使用者對已知風險（每次 INIT ~10s、校正中被撞到的風險從「只在開機時」擴大到「每次清洗前」）的明確取捨，非我方判斷。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-24d Claude (Sadie) — do_step_sync_rail_sweep_ 補上 ensure_arm_ready_()
+### 需求（user）
+「清洗手臂開始清潔前，要先做手臂init」；追問後改用既有慣例 `ensure_arm_ready_()` 而非真的每次 `arm_cmd_("INIT")`（user 選「ensure_arm_ready_()（建議）」）
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `do_step_sync_rail_sweep_()`：DEPLOY LEFT 前先呼叫 `ensure_arm_ready_()`；失敗（未 calibrated / ENABLE 失敗）就整段跳過 DEPLOY/CH_BRUSH，只做純 rail 掃動，不擋這一步（跟既有 arm deploy 失敗的容錯路徑一致）
+### 原因
+`do_arm_clean_sweep_()`/`do_arm_clean_sweep_continuous_()` 都遵循 2026-05-28 的既有設計：INIT（M1/M2 全校正）只在系統 `init` 時做一次，避免每次清洗前都重新校正、中途撞到東西把原點搞歪的風險；平常清洗前只呼叫 `ensure_arm_ready_()` 重新 ENABLE 馬達（用既有校正原點）。`do_step_sync_rail_sweep_()` 先前漏了這一步，直接 DEPLOY，PARK 過一次後下次呼叫大概率會因馬達沒重新 ENABLE 而失敗 —— 這次補上讓它跟另外兩條清洗流程一致。**規範權威：** 無新規範，沿用既有 `ensure_arm_ready_()` 慣例（見 `WASH_ROBOT.cpp:2716-2721` 註解）。
+### 附註
+發現 `do_step_sync_rail_sweep_()` 目前內容（LEFT/RIGHT 各別 DEPLOY、deploy 後等 2s 再讓滑台動）比我上次（changelog 2026-07-24b）寫的單一 CENTER DEPLOY 版本更新、更完整 —— 應該是另一個視窗/session 在這之間繼續改的，非本次異動範圍，只是提醒協作者留意目前實際內容。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-24c Claude (Sadie) — 上滑台掃動行程縮短：-10cm → -6cm
+### 需求（user）
+「幫我改上滑台的位移，0->-6->0」
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`：
+  - `ARM_SWEEP_CM`：-10 → -6（`do_arm_sweep_`/`do_arm_clean_sweep_`/`do_arm_clean_sweep_continuous_` 共用）
+  - `DM2J_ARM_STEP_SWEEP_CM`：-10.0 → -6.0（`do_step_sync_rail_sweep_` 專用，跟上面同方向調整維持統一）
+### 原因
+使用者直接指定新的上滑台掃動行程。**規範權威：** 無新規範，純參數調整，兩個常數各自的呼叫端邏輯不變。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-24b Claude (Sadie) — 手臂實機裝上：do_step_sync_ 接回真清洗（DEPLOY+刷），deploy 距離統一 360mm，水閥仍不開
+### 需求（user）
+「幫我把註解拿掉，手臂已經上去，但不開水閥，水閥沒接，所有水閥幫浦都註解調，另外把手臂deplay的距離通通設定成360mm」；追問 `ARM_ROPE_PROTECT_WALL_MM` 是否一併改 → user 選「一起改成360mm」。
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`：
+  - `ARM_CLEAN_WALL_MM`：330 → 360
+  - `ARM_ROPE_PROTECT_WALL_MM`：250 → 360（per user，跟清洗距離統一）
+- `user_lib/WASH_ROBOT.cpp`：
+  - `do_arm_sweep_()`：取消註解 `pqw_.controlRelay(CH_BRUSH, true)`；`CH_WATER_INLET`/`CH_WATER_PUMP` 兩行維持註解（水閥/水泵尚未接管路）
+  - `do_step_sync_rail_sweep_()`：補回 `arm_cmd_("DEPLOY " + ARM_CLEAN_WALL_MM + " CENTER")` + `CH_BRUSH` 開/關 + 收尾 `arm_cmd_("PARK")`，跟原本純 rail 掃動包在同一段時間內執行；DEPLOY 失敗（no reply / obstacle）非致命，跳過開刷但 rail 掃動照跑，不擋 step。未動水閥/水泵（維持不接）
+### 原因
+手臂已經物理裝上機體（CH_BRUSH 也已在稍早改到 CH15、PQW 擴到 16CH 反映同一件事），`do_step_sync_`（同步步伐）該接回的清洗掛鉤（v2_app_redesign_plan.md §5.6 提到的位置）可以真的動起來；水閥管路還沒接，維持全部關閉/註解，避免乾轉的泵浦誤動作或漏電磁閥誤開。**規範權威：** `.claude/v2_app_redesign_plan.md` §5.6（掛鉤重新接回的規劃位置）；本次為 do_step_sync_ 專屬掛鉤 (`do_step_sync_rail_sweep_`)，非該節描述的舊 v1 pipeline 復用。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-24a Claude (Sadie) — feet pusher preset 縮短：5.7/6.0cm → 3.5/3.8cm
+### 需求（user）
+「幫我把 present 分別改成 slave 1,3 3.5cm、slave 2,4 3.8cm」
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`：
+  - `PUSHER_EXTEND_FEET_PULSE`（feet upper, slave 1,3）：17100 → 10500 pulse（5.7cm → 3.5cm，慣例 3000 pulse=1cm）
+  - `PUSHER_EXTEND_FEET_PULSE_LOWER`（feet lower, slave 2,4）：18000 → 11400 pulse（6.0cm → 3.8cm）
+### 原因
+使用者直接指定新的 feet cup 伸長 preset 值。**規範權威：** 無新規範，純參數調整；`preset_extend_pulse_for_slave_()` 直接引用這兩個常數，其餘 fine-tune/over-cap 邏輯（`FEET_TARGET_OVER_CAP_CM`=5.0 等）不受影響，preset 縮短後餘裕只會更大。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-23z23 Claude (Sadie) — 新增 Linux_test menu 32：跟 31 一樣但不碰 CH16（對照組）
+### 需求（user）
+「幫我多一個功能32，他和31一模一樣，只是沒有破真空功能(也就是沒有ch16)」；順便把 menu 31 的 RPM 調整（1200→1000→800）跟 CH16 時序（`CH16_PRE_RETRACT_MS` 50→100、`CH16_TOTAL_ON_MS` 500→800）套用到新的 menu 32 對應的非-CH16 延遲上。
+### 修改檔案
+- `Linux_test/main.cpp`：新增 `test_leg_release_no_break_vacuum()`（menu 32）——輸入、連線、`CH_own_valve OFF`+ZDT prep 並行、縮腳速度(800rpm/acc255/300pulse)、ZDT 到位輪詢+stall重試迴圈，全部照抄 menu 31；拿掉的部分：`BREAK_VACUUM_CH`/`Ch16Guard`/兩次 `controlRelay(CH16,...)` 呼叫，完全不碰 CH16。原本 menu 31 的兩段 CH16 相關延遲（`CH16_PRE_REST_MS`=80、`CH16_PRE_RETRACT_MS`=100）保留為對應的 `PRE_RETRACT_REST1_MS`/`PRE_RETRACT_REST2_MS`，維持一樣的縮腳前等待時間，方便兩者對照
+- menu 列表 + dispatch 加上第 32 項
+### 原因
+提供一個「純解真空 + 縮腳，不靠破真空閥輔助」的對照組，方便比較有無 CH16 介入時縮腳/脫壁的差異。**規範權威：** 無新規範，純新增測試工具功能。
+### ⚠ 尚未編譯驗證
+
+## 2026-07-23z22 Claude (Sadie) — 大改：CH16 開關改成固定時間表，不再用壓力判斷關閉時機
+### 需求（user）
+「幫我修改一下 收腳和開破真空的地方，順序改成先開破真空->等50ms->收腳->500ms關破真空，就不用壓力來關了」
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：
+  - 整段拿掉壓力確認邏輯（JC-100 輪詢迴圈、debounce/`CONFIRM_READS`、`BREAK_WAIT_POLL_MS`/`BREAK_WAIT_TIMEOUT_MS`、`vacuum_confirmed_broken`）以及先前為了讓 CH16 穩定動作而加的 bus-quiet 機制（`CH16_MIN_ON_MS` 相關的兩段等待）——這些全部是圍繞「用壓力判斷何時關閉」這個設計的配套，設計整個換掉後不再需要
+  - 改成固定時間表：`CH16 ON` → 記錄時間戳 → 等 `CH16_PRE_RETRACT_MS`(50ms) → 送出縮腳指令（`motion_control_pos_mode_nowait`，非阻塞立即返回）→ 檢查距離 CH16 開啟已經過多久，補等到滿 `CH16_TOTAL_ON_MS`(500ms) → `CH16 OFF`
+  - `VACUUM_BROKEN_THRESHOLD_KPA` 常數移除（不再需要判斷用途）；開場的 "Sequence:" 提示文字同步更新
+  - `jc`（JC-100）物件保留，僅在結尾印一次壓力當作參考資訊，不參與任何控制邏輯
+### 設計改變說明
+CH16 現在會在縮腳動作進行中途才關閉（開→50ms→送出縮腳→縮腳持續進行的同時 CH16 繼續開著，直到累計滿 500ms 才關）——不再要求「確認真空已破」才開始拉，而是讓拉的動作本身（配合 CH16 持續充氣）一起完成脫壁。這跟先前那次「安全性修正」（拉起前一定要等真空確認破，否則機體被吸盤黏著往牆上拉）的設計方向不同，是 user 這次明確要的新設計。**規範權威：** 無新規範，測試工具流程重新設計。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Linux 測試環境後確認：固定時間表下 CH16 穩定開關、縮腳過程正常，且這個時間安排（50ms 先拉、500ms 後關）在實際負重狀態下不會出現先前踩過的「機體被往牆上拉」的狀況。
+
+## 2026-07-23z21 Claude (Sadie) — ✅ CH16 確認穩定正常了！三個 500ms 延遲都試著砍到 80ms
+### 進展
+z20 的組合（`CH3 OFF`→500ms 靜置→`CH16 ON`→500ms 安靜持續→壓力輪詢(100ms間隔)→確認破→500ms 關閉緩衝→縮腳）user 確認「正常了」——CH16 這次終於穩定物理開關，整趟除錯到此告一段落。
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：
+  - 新增具名常數 `CH16_PRE_REST_MS`（原本裸寫的 500，`CH3 OFF` 後、`CH16 ON` 前那段），改成 `80`
+  - `CH16_MIN_ON_MS`（同時用在「開後安靜等待」跟「關後緩衝等待」兩處）從 `500` 改成 `80`
+### 原因
+user 要求把中間三段 500ms 延遲都試著砍到 80ms，找一個更快、但還能穩定成功的數值。**規範權威：** 無新規範，延續同一輪除錯，往回收斂速度。
+### ⚠ 尚未驗證
+需要 user 實測：三段都降到 80ms 後，CH16 是否還能穩定開關（不是偶爾成功）。如果不行，代表 80ms 太短，需要抓一個介於 80~500 之間的中間值；如果可以，之後還能再往下試更小的數字找真正的下限。
+
+## 2026-07-23z20 Claude (Sadie) — 「bus 安靜」假設也失敗；加回 CH3 OFF→CH16 ON 前 500ms 靜置，跟現有的開後靜置疊加測試
+### 觸發
+z19 那次「開啟後 bus 安靜 500ms + 輪詢間隔拉到100ms」實測還是沒開。user 要求再加回「解真空後、開 CH16 前」的 500ms 靜置（這個位置之前試過 2 秒沒用，這次改成跟開後靜置疊加，看組合是否有效）。
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：`CH3 OFF`（含 ZDT prep）完成後、`CH16 ON` 之前，加回 500ms 靜置
+### 原因
+單獨測「開前靜置」「開後靜置」都各自失敗過，這次測兩者疊加（開前 500ms + 開後 500ms 都靜置）是否有效。**規範權威：** 無新規範，持續同一輪除錯。
+### ⚠ 尚未驗證
+
+## 2026-07-23z19 Claude (Sadie) — 關鍵新假設：JC-100 壓力輪詢跟 CH16 共用 bus，把 relay 動作干擾掉了
+### 觸發
+user 確認：手動個別開關 CH16 一定正常（不是「幾乎」），但自動化測試連續跑幾乎都沒開——推翻了「硬體不穩定」的懷疑，代表自動化流程本身還在做什麼手動測試沒有的事。
+### 新假設
+`jc`（JC-100 壓力計）跟 `pqw`（PQW relay）共用同一條 TCP 連線/RS485 bus。原本的 `CH16_MIN_ON_MS` 修法雖然有讓 CH16 保持開啟 500ms，但這 500ms 期間**壓力輪詢迴圈立刻開始跑**（每 50ms 讀一次 JC-100）——bus 一點都不安靜。懷疑這些高頻讀取干擾了 relay 板內部真正驅動實體繼電器所需要的處理時間，手動測試時 bus 是完全安靜的，才會穩定成功。
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：
+  - CH16 ON 之後，先加一段 `CH16_MIN_ON_MS`(500ms) 的**純安靜**等待（完全不碰 `cli_pqw`，不讀壓力），這段時間過了才開始壓力輪詢迴圈——原本「先跑迴圈、迴圈跑完檢查夠不夠 500ms 再補等」的作法拿掉，因為那個做法沒有解決「輪詢期間 bus 不安靜」這個問題
+  - 壓力輪詢間隔 `BREAK_WAIT_POLL_MS` 50ms → 100ms（user 要求），輪詢期間也留更多安靜時間
+### 原因
+比起「延長 CH16 開啟的總時間」，更精準的假設是「這段時間 bus 需要安靜，不能有其他 Modbus 流量」——之前的修法有加長時間但沒有讓 bus 安靜，這次兩者一起做。**規範權威：** 無新規範，延續同一輪除錯，新的干擾假設。
+### ⚠ 尚未驗證
+需要 user 實測：這次 bus 真正安靜 500ms 之後，CH16 是否穩定物理開啟（不是偶爾成功）。
+
+## 2026-07-23z18 Claude (Sadie) — ✅ CH16 ON 確認成功！加對稱的關閉後緩衝時間
+### 進展
+`CH16_MIN_ON_MS`(500ms) 加上去後，user 確認 CH16 這次**物理上真的開了**——`min hold` 假設驗證成功。但接著回報「現在可以開了! 但沒關」。
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：CH16 OFF 送出後，到送出縮腳指令之前，加一段 `CH16_MIN_ON_MS`(500ms) 的等待
+### 原因
+對稱假設：關閉電磁閥同樣是一個實際的機械行程，不是瞬間完成。原本 OFF 指令送出後**立刻**送縮腳指令，中間完全沒有等——如果套用跟開啟同一套「動作被打斷」邏輯，關閉這邊可能也需要類似的時間才能真正完成釋放行程。先套用跟 `CH16_MIN_ON_MS` 同數量級的等待驗證看看。**規範權威：** 無新規範，延續同一輪除錯的對稱假設。
+### ⚠ 尚未驗證
+需要 user 實測：這次 CH16 關閉後是否真的物理上關閉了。如果還是不行，代表「關閉需要保底時間」這個對稱假設不成立，要考慮是不是需要專門讀回確認 CH16 真的變成 OFF 狀態（而非只是等時間），或者是別的機制。
+
+## 2026-07-23z17 Claude (Sadie) — test_break_vacuum_leg：CH16 加最短開啟時間（500ms），拿掉沒用的 2 秒前置延遲
+### 觸發
+2 秒前置延遲測了沒用，CH16 依然沒反應。user 手動用 menu 5 快速連續測試（ZDT 保持 enable、CH3 off/on/off、CH16 on/off 交錯）全部正常，判斷「應該是程式邏輯問題」。
+### 新假設 + 根因
+比對 menu 5 手動測試的節奏：每個指令之間至少有打字/讀結果的時間（抓 1-2 秒以上），`on 16` 到 `off 16` 間隔一定有好幾秒。而 `test_break_vacuum_leg()` 裡 CH16 從 ON 到 OFF 只間隔約 150-200ms（因為壓力很快就被判定「已破」——已經確認這多半是 `CH3 OFF` 自然洩壓的結果，不是 CH16 的功勞，見前幾輪 memory 記錄）。CH16 控制的是一顆氣動電磁閥，閥芯機械動作需要時間；如果 ON 命令送出後不到 200ms 就被 OFF 打斷，閥可能整個來不及完成動作行程，跟「沒開」的觀察完全吻合。根因是**把「CH16 該開多久」完全綁在壓力確認的快慢上，沒有給 CH16 自己保底的最短開啟時間**。
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：
+  - 拿掉先前加的 2 秒前置延遲（已證實無效，純粹是猜錯方向）
+  - CH16 ON 當下記錄時間戳 `ch16_on_at`
+  - 壓力確認「已破」後，關閉 CH16 前先檢查已經開了多久，不足 `CH16_MIN_ON_MS`(500ms) 就補等剩餘時間，確保 CH16 至少維持開啟 500ms 才會被關掉——把「等真空確認破」（安全性判斷）跟「給 CH16 足夠動作時間」（硬體特性）這兩件事分開，互不干擾
+### 原因
+之前的「加延遲」都試在 CH16 ON **之前**，這次改成保證 CH16 ON **之後**維持夠久，方向不同、理論依據更直接（解決「開太短氣動閥來不及動作」而非「指令下太快被吃掉」）。**規範權威：** 無新規範，純測試工具邏輯修正。
+### ⚠ 尚未驗證
+需要 user 實測：CH16 這次開滿 500ms 以上再關，是否終於物理上正常反應。如果還是不行，代表這個假設也不對，需要重新從電氣/硬體角度排查。
+
+## 2026-07-23z16 Claude (Sadie) — test_break_vacuum_leg：加 2 秒診斷性延遲，驗證「需要秒級靜置」假設
+### 背景
+hex dump 證實 CH16 的 Modbus 寫入（`0C 05 00 0F FF 00 BD 24`）在 menu 5（正常）跟 menu 31（不正常）兩邊逐 byte 一致，含正確 ACK——排除協定/軟體邏輯問題。user 提出：手動測試（enable+CH3 off+CH16 on 都做，但動作間隔幾秒鐘）是可靠的；目前試過的延遲（200-300ms）都只是猜測值的一個數量級以下。
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：`CH3 OFF`（含 ZDT prep）完成後、`CH16 ON` 之前，加一個明確標註為「診斷用」的 2 秒延遲，先確認「需要秒級靜置」這個假設是否成立，之後再抓真正需要的最小值——2 秒是驗證用的上限，不是預期的最終數值
+### 原因
+純電氣/硬體問題（電源同時負載）已請 user 排查（ZDT enable 是否同時通電、是否共用電源），這裡先驗證另一個平行假設（單純的秒級靜置需求）。**規範權威：** 無新規範，診斷性延遲，非定案。
+### ⚠ 尚未驗證
+需要 user 實測：2 秒延遲後 CH16 是否終於正常開關。如果是，下一步要抓實際需要的最小間隔；如果還是不行，代表這個假設也不成立，要回頭聚焦電氣/電源負載那個方向。
+
+## 2026-07-23z15 Claude (Sadie) — ⚠ 找到真正根因：ZDT prep 加速優化拆掉了 CH16 需要的靜置間隔，整段還原
+### 觸發
+200ms 顯式延遲加了還是沒用（壓力第一筆讀值就已經是 `0`，代表洩壓在延遲期間就已經完成，跟 CH16 無關）。user 提供關鍵線索：「我非常確定是正常的，而且剛加入這個功能時還是正常開關，自從加快速度後就變成這樣了」——用實機行為反推出是這次對話較早之前加的「加速」改動造成的迴歸。
+### 根因
+`2026-07-23` 較早的一輪（回應 user「解真空後到拉起前的準備動作可以加快嗎」）把 ZDT prep 從「無條件 清stall+等100ms+enable+等200ms（合計 ~300ms）」改成「先查有沒有 enable，已經 enable 就整段跳過」。log 顯示這段幾乎每次都命中「already enabled」分支，導致 `CH3 OFF` 跟 `CH16 ON` 這兩個 PQW 指令之間的間隔從原本的 ~300ms 塌縮到幾乎 0——這個被拿掉的 300ms，很可能才是原本讓兩個 PQW 指令不會互相干擾的真正原因。上一輪另外加的 200ms 顯式延遲也不夠，因為問題不是「差一點點」，是整個機制被拆掉了。
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：把 ZDT prep 改回**無條件**執行「`release_stall_flag()` → 等100ms → `motion_control_driver_EN(true)` → 等200ms」，拿掉「已經 enable 就跳過」的判斷；同時移除上一輪加的、現在多餘的顯式 200ms 延遲（原本的無條件序列本身就提供足夠間隔）；保留 enable 失敗的錯誤處理
+### 取捨（明確告知 user）
+稍早那次「加速」是 user 自己要求的，這次為了讓 CH16 真的動，把那個加速反悔掉了——`test_break_vacuum_leg()` 現在解真空到拉起前這段又變慢（~300ms），跟今天稍早的加速請求方向相反，但 CH16 能不能真正動作，優先權更高。**規範權威：** 無新規範，實機行為證據反推的迴歸修復。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Linux 測試環境後確認：這次 CH16 是否終於恢復物理上正常開關（跟這次改動之前、剛加入這個功能時的行為一致）。
+
+## 2026-07-23z14 Claude (Sadie) — test_break_vacuum_leg：CH3 OFF 跟 CH16 ON 間加 200ms 靜置，疑似指令下太快被吃掉
+### 觸發
+user 確認：CH3 OFF 單獨就足以慢慢洩壓（這也是加 CH16 的原因——太慢），但 CH16 這次再次確認物理上沒開。user 說「壓力計還是什麼的輪詢搶到 bus 導致都沒開」，但排查後懷疑真正原因是 `CH3 OFF` 跟 `CH16 ON` 兩個 PQW 指令離得太近（`prep_thread.join()` 在 ZDT 已 enable 時幾乎瞬間回來，兩個指令間隔只有 ~100ms）。menu 5 手動測試因為是人工一個個打指令，天然間隔好幾秒，才沒踩到這個問題。
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：`prep_thread.join()` 之後、CH16 ON 之前，加 200ms 靜置延遲
+### 原因
+`WASH_ROBOT.cpp` 的 `pqw_set_relay_verified_` 已有既有註解記錄同一類現象：PQW gateway 連續下指令需要靜置時間（該處用 200ms），指令下太快下一個可能被忽略/吃掉。這次沿用同樣的數值。**規範權威：** 無新規範，沿用既有 production 對 PQW 連續指令間隔的經驗值。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Linux 測試環境後確認：加了 200ms 靜置後，CH16 這次是否真的物理上有反應（LED/聲音）。如果還是沒有，代表這不是根因，要往其他方向查（比如直接量測 CH16 那條配線本身、或懷疑模組是否真的有第16個 relay）。
+
+## 2026-07-23z13 Claude (Sadie) — ⚠ 危險迴歸已修：pqw/jc 共用連線導致假壓力讀值，騙過「真空已破」判斷
+### 觸發（實機危險狀況）
+user 回報：CH16 relay 物理上根本沒開（有確認過），但 log 顯示壓力從 `-35` 一輪 50ms 就跳到 `0`、判定「vacuum confirmed broken」，程式真的送出了拉起指令——等於又回到「還沒真的破就在拉」的原始危險狀況，只是這次是被假讀值騙過去，不是時序問題。
+### 根因
+`pqw`（PQW slave 12）跟 `jc`（JC-100 slave 3）共用同一個 `cli_pqw` TCP 連線（同一條 .22 RS485 bus）。CH16 ON 之後緊接著呼叫的 `pqw.readAllStatus()`（純資訊性讀回，2026-07-23z12 才決定不拿來當判斷依據）如果實際 Modbus 回應比它自己的 200ms 讀取逾時還慢，遲到的回應會留在 socket buffer 裡沒被讀走——緊接在後面的第一次 `jc.read_pressure()` 很可能撈到這包殘留資料，誤判成真的壓力讀值。`PQW_IO_16O_RLY` 驅動沒有遷移到 atomic drain-send-recv（跟 project 既有的 stale buffer 問題是同一類），這次终于在「PQW 呼叫緊接著 JC-100 讀取、共用同一條線」這個組合下真的踩到。
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：
+  - CH16 ON 之後到壓力輪詢迴圈之間，**整段拿掉 `pqw.readAllStatus()` 呼叫**——不只是不信任它的結果，是它本身會透過共用連線干擾緊接著的壓力讀取，必須整個移除，不能留著當「純參考」
+  - 壓力確認邏輯加上 debounce：新增 `CONFIRM_READS=3`，要連續 3 次讀值都超過 `-30` 門檻才算「真空確認已破」，中途掉回門檻以下就重置連續計數——單一次讀值（可能是雜訊/殘留資料）不再足以觸發拉起
+### 原因
+一次性讀值本身就不該被信任來觸發一個有物理風險的動作（拉起可能還密封的吸盤），這次的教訓是連「只印出來參考」的呼叫都可能透過共用連線產生副作用，不是加了「不信任判斷結果」就夠安全。**規範權威：** 無新規範，修一個讓「等真空真的破」這個安全設計整個失效的嚴重迴歸，優先權最高。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Linux 測試環境後**務必**用 CH16 確實不通電/relay 拔掉的情況測試一次，確認壓力輪詢不會再誤判「已破」而錯誤送出拉起指令。
+
+## 2026-07-23z12 Claude (Sadie) — test_break_vacuum_leg：拿掉 CH16 讀回硬中止，改用壓力輪詢當真正驗證
+### 觸發
+user 確認：menu 5 手動開關 CH16 幾乎正常（物理上可靠），但 menu 31 的 `readAllStatus()` 讀回一直顯示 OFF。差異在於 menu 5 用 `total_relay=8` 初始化、menu 31 用 `total_relay=16`——推斷 PQW 模組的「讀狀態」功能碼（FC01）可能固定只回報前 8 個 channel，即使對第16個位址的「寫入」（FC05）是有效的，讀回第16個 channel 的 bit 位置還是讀不到有意義的值。也就是說 CH16 的**讀回**本身不可靠，跟 CH16 有沒有真的開無關。
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：拿掉 `readAllStatus()` 讀回 CH16 的硬中止判斷（`[ABORT] ... readback says OFF`），改成純資訊性列印（標註「informational only — not trusted for CH16」），不再擋流程；真正的驗證交給後面已經有的壓力輪詢——CH16 如果真的沒作用，壓力不會過 -30 門檻，`BREAK_WAIT_TIMEOUT_MS`(3秒) 逾時會抓到，這是測「有沒有實際效果」而不是測一個不可靠的暫存器讀值
+### 原因
+上一輪加的「讀回 OFF 就硬中止」判準，驗證手段本身有問題，導致一直誤判成「沒開」而中止，跟實際物理狀態脫節。改成信任功能性驗證（壓力變化）而非狀態暫存器讀值。**規範權威：** 無新規範，修正一個驗證手段選錯導致誤判的邏輯問題。
+### ⚠ 尚未編譯驗證
+需要 user 重新編譯 + 實機驗證：CH16 讀回顯示 OFF 時，流程不再中止，照樣進入壓力等待迴圈；真正確認 CH16 有沒有效果要看壓力是否有變化。
+
+## 2026-07-23z11 Claude (Sadie) — ⚠ 真正根因：中止分支手動 close() 連線，搶在 Ch16Guard 解構子前把 socket 關了
+### 觸發
+user 回報 2026-07-23z9 加的 `Ch16Guard` 沒用——log 印出 `[SAFETY] closing CH16 on exit (guard)`，但實體閥依然開著沒關。追問「menu 5 手動開關卻正常」，排除了硬體/接線問題，逼出真正根因。
+### 根因
+中止分支寫的是 `cli_zdt.close(); cli_pqw.close(); return;`——這行**手動呼叫**在 `return` 之前先執行，把 `cli_pqw` 的 TCP socket 關掉了。等 `return` 觸發區域變數解構（C++ 解構順序是宣告的反序），`ch16_guard`（宣告在 `cli_pqw` 之後，理應先解構）這時候才輪到執行，裡面呼叫 `pqw->controlRelay(ch, false)`——但這時候 `cli_pqw` 的 socket 已經被手動關掉了，指令送不出去，`[SAFETY]` 訊息照樣印出來（純粹是印 log 用的文字，沒有檢查送出是否真的成功），但 CH16 實際上完全沒收到關閉指令。
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：拿掉 CH16 已經 armed 之後那三處中止分支（讀回OFF / 讀回太短 / 壓力等待逾時）裡手動的 `cli_zdt.close(); cli_pqw.close();`，只留 `return;`——讓 `TCP_client` 自己的解構子（本來就會呼叫 `close()`）在正確的順序（`ch16_guard` 先解構送出關閥指令 → `pqw`/`jc` 解構 → 最後才是 `cli_pqw`/`cli_zdt` 解構關閉 socket）下自然執行
+### 原因
+RAII 守衛要生效，前提是不能有人手動搶在它前面破壞它需要的資源（這裡是還沒關的 TCP 連線）。**規範權威：** 無新規範，修一個讓上一輪安全性修復完全失效的嚴重 bug。
+### ⚠ 尚未編譯驗證
+需要 user 重新編譯 + 實機驗證：CH16 讀回 OFF 觸發中止時，這次閥真的會物理關閉（不是只印訊息）。
+
+## 2026-07-23z10 Claude (Sadie) — 修編譯錯誤：Ch16Guard 聚合初始化失敗，改用明確建構子
+### 觸發
+user 回報編譯錯誤：`no matching function for call to 'Ch16Guard::Ch16Guard(<brace-enclosed initializer list>)'`
+### 根因
+`Ch16Guard` struct 裡 `bool armed = false;` 是 in-class default member initializer，加上有 user-declared 解構子、brace-init `{&pqw, BREAK_VACUUM_CH}` 又只給了 2 個值（少於 3 個成員），這個組合在專案實際使用的 C++ 標準版本下不符合 aggregate 的資格，導致編譯器找不到對應建構子。
+### 修改檔案
+- `Linux_test/main.cpp`：`Ch16Guard` 拿掉成員預設初始化，改成明確寫建構子 `Ch16Guard(PQW_IO_16O_RLY* p, int c) : pqw(p), ch(c), armed(false) {}`；呼叫端改用函式呼叫語法 `ch16_guard(&pqw, BREAK_VACUUM_CH)`（不再依賴 aggregate brace-init）
+### 原因
+明確建構子不吃 aggregate 初始化規則，不管專案編譯用哪個 C++ 標準版本都能過。**規範權威：** 無新規範，純編譯修復。
+### ⚠ 尚未編譯驗證
+需要 user 那邊重新編譯確認這次真的過了。
+
+## 2026-07-23z9 Claude (Sadie) — ⚠ 修 test_break_vacuum_leg 危險 bug：中止路徑沒關 CH16、也沒縮腳
+### 觸發（實機危險狀況）
+user 回報：「這個狀況是有破真空，但沒收腳就結束! 也沒關破真空罰 很危險」。對照上一輪（2026-07-23z8）log，CH16 讀回顯示 OFF 觸發了 `[ABORT]...return`，但根因是**這個 abort 分支只有 `return`，沒有先關 CH16**——而且從 log 看起來真空實際上真的破了（代表 CH16 讀回本身可能不可靠，呼應 `project_v2_break_vacuum_valve_ch16` memory 裡「模組是否真的有 16 個實體 channel」的既有疑點），程式卻因為讀回說 OFF 就直接中止，導致 CH16 停留在開啟狀態、腳完全沒收。
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：新增 `Ch16Guard` RAII 守衛——CH16 送 ON 後立刻 `armed=true`，往後**任何**離開函式的路徑（包括還沒被想到、之後才加的新 abort 分支）都會在解構時自動關閉 CH16；唯一的「刻意關閉」路徑（確認真空已破、準備送拉起指令前）主動 `armed=false` 停用守衛，避免重複關閉
+### 原因
+上一輪的修法是「加一個 return 前手動關 CH16」，但這次的 bug 恰好證明這種做法不可靠——容易漏掉。改成結構性保證（RAII），不管以後在這個函式裡加多少新的中止分支，只要沒有明確解除守衛，離開時一定會關 CH16。**規範權威：** 無新規範，這是修一個實機已經發生、會讓機體處於「真空已破但腳沒收」危險狀態的嚴重 bug，優先權高於一般的邏輯調整。
+### ⚠ 待討論（沒有在這次一起改）
+CH16 讀回本身可能不可靠（見本次 log：真空真的破了，讀回卻說 OFF），上一輪加的「讀回 OFF 就硬中止」邏輯建立在讀回可信的假設上，這個假設可能是錯的。目前沒有改動這條邏輯本身（只修了它「中止時沒關閥」這個安全漏洞），是否要放寬/移除這個硬中止判斷（改成完全信任後面的壓力輪詢作為真正驗證），需要另外跟 user 討論。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Linux 測試環境後**務必**驗證：任何一條中止路徑（讀回 OFF / 讀回太短 / 壓力等待逾時）都會實際看到 `[SAFETY] closing CH16 on exit` 且 CH16 確實關閉。
+
+## 2026-07-23z8 Claude (Sadie) — test_break_vacuum_leg：CH16 讀回沒開/無法確認 → 硬中止，不繼續下一步
+### 需求（user）
+「沒開應該暫停 不能下一步」——針對剛加的 CH16 讀回確認（2026-07-23z7），user 要求讀回顯示沒開（或讀不到）時要直接中止，不能繼續往下走。
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：`readAllStatus()` 讀回 CH16 後，`OFF` 或「讀回長度不夠無法確認」兩種情況都變成 `[ABORT]`，關閉連線、直接 `return`，不再繼續往下做「等真空破」跟「拉起」——原本只是印出讀回結果、照樣往下走
+### 原因
+CH16 讀回沒開（或無法確認）時如果照樣往下等真空破、甚至送拉起，等於在「破真空機制根本沒真正啟動」的情況下繼續動作，正是這整個安全重新設計要避免的「不確定真空狀態就動」情境。**規範權威：** 無新規範，純測試工具安全性強化，延續 2026-07-23z6 的安全精神。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Linux 測試環境後確認：CH16 讀回 OFF 時程式確實中止、不會誤送拉起指令。
+
+## 2026-07-23z7 Claude (Sadie) — test_break_vacuum_leg 加 CH16 開關的真實讀回確認
+### 觸發
+user 懷疑「破真空瓣沒開」，要確認功能31是不是真的有開 CH16。
+### 發現
+`PQW_IO_16O_RLY::controlRelay()` 的回傳值**只反映 TCP 送出是否成功**，完全沒有檢查 relay 實際狀態（沒有讀回比對，跟 `WASH_ROBOT.cpp` 的 `pqw_set_relay_verified_` 不一樣）。原本 code 裡的 `[WARN] ... readback mismatch` 訊息文字有誤導性——那個訊息只會在 TCP send 本身失敗時才出現，不是真的驗證過 relay 狀態，所以「沒跳警告」不代表 CH16 真的開了。
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：CH16 ON 送出後，新增 `pqw.readAllStatus()`（獨立的 FC01 讀取，跟寫入分開）印出 CH16 實際讀回的 bit 狀態；修正誤導性的 `[WARN]` 文字，改成只在 TCP send 真的失敗時才印
+### 原因
+讓 user 能透過 Modbus 讀回確認，不用只靠眼睛看 LED 或誤信一個其實不驗證任何東西的回傳值。**規範權威：** 無新規範，純測試工具診斷能力補強。
+### ⚠ 待確認（跟 memory `project_v2_break_vacuum_valve_ch16` 的既有疑點相關）
+如果現場 PQW 模組實體上真的只有 8CH，`readAllStatus()` 讀回的 16-bit 狀態裡，CH16（第16個 bit）本身可能就讀不到有意義的值（firmware 對超出物理範圍的讀取行為未知，可能回應被截斷或直接回垃圾值）——如果讀回顯示 OFF，可能代表「CH16 真的沒開」，也可能代表「模組實體上根本沒有第16個 relay，這個讀回本身就不可靠」，兩種情況都要考慮，最終還是要配合實際 LED/裝置反應確認。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Linux 測試環境後跑一輪，實際比對 readback 結果跟物理 LED 是否一致。
+
+## 2026-07-23z6 Claude (Sadie) — ⚠ test_break_vacuum_leg 安全性修正：拉起改成等真空真的破了才送，不再跟 CH16 幾乎同時觸發
+### 觸發（實機危險狀況，非理論疑慮）
+user 回報：「現在變成破真空的時間太短，還沒破完就已經在拉了 會導致機體被網牆上拉」。根因是 2026-07-23z（CH16 跟拉起指令排序調整）那次把兩者做成幾乎同時觸發，副作用是拉起動作在真空還沒真正洩掉前就開始，吸盤還黏著牆面、機體被扯著往牆上拉。
+### 討論
+提了兩個修法：(1) 固定延遲 N 毫秒、(2) 改成真正等 JC-100 壓力確認破空才拉起。user 選 (2)。
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：
+  - CH16 ON 之後，新增一段等待迴圈：輪詢 JC-100（`BREAK_WAIT_POLL_MS`=50ms 一次），直到 `p > VACUUM_BROKEN_THRESHOLD_KPA`（真空確認已破）才繼續；設 `BREAK_WAIT_TIMEOUT_MS`=3000ms 逾時上限，逾時就中止、**不送拉起指令**，CH16 保持開啟讓操作員手動檢查（不是猜測性的固定延遲，是跟著實際物理狀態走，逾時只當 backstop）
+  - 確認真空已破後才：CH16 OFF → 送出拉起指令（`motion_control_pos_mode_nowait`）
+  - 原本「迴圈中同時監測壓力、監測 ZDT 到位」的合併迴圈拆開——壓力確認已經在拉起前做完，拉起後的迴圈只單純輪詢 ZDT 位置/stall，不再管壓力/關閥
+  - 更新開場的 "Sequence:" 提示文字，反映新的循序流程（不再寫「concurrent」）
+### 原因
+拉起時機必須跟著「真空是否真的已經破」這個物理事實走，不能用猜測的固定延遲頂替——不同吸盤/氣壓狀況破真空實際所需時間不一樣，猜太短會重演這次的危險狀況，猜太長又犧牲速度。**規範權威：** 無新規範，純測試工具安全性修正，但性質上是修正一個已經在實機重現的危險行為，不是一般的速度調整。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Linux 測試環境後**務必**先驗證：CH16 ON 後，拉起指令確實等到 JC-100 壓力讀值真的超過 -30 才送出，且逾時路徑（3000ms 內壓力一直沒過門檻）正確中止並保持 CH16 開啟、不送拉起指令。
+
+## 2026-07-23z5 Claude (Sadie) — test_break_vacuum_leg：VACUUM_BROKEN_THRESHOLD_KPA -50→-30
+### 需求（user）
+「破真空的門檻幫我改成-30才關」
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：`VACUUM_BROKEN_THRESHOLD_KPA` `-50` → `-30`（唯一定義處，其餘全部引用該常數，一併生效）
+### 原因
+user 直接指定數值。**規範權威：** 無新規範，純測試工具門檻數值調整。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Linux 測試環境後確認新門檻下 CH16 關閉時機符合預期。
+
+## 2026-07-23z4 Claude (Sadie) — test_break_vacuum_leg：破真空關閉反應加快 + 解真空/破真空間空檔平行化
+### 需求（user）
+「我覺得破真空關的速度要再快一點、解真空和破真空之間也要縮短變快」
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：
+  - `POLL_INTERVAL_MS` `200` → `50`——壓力輪詢變快，偵測到「真空已破」到送出 CH16 OFF 之間的最壞延遲從 ~200ms 降到 ~50ms
+  - Step 1（PQW 解真空 `own_valve_ch` OFF）跟 ZDT prep（清 stall flag + 視情況 enable）改成用 `std::thread` **平行**執行：兩者是不同連線的獨立裝置，沒理由排隊；CH16 ON 等兩邊都做完（`prep_thread.join()`）才送，總間隔從「兩者相加」變成「兩者取較長」
+### 原因
+兩個都是 bench 工具的反應速度優化，沒有動到安全邊界：輪詢變快只是問得更勤（JC-100 讀值很輕量）；平行化只是把兩個本來就互不相關的動作重疊執行，不影響各自的正確性。**規範權威：** 無新規範，純測試工具時序/併發優化。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Linux 測試環境後確認：(1) 50ms 輪詢下 cli_pqw/cli_zdt 這兩條連線沒有互相干擾或 CRC 錯誤變多；(2) 平行化後 ZDT enable 失敗的錯誤路徑正常觸發（`zdt_prep_enable_failed` 旗標）。
+
+## 2026-07-23z3 Claude (Sadie) — test_break_vacuum_leg：解真空後→拉起前的準備動作加速
+### 需求（user）
+「他要拉起的前置作業可以加快嗎? 就是解真空後到拉起前」
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：
+  - 拿掉 `release_stall_flag()` 後面的 100ms 純等待——比照 production `pusher_two_stage_retract_` 清完 stall flag 直接送移動指令、中間不等
+  - `enable` 呼叫改成先用 `get_system_status()` 查 `status.is_enabled`，已經是 enable 狀態就整段跳過（不呼叫 `motion_control_driver_EN` 也不等 200ms）；只有真的需要 enable 時才照舊呼叫 + 等 200ms
+### 原因
+100ms 那段是我自己加的保守值，沒有 production 依據，拿掉沒有新增風險。200ms 那段不是隨便的 slack——是為了避開已知的 ZDT firmware 時序問題（enable 剛送出、內部狀態還沒穩定就送移動指令，偶發被吃掉不執行，`project_zdt_firmware_quirks` memory 有記錄），所以只在真的需要 enable 時才付這個代價，已經是 enable 狀態就整段省掉。**規範權威：** 無新規範，純測試工具時序優化。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Linux 測試環境後確認：(1) 腳原本就 enable 時，直接送縮腳指令沒有被吃掉；(2) 腳原本沒 enable 時，走 enable+200ms 路徑一樣正常。
+
+## 2026-07-23z2 Claude (Sadie) — test_break_vacuum_leg：RPM_RETRACT_FULL 900→1200
+### 需求（user）
+「但縮腳還是不夠快」→ 問過 user 要拉到多少，選「拉回 1200（今天調降前的值）」；user 同時補充「中間不要兩段式」——已確認維持單段直接拉起，沒有重新加回兩階段。
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：`RPM_RETRACT_FULL` `900` → `1200`
+### 原因
+今天稍早把 production `PUSHER_RPM_RETRACT_FULL` 從 1200 調降到 900，這裡拉回 1200 只影響這個 bench 工具（單腳測試，沒有 production 多滑塊同步的顧慮），不動 production 常數本身。**規範權威：** 無新規範，純測試工具數值調整。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Linux 測試環境後確認 1200rpm 縮腳沒有堵轉/撞 hardstop 過猛。
+
+## 2026-07-23z Claude (Sadie) — test_break_vacuum_leg：CH16 跟縮腳沒有真的同時，改成 ZDT 準備動作提前
+### 觸發
+user 問「腳那邊再縮起時有和破真空同時開嗎」——查了發現原本順序是 CH16 ON → release_stall_flag+100ms → enable+200ms → 才送縮腳指令，中間隔了至少 300ms+ 的 ZDT 準備動作，不是同時。
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：把 `release_stall_flag()`/`motion_control_driver_EN(true)`（含兩個 sleep）搬到 CH16 ON 之前執行；CH16 ON 送出後緊接著就是縮腳的 `motion_control_pos_mode_nowait`，中間不再夾任何準備動作
+### 原因
+單執行緒工具做不到真正硬體同時（那需要開執行緒平行送兩個 Modbus write），但至少把 ZDT 這邊耗時的準備工作挪到 CH16 之前做完，讓「CH16 充氣」跟「腳開始縮起」這兩個動作之間的間隔縮到只剩 CH16 那次 Modbus 寫入本身的來回時間（最多 200ms echo timeout），不再多等 300ms 的 enable 流程。**規範權威：** 無新規範，純測試工具時序調整。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Linux 測試環境後確認新順序沒有讓 enable 還沒完成就意外送出縮腳指令（目前 enable 呼叫本身是同步等回覆，理論上沒有這個風險）。
+
+## 2026-07-23y Claude (Sadie) — test_break_vacuum_leg 拿掉兩階段縮腳，改直接拉起
+### 需求（user）
+「不用兩階段縮腳，直接拉起」——針對剛加的 Linux_test menu 31。
+### 修改檔案
+- `Linux_test/main.cpp` `test_break_vacuum_leg()`：拿掉慢脫壁 stage1（`RETRACT_SLOW_PEEL_CM`/`PUSHER_RPM_RETRACT`/`STAGE1_DELAY_MS` 那段判斷+送指令+delay），直接對目標 300 pulse(~0.1cm) 送一次 `motion_control_pos_mode_nowait` @ 900rpm/acc255（原本 stage2 的速度），其餘（真空監測、關閥、stall-recovery 輪詢）都沒動
+### 原因
+user 直接要求簡化，這顆測試腳不需要比照生產環境「先脫壁再快收」的兩段技巧。**規範權威：** 無新規範，純簡化測試工具邏輯。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Linux 測試環境後確認直接拉起時 ZDT 沒有異常堵轉（stall-recovery 邏輯還在，出問題會自動重試）。
+
+## 2026-07-23x Claude (Sadie) — 新增 Linux_test menu 31：破真空閥(CH16) + ZDT 腳兩段式縮腳測試工具
+### 需求（user）
+「我現在新增一個設備在 relay 那邊(192.168.1.22)，放在 ch16，他是負責用來破真空的(on充氣->off關)。現在幫我在 linux test 裡面新增一個功能：輸入其中一隻 zdt ip、slave id(預設192.168.1.20/id 3)，開始後先解真空這隻腳→破真空同時縮zdt腳(依樣到0.1cm的位置，縮腳比照step辦理)→同時偵測真空度一大於-50就關破真空閥→完成」
+### 新硬體記錄
+PQW（192.168.1.22, slave 12）新增 **CH16 破真空閥**：ON=充氣強制斷真空、OFF=關。跟既有 CH1-8（dp0105/VT307 腳組/身體/中心閥/刷洗/水泵/保留×2）是分開的新 channel。已寫進 memory `project_v2_break_vacuum_valve_ch16`（含「PQW class 叫 16O 但專案文件記載現場模組是 8CH，這次 CH16 代表現場接線/模組可能已經不是原本 8CH」的待確認點）。
+### 修改檔案
+- `Linux_test/main.cpp`：新增 menu 31 `test_break_vacuum_leg()`
+  - 輸入 ZDT gateway IP/slave（預設 192.168.1.20/3，照 user 給的值；但程式內註解 + changelog 都提醒專案既有慣例 ZDT 是接在 .21，.20 是 DM2J 的 bus，user 之後測試時如果不是刻意要測 .20 記得覆蓋輸入）
+  - 該腳自己的真空閥 channel 依 slave id 自動推算（slave 1,2→CH1／slave 3,4→CH3，比照 `WASH_ROBOT.h` `CH_VALVE_RIGHT`/`CH_VALVE_LEFT`），slave 超出 1-4 範圍則手動輸入 channel
+  - 序列：CH(own) OFF（解真空）→ CH16 ON（破真空充氣）+ 兩段式縮腳到 300 pulse(~0.1cm) 同時進行（兩段式邏輯完全比照 `WASH_ROBOT.cpp::pusher_two_stage_retract_`：`RETRACT_SLOW_PEEL_CM`=1.0cm 慢脫壁 @150rpm → 129ms delay → 快速收到 300 pulse @900rpm，acc=255，皆為 production 同一組常數值）→ 迴圈中每輪同時讀 JC-100 壓力，一旦 `p > -50`（raw units，跟 production `DETACH_THRESHOLD_KPA` 同慣例、不除以10）立刻關閉 CH16，ZDT 端沿用 `test_zdt()` 既有的 stall-recovery 輪詢邏輯直到到位/逾時 → 若迴圈結束真空值仍沒過門檻，收尾前強制關閉 CH16（不留著充氣閥一直開的保險）
+  - menu 列表 + dispatch 對應加上第 31 項
+### 原因
+Bench 驗證新硬體（CH16）跟既有兩段式縮腳技術是否能配合運作，範圍限定測試工具（`Linux_test/` 屬於 Sadie 負責的測試/工具範圍），不影響生產程式碼——CH16 目前完全沒進 `WASH_ROBOT.cpp` 的 `do_step_sync_`/`do_step_down_` 解真空流程，之後要不要整合、怎麼整合都還沒決定（見 memory 檔案的「之後如果要進生產流程」一節）。**規範權威：** 無新規範，純新增測試工具功能 + 記錄新硬體。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Linux 測試環境後跑一輪：確認 CH16 充氣/縮腳/壓力監測時序正確，且不管真空有沒有在迴圈內偵測到「已破」，CH16 最終都會被關掉。
+
+## 2026-07-23w Claude (Sadie) — Linux_test PQW menu channel range 1..8 → 1..16
+### 觸發
+user 在 Linux_test menu 5（PQW 8CH relay）試 `on 16` 被擋（menu 自己寫死 `ch<1||ch>8`），要求擴大 range。
+### 修改檔案
+- `Linux_test/main.cpp` `test_pqw()`：
+  - `bool state[9]` → `state[17]`（index 1..16）
+  - `on N`/`off N` 輸入驗證：`ch<1||ch>8` → `ch<1||ch>16`
+  - `a`(all ON)/`o`(all OFF)/`s`(state) 三處迴圈上限 8 → 16
+### 原因
+`PQW_IO_16O_RLY::controlRelay()`（`user_lib/PQW_IO_16O_RLY.cpp:171`）本來就寫死允許 1..16（class 名稱本身也是 16O），menu 這層 1..8 的檢查只是這支測試工具自己加的、比驅動更嚴格的限制，擋住了驅動本來就支援的範圍。純測試工具改動（`Linux_test/` 屬於 Sadie 負責的測試/工具範圍），不影響任何生產程式碼。
+### 範圍澄清
+沒有動 `drv.init(cli, slave, 8, true)` 的 `total_relay=8` 參數——這個參數只影響 `readAllStatus()`/`parseReadResponse()` 的讀取長度，而這個 menu 的 `s`（state）指令本來就只印本地端追蹤的 `state[]`，沒有呼叫 `readAllStatus()`，所以跟這次的 channel range 擴大無關。專案目前實際部署的 PQW 模組是 8CH（見 CLAUDE.md 硬體表），CH9-16 目前沒有實體硬體對應，這次只是讓測試工具能夠測試驅動支援的完整範圍。**規範權威：** 無新規範，純測試工具限制放寬。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Linux 測試環境後確認 `on 9`~`on 16` 不再被 menu 擋下（實際 Modbus 寫入結果視硬體是否真的有對應 channel 而定）。
+
+## 2026-07-23v Claude (Sadie) — motion_rope 兩段式煞車→三段式：15cm 先減半速，8cm 再降到 fine_adjust_hz
+### 需求（user）
+「幫我在程式裡面從兩段式煞車改成三段式 靠近目的前15cm開始減半」——針對 `do_step_sync_` 的 `motion_rope()`（今天稍早才加的到位減速），加一個中間階段。
+### 修改檔案
+- `Crane_control_PI/main.cpp`：
+  - 新增常數 `CMD_HALF_SPEED_APPROACH_CM = 15`（只給 `motion_rope` 用，不跟 `cmd_side_measured` 共用）
+  - 新增 `left_half_slowed`/`right_half_slowed` latch，跟既有 `left_slowed`/`right_slowed` 並列
+  - `motion_rope` 的 slow-approach 區塊改成三段：剩 15cm → 該側 `setFreqHz(g_vfd_motion_hz/2, VFD_MAX_HZ)`；剩 8cm → 該側 `setFreqHz(g_fine_adjust_hz, VFD_MAX_HZ)`（沿用原本邏輯，未改動）；左右各自獨立判斷
+  - `apply_balance_trim` 的 guard 從 `!left_slowed && !right_slowed` 加上 `&& !left_half_slowed && !right_half_slowed`——半速階段也要擋掉 balance trim，否則會被拉回 motion_hz
+### 原因
+今天稍早把 `VFD_MOTION_HZ_DEFAULT` 從 15 拉到 40，直接從 40Hz 一口氣降到 `fine_adjust_hz`(10) 的降速幅度變大，多一個 15cm 先減半（40→20）的中間階段，讓最後 8cm 進 fine_adjust 前的速度落差沒那麼大。**規範權威：** 無新規範，純數值/邏輯調整。
+### 範圍澄清
+只改了 `motion_rope`（`do_step_sync_` 走的路徑）。`cmd_side_measured`（`do_step_down_`/`do_step_up_` 交替 step 用）維持原本兩段式，沒有跟著改。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Pi 後測試：`do_step_sync_` 走一輪，確認剩 15cm 時速度確實減半、剩 8cm 再降到 fine_adjust_hz，兩段轉換過程沒有卡頓或方向錯誤。
+
+## 2026-07-23u Claude (Sadie) — do_step_sync_ 上滑台掃動改成跟伸腳同時執行（一伸出腳就開始清潔）
+### 需求（user）
+「同步step那邊，幫我把上滑台那邊(手臂清洗)和幾腳組西真空同步做，一伸出腳就開始清潔」——原本 `do_step_sync_rail_sweep_` 是等第 5 步伸腳+重新吸附全部確認完才依序執行，現在要改成伸腳一開始就同時跑。
+### 討論過程
+`do_step_sync_rail_sweep_` 原本用的是**阻塞式** `PR_move_cm`——這個呼叫內部自己會 poll `cli_22_` bus 確認有沒有到位。如果直接把它丟到背景執行緒、跟主執行緒的伸腳（`smart_extend_subset_` 內部靠 JC100 讀壓力，也走 `cli_22_`）同時跑，會撞成 2026-05-26 那次已經解過的老問題（`arm_sweep_fire_nowait_` 的檔頭註解就是在講這個）。所以改用**非阻塞**的 `arm_sweep_fire_nowait_`（只送 PR_move_set + PR_trigger，不 poll）取代阻塞版本，這樣才能安全跟伸腳同時執行。
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`
+  - `arm_sweep_fire_nowait_`/`arm_monitor_during_sweep_` 都加上 `rpm`/`acc`/`dec`/`est_ms` 可選參數（預設沿用既有 `ARM_SWEEP_*` 常數，其他既有呼叫端完全不受影響）
+  - 新增 `DM2J_ARM_STEP_SWEEP_EST_MS = 1500`（純計算估計值，10cm@600rpm 換算，未實機驗證；沒有沿用 `ARM_SWEEP_EST_MS=3900` 那組，不然明明 10cm 的小行程卻要平白多等好幾秒，跟這次「同時執行省時間」的目的矛盾）
+- `user_lib/WASH_ROBOT.cpp`
+  - `arm_sweep_fire_nowait_`/`arm_monitor_during_sweep_`：改吃上面新參數（本體內幾處原本寫死 `ARM_SWEEP_EST_MS`/`ARM_SWEEP_RPM` 的地方都改成用參數）
+  - `do_step_sync_rail_sweep_`：改叫 `arm_sweep_fire_nowait_(DM2J_ARM_STEP_SWEEP_CM, ...)` → `arm_sweep_fire_nowait_(0.0, ...)`，不再用阻塞的 `PR_move_cm`
+  - `do_step_sync_`：在第 5 步伸腳呼叫之前，先用 `std::async` 把 `do_step_sync_rail_sweep_(tag)` 丟到背景執行緒（`RailSweepJoin` RAII 保證任何提前 return 都會等它結束），伸腳＋重試邏輯跑完後、印「done」之前再明確 `fut_rail_sweep.wait()` 一次確保兩邊都真的做完才回報完成
+### 原因
+使用者要滑台掃動不要等伸腳全部確認完才開始，而是伸腳當下就同時進行。**規範權威：** 無新規範，沿用既有 `arm_sweep_fire_nowait_`（2026-05-26）避免 bus contention 的既有設計模式，套用到這次新的併行情境。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Pi 後測試：確認滑台真的在伸腳同時開始動，且整個 step 回報「done」的時間點是等兩邊都做完（不是伸腳一完成就先回報、滑台還在背景繼續跑）。`DM2J_ARM_STEP_SWEEP_EST_MS=1500` 是計算估計值，上機後如果滑台實際到位時間跟這個估計差太多，可能要調整。
+
+## 2026-07-23t Claude (Sadie) — FOLLOWER_ROLL_TOL_DEG 0.5→1.0（IMU 微調門檻拉高，小傾斜不再修正）
+### 觸發
+user 提供 `step_down_sync` 實機 log：`[step_sync_imu]` 3 個 pass 分別量到 roll=1.28°→-0.75°→1.58°，方向來回翻、3 pass 內沒收斂，懷疑是小傾斜被觸發修正後過修正、來回震盪。user 要求門檻拉高，只修大一點的傾斜（1度）。
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` `FOLLOWER_ROLL_TOL_DEG`：`0.5` → `1.0`
+### 影響範圍
+這個常數是共用的，同時影響：
+- `follower_imu_level_`（`do_step_down_`/`do_step_up_` 交替 step 的第二腳精細對平）
+- `do_sync_imu_roll_correct_`（`do_step_sync_` 同步 step 的差動修正，這次觸發問題的來源）
+兩邊「roll 多小算已經夠平」的門檻都從 0.5° 放寬到 1.0°。**規範權威：** 無新規範，純數值調整。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Pi 後測試：小傾斜（<1°）不再觸發 roll_correct/imu_level pass；大傾斜（>1°）仍正常修正、震盪情形是否改善。
+
+## 2026-07-23s Claude (Sadie) — VFD_MOTION_HZ_DEFAULT 15→40（微調頻率確認維持 10，已是現值）
+### 需求（user）
+「幫我把吊機自動頻率設成40，微調設成10」
+### 修改檔案
+- `Crane_control_PI/main.cpp` `VFD_MOTION_HZ_DEFAULT`：`15.0` → `40.0`
+- `FINE_ADJUST_HZ_DEFAULT`：已經是 `10.0`（2026-07-14 就改回 10 了），這次沒有變動，純確認符合需求
+### 原因
+user 直接指定數值；今天稍早才把 `motion_rope` 加上到位減速（8cm 前降到 `fine_adjust_hz`），有了這個保護，自動頻率從 15 拉高到 40 的過衝風險比沒有降速機制時低。**規範權威：** 無新規範，純數值調整。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Pi 後測試：`do_step_sync_`/`motion_rope` 全速跑 40Hz、剩 8cm 降到 10Hz，確認過衝量在可接受範圍。
+
+## 2026-07-23r Claude (Sadie) — motion_rope 加上到位減速（比照 cmd_side_measured 的 slow-approach）
+### 背景
+討論「step_sync 收放繩有沒有做到位減速」時發現：`do_step_sync_` 走的 `motion_rope()`（`pay_out <cm>`/`retract <cm>`）全程固定 `g_vfd_motion_hz` 全速跑，偵測到位才喊停，減速完全靠 SE3 自己的 P.8 斜坡，事後才靠 `motion_fine_adjust_sync` 補殘留誤差；而 `do_step_down_`/`do_step_up_` 走的 `cmd_side_measured()` 有明確的 slow-approach：剩最後 `CMD_MEASURED_APPROACH_CM`(8cm) 先降到 `fine_adjust_hz`，讓煞車滑行不衝過頭。user 要求 `motion_rope` 也比照辦理，8cm 開始減速。
+### 修改檔案
+- `Crane_control_PI/main.cpp` `motion_rope()`：
+  - 新增 `left_slowed`/`right_slowed` latch（跟既有 `left_frozen`/`right_frozen` 並列）
+  - 「Sync stop on FIRST side to reach target」那段迴圈裡，在算 `l_reached`/`r_reached` 之前，先各自判斷該側是否進入「剩 `cm - CMD_MEASURED_APPROACH_CM`」的範圍，是的話該側單獨 `setFreqHz(fine_adjust_hz, VFD_MAX_HZ)` 降速（左右各自獨立判斷，哪側先進 8cm 範圍哪側先降）
+  - `apply_balance_trim` 呼叫的 guard 從 `!left_frozen && !right_frozen` 加上 `&& !left_slowed && !right_slowed`——否則 balance trim 每個 tick 會把降速的那側頻率拉回 `motion_hz`，跟降速互相打架
+### 原因
+直接沿用 `cmd_side_measured` 已經驗證過的技術（8cm 降速消解煞車過衝），套用到 `motion_rope` 兩側各自判斷；`CMD_MEASURED_APPROACH_CM`/`fine_adjust_hz`/`VFD_MAX_HZ` 三個常數都是既有的，沒有新增常數。**規範權威：** 無新規範，沿用既有 `cmd_side_measured` 降速機制，這次是把同一招搬到 `motion_rope`。
+### 已知取捨（沒有處理，先記錄）
+兩側降速時機各自獨立——如果一側先進入 8cm 降速、`apply_balance_trim` 整個停止介入，另一側若原本正處於 trim 中間值（不是 base `motion_hz`），會停留在那個 trim 過的頻率直到它自己也進入降速或整體停止，不會被強制拉回 base。這跟現有「凍結後 balance trim 也不再介入」的既有行為是同一類取捨，不是這次新增的問題。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Pi 後測試：`do_step_sync_` 走一輪，確認兩側繩子在剩 8cm 時各自降到 `fine_adjust_hz`、停止後過衝量是否比改動前明顯變小（比照 `cmd_side_measured` 已驗證過的效果）。
+
+## 2026-07-23q Claude (Sadie) — 所有上滑台掃動統一改成 0->-10->0（含真正清洗引擎）
+### 需求（user）
+「所有只要是上滑台移動 通通要改成0->-10->0 不管有沒有要用」——確認範圍包含網頁 `arm_sweep` 按鈕、以及 `do_arm_clean_sweep_`/`_continuous_`（`step_down`/`step_up` 按鈕會背景觸發的真正清洗引擎）。
+### 討論過程
+先盤點了所有會動 `DM2J_ARM`（上滑台 slave 14）的地方，發現：
+- `do_arm_sweep_()`（GUI 按鈕）跟 `do_arm_clean_sweep_()`/`_continuous_()`（真正清洗引擎，內部 `sweep_with_tool` 一個 round 做 4 段：LEFT 滾筒來回 + RIGHT 刮刀來回，各段都是 0↔`ARM_SWEEP_CM`）**三個地方其實共用同一個常數 `ARM_SWEEP_CM`**——不用分別改三處程式碼，改一個常數就全部套用
+- `arm_sweep_fire_nowait_(target_cm)` 是底層通用函式，target 由呼叫端決定，本身沒有固定距離，不用改
+- `home_set_current_pos_zero()`（校零）、`cmd_pusher`/`move` 手動指令（使用者自己指定距離）都不是「固定距離掃動」，不在範圍內
+- 意外發現：`arm_attached_` 建構子預設是 `true`（不是 false），代表就算手臂沒裝，`do_step_down_`/`do_step_up_` 背景觸發的 `do_arm_clean_sweep_` 目前**不會**因為「手臂沒裝」自動跳過——這解釋了之前 log 看到的 `[arm_cmd] 'PARK' send fail` 是真的在嘗試操作不存在的手臂，這次沒有動 `arm_attached_` 這個開關（使用者沒有要求），只改了掃動距離本身
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — `ARM_SWEEP_CM`：`55` → `-10`（同一行變動，`do_arm_sweep_`/`do_arm_clean_sweep_`/`do_arm_clean_sweep_continuous_` 三處全部套用到新距離，不用個別改程式碼）；`ARM_SWEEP_EST_MS`（3900ms，原本按 55cm@1000rpm 估算）**沒有跟著重新推算**，故意保留偏長的等待時間（10cm 實際只需要一小部分，等久一點不影響正確性，只是比較慢，先不管，太煩再調）
+### 原因
+使用者要求所有上滑台移動統一成同一個小行程模式，不論目前有沒有實際用到。**規範權威：** 無新規範，純參數/常數調整；跟上一條（2026-07-23o，`do_step_sync_` 專用的獨立小行程掃動）分開的兩組常數維持不變（那組速度故意設得更保守，這次沒有要求合併成同一組）。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Pi 後測試。特別提醒：`do_arm_clean_sweep_`/`_continuous_` 目前因為 `arm_attached_` 預設 `true` 會真的執行（含嘗試 DEPLOY 手臂），這條路徑除了滑台距離變小之外，其他手臂/水泵相關的行為完全沒有動，如果手臂還沒裝、不希望這整段清洗流程真的跑，需要另外用 `arm_attached off` 指令關掉（這次沒有主動關，使用者也沒要求）。
+
+## 2026-07-23p Claude (Sadie) — Crane_control_PI VFD_MAX_HZ 上限 50→120（比照 SE3 手冊 01-00 出廠值）
+### 需求（user）
+查了士林電機 SE3-210 手冊確認吊機變頻器最快速度後，user 要求把專案裡「吊機頻率設定上限」調到約 120（比照手冊查到的 01-00 出廠預設值）。
+### 手冊查證（本次順便查的）
+`變頻器SE3系列操作手冊 V1.03.docx`（P.1~P.3, manual p.78-79）：
+| 參數 | 名稱 | 設定範圍 | 出廠值 |
+|---|---|---|---|
+| 01-00 (P.1) | 上限頻率 | 0.00~01-02(P.18)Hz | **120.00Hz** |
+| 01-01 (P.2) | 下限頻率 | 0~120.00Hz | 0.00Hz |
+| 01-02 (P.18) | 高速上限頻率 | 01-00~650.00Hz | 120.00Hz |
+| 01-03 (P.3) | 基底頻率（馬達額定） | 0~650.00Hz | 50Hz/60Hz（依系統設定） |
+### 修改檔案
+- `Crane_control_PI/main.cpp` `VFD_MAX_HZ`：`50.0` → `120.0`，比照 SE3 01-00 出廠上限值。原本的 50 其實是誤把「馬達基底頻率（01-03=50Hz）」當成「VFD 可設定上限」在用，兩個是不同參數。
+### 影響範圍
+`VFD_MAX_HZ` 是 `set_hold_hz`/`set_motion_hz`/`set_roll_correct_hz`/`set_freeze_hz`/`set_balance_hz_min`/`set_balance_hz_max` 這幾個 runtime 指令的上界檢查（`cmd_set_*_hz` 裡 `hz > VFD_MAX_HZ` 那道檢查）。純粹放寬允許輸入的範圍，**不影響任何現有預設值**（目前 hold=10/motion=15/roll_correct=5，離 50 都還很遠，離新上限 120 更遠）。
+### ⚠ 安全提醒（未觸發任何程式行為改變，純文字提醒）
+50Hz 是馬達的基底/額定頻率（01-03），超過 50Hz 馬達進入弱磁區，V/Hz 比下降、可用扭力會跟著下降。吊機是吊著機體重量的場景，**改到 120 只代表 VFD 不會拒絕這個設定值，不代表 120Hz 是負重下扭力安全的操作點**。之後如果真的要把任何 `*_hz` 設定調到超過 ~50 的範圍，需要先在有負重的情況下實機驗證扭力/是否過熱/是否堵轉，不能只看 VFD 收不收指令。**規範權威：** 無新規範，純數值調整 + 手冊查證記錄。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Pi 後確認 `set_*_hz` 系列指令在 50~120 區間不再回 `ERR hz_out_of_range`。
+
+## 2026-07-23o Claude (Sadie) — do_step_sync_ 加回上滑台（DM2J:14）小行程掃動，手臂/滾筒仍不碰
+### 需求（user）
+「幫我把上滑台加回去step中，同樣也是0->-10->0來回掃一次，手臂同樣不用加」
+### 討論過程
+確認三個設計點：(1) 範圍只加 `step_down_sync`/`step_up_sync`，不動交替步伐；(2) 時機放在跟完整手臂清洗流程同一個位置（step 最後面），但手臂本身跟刷滾筒（CH5）都不控制，純粹只動滑台；(3) 速度另外設一組新參數，不沿用現有 `ARM_SWEEP_RPM/ACC/DEC`（那組是 55cm 行程調出來的，10cm 行程直接沿用不合理）。
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`
+  - 新增 `DM2J_ARM_STEP_SWEEP_CM=-10.0`/`_RPM=300`/`_ACC=100`/`_DEC=100`（⚠ RPM 是保守猜測值，未實機驗證，上機後依手感調）
+  - 新增 `do_step_sync_rail_sweep_(const char* tag)` 宣告
+- `user_lib/WASH_ROBOT.cpp`
+  - 新增 `do_step_sync_rail_sweep_`：`D_(DM2J_ARM).PR_move_cm(...)` 0→-10cm→0 一次來回，跟 `do_arm_sweep_` 同款寫法（`try_or_pause_` 包每一段），但完全不碰 `arm_cli_`/motor_api、不開 CH5 刷滾筒繼電器；任何失敗都非致命（log + 直接 return，不讓整個 step 失敗——這時候 4 顆吸盤已經重新吸好，滑台的問題不影響安全）
+  - `do_step_sync_` 第 5 步之後（吸盤已確認重新吸好）呼叫 `do_step_sync_rail_sweep_(tag)`，才印 done/回傳
+### 原因
+使用者要滑台在同步步伐裡也能來回掃一次，但明確表示手臂還沒裝、不要牽扯進來。**規範權威：** `.claude/v2_app_redesign_plan.md` §5.6（完整手臂清洗流程重新接回的既有規劃，這次只借用其中的「rail-only」子集，不觸發 §5.6 其餘手臂/水泵相關步驟）。
+### ⚠ 尚未編譯驗證 + 速度未調
+本機無法交叉編譯，需部署到 Pi 後測試。**RPM=300 只是保守初始值，沒有實機測過**，第一次上機建議先在旁邊看著跑，觀察滑台加減速是否平順、有沒有失步，再依情況調整 `DM2J_ARM_STEP_SWEEP_RPM`。
+
+## 2026-07-23n Claude (Sadie) — 推翻 2026-07-23m 的「拆兩次呼叫」，改成 pusher_extend_with_disable_seal_ 支援 per-group 早停
+### 問題（user 否決上一版）
+上一版（2026-07-23m）把 `do_step_sync_` 第一次伸腳從「4 顆一起觸發」拆成「右側一次呼叫、左側一次呼叫」依序執行，才能各自套用 `stop_on_first_seal`。user 明確否決：「這樣不行，兩邊的腳組一定要一起放」——4 顆必須維持同一個 `trigger_sync_move` 同時觸發，不能變成先右後左。
+### 根因與新做法
+底層 `pusher_extend_with_disable_seal_` 的 `stop_on_first_seal` 原本是**整批共用一個全域旗標**：只要傳進去的 slave 清單裡任一顆吸好，整批立刻停止推伸。這就是為什麼不能直接把 4 顆一起丟進去開這個旗標——會變成「右邊隨便一顆吸好，連左邊都還沒吸好的兩顆也被錯誤中斷」。
+真正的解法是讓底層函式本身**認識分組**，而不是靠呼叫端拆成兩次呼叫。新增 `stop_group_ids`（跟 `slaves`同長度的 optional 參數，標記每個 slave 屬於哪一組）：
+- 沒傳（`nullptr`，所有既有呼叫端都不用改）→ 行為跟原本完全一樣，視為單一全域組
+- 有傳 → 每組各自獨立判斷「這組有沒有 ≥1 顆真的吸好」，吸好的組把該組剩下沒吸好的 slave 原地凍結（呼叫跟 MAX_ITERS 收尾一樣的 re-enable+鎖位置+新鮮讀值搶救邏輯，複用同一段 code，抽成 `freeze_and_finalize` lambda），沒吸好的組繼續正常推——直到**所有組**都滿足才真正停止整個推伸迴圈
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`
+  - `pusher_extend_with_disable_seal_` 新增第 8 個參數 `const std::vector<int>* stop_group_ids = nullptr`
+  - `smart_extend_subset_` 新增第 4 個參數 `stop_group_ids`，轉傳
+- `user_lib/WASH_ROBOT.cpp`
+  - `pusher_extend_with_disable_seal_`：新增 4 個 lambda（`freeze_and_finalize`/`stop_group_of`/`group_has_real_seal`/`apply_stop_on_first_seal`）；兩處原本「數全域 real_sealed 就 break」的判斷都改呼叫 `apply_stop_on_first_seal()`（回傳「是否所有組都已滿足」才真正 break）；WAIT_SEAL 逐 slave 迴圈裡原本「一顆吸好就 break 這一輪剩下的 slave」也拿掉，讓同一個 tick 內其他組的 slave 還能被正常讀到（避免延遲偵測）
+  - `smart_extend_subset_`：轉傳 `stop_group_ids` 給底層函式
+  - `do_step_sync_` 第 5 步：**改回單一 `smart_extend_subset_("all", all_slaves, stop_on_first_seal=true, &stop_group_ids)` 呼叫**（4 顆同一個 trigger_sync_move 同時觸發），`stop_group_ids` 依 slave 是 RF1/RF2（右）或 LF1/LF2（左）標成 0/1 兩組
+### 原因
+使用者堅持兩側腳組必須同時放，上一版犧牲同時性換取每側早停不能接受。**規範權威：** 取代 2026-07-23m 條目；沿用 2026-07-08 `group_seal_ok_`/「每側 ≥1」慣例，這次擴大到「同一次呼叫內」的分組粒度。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Pi 後測試：確認 4 顆仍是同一個 trigger 同時開始動作，且任一側先吸好一顆後，同側另一顆會原地停止（不再繼續推伸），另一側則不受影響繼續正常推到自己也滿足為止。也要確認 `do_step_down_`/`up_`/`cmd_attach` 這些沒傳 `stop_group_ids` 的既有呼叫端行為完全不變（相當於全域單一組，等同修改前）。
+
+## 2026-07-23m Claude (Sadie) — do_step_sync_ 第一次伸腳也改成每側各自 stop_on_first_seal
+### 問題（user 回報實機 log）
+`step_down_sync` 第一次伸腳（`smart_extend_subset_("all", all_slaves)`）log 顯示 slave 2、4 很早就 SEALED，但 slave 1、3 卻繼續 iter 1→2→3→4 一直推，電流越推越高，最後撞 WALL/WEAK_SEAL——user 質疑「明明兩側都各自吸好一顆了，為什麼還繼續試？」
+### 根因
+上次（2026-07-23i）只把「每側 ≥1 顆即算好」的早停邏輯套用到**重試（retry）那段**；第一次伸腳沿用的是 `cmd_attach` 的 `smart_extend_subset_("all", all_slaves)` 單一組合呼叫，這個呼叫預設 `stop_on_first_seal=false`（維持 attach 那套「盡量每顆都吸」哲學），對 4 顆混在一起的呼叫沒有「每側」概念——底層 `pusher_extend_with_disable_seal_` 的 `stop_on_first_seal` 是全域旗標，只要傳進去的 slave 清單裡任一顆吸好就整組停，若把 4 顆一起傳、開這個旗標，反而會錯誤地讓「right 吸好 1 顆」提早打斷「left 都還沒吸好」——這是我當時沒把它套到第一次伸腳的原因。
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`/`user_lib/WASH_ROBOT.cpp` `smart_extend_subset_`：新增第 3 個參數 `stop_on_first_seal`（預設 `false`，`cmd_attach` 呼叫端不變、行為不受影響），轉傳給 `pusher_extend_with_disable_seal_`
+- `user_lib/WASH_ROBOT.cpp` `do_step_sync_` 第 5 步：原本一次 `smart_extend_subset_("all", all_slaves)`，改成**兩次依序呼叫**——`smart_extend_subset_("right", right_slaves, /*stop_on_first_seal=*/true)` 再 `smart_extend_subset_("left", left_slaves, /*stop_on_first_seal=*/true)`，跟 `do_step_down_`/`up_` 的 `cycle_group_` 用同一套早停機制
+### 取捨
+兩側改成**依序**（先右後左），不再是原本「4 顆一次觸發」的同時動作——因為 `stop_on_first_seal` 這個底層機制天生是「整個呼叫清單共用一個全域早停旗標」，沒辦法在「一次 trigger_sync_move 4 顆」的情況下做到「每側各自獨立早停」，只能拆成兩次呼叫才能分開判斷。跟 `do_step_sync_` 檔頭註解說的一致：這個 gait 沒有誰要先錨定的問題，所以先後順序本身不影響安全性，只是犧牲掉「兩側嚴格同時觸發」這個效率上的細節。第 5 步後面的 retry fallback 邏輯（2026-07-23i 那次）完全沒動，繼續適用。
+### 原因
+使用者實機觀察到已經吸好那顆的兄弟繼續被推到 WALL/WEAK_SEAL，浪費時間又增加磨耗，且不符合「每側 ≥1 即算好」的既有慣例。**規範權威：** 沿用 2026-07-08 `group_seal_ok_`/「每側 ≥1」既有慣例（`project_v2_step_seal_per_side` memory），套用範圍擴大到第一次伸腳。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Pi 後測試：確認一側其中一顆吸好後，同側另一顆不會再被繼續推伸；也要確認 `cmd_attach` 的行為完全沒變（因為預設參數沒動）。
+
+## 2026-07-23l Claude (Sadie) — cmd_run_depth_avoid：修 suggested_step_cm 漏算負值 remaining_travel_cm 的 bug
+### 觸發
+user 提供窗框辨識結果11：候選物偵測到了（min_distance_cm=64.0cm 換算 remaining_travel_cm=-1.0cm），但 GUI「下一步走幾公分」欄位還是顯示預設的 5.0cm，沒有套用跨越障礙物的建議公式，user 追問「不是說低於20cm步距改成用跨的嗎？」
+### 根因
+`cmd_run_depth_avoid`（`WASH_ROBOT.cpp` 第 1882 行）判斷式寫成：
+```cpp
+if (remaining_travel_cm > 0.0 && remaining_travel_cm < DEPTH_AVOID_LOW_CLEARANCE_CM) {
+```
+`remaining_travel_cm=-1.0`（代表已經幾乎頂到障礙物，是最急迫需要跨越的狀況）不滿足 `>0.0`，導致整個 if 沒進去，`suggested_step_cm` 停留在 `step_cm_.load()`（畫面顯示的 5.0）。`>0.0` 這道門檻本身就是錯的——公式 `cross_cm = remaining_travel_cm + max_height_cm + 吸盤直徑(20) + 緩衝(5)` 完全可以吃負值（吸盤直徑+緩衝已經足夠蓋過小的負值），沒有理由把「最需要跨越的情況」排除在建議公式外。
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `cmd_run_depth_avoid`：拿掉 `remaining_travel_cm > 0.0` 這個子句，只留 `remaining_travel_cm < DEPTH_AVOID_LOW_CLEARANCE_CM`；順便把 `suggested_step_cm` 的夾限從只夾 `STEP_CM_MAX` 上限，改成同時夾 `STEP_CM_MIN` 下限（防極端小 max_height_cm 情況下 cross_cm 算出過小值）
+### 驗算（用結果11實測數字）
+`remaining_travel_cm=-1.0, max_height_cm=8.0` → `cross_cm = -1.0+8.0+20+5 = 32.0`，夾在 `[5,80]` 內仍是 32.0 — 修完後這個案例會建議走 32cm，不再卡在 5cm 預設值。
+### 範圍澄清（同時回覆 user 的另一個疑問）
+`next_is_cross`（下一步自動改用 `do_cross_obstacle_` 完整步態）跟 `suggested_step_cm`（GUI 預設步距數字）是**兩條獨立機制**：`next_is_cross` 只要 `candidates>0` 就會武裝，不受這個 bug 影響，結果11 案例下一步理論上仍會自動觸發跨越步態；這次修的 bug 只影響「GUI 顯示的建議步距數字」在負值 remaining 時沒更新，不影響是否真的跨越。**規範權威：** 無新規範，沿用 2026-07-22 跨越步幅建議公式（`project_v2_depth_camera_distance_priority_2026_07_22` memory）的既有設計，這次只是修門檻條件本身的邏輯錯誤。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Pi 後重跑窗框辨識驗證：remaining_travel_cm 為負值時，GUI「下一步走幾公分」是否確實顯示跨越公式算出的建議值。
+
+## 2026-07-23k Claude (Sadie) — TCP_client 加 quiet_reconnect_log，先關掉手臂那條連線的重連 log
+### 背景（user 回報）
+`step_up_sync` 實機 log 裡，`127.0.0.1:9530`（depth_cam）跟 `127.0.0.1:9527`（arm motor_api）兩條閒置連線每 500ms 就跳一次「reconnecting → reconnect success」，整段 log 洗版。user 說目前手臂還沒實際裝上去，先把手臂那條的 log 關掉就好（不是現在要深入查真正斷線原因）。
+### 修改檔案
+- `user_lib/TCP_client.h` — 新增 public `set_quiet_reconnect_log(bool)` + private `quiet_reconnect_log_`（預設 false，不影響其他既有 instance 的行為）
+- `user_lib/TCP_client.cpp` `reconnectLoop()` — 三處 `fprintf(stderr, ...)`（reconnecting.../reconnect success/reconnect failed）都包上 `if (!quiet_reconnect_log_)`；只影響這幾行 log 輸出，不影響重連行為本身（照樣會嘗試重連，只是不印）
+- `user_lib/WASH_ROBOT.cpp` `init()` — `arm_cli_.connectToServer(...)` 前呼叫 `arm_cli_.set_quiet_reconnect_log(true)`；`depth_cli_`/`crane_cli_` 沒動，log 照常
+### 原因
+手臂實體還沒裝上去，這條連線的重連 log 目前沒有可行動的資訊量，先關掉減少雜訊。**規範權威：** 無新規範，純 log 開關；手臂裝回去之後應該把這行拿掉恢復正常 log。
+### ⚠ 尚未查明的根因（留給之後）
+這兩條連線在完全閒置（`do_step_sync_` 執行期間不會呼叫 `depth_cam_cmd_`/`arm_cmd_`）的情況下仍每 500ms 重連一次，「connect 都會成功」代表對面服務有在聽，比較像是 `depth_cam_service.py`/`motor_api` 那個 process 本身在 crash-loop（尤其 arm 這邊很可能是手臂硬體/CAN 裝置不存在導致 motor_api 開機初始化重複失敗重啟），而不是 TCP_client 的問題；depth_cam 那條沒關 log，之後如果也觀察到同樣的閒置重連，要往 python 服務端排查，不是 client 端。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Pi 後確認手臂那條 log 真的安靜下來，且不影響它照常在背景嘗試重連（手臂真的裝上去之後應該還是連得上）。
+
+## 2026-07-23j Claude (Sadie) — do_step_sync_ 真空開關改用 vacuum_valve_("feet", ...)，跟 vacuum feet on/off 按鈕同體感
+### 需求（user）
+討論「同步 step 的解真空/開真空左右能不能同時」時發現：右閥、左閥物理上受限於同一條 RS485 半雙工 bus + PQW 驅動只有 `controlRelay` 單通道寫入，本來就不可能真同時。但 GUI 上「vacuum feet on/off」按鈕已經是「一個指令、兩邊依序動」的體感（`vacuum_valve_("feet", on)`），user 要求 `do_step_sync_` 這個 gait 也改成同樣體感就好，不用真的做到硬體同時。
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `do_step_sync_`：
+  - 步驟 1（解真空）：原本兩個獨立 `try_or_pause_` 分別包 `pqw_set_relay_verified_(CH_VALVE_RIGHT/LEFT, false)`（context tag `_valve_right_off`/`_valve_left_off`），改成單一 `try_or_pause_` 包 `vacuum_valve_("feet", false)`（context tag 合併為 `_valve_off`）
+  - 步驟 4（開真空）：同樣改法，`vacuum_valve_("feet", true)`，context tag 合併為 `_valve_on`
+### 原因
+跟 `cmd_vacuum("feet", on)` 走同一個 helper，行為、時序完全一致——右閥先發送+驗證、左閥後發送+驗證，只是包裝成一次呼叫。範圍只限這個 gait（`do_step_sync_`），其他 step gait（`do_step_down_`/`up_`）仍保留左右分開的 `try_or_pause_`（那邊左右閥動作時機本來就不同，不適用此簡化）。
+### 取捨
+損失的是「左右分開回報 pause context」的細緻度——原本閥門卡住會分別報 `_valve_right_off`/`_valve_left_off`，方便操作員知道哪一側的繼電器沒回應；改完後只會報 `_valve_off`/`_valve_on`，不分邊。**規範權威：** 無新規範，沿用既有 `vacuum_valve_`/`cmd_vacuum` helper。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Pi 後測試：`do_step_sync_` 走一輪，確認真空開關時序、`vacuum_check_` 判斷都跟改動前一致。
+
+## 2026-07-23i Claude (Sadie) — do_step_sync_ 重伸真空判準：一側已有 1 顆吸好就不重試另一顆
+### 需求（user）
+同步步伐（`do_step_sync_`）重新伸腳吸附那段，當一側（左或右）的兩顆吸盤裡已經有一顆吸好，另一顆就不用再花時間重試了，直接算那側完成。
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `do_step_sync_` 第 5 步（伸腳）的 retry 邏輯：原本只要 `vacuum_check_("all")` 有回傳任何未吸的 slave，就會對該側呼叫 `smart_extend_subset_` 重試；改成先判斷該側是「整側 0 顆吸好（全掉）」還是「部分失敗（該側已有 ≥1 顆吸好）」——只有整側全掉才重試，部分失敗（另一顆已經吸好）直接跳過重試、留著那顆沒吸就好
+### 原因
+跟既有 v2「每側 ≥1 顆即算好」慣例（`group_seal_ok_`）一致：既然最後的合格判準就是「每側 ≥1 顆」，重試階段沒必要為了已經合格的側浪費時間去湊滿 2 顆。**規範權威：** 無新規範，沿用既有 `group_seal_ok_`/「每側 ≥1」慣例（`project_v2_step_seal_per_side` memory）套用到這次新增的 `do_step_sync_`。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Pi 後測試：一側只吸好 1 顆時，另一顆確認不會再被重新推伸嘗試。
+
+## 2026-07-23h Claude (Sadie) — run_depth_avoid：偵測到候選物，下一步自動改用跨障礙物步伐
+### 需求（user）
+持續往下走搭配窗框避障（`run_depth_avoid`）那個功能，偵測到障礙物時，下一步應該要用跨障礙物步伐（`do_cross_obstacle_`，一側伸腳 2×preset 站離牆跨越），不是只把下一步的建議公分數調大。
+### 討論過程
+現有 `cmd_run_depth_avoid` 在偵測到淨空不足時，已經有一個 `suggested_step_cm` 機制（`remaining_travel_cm < DEPTH_AVOID_LOW_CLEARANCE_CM` 時建議一個較大的 cm 值），但那只是讓「下一步的普通 step_down_」走遠一點，**沒有真的換成跨障礙物那套機構動作**（一側 ZDT 伸兩倍長站離牆）。跟 user 確認三點後動手：
+1. 完全自動切換，不跳確認（但 modal 會顯示提示）
+2. 觸發門檻用 `candidates>0`（不是 `big_obstacle` 高度>10cm 那個門檻）
+3. 只自動切換一次；跨完那步之後不管還有沒有偵測到，都回到正常步伐，寬障礙物需要多次跨越的話由使用者自己用 continue 手動決定
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `cmd_run_depth_avoid`：新增 `next_is_cross` 旗標，在迴圈頂端「消耗」（決定這一輪走哪個引擎後立刻清掉，不會被這輪自己的偵測結果重新觸發）；`run_as_cross` 為真時呼叫 `do_cross_obstacle_(/*up=*/false)` 取代 `do_step_down_`；AFTER 分析完 `candidates` 後，只有「這步不是自動跨障礙物」時才會武裝下一輪的 `next_is_cross`；`depth_obstacle_result` EVT 新增 `next_step_gait=cross|normal` 欄位
+- `web_backend/public/index.html` — modal 新增 `modal-depth-cross-notice` 提示列（🧗 圖示），跟現有 big-obstacle 警告同樣風格
+- `web_backend/public/app.js` — parse `next_step_gait=`，`showDepthObstacleModal` 多一個參數控制這個提示列顯示/隱藏
+### 原因
+現有的「建議更大 cm」機制沒有真的改變步伐機構動作，遇到真的凸出障礙物時普通步伐（吸盤貼牆平移）過不去，需要真的用跨障礙物那套（一側伸長站離牆）才能物理上跨過去。**規範權威：** 無獨立文件章節記載 `run_depth_avoid` 的完整規格（目前只散落在 code 註解 + changelog），本條 + 相鄰幾筆 2026-07-2x 條目是目前最新狀態的紀錄。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署後測試：確認偵測到候選物後下一步真的是跨障礙物步伐（觀察機構動作，不是只看 cm 數字變大）、且跨完那步後不會連續自動再跨一次。
+
+## 2026-07-23g Claude (Sadie) — 吊機自動 motion 預設 15Hz；IMU 微調（roll_correct）拆成獨立速度、預設 5Hz
+### 需求（user）
+「吊機的自動放收繩預設速度我想改成15hz、imu微調改成5hz」
+### 討論過程
+`roll_correct`（同步走法 `do_sync_imu_roll_correct_` 呼叫的差動微調指令）原本跟一般 `pay_out`/`retract` 共用同一個 `g_vfd_motion_hz`，沒有獨立速度可調——要達成「motion 15Hz、IMU 微調 5Hz」這兩個不同的值，必須先把 `roll_correct` 從 `g_vfd_motion_hz` 拆出來，給它自己的 runtime 參數，而不是單純改一個數字。
+### 修改檔案
+- `Crane_control_PI/main.cpp`
+  - `VFD_MOTION_HZ_DEFAULT`：35.0 → 15.0（自動 pay_out/retract 預設）
+  - 新增 `ROLL_CORRECT_HZ_DEFAULT = 5.0` + `g_roll_correct_hz` atomic（獨立於 `g_vfd_motion_hz`）
+  - `cmd_roll_correct` 的 `dual_vfd_sync_start` 改吃 `g_roll_correct_hz` 而非 `g_vfd_motion_hz`
+  - 新增 `cmd_set_roll_correct_hz` + dispatch `set_roll_correct_hz <hz>`；`status` 回覆新增 `roll_correct_hz=`
+- `web_backend/public/index.html` — 頻率設定那排新增「IMU 微調（同步走法）」輸入框（預設 5），hint 補充說明這是同步步伐差動抓平專用、跟「自動 motion」分開調不會互相影響；「自動 motion」輸入框預設值同步改成 15
+- `web_backend/public/app.js` — `status` parse 新增 `roll_correct_hz=` regex + 顯示；`wireFreqInput('crane-roll-correct-hz-input', 'set_roll_correct_hz')`
+### 原因
+使用者要兩個獨立的預設值。**規範權威：** `.claude/motion_flow.md` §4b（同步步伐，IMU 微調段落補充其速度現在獨立可調）。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Pi 後測試：確認一般 `pay_out`/`retract`（含 `run`/`run_script` 的 alt 跟 sync gait 主移動）用 15Hz、`step_down_sync`/`up_sync` 的 IMU 差動微調用 5Hz，兩者互不影響。
+
+## 2026-07-23f Claude (Sadie) — 更新相機安裝幾何實測值：LEAD_OFFSET 16→32cm、STANDOFF 50→56cm
+### 問題（user 實測，結果10）
+`remaining_travel_cm` 算出 19.8cm，user 現場皮尺量測相機到吸盤實際前緣只有 3~4cm，反推「前緣偏移量」應該要 ~32cm（是原本 16cm 的兩倍），user 重新量測後確認：前緣偏移量確實是 32cm，同時相機安裝高度也更新為 56cm（原本量的 50cm）。
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`：`DEPTH_CAM_STANDOFF_CM` 50.0→56.0，`DEPTH_CAM_LEAD_OFFSET_CM` 16.0→32.0，註解更新記錄修正歷程（原本 16cm 很可能量到了機身某個中間參考點，不是真正的吸盤最前緣）
+### 原因
+純物理量測值更新，不是程式邏輯問題——上一輪（23c）修的「近點取畫面中心」讓算式本身內部一致（`center_distance_m=61.5cm` 對得上候選物自己的 `d=60.5cm`），但套用舊常數算出來的最終數字還是跟現場量測差了一截，回推才發現是安裝幾何常數本身需要校正。**規範權威：** 無新規範，這兩個常數就是規範本身（記在 `WASH_ROBOT.h` 常數註解），之後如果安裝角度/位置又調整，記得同步更新這裡。
+### ⚠ 尚未部署驗證
+需要重新編譯 `facade_cleaning_v2`，部署後拿皮尺再驗一次「機器人前緣尚可安全走」這個數字，確認跟現場量測一致。
+
+## 2026-07-23e Claude (Sadie) — 伸縮腳全速段 1200rpm 調降到 900rpm
+### 需求（user）
+把 ZDT 伸腳/收腳全速段的 1200rpm 都改成 900rpm。
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — `PUSHER_RPM`（伸腳速度）跟 `PUSHER_RPM_RETRACT_FULL`（收腳兩段式第二段全速段）都從 1200 → 900。`PUSHER_RPM_RETRACT`（收腳第一段慢脫壁，150rpm）沒動，不在這次調降範圍內
+### 原因
+使用者要求調降。**規範權威：** 無新規範，純參數調整。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Pi 後測試。
+
+## 2026-07-23d Claude (Sadie) — run_script/run_saved 也加 gait 參數（同 run）
+### 需求（user）
+`run` 那邊加完交替/同步走法選擇後，`run script`（CSV 腳本）那邊也要能選。
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — `cmd_run_script(csv, up=false, gait="alt")`、`cmd_run_saved(name, up=false, gait="alt")` 都加第 3 個參數（向下相容）
+- `user_lib/WASH_ROBOT.cpp`
+  - `cmd_run_script`：驗證 gait；迴圈內非 cross 步驟依 gait 分支 `do_step_sync_(up)` 或原本 `do_step_up_`/`do_step_down_`+左右交替；**cross 步驟（CSV 的 `x` 標記）不受 gait 影響，一律 `do_cross_obstacle_`**（同步走法沒有對應的跨障礙物版本）
+  - `cmd_run_saved`：純轉呼叫，多帶 gait 參數
+- `facade_cleaning_v2/main.cpp` — `run_script` dispatch 比照 direction 的 prefix-strip 手法，多剝一個可選的 `alt`/`sync` 前綴 token（CSV 本身是純數字，不會跟走法關鍵字混淆）；`run_saved` 多讀一個可選 token；指令表註解更新
+- `web_backend/public/index.html` — auto run 面板加「走法」下拉（跟 run 那邊同樣的 alt/sync 選項），hint 註明 cross 步驟不受影響
+- `web_backend/public/app.js` — `btn-run-script` 跟 saved-script 列表的「▶ Run」都讀這個下拉值一併送出；confirm 對話框文字也加註走法
+### 原因
+使用者要跟 `run` 一致的走法選擇能力，CSV 腳本流程一樣可能想用同步走法跑。**規範權威：** `.claude/motion_flow.md` §4b（同步步伐本身）+ 2026-07-23b 條目（gait 參數設計，本次沿用同一套慣例）。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署後測試 CSV 混合 cross + sync 步驟（例如 `sync 30,30x,30`）是否正確：sync 步驟用同步走法、cross 步驟仍走原本的跨障礙物邏輯。
+
+## 2026-07-23c Claude (Sadie) — 修 remaining_travel_cm 系統性高估：near_m 改用畫面水平中心附近的距離
+### 問題（user 實測）
+結果9：GUI 顯示「機器人前緣尚可安全走 30.4cm」，user 現場量測實際距離只有約 20cm，兩者差了近 10cm，且方向一致地偏遠（高估）。
+### 根因
+`WASH_ROBOT.cpp` 的 `remaining_travel_cm` 公式 `sqrt(min_distance_cm² − DEPTH_CAM_STANDOFF_CM²) − DEPTH_CAM_LEAD_OFFSET_CM`，只有在「量到的最近點剛好落在相機光軸正前方（畫面水平中心）」時才幾何正確。但 `min_distance_cm` 來源的 `near_m` 是**整個候選框（可能寬達 640px 全畫面）裡最近的單一像素**，不保證在中心——如果窗檻本身左右不平整、或最近點剛好偏在畫面邊緣，多出來的斜距其實有一部分是**左右偏移量**，不是「往前的距離」，但公式把全部都當往前算，造成系統性高估（驗算：這個案例的 68.2cm 斜距若真的落在正前方，換算約 30.4cm；但 near_m 偏心的話，實際往前距離會比這個小）。
+### 修改檔案
+- `frame_capture/depth_reflection_bench.py`
+  - `detect_frame_candidates` 簽名新增 `ppx` 參數（相機光軸主點，「正前方」的畫面座標基準）
+  - 候選物新增欄位 `center_distance_m`：只在候選框跟 `ppx` 左右各 30px 的窄條交集範圍內找最近深度值（找不到則退回 `near_m`），這個距離才真的符合幾何公式假設的「正前方」
+  - `fit_plane_two_pass` 簽名比照新增 `ppx`，內部兩次 `detect_frame_candidates` 呼叫都傳入
+  - 互動版 bench 工具主迴圈的呼叫點同步更新
+- `frame_capture/depth_cam_service.py`：兩處呼叫都補上 `state.ppx`；`min_distance_cm` 改成有候選物時一律用 `center_distance_m`（不是 `near_m`）；candidate log 補印 `center=` 方便比對
+### 原因
+**規範權威：** 無新規範；純幾何公式修正，`DEPTH_CAM_STANDOFF_CM`/`DEPTH_CAM_LEAD_OFFSET_CM` 這兩個既有常數/公式本身沒錯，錯在餵給公式的距離沒有限制在「正前方」這個假設前提內。
+### ⚠ 尚未部署驗證
+純 Python 改動，不用重編 C++，重新部署 `depth_cam_service.py` + `depth_reflection_bench.py` 後，麻煩實機再拿皮尺驗一次「機器人前緣尚可安全走」這個數字，確認跟現場量測對得起來。
+
+## 2026-07-23b Claude (Sadie) — run 加 gait 參數，可選交替/同步走法連續跑多步
+### 需求（user）
+網頁「run」那邊（連續跑 N 步）加一個選項，可以選用原本左右交替的走法，或用新的同步走法。
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — `cmd_run` 簽名加第 4 個參數 `const std::string& gait = "alt"`（向下相容，沒帶這個參數的舊呼叫端行為不變）
+- `user_lib/WASH_ROBOT.cpp` `cmd_run`：驗證 `gait` 只能是 `alt`/`sync`；迴圈內依 gait 分支呼叫 `do_step_sync_(is_up)`（同步）或原本的 `do_step_up_`/`do_step_down_` + 左右交替邏輯（`alt`，行為完全不變）
+- `facade_cleaning_v2/main.cpp` — `run` 指令 dispatch 多讀一個可選 token（第 4 個，預設 `alt`）；指令表註解更新
+- `web_backend/public/index.html` — run 那排加「走法」下拉選單（交替/同步）
+- `web_backend/public/app.js` — `btn-run` onclick 讀走法下拉值，一併送出 `run <n> <cm> <dir> <gait>`
+### 原因
+使用者要能用同一個「連續跑 N 步」介面，依現場情況選交替或同步走法，不用另外做一套跑多步的同步版本。**規範權威：** `.claude/motion_flow.md` §4b（同步步伐本身的規格）+ 本條 changelog（run 的 gait 選項）。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Pi 後測試 `run <n> <cm> <dir> sync` 連續跑多步是否正常（含中途 abort/pause 行為，跟 alt 走法共用同一段迴圈邏輯，理論上應該一致）。
+
+## 2026-07-23 Claude (Sadie) — 修 do_step_sync_ 真空判準過嚴（要求 4 顆全吸，違反 v2「每側 ≥1」慣例）
+### 問題（user 回報）
+`step_down_sync` 實機測試：`EVT step_down_sync_partial_seal count=2` → `state_changed running error`，log 顯示 p1=1(未吸)/p2=-66(吸住)/p3=0(未吸)/p4=-66(吸住)——右側（slave 1,2）跟左側（slave 3,4）都各有 1 顆吸住。user 質疑：「不是兩邊有一顆吸好就算過嗎」。
+### 根因
+`do_step_sync_` 伸腳後的最終真空判準寫成 `vacuum_check_("all")` 全空才過，任何 1 顆沒吸住就直接 `return fail("ERR partial_seal\n")` 進 `State::Error`。這比 v2 既有慣例（2026-07-08 per user，`group_seal_ok_()` helper，`do_step_down_`/`do_step_up_` 的 `cycle_group_`/pre-flight 都遵循：**每側只要 ≥1 顆吸住即算過，只有整側全掉才是硬停**）嚴格——是我這次新增 `do_step_sync_` 時抄錯的判準，抄的是「4 顆全吸」而非既有的「每側 ≥1」規則。
+`ERR recover_vacuum_fail slaves=1,3`（user 接著試的 `recover`）不是同一個 bug——`cmd_recover()`（`WASH_ROBOT.cpp:11700`）本來就故意設計成要求全 4 顆才能從 Error 跳回 Attached（2026-06-02 決策，理由是 recover 跳過物理檢查、partial seal 盲跳有可能把 anchor 那組放到空氣中造成衝擊負載），這部分維持不動、正確運作中。修好 `do_step_sync_` 的判準後，per-side-ok 的 partial seal 就不會再進 Error，也就不會再需要用到 `recover`。
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `do_step_sync_`：最終判準改用 `group_seal_ok_("right", ...)`/`group_seal_ok_("left", ...)`，只有某側整組（2 顆）全掉才回 `ERR side_unsealed` 進 Error；partial（每側 ≥1）只記 EVT `_partial_seal count=N` 後正常返回 OK，跟 `do_step_down_`/`do_step_up_` 的判準對齊
+### 原因
+使用者驗算實機 log 後指出跟既有規範不符，已對照 `.claude/` 內既有「每側 ≥1」慣例修正。**規範權威：** `.claude/motion_flow.md` §4b（同步步伐）+ 沿用既有「三個 gate 一致」慣例（見 v1 討論當時的 memory，未落成獨立 .md 章節，體現在 `group_seal_ok_` 這個 helper 本身）。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯，需部署到 Pi 後重跑一次 `step_down_sync` 確認 partial seal（每側 1 顆）情況會正常回 OK、不再進 Error。
+
+## 2026-07-22f Claude (Sadie) — GUI 補上 kick_hz/fine_adjust_hz 控制（計米器微調偶爾太快沒對平）
+### 問題（user）
+「計米器微調那邊很有問題，可以慢速調嗎」——追問後確認是「偶爾微調速度太快，結果沒對平」。
+### 根因
+crane 端 `motion_fine_adjust_sync`（`Crane_control_PI/main.cpp:1800`）的收斂分兩段：落後距離 ≥15cm（`KICK_DISTANCE_THRESHOLD_CM`）先用 `kick_hz`（預設 20Hz）盲衝 500ms（`KICK_DURATION_MS`）——這段完全不檢查位置，程式碼自己的註解就寫「kick is a blind sleep...overshoots short corrections before the convergence loop even gets to poll the cache」；衝完才降到 `fine_adjust_hz`（預設 10Hz）邊走邊檢查收斂。兩個都早就是 runtime 可調的（`set_kick_hz`/`set_fine_adjust_hz` 指令），但**都沒接進 GUI**，只能手動送 raw command，難怪使用者調不到。「偶爾太快沒對平」的現象比較符合 kick 這段盲衝造成的，不是 fine_adjust 精調段。
+### 修改檔案
+- `web_backend/public/index.html` — 頻率設定那排新增「計米器微調-衝刺」（`crane-kick-hz-input`，預設 20）跟「計米器微調-精調」（`crane-fine-adjust-hz-input`，預設 10）兩個輸入框，樣式沿用既有 hold/motion/middle 那組；hint 補充說明兩段式收斂邏輯跟哪段比較可能是問題根源
+- `web_backend/public/app.js` — `status` 回覆 parse 新增 `kick_hz=`/`fine_adjust_hz=` 兩個 regex + `updateHzCell` 顯示目前值；`wireFreqInput('crane-kick-hz-input', 'set_kick_hz')`/`wireFreqInput('crane-fine-adjust-hz-input', 'set_fine_adjust_hz')` 沿用既有 debounce 送出 pattern
+### 原因
+crane 端指令跟參數本來就存在且是活的，純粹是 GUI 沒曝露出來。**規範權威：** 無新規範，UI 曝露既有 runtime 參數。
+### ⚠ 未驗證
+還沒實機測「調低 kick_hz 之後偶爾沒對平的現象會不會改善」——建議使用者先試著把「衝刺」那格調到 10-12Hz 左右（比 fine_adjust 精調的 10Hz 高一點但不到原本 20Hz），觀察幾次同步/交替步伐是否還會出現沒對平的狀況。
+
+## 2026-07-22e Claude (Sadie) — 新增同步步伐（step_down_sync/step_up_sync）— 4 顆同時放開/放繩/重伸
+### 需求（user）
+新增兩個指令：往上一步、往下一步，跟現有 step_down/step_up 的交替 inchworm 走法不同。以 20cm 舉例：先解真空縮腳（4 顆一起）→ 吊機左右同步放繩 20cm → 靠 IMU 微調平衡 → 開真空 → 伸腳（4 顆一起）。不含清洗。
+### 討論過程
+動手前跟 user 確認了兩個關鍵設計點（見對話）：
+1. **安全性質**：這是本專案第一個「重複執行、且 4 顆全部同時放開」的走法，放繩期間完全靠吊機繩索承重、沒有吸盤錨定牆面——跟現有所有重複走法（`do_step_down_`/`do_step_up_`/`do_cross_obstacle_`）永遠保持至少一側黏牆防墜的慣例不同。**user 明確確認這是刻意的設計**。
+2. **IMU 微調機制**：選用「雙邊差動」（兩側繩子同時反向微調），不是單邊微調 —— 對應到復活/改寫 v1 已 retired 的 `do_phase5_roll_correct_` 邏輯（原本綁定 v1 已移除的 body/center valve，這次改寫成不需要那些、純粹呼叫 crane 端本來就有的 `roll_correct <delta_cm>` 差動指令）。
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — 新增 public `cmd_step_down_sync(int cm=0)`/`cmd_step_up_sync(int cm=0)`；private `do_step_sync_(bool up)`、`do_sync_imu_roll_correct_()`
+- `user_lib/WASH_ROBOT.cpp`
+  - `do_sync_imu_roll_correct_()`（緊接 `follower_imu_level_` 之後）：讀 IMU roll 平均值、用 `crane_cmd_("roll_correct <delta_cm>")` 差動微調，沿用 `follower_imu_level_` 的 roll>0=左高右低 sign convention 跟 `FOLLOWER_*`/`BAL_CAL_ROLL_PANIC_DEG` 既有常數，幾何估計值減半（因為兩側同時反向動，跟單邊微調要達到同樣的抓平效果只需一半距離）
+  - `do_step_sync_(bool up)`（緊接 `do_cross_obstacle_` 之後）：5 步序列，Step 1/5 分別仿照 `cmd_return_home`（全放真空+兩段式縮回）跟 `cmd_attach`（全開真空+`smart_extend_subset_("all",...)`）的「4 顆一起」寫法；Step 2 直接送 crane 端既有的裸指令 `pay_out <cm>`/`retract <cm>`（crane 端 `dual_vfd_sync_start` 雙繩同步，不是 `do_step_down_`/`up_` 用的單側交替 `pay_out_left`/`pay_out_right`）
+  - `cmd_step_down_sync`/`cmd_step_up_sync`（緊接 `cmd_cross_obstacle_up` 之後）：state guard + cm range 驗證 + `ensure_arm_parked_after_rope_`，完全仿照 `cmd_cross_obstacle_down`/`up` 的殼
+- `facade_cleaning_v2/main.cpp` — dispatch 新增 `step_down_sync`/`step_up_sync`，指令表註解補一行
+- `web_backend/public/index.html` — 跨障礙物那排下面加一排「同步步伐」按鈕 + `<ul><li>` 安全提示（零錨點警告）
+- `web_backend/public/app.js` — 兩顆按鈕 onclick，沿用既有 `readStepCm()`
+- `.claude/motion_flow.md` — 新增 §4b「同步步伐」，完整流程 + 安全性質差異說明（規範權威所在）
+### 原因
+使用者要一個比交替 inchworm 走法更簡單快速的移動方式，用在不需要邊走邊維持錨點的情境。**規範權威：** `.claude/motion_flow.md` §4b。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯（VS remote build），需部署到 Pi 後實測。IMU 差動微調的 sign convention 是照抄 `follower_imu_level_`/`cmd_roll_correct` 既有邏輯推導，**還沒實機驗證兩側同時差動的方向是否真的抓平**（建議先在小角度、有人在旁看著的情況下測第一次）。
+
+## 2026-07-22d Claude (Sadie) — 修 min_distance_cm 被不相干的 rejected 小碎片搶走
+### 問題（user 實測，結果8）
+「只認最寬候選物」上線後 candidates=1（成功濾掉雜物），但 GUI 顯示「相機到障礙物斜距 55.2cm」跟框框標示的候選物本身 `d=56.2cm` 對不起來，user 指出這個距離數字是錯的（機器人明明已經很接近障礙物，算出來的安全步距不合理）。
+### 根因
+`min_distance_cm` 上一版（22b）改成「candidates+rejected 全部裡最近的」，這次被一個 544px 的小雜訊碎片（畫面最下緣 y=453，因寬高比不符被 rejected，距離 55.2cm）搶走——它比真正的候選物（木條本身，56.2cm）近一點點，就被當成「最近的東西」拿去算安全步距，即使它根本不是被判定為窗檻的那個物件。
+### 修改檔案
+- `frame_capture/depth_cam_service.py` `handle_after()`：`min_distance_cm` 改成**只要有候選物存在，一律用候選物自己的距離**；只有完全沒有候選物（candidates=0）時才退回「rejected 裡最近的」當備援。同時補印每個 accepted candidate 自己的 near/protrusion/height/bbox（之前只印數量，沒印內容，這次的錯位就是因為 log 裡看不出候選物自己的距離跟顯示的距離對不對得上）
+### 原因
+候選物（窗檻）一旦被正式判定出來，它自己的距離就是最可信的依據，不該被旁邊「已經被判定不是窗檻」的雜訊碎片覆蓋掉。**規範權威：** 無新規範，修正 22b 那次改動的副作用。
+### ⚠ 尚未部署驗證
+需要重新部署 `depth_cam_service.py`，實機確認候選物存在時，顯示的「相機到障礙物斜距」是不是跟候選物框框上標示的 `d=` 一致。
+
+## 2026-07-22c Claude (Sadie) — 只認最寬候選物（濾雜物）+ 跨越障礙物步幅建議
+### 需求（user，看結果7圖）
+1. 距離+形狀 fallback 上線後，一個小雜物（角落黃色那塊）跟木條一起被判定成候選物（候選物數量:2），user 只要辨識木條就好
+2. 安全步距（`remaining_travel_cm`）太小（<20cm）時，優先建議走一大步跨過障礙物，但不能超過 `STEP_CM_MAX`；跨越步幅算法（user 提供）= 距離障礙物cm數 + 障礙物寬度(沿爬行方向的厚度) + 吸盤直徑20cm + 預留5cm
+### 修改檔案
+- `frame_capture/depth_reflection_bench.py` `detect_frame_candidates`：形狀過濾通過的候選物如果不只一個，只保留**最寬**的那個當作真正的窗檻（window sill 本來就該是畫面裡最寬的特徵），其餘降級進 `rejected`（附原因），`candidates` 現在最多 1 筆
+- `user_lib/WASH_ROBOT.h`：新增常數 `DEPTH_AVOID_LOW_CLEARANCE_CM=20.0`（安全步距低於這個值才觸發跨越建議）、`DEPTH_AVOID_SUCKER_DIAMETER_CM=20.0`（吸盤直徑）、`DEPTH_AVOID_CROSS_MARGIN_CM=5.0`（預留緩衝）
+- `user_lib/WASH_ROBOT.cpp` `cmd_run_depth_avoid`：
+  - `remaining_travel_cm` 計算拿掉 `candidates>0` 限制，改成只看 `min_distance_cm`（配合前一版 min_distance_cm 一律有值的改動，非窗框形狀的近物一樣能算出安全距離）
+  - 新增 `suggested_step_cm`：`remaining_travel_cm < DEPTH_AVOID_LOW_CLEARANCE_CM` 時，算 `remaining_travel_cm + max_height_cm + DEPTH_AVOID_SUCKER_DIAMETER_CM + DEPTH_AVOID_CROSS_MARGIN_CM`，`std::min` 夾到 `STEP_CM_MAX`，取代原本的 `step_cm_.load()` 填進 `EVT depth_obstacle_result` 的 `default_step_cm`
+### 原因
+**規範權威：** 無新規範；`default_step_cm` 沿用既有「只是預設值，使用者仍可手動改」的性質（`WASH_ROBOT.h:181-195` 的 2026-07-20 原設計沒變），這次只是把預設值算得更聰明。跨越步幅的公式（距離+厚度+吸盤直徑+緩衝）是 user 提供的，不是我方猜的數字。
+### ⚠ 尚未部署驗證
+需要重新編譯 `facade_cleaning_v2` + 部署 `depth_reflection_bench.py`，實機確認：(1) 木條單獨被辨識到、雜物不再算候選物、(2) 安全步距 <20cm 時 GUI 的「下一步走幾公分」欄位預設值是不是真的變成跨越用的大步幅，且沒超過 80cm 上限。
+
+## 2026-07-22b Claude (Sadie) — min_distance_cm 改成一定有值，不因為沒有 candidate 就歸零
+### 需求（user）
+「無論如何都要在網頁上顯示計算出來的結果（包括圖片）」——不要因為沒有東西通過形狀過濾（candidates=0）就把距離也一起歸零，該顯示的都要顯示。
+### 修改檔案
+- `frame_capture/depth_cam_service.py` `handle_after()`：`min_distance_cm` 改成取 `candidates + rejected` 全部 blob 裡最近的 `near_m`（原本 candidates=0 時直接回 `min_distance_cm=0.0`，等於「這步什麼有用資訊都沒有」，即使旁邊明明有個形狀不像窗檻、但真實存在、有量到距離的東西）。`max_height_cm`/`max_protrusion_cm` 語意不變，仍然只算「通過形狀過濾的候選物」，因為那兩個是「這是不是真的窗檻」的判斷，不是距離
+### 原因
+最主要需求是距離（拿來算下一步步伐），只要 motion mask + 距離範圍篩過、面積夠大的東西，不管形狀像不像窗檻，都算是「這裡有東西、量到多遠」的有效資訊，不應該因為形狀判斷沒過就整個歸零。結果圖（`/snap/depth`）跟 BEFORE/AFTER 照片本來就已經是每次都發布、GUI modal 本來就是每次 `depth_obstacle_result` 都彈窗顯示（21c 那次改的），這次只補上距離這個數字的一致性。**規範權威：** 無新規範，延續 22 號當天「距離優先」的判準調整方向。
+### ⚠ 尚未部署驗證
+需要確認 `min_distance_cm` 在 candidates=0 但 rejected 不是空的情況下，確實顯示 rejected 裡最近的距離，而不是 0.0。
+
+## 2026-07-22 Claude (Sadie) — 候選物判準改成「距離+形狀」為主，凸出量降級成非必要的附加資訊
+### 問題（user 實測 + 需求）
+21j 加的診斷 log 顯示：`two-pass refit: pass 2 skipped (only 33px left after excluding 41543px)`——畫面裡「距離 ≤80cm 且有真實移動」的像素幾乎全部（99.9%）是木條本身，沒有任何獨立的背景可以拿來擬合平面。這證實鏡面反光場景下，根本沒有足夠的背景資料能讓「擬合平面→算凸出量」這套邏輯運作，不是參數沒調好。user 澄清目標是**鏡面反光跟一般窗戶兩種情境都要能處理**（真實玻璃帷幕本來就有很像鏡子的），且**最主要需求是距離**（用來算下一步步伐），凸出量退居次要。
+### 設計決策
+候選物是否成立，改成只看：
+1. **距離**（`near_m` ≤ 80cm，且有通過 motion mask 的真實移動）
+2. **形狀**（寬扁比 `SILL_MIN_ASPECT_RATIO`、最小寬度 `SILL_MIN_WIDTH_PX`——這兩個不需要背景平面，永遠算得出來）
+凸出量/`protrusion_std` 兩個門檻**從「拒絕條件」降級成「有算到就附加顯示，算不到也不擋偵測」**——背景平面擬合失敗時，不再直接回傳 candidates=0，改成退回「只用距離+形狀」判斷，一樣能正常回報候選物 + 距離。
+### 修改檔案
+- `frame_capture/depth_reflection_bench.py`
+  - `detect_frame_candidates`：`protrusion_map` 參數改成可以是 `None`；`None` 時每個候選物的 `protrusion_m`/`protrusion_std_m` 都是 `None`，不再檢查 `PROTRUSION_MIN_M`/`MAX_PROTRUSION_STD_M`（`reasons` 只剩 width/aspect 兩種）；`height_m` 不受影響（本來就只靠像素尺寸+距離算，不需要平面）
+  - `_merge_close_blobs`：合併判準改成優先看凸出量差（`prot` 不是 `None` 時，行為不變），**兩邊都沒有凸出量時退回比較原始距離** `near_m`（新常數 `MERGE_MAX_NEAR_DIFF_M_FALLBACK=0.10`，比凸出量門檻寬鬆，因為原始距離沒做角度校正、抓不出「同一根斜看窗檻」的自然距離漂移，只是有勝於無的次要方案）
+  - `draw_candidates`、互動版 bench 工具的候選物/存檔 log：凸出量顯示改成 `protrusion_m is None` 時印 `n/a`，避免 `None*100` 直接炸掉
+  - `PROTRUSION_MIN_M`/`MAX_PROTRUSION_STD_M` 常數保留（原本驗證過的調校歷史有價值），標註目前沒有程式在用
+- `frame_capture/depth_cam_service.py`
+  - import 加回 `detect_frame_candidates`
+  - `handle_after()`：`fit_plane_two_pass` 回傳 `plane is None` 時，不再直接回 `candidates=0`，改成呼叫 `detect_frame_candidates(masked_depth_m, None, ...)` 退回距離+形狀判斷
+  - `max_protrusion_cm` 計算改成過濾掉 `None` 後才取 max，全部是 `None` 時預設 0.0（讀作「未知」，不是「確認没有凸出」）
+### 原因
+**規範權威：** 無新規範；這是根據 21i/21j 兩輪實測數據 + user 明確的優先順序（距離 > 凸出量）做的判準調整，行為變動：**背景平面擬合失敗不再等於偵測失敗**。之前「幾何先驗」（用已知安裝角度算理論背景）的選項還在，如果之後想要凸出量判準更穩定、更常有值，可以往那個方向做，這次先用最小改動讓距離判準不被平面擬合卡住。
+### ⚠ 尚未部署驗證
+需要重新部署到 Pi 測試：(1) 這次木條在鏡面場景下是不是真的能變成 candidate（凸出量顯示 n/a 但距離要正確）、(2) `min_distance_cm`/`remaining_travel_cm` 算出來的數字要用皮尺再驗一次、(3) 確認一般（非鏡面）窗戶場景下，如果背景平面擬合得成功，凸出量/大障礙物警告這些功能沒有被破壞。
+
+## 2026-07-21j Claude (Sadie) — fit_plane_two_pass 加診斷統計，確認鏡面反射有沒有污染背景擬合
+### 問題（user 實測，21i 沒解決）
+兩階段重擬合上線後（21i），實測 `protrusion` 從固定的 `-0.1cm` 變成 `-0.2cm`/`+0.3cm`（代表新邏輯真的有跑，plane2 跟 plane1 不一樣），但木板還是被判定「跟背景沒差」刷掉。user 明確表示目標是**鏡面反光跟一般窗戶兩種情境都要能處理**，鏡面反光是真實的玻璃帷幕情境，不是要迴避的邊角案例。
+### 診斷方向
+懷疑瓶頸不在平面擬合這一步，而是更前面的 motion mask 沒把鏡子反射濾乾淨——如果背景本身混著大量反射雜訊（不是真正平坦的表面），不管重擬合幾輪都救不回來，因為餵進去的資料本身就是壞的。要驗證這個猜測，不需要換實體場景，只要印出「排除木板後、拿來重新擬合的背景點」本身的統計數字：如果這些點對重擬合出的平面殘差標準差很大，就證實背景根本不是平面（反射雜訊污染）；如果殘差很小，代表背景本身沒問題，要往別的方向查。
+### 修改檔案
+- `frame_capture/depth_reflection_bench.py` `fit_plane_two_pass`：回傳值新增第 5 個 `stats` dict（`pass1_plane`/`pass2_plane` 平面係數、`pass1_points`/`excluded_points`/`refit_points` 點數、`refit_residual_mean_cm`/`refit_residual_std_cm` — pass 2 用來重擬合的背景點自己對 plane2 的殘差分布）。函式本身沿用 `fit_background_plane`/`detect_frame_candidates` 的慣例保持靜默，統計交給呼叫端印
+- `frame_capture/depth_cam_service.py` `handle_after()`、互動版 bench 工具主迴圈：都改成解 5 個回傳值，印一行 `two-pass refit: excluded Npx, refit on Mpx, refit residual mean=X.Xcm std=Y.Ycm`（pass 2 被跳過時印替代訊息）
+### 原因
+**規範權威：** 無新規範；純診斷工具，沒有改變任何偵測邏輯或門檻值。
+### ⚠ 尚未部署驗證
+下次跑完把這行 `refit residual ... std=` 的數字貼出來——這是判斷「問題在 motion mask 還是在別的地方」的關鍵數字，看完才知道下一步該往哪調。
+
+## 2026-07-21i Claude (Sadie) — 背景平面兩階段擬合，修木板自己把自己拉平的問題
+### 問題（user 實測，三次連續 AFTER 都一樣）
+`protrusion std` 爆炸的問題修好後（21g），出現新的失敗模式：三次擷取，畫面裡最大的那個 blob（明顯是木板本身，near 57.8~65.1cm、面積 2.5萬~5.6萬 px）凸出量都算成幾乎 0（`protrusion -0.1cm within ±1.0cm of background plane`），被判定「跟背景平面沒差」而刷掉。
+### 根因
+`fit_background_plane` 是對整個畫面「有效點」做最小二乘法擬合一個背景平面，沒有排除木板自己的像素。這幾次擷取木板占「有效點」的相當大比例（masked 14.6%~33.4% 的畫面，其中木板 blob 又占其中一大塊），最小二乘法把木板自己的點也當「背景」的一部分去配平面，配出來的其實是「背景+木板」妥協出來的平面。木板對著這個被自己污染的平面量，凸出量自然趨近 0——現有的 3 輪離群值剔除（`PLANE_FIT_REFIT_ITERS`）設計上是抓「少數污染源」，這次污染源不是少數，救不回來。
+### 修改檔案
+- `frame_capture/depth_reflection_bench.py` 新增 `fit_plane_two_pass()`：先用全部有效點 fit 一次（pass 1），跑 `detect_frame_candidates` 粗抓出候選/被拒的 blob（不分是否通過形狀過濾，只要夠大就可能是真實物體），把這些 blob 的 bbox 範圍從有效點裡排除，**重新 fit 一次乾淨的背景平面**（pass 2），再用這個平面重新跑一次 `detect_frame_candidates`。如果 pass 2 剩餘點數不足以 fit（排除範圍太大），退回 pass 1 的結果而不是報錯。互動版 bench 工具主迴圈跟 `depth_cam_service.py` 的 `handle_after()` 都改呼叫這個新函式取代原本兩段各自獨立的 fit + detect
+### 原因
+兩階段重擬合是三個修法選項（two-pass / RANSAC / 幾何先驗約束）裡 user 選定的方向，取捨：實作量小、重用現有 `detect_frame_candidates` 基礎設施，代價是「如果 pass 1 抓到的 blob 其實是雜訊」會白白排除掉一些好點（可接受，因為目標情境是「真的有大物體污染擬合」）。**規範權威：** 無新規範；純演算法修正，沒有動偵測邏輯以外的東西。
+### ⚠ 尚未部署驗證
+還沒重新在實機上跑過，需要確認：(1) 木板這次凸出量是否回到合理範圍（3-4cm 附近，配合 21h 的中位數修正一起看）、(2) pass 2 fit 會不會因為排除掉木板後剩餘點數不夠（背景本身雜亂,可用點沒那麼多）反而更常吃到 fallback、(3) 兩次 fit + 兩次 connected-components 對這個服務的即時性（每步都要跑）有沒有明顯拖慢。
+
+## 2026-07-21h Claude (Sadie) — 凸出量改用中位數 + 新增「剩餘安全行走距離」計算
+### 問題（user 回報 + 實測）
+第一次真正抓到候選物（`d=62.3cm prot=-5.9cm h=10.2cm`），但 user 現場量測障礙物實際凸出量只有 3-4cm，回報值 5.9cm 明顯偏高。另外 user 提出主要需求：需要把偵測到的距離換算成「機器人還能安全走幾公分」，方便決定下一步的行走距離。
+### 根因（凸出量偏高）
+`detect_frame_candidates` 原本取 blob 裡「絕對值最大」的像素當作 `protrusion_m`（`region_prot[np.argmax(np.abs(region_prot))]`）。深度感測器在物體邊緣（前景/背景混合像素）常見雜訊尖峰，取最大值容易被單一雜訊點拉高，比實際量測值誇張。
+### 修改檔案
+- `frame_capture/depth_reflection_bench.py` `detect_frame_candidates`：`protrusion_m` 改用 `np.median(region_prot)` 取代 max-abs，對少數雜訊點更穩健
+- `frame_capture/depth_cam_service.py` `handle_after`：AFTER 回覆新增 `min_distance_cm`（`candidates[0]['near_m']`，candidates 已按 near_m 排序,取最近候選物的最近點斜距,單位公分)，candidates=0/plane-fit 失敗兩個早退路徑也補上 `min_distance_cm=0.0` 維持格式一致
+- `user_lib/WASH_ROBOT.h`：新增 `depth_last_min_distance_cm_`/`depth_last_remaining_travel_cm_` 兩個 atomic；新增相機安裝幾何常數 `DEPTH_CAM_STANDOFF_CM=50.0`（相機垂直於牆面的安裝高度）、`DEPTH_CAM_LEAD_OFFSET_CM=16.0`（機器人前緣沿爬行方向比相機更靠近前方障礙物的偏移量，2026-07-21 user 現場量測值：俯角 35°、偏移 16cm 前緣較近）
+- `user_lib/WASH_ROBOT.cpp` `cmd_run_depth_avoid`：解析 `min_distance_cm`；用直角三角形換算 `remaining_travel_cm = sqrt(min_distance_cm² − DEPTH_CAM_STANDOFF_CM²) − DEPTH_CAM_LEAD_OFFSET_CM`（斜距→沿牆水平距離→扣掉前緣已經比相機更靠近的偏移量）；`EVT depth_obstacle_result` 新增 `min_distance_cm=`/`remaining_travel_cm=` 兩個欄位
+- `web_backend/public/app.js`：解析新欄位、`showDepthObstacleModal` 新增兩個參數並更新對應 DOM
+- `web_backend/public/index.html`：modal 新增「相機到障礙物斜距」「機器人前緣尚可安全走」兩行顯示
+### 幾何驗算
+user 提供安裝參數：相機垂直於牆面高度 50cm、俯角（跟牆面法線夾角）35°。理論預測鏡頭中心斜距 = 50/cos(35°) ≈ 61cm，跟實測 d=62.3cm 幾乎吻合，驗證這組安裝參數可信，才據此往下推算水平距離公式。
+### 原因
+**規範權威：** 無新規範文件；`remaining_travel_cm` 只是新增的資訊性欄位，前端「下一步走幾公分」欄位維持 2026-07-20 原設計（`WASH_ROBOT.h:181-195` 註解：使用者手動決定，不自動套用建議值），沒有改變這個既有設計決策。
+### ⚠ 尚未部署驗證
+三個 C++/Python 檔案都要重新部署編譯，下次跑 `run_depth_avoid` 要確認：(1) 凸出量改中位數後是否更貼近實測 3-4cm、(2) `remaining_travel_cm` 算出來的數字是否合理（可以拿皮尺實測驗算一次數字對不對，這是會影響安全判斷的計算，不建議只憑理論公式就信任）。
+
+## 2026-07-21g Claude (Sadie) — 修 detect_frame_candidates：bbox 重新取樣漏掉距離門檻，讓遠處反光雜訊污染近物凸出量統計
+### 問題（user 回報 + 實測）
+bench 場景是木板架在鏡子反射的雜亂背景前（鏡子把工作室反射進畫面）。加了 rejected 原因 log 後看到：木板那個 blob 被判定 `protrusion std 143.0cm>2.0cm（likely spans multiple surfaces）`刷掉。user 存了 GUI 截圖（`D:/洗窗戶機器人/窗框辨識結果.png`）確認 masked depth 圖裡木板本身訊號其實乾淨、連續，不像是真的「混到兩個表面」。
+### 根因
+`detect_frame_candidates`（`depth_reflection_bench.py`）合併多個 raw blob 成一個 union bbox 後，重新從**矩形範圍**裡取樣算凸出量標準差時：
+```python
+region_valid = (masked_depth_m[y:y+h_px, x:x+w_px] > 0)   # 只檢查有沒有深度值
+```
+沒有像連通元件那步一樣同時檢查 `<= MAX_DETECT_DISTANCE_M`。union bbox 涵蓋 640px 全寬、115px 高，這個矩形範圍裡混進了其他跟木板不相干、但深度值 >0 的像素——包括本該被距離門檻排除在外的遠處鏡面反射雜訊（只要它們剛好落在同一個矩形範圍內，不需要真的跟木板連通）。這些雜訊的凸出量隨機且劇烈，把整塊的 `protrusion_std` 拉到 143cm，導致明明乾淨的木板訊號被誤判成「跨越多個表面」。
+### 修改檔案
+- `frame_capture/depth_reflection_bench.py` `detect_frame_candidates`：`region_valid` 補上 `<= MAX_DETECT_DISTANCE_M`，跟連通元件那步（`valid = (masked_depth_m > 0) & (masked_depth_m <= MAX_DETECT_DISTANCE_M)`）的過濾條件對齊一致
+### 原因
+這支函式被 `depth_cam_service.py` 直接 import 使用，一次修好兩邊。**規範權威：** 無新規範；`_merge_close_blobs` 本身的合併判準（`prot_diff <= MERGE_MAX_PROTRUSION_DIFF_M`）沒有問題，問題純粹在合併後的矩形重新取樣這一步漏掉距離過濾，屬於 bug fix 不是設計變動。
+### ⚠ 尚未部署驗證
+還沒重新跑 `run_depth_avoid` 確認這次木板是否能正常變成 candidate（而不是 rejected）。如果修完還是被刷，下一步要看是不是同一塊矩形範圍內還混進了「距離也在 80cm 以內、但明顯不是木板」的近距離雜訊（例如反光造成的假近點），那就是另一個問題,需要看實際 `protrusion` 數值分佈才能判斷。
+
+## 2026-07-21f Claude (Sadie) — depth_avoid 加印 rejected blob 的具體原因
+### 問題（user 回報）
+套用 80cm 門檻後 plane fit 成功了，但這次變成 `AFTER: 0 candidate(s), 1 rejected`——有抓到一個 blob，卻被刷掉，看不出來是哪個過濾條件擋住的。
+### 修改檔案
+- `frame_capture/depth_cam_service.py` — `handle_after()` 在印完 `candidate(s)/rejected` 那行 count 之後，補印每個 rejected blob 的 `reasons`（`detect_frame_candidates` 早就有算：width/aspect/protrusion 太小/protrusion_std 太大，四種原因訊息），跟 `depth_reflection_bench.py` 互動版本（614-617 行）同一個格式，最多印 10 筆
+### 原因
+跟前一條（21e）同一個模式：`detect_frame_candidates` 回傳的 `rejected` 早就帶了 `reasons` 診斷欄位，但這支服務只印數量、沒印內容，跟互動版 bench 工具的輸出對不齊。**規範權威：** 無新規範；沿用 `depth_reflection_bench.py` 既有輸出格式。
+### ⚠ 尚未部署驗證
+還沒看到實際印出來的 `reasons` 內容，下次跑完把這行貼過來才能判斷是哪個過濾條件（形狀太窄/太方、凸出量太小、還是同一塊裡混了兩個表面）擋住的。
+
+## 2026-07-21e Claude (Sadie) — depth_avoid 加診斷 log + DEPTH_MAX_M 60cm→80cm
+### 問題（user 回報）
+`run_depth_avoid` 一直 `candidates=0`，`depth_cam_service.py` 終端機完全沒有任何輸出可以判斷原因。
+### 修改檔案
+- `frame_capture/depth_cam_service.py` — `handle_after()` 補回 `depth_reflection_bench.py` 互動版本原本就有、但這支服務漏掉的兩行診斷 log：每次 AFTER 都印 `valid depth: raw=X% -> masked=Y%`；plane fit 失敗（點數 < `MIN_PLANE_FIT_POINTS`）時印實際點數，不再靜默 return。連帶把 `MIN_PLANE_FIT_POINTS` 加進 import list。
+- `frame_capture/depth_reflection_bench.py` — `DEPTH_MAX_M`（同時是 colorize 上色範圍上限 + `fit_background_plane` 的 `plane_valid` 距離門檻）從 0.60 調到 0.80
+### 根因 + 原因
+加了 log 後量到：`raw=76.5%` 正常、`masked=21.3%`（~6.5萬點通過 motion mask）但套上 60cm 距離門檻後只剩 **82 點**（< 500 需求），大量掉在門檻外。user 說明相機是「距牆面約 50cm 高、俯視」安裝——斜視角下同一個 50cm 安裝高度，畫面裡離鏡頭「看起來」較遠的點（越靠近畫面上方/越平視方向）**斜距（slant range）本來就會比 50cm 大**，60cm 這個當初假設「正面直視、10-50cm 工作距離」抓的門檻，在斜視安裝下把大量合法的近牆背景點也濾掉了。**規範權威：** 無新規範文件；`DEPTH_MAX_M` 原本的設計假設（10-50cm 正面直視）記在 `depth_reflection_bench.py:105-109` 註解裡，這次連同新的俯視安裝資訊一起更新進註解。
+### ⚠ 尚未部署驗證
+兩個檔案都要重新部署到 Pi、重啟 `depth_cam_service.py` 才會生效；下一次 `run_depth_avoid` 要重新確認 `masked` 通過門檻後的有效點數是否 ≥500、candidates 是否不再恆為 0。如果 80cm 還是不夠，可能要照實際俯角量出更精確的最大斜距，而不是繼續猜數字。
+
+## 2026-07-21d Claude (Sadie) — Camera 頁面「拍照」按鈕同時顯示全彩圖 + 深度圖
+### 需求（user）
+Camera 頁面深度攝影機那格按「拍照」，除了目前的全彩即時畫面，也要同時看到目前的深度圖。
+### 修改檔案
+- `frame_capture/depth_cam_service.py` — 新增 `/snap/depth_live_depth` endpoint（`_serve_live_depth`）：讀 `DepthCamState.latest()` 拿目前 depth_m，用既有的 `colorize_depth()`（跟 AFTER 分析用的同一個熱力圖上色函式）即時上色編碼，不做 motion mask / plane fit；跟 `/snap/depth_live`（全彩）並列，都是「不管有沒有跑過 BEFORE/AFTER，就是要現在這一瞬間」
+- `web_backend/server.js` — `CAMERAS` 新增 `depth_live_depth`（沿用 `DEPTH_CAM_LIVE_URL`，走既有 generic `/snap/:cam_id` proxy route）
+- `web_backend/public/index.html` — 深度攝影機 cam-cell 內新增第二個 `.cam-stage`（`depth-stream-map` + `depth-placeholder-map`），全彩/深度圖各自加小標籤
+- `web_backend/public/style.css` — 新增 `.cam-stage-label` 小標籤樣式
+- `web_backend/public/app.js` — `wireDepthCamera()` 改成 `Promise.allSettled` 平行 fetch `/snap/depth_live` + `/snap/depth_live_depth`，其中一張失敗不會擋住另一張顯示，按鈕文字依「全部成功/部分成功/全部失敗」三態顯示
+### 原因
+辨識避障常常需要同時比對全彩畫面跟深度分佈才看得出哪裡是窗框、哪裡是雜訊，只看全彩圖看不出高度資訊。**規範權威：** 無新規範，沿用既有 `/snap/:cam_id` reverse-proxy 慣例；`colorize_depth()` 沿用 `depth_reflection_bench.py` 既有函式，沒改演算法。
+### ⚠ 尚未部署驗證
+depth_cam_service.py 這次改動要重新部署到 Pi、重啟服務才會生效；web_backend 也要重啟才吃得到新的 `CAMERAS.depth_live_depth`。
+
+## 2026-07-21c Claude (Sadie) — 深度避障行走 modal 加上 BEFORE/AFTER 原始照片（辨識除錯用）
+### 問題（user）
+目前無法辨識窗框，想看每一步 BEFORE/AFTER 兩張照片確認相機到底拍到什麼、判斷辨識失敗的原因。原本 `/snap/depth` 只有「標註過的偵測結果」一張，而且前端只有 `big_obstacle=yes`（高度>10cm）才會顯示——`candidates=0` 時完全看不到任何照片，沒法目視除錯。
+### 修改檔案
+- `frame_capture/depth_cam_service.py` — `handle_before`/`handle_after` 新增在擷取當下把原始（未標註）彩色影像各自發布到新的 `before_buf`/`after_buf`（沿用同一 session 稍早已加的 `DepthCamState.latest_color()`，該次是為了 Camera 頁面手動拍照鈕 `/snap/depth_live` 加的）；`_make_http_handler` 改成吃 `{suffix: buffer}` dict，新增 `/snap/depth_before`、`/snap/depth_after` 兩條路徑（`/snap/depth` 結果圖、`/snap/depth_live` 手動拍照鈕不受影響）
+- `web_backend/server.js` — `CAMERAS` 新增 `depth_before`/`depth_after`（沿用 `DEPTH_CAM_URL`，走既有 generic `/snap/:cam_id` proxy route，不用加新路由）
+- `web_backend/public/index.html` — `modal-depth-obstacle` 改成三張圖並排（BEFORE / AFTER 原始 / 偵測結果），modal 加寬（`.modal-content-wide` 900px）
+- `web_backend/public/app.js` — `showDepthObstacleModal` 拿掉「只有 big_obstacle 才顯示照片」的 gate，改成每一步都 fetch 並顯示全部三張；`⚠` 警告文字仍只在 big_obstacle 時顯示
+- `web_backend/public/style.css` — 新增 `.modal-depth-photos`/`.modal-depth-photo-cell`/`.modal-depth-photo-label` 三欄排版
+### 原因
+候選物數量=0 是最需要除錯的情況，但舊設計恰好在這種情況下不給任何視覺回饋。BEFORE/AFTER 原始照一起看可以判斷是「根本沒拍到窗框」還是「motion mask/plane fit 算法把它濾掉了」。**規範權威：** 無新規範，沿用既有 `/snap/:cam_id` 慣例；偵測演算法本身（depth_reflection_bench.py）未變動。
+### ⚠ 注意：可能不是演算法問題
+下一條（2026-07-21b）記錄了同一天發現的 `TCP_client` bug：Linux 下斷線偵測不到，會讓 `depth_cam_cmd_("BEFORE")` 直接 send 失敗、根本沒送到 depth_cam_service.py，跟「演算法認不出窗框」是完全不同的失敗模式。看到 BEFORE/AFTER 照片前，先確認 console 有沒有印 `'BEFORE' send fail` —— 有的話問題在連線層，不在偵測演算法，這批照片會看到「沒有照片可看」而不是「照片但認錯」。
+
+## 2026-07-21b Claude (Sadie) — TCP_client 修：Linux 下斷線偵測不到，client 永遠卡在「已連線」殭屍狀態
+### 問題（user 回報）
+`run_depth_avoid` 一直失敗在 `depth_cam_cmd_("BEFORE")`，log 顯示 `'BEFORE' send fail attempt=0/1`（代表 `isConnected()` 是 true，不是卡在「還沒連上」分支，是真的 send 失敗）；同一時間主程式自己的 console 完全沒印任何 `reconnecting .../ reconnect success` 訊息——代表 `reconnectLoop()` 從頭到尾都沒偵測到這條連線已經斷了。
+### 根因
+1. `TCP_client::available()` 的 Linux 分支用 `ioctl(sock, FIONREAD, &count)`，這個呼叫只回報「recv buffer 裡還有幾個 byte」，對方正常關閉連線（送 FIN）時通常也回傳 0——跟「單純沒新資料」無法區分，永遠不會回傳負值觸發重連。Windows 分支用的是 `recv(MSG_PEEK)` 才真的分得出來，兩邊實作不一致。
+2. `sendData()` / `receiveData()` / `sendAndReceive()` 呼叫失敗時（`send()`/`recv()` 回傳 <=0）都沒有把 `connected` 設回 `false`，只回傳失敗值給呼叫端，client 物件本身狀態不會自我修正。
+兩者疊加：一旦連線真的斷了（例如對方 process 重啟過一次），`connected` 永遠卡在 `true`，`reconnectLoop()` 的 `!connected || available() < 0` 兩個條件都不會成立，之後所有 `sendData`/`sendAndReceive` 都在 `send()` 就默默失敗，且永遠不會自己恢復，必須重開整個主程式才能重新連上。
+### 修改檔案
+- `user_lib/TCP_client.cpp`
+  - `available()` Linux 分支改用非阻塞 `recv(MSG_PEEK)`（比照 Windows 分支）：`recv()==0` → 判定對方已關閉、回傳 -1；`EWOULDBLOCK/EAGAIN` → 回傳 0（單純沒資料，連線仍活著）
+  - `sendData()`：`send()` 回傳 <=0 時設 `connected = false`
+  - `receiveData()`：`recv()` 回傳 0（對方正常關閉）時設 `connected = false`；回傳 <0（純 timeout）不動，避免正常 device 慢回應被誤判斷線
+  - `sendAndReceive()`：send/recv 兩處比照上面同樣邏輯
+### 影響範圍
+所有用 `TCP_client` 的裝置連線都吃得到這個修復（`depth_cli_`、`arm_cli_`、`crane_cli_`、DM2J/ZDT/JC100/PQW/SD76/SE3/MH300 等所有透過 gateway 連線的裝置），不是 depth cam 專屬 bug。**規範權威：** 無既有規範文件記載此行為，屬 bug fix；沿用 `TCP_client.cpp` 開頭 `apply_keepalive()` 註解裡本來就假設的「send 失敗 → 應該被偵測到 → 觸發 reconnect」設計意圖，這次是把該假設實際兌現。
+### ⚠ 尚未編譯驗證
+本機無法交叉編譯（VS remote build），需部署到 Pi 後實測 `run_depth_avoid` 是否恢復正常。
+
+## 2026-07-21 Claude (Sadie) — Camera 頁面加入深度攝影機（僅拍照，不常駐拉流）
+### 需求（user）
+Web GUI 的「攝影機」頁面加上 D435i 深度攝影機，不用像 cam1/cam2 一樣持續拉 MJPEG 串流，只要按一下「拍照」抓一張目前畫面看看即可，名稱要標註是辨識避障用。
+### 修改檔案
+- `web_backend/public/index.html` — camera panel 新增第三個 cam-cell（`data-cam-id="depth"`），標題「深度攝影機 D435i — 辨識避障用」；`<img>` 預設隱藏 + 「尚未拍照」placeholder 覆蓋層，只有一顆「📸 拍照」按鈕（沒有 cam1/cam2 那種串流用的重連按鈕）
+- `web_backend/public/style.css` — `.cam-overlay-offline.placeholder` 新增中性色（`--fg-dim`）變體，跟 cam1/cam2 的紅色「離線」語意區分
+- `web_backend/public/app.js` — 新增 `wireDepthCamera()`：按鈕 fetch `/snap/depth` 一次、用 blob URL 顯示在 `<img>` 內，不像 `wireCamera()` 有 MJPEG reload/offline 自動重試邏輯（本來就沒有常駐連線可斷）
+### 原因
+後端 `server.js` 的 `CAMERAS.depth` 與 `frame_capture/depth_cam_service.py` 的 `/snap/depth` 端點已存在（2026-07-20 為 `run_depth_avoid` 走行流程加的），本次只是把它同一顆相機也曝露在一般 Camera 頁面上，方便手動隨時看一眼、跟走行流程的自動快照分開用。**規範權威：** 無新規範，沿用既有 `/snap/:cam_id` reverse-proxy 慣例。
+### 問題（user）
+`do_step_up_`/`do_step_down_`/`do_cross_obstacle_` 吸不好重試退繩時，觀察到退到比這一步開始前的原始位置**還低**（超退）。
+### 根因
+`backup_cm` 的退繩上限是 `remaining = step - cumulative_backup_cm`，用的是**固定的 step 常數**；但 `crane_abs_target_cmd_` 實際下的搬移量 `mv` 可能因為「領先側只需補差額 ≤step」而**小於** step。用 step 當退繩預算，遇到 mv<step 的情況就能退超過起點。
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` `crane_abs_target_cmd_` 簽名新增輸出參數 `double& out_mv_cm`（純量、跟方向無關）
+- `user_lib/WASH_ROBOT.cpp` `crane_abs_target_cmd_`：每條 return 路徑（fixed_step fallback / meter 讀取失敗 / 已到位 / 正常 clamp 後）都設好 `out_mv_cm`
+- `user_lib/WASH_ROBOT.cpp` `do_step_down_`/`do_step_up_`/`do_cross_obstacle_`：`run_side` 內新增 `fwd_mv_cm`（預設=step，由 `pre_cycle` 呼叫 `crane_abs_target_cmd_` 後填入實際值），`backup_cm` 的 `remaining` 改用 `fwd_mv_cm` 取代 `step`
+### 原因
+user 觀察到實機退繩超過原位，追出退繩預算跟實際前進量脫鉤。方向判斷（pay_out/retract 選擇）完全沒動，只改磁量上限。**規範權威：** motion_flow.md step_down/step_up 段。⚠ washrobot 重編。
+
+## 2026-07-15e Claude (Sadie) — feet top-up 改背景執行，換邊不用等它
+### 需求（user）
+一組裡 ≥1 顆吸住就該立刻換邊處理另一側，「同時繼續補伸第 2 顆」，不要卡在原地等 topup 結束。
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` 新增 `zdt_bus_mtx_`（序列化 ZDT 推桿 bus 操作 —— `pusher_move_many_`/`pusher_two_stage_retract_`/`pusher_extend_with_disable_seal_` 三個函式入口都上鎖，因為 4 顆 ZDT 共用 `cli_20_` 一條 bus，`TCP_client::socket_mtx` 只保護單次 send/recv、不保護整個請求-回覆交易，背景 topup 跟主 thread 另一側動作可能同時搶 bus）
+- `user_lib/WASH_ROBOT.cpp` `do_step_down_`/`do_step_up_`：`run_side` 內 `feet_topup_unsealed_` 呼叫改成 `std::async` 丟背景（`topup_fut_right`/`topup_fut_left`），換邊立即開始；兩個 future 在 end-of-step `do_feet_realign_`（會動全部 4 顆）前 `.get()` join
+### 原因
+user 提出「換邊不等 topup」需求。**規範權威：** motion_flow.md step_down/step_up + project_v2_step_seal_per_side。⚠ washrobot 重編。
+
+## 2026-07-15d Claude (Sadie) — 首頁：吊機控制面板搬到 IMU 姿態面板下面
+### 修改檔案
+- `web_backend/public/index.html` — `panel-crane` 區塊搬到 `panel-washrobot`（IMU 姿態）區塊後面，其餘內容不變
+### 原因
+user 要求調整版面順序。
+
+## 2026-07-15c Claude (Sadie) — crane meter 讀數 sanity check，防止 corrupted 值反轉移動方向
+### 問題（user 回報實機事故）
+step 執行中吊機把一側拉超高、另一側超低，機體傾斜 49.6° 觸發 IMU 緊急停。
+### 根因
+`crane_abs_target_cmd_` 的 `delta = target_len - self_len` 決定方向；某次 `self_len` 讀到 corrupted 值（3.36941e+07，明顯是 SD76/status 字串解析到的髒值），讓 delta 正負號整個反過來（該 pay_out 卻變成 retract），per-move cap 只夾了搬移量沒夾方向，實際命令方向就反了。
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `read_crane_meters_`：`parse` lambda 加合理範圍檢查 `CRANE_METER_SANITY_MAX_CM = 20000`（200m），超出範圍當成解析失敗，讓呼叫端走 `fixed_step()` fallback（方向鎖在 step 開始前決定，不受這次讀數影響）
+### 已驗證
+`crane_abs_target_cmd_` 的 delta/word 判斷邏輯、`do_step_down_`/`do_step_up_` 的 `min/max` target 公式本身用實際事故數字回推是對的，問題只在輸入值沒做 sanity check。
+### 原因
+user 回報實機傾斜事故。**規範權威：** motion_flow.md step 段。⚠ washrobot 重編。
+
+## 2026-07-15b Claude (Sadie) — cmd_side_measured 補 motion_mtx 保護，crane_cmd_ 補印被丟棄的錯誤回覆
+### 問題（user 回報）
+吊機跟主機通訊頻繁出現 PAUSE-ON-ERROR + 快速重試迴圈。
+### 根因
+1. `crane_motion_timeout_sec_` 的 client 端 timeout（30cm≈8s）常常比實際搬移+安全檢查耗時短，逾時後 `crane_cmd_` 會強制斷線重連+重送同一指令
+2. `Crane_control_PI/main.cpp` 的 `cmd_side_measured`（v2 step 用的 `retract_left/right`/`pay_out_left/right`）沒有像 `motion_rope`/`cmd_roll_correct` 一樣搶 `motion_mtx`，導致重送的指令可能在舊指令還在跑的時候疊加驅動同一顆 VFD
+3. `crane_cmd_` 的 ERR 回覆字串被呼叫端丟棄，log 完全看不出真正失敗原因
+### 修改檔案
+- `Crane_control_PI/main.cpp` `cmd_side_measured`：加 `std::unique_lock<std::mutex> lock(motion_mtx, std::try_to_lock)`，搶不到鎖立刻回 `ERR motion_busy`
+- `user_lib/WASH_ROBOT.cpp` `crane_cmd_`：非 OK 回覆、或兩次 attempt 都失敗，印出實際內容/原因
+### 原因
+user 回報頻繁通訊異常。**規範權威：** motion_flow.md crane 協定段。⚠ crane 重編。
+### 待辦（未完成，本次未套用）
+`cmd_side_measured` 進入時沒有像 `motion_rope`/`cmd_roll_correct`/另一個 MotionScope 函式一樣重置 `abort_flag = false`——一旦被 stop 過一次，`abort_flag` 永遠是 true，之後所有 `retract_left/right`/`pay_out_left/right` 都會秒回 `ERR aborted`，只有重開吊機程式才會恢復（static 變數重新初始化）。已跟 user 討論出修法（在 `cmd_side_measured` 拿到 `motion_mtx`/`MotionScope` 後補一行 `abort_flag = false;`），**但尚未實際套用到程式碼**，下次接手要記得補。
+
+## 2026-07-14p Claude (Sadie) — crane 移動速度 40→35Hz（衝太快、折衷）
+### 修改檔案
+- `Crane_control_PI/main.cpp` — `VFD_MOTION_HZ_DEFAULT` 40 → **35**（承 07-14i 40；user 覺得 40 衝太快、可能助長過衝/IMU 多趟，折衷回 35）
+### 耦合
+`CMD_MEASURED_APPROACH_CM=8cm` 為 40-50Hz 減速留的 → 35Hz 更有餘裕，不動。`set_motion_hz` 仍可 live 調。
+### 原因
+user。**規範權威：** motion_flow.md。⚠ crane 重編。
+
+## 2026-07-14o Claude (Sadie) — follower IMU 對平 roll 讀值改短窗平均（減少來回趟數）
+### 需求（user）
+IMU 對平放/收繩有時來回多趟才到位，想提高一次到位機率。
+### 根因
+`follower_imu_level_` roll 用**單次瞬讀** `imu_.x - imu_roll0_`；角落若還在殘晃（settle 800ms 未必全停），單讀可能抓到晃動峰值 → trim 量偏 → 多一趟。
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `follower_imu_level_`：加 `read_roll_avg` lambda（~300ms 內 6 取樣平均、跳 read_error 樣本），pass 迴圈的 roll 改用它（panic/level/trim 共用）。
+### 效果
+roll 估計更穩 → trim 更準 → 一次到位機率提高、震盪減少。比單純拉長 settle 更有效、幾乎不慢（+~300ms/pass 但少一整趟）。
+### 未做（另一半根因）
+`FOLLOWER_SPAN_CM=100` 是 PLACEHOLDER，trim=span·tan(roll) 的**量級**沒校 → 這是一次到位的根本。待 user 量左右繩掛點水平間距 或 貼 log 反推後校準。
+### 原因
+user 選 ②。**規範權威：** motion_flow.md follower 對平。⚠ washrobot 重編。
+
+## 2026-07-14n Claude (Sadie) — stop_on_first_seal 即時化：一顆吸好立刻停等、進下一步
+### 問題（user）
+step 一組裡一顆先吸好後，理應及時進下一步；但實際會拖。
+### 根因
+`stop_on_first_seal` 只在**每個 iter 開頭**（disable_seal 4833）檢查、用的是**前一輪**的 done[]；cup 是在 **WAIT_SEAL 迴圈內**（5179）才標 sealed。所以一顆吸好後，WAIT_SEAL 仍**繼續等落後那顆**到 plateau(~2s)/timeout，下個 iter 開頭才 break → 延遲。
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `pusher_extend_with_disable_seal_` WAIT_SEAL：
+  - (a) **SEALED 判定點**（p<=SEAL_DEEP、5179）真吸好後立刻 `if (stop_on_first_seal) break` 跳出 per-slave 迴圈，不再 poll 其餘 cup —— 真正「吸好那刻就跳」
+  - (b) per-slave 迴圈後再加 stop_on_first_seal 檢查 → ≥1 真吸好 break WAIT_SEAL while → 收尾(未吸那顆 weak_seal+lock) → 下個 iter 頂 break iter loop
+### 效果
+一顆吸好即進下一步，省掉落後 cup 的 plateau/timeout 等待（最壞省 ~1.7s）。第 2 顆之後照舊由 feet_topup best-effort 補。
+### 範圍
+只影響 stop_on_first_seal=true（step feet）；attach/manual/probe（=false）仍等全部 cup、不受影響。
+### 原因
+user 要求即時進下一步。**規範權威：** motion_flow.md 密封流程。⚠ washrobot 重編。
+
+## 2026-07-14m Claude (Sadie) — crane fine_adjust_hz 試 15 後改回 10（IMU pass 數取捨）
+### 經過
+承 07-14i/j：減速接近尾段 8cm @ fine_adjust_hz 是提速後剩餘大塊。live 測 `set_fine_adjust_hz 15` 對平當下看似 OK、尾段變快。但 user 進一步觀察：**fine_adjust 快 → 過衝變大 → follower IMU 微調每 pass 過頭 → IMU pass 次數變多，net 反而沒賺**。→ 改回 10。
+### 最終
+- `Crane_control_PI/main.cpp` — `FINE_ADJUST_HZ_DEFAULT` 維持 **10**（試 15 後回退）
+### 教訓（記錄）
+fine_adjust_hz 不是越高越快：它同時是①減速尾段速度②IMU trim 移動精度。升高省了①但害了②（IMU 收斂 pass 變多），對有 IMU follower 的 step 反效果。`set_fine_adjust_hz` 仍可 live 調實驗。
+### 原因
+user 實測發現。**規範權威：** motion_flow.md。
+
+## 2026-07-14l Claude (Sadie) — Tier2 兩參數改 settings 可調（live 掃重吸補伸速度 + 障礙門檻）
+### 需求（user）
+想 live 測 `PUSHER_RPM_DISABLE_SLOW` 50→80，但它是純 constexpr 不能 live 改。
+### 修改檔案（`user_lib/WASH_ROBOT.{h,cpp}`）
+把兩個 constexpr 接成 settings（沿用 disable_retry_max_iters pattern，6 接點：struct member / 建構子 seed / status / set_setting clamp / #define / config save）：
+- `pusher_rpm_disable_slow`（Tier2 重吸補伸速度）clamp [10,200]，seed 50
+- `disable_phase_current_limit_ma`（障礙偵測相電流門檻）clamp [500,3000]，seed 1200
+### live 用法（target=washrobot）
+- `set_setting pusher_rpm_disable_slow 80`
+- `set_setting disable_phase_current_limit_ma 1500`（push 快→電流基準抬高→門檻跟著調，避免誤判障礙）
+- `get_settings` 看 current:default；`save_settings` 存 settings.json（開機載入）
+### 相容
+seed = 原 constexpr → 預設行為不變。#define 在 seed 之後 shadow constexpr（同 disable_retry_max_iters）。
+### 原因
+user 要 live 掃 Tier2。**規範權威：** motion_flow.md。⚠ 要**重編一次**（加 settings plumbing），之後永久 live。
+
+## 2026-07-14k Claude (Sadie) — ZDT 收腳目標 0→300（避免高速撞 hardstop「叩」聲）
+### 需求（user）
+Tier1 收腳提速後（RETRACT_FULL 1200rpm），收到 0=機械原點會撞 hardstop 有撞擊聲。
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — `PUSHER_RETRACT_PULSE` 0 → **300**（≈0.1cm，停在原點前）
+### 為何安全
+- 閉環位置模式規劃減速停在 300、不再撞底
+- FAKE-DONE 驗證 `|pos|>50°(500pulse)`：300pulse=30°<50° → 正常收好一樣過、卡住(>500)照抓
+- set_zero（僅 retry 重吸）原假設「收到0=hardstop」；改 300 後在 300 重設零點，但 retry 少見 + last_seal_pulse_ 自校正，影響小（多次重吸若漂移再議）
+### 若無效（caveat）
+若「叩」其實是高速急停本身（`PUSHER_ACC_RETRACT=255` 減速太猛）而非撞底 → 停 300 仍會叩；那要改降 acc，不是改目標。
+### 原因
+user 回報 + 提議。**規範權威：** motion_flow.md。⚠ washrobot 重編。
+
+## 2026-07-14j Claude (Sadie) — 配合繩速提速：減速接近距離 5→8cm（耦合修正）
+### 背景
+承 07-14i（motion_hz 30→40、可 live 到 50）。繩速越高，`cmd_side_measured` 從 motion_hz 減速到 fine_adjust_hz 需要的距離越長；原 `CMD_MEASURED_APPROACH_CM=5` 是配 30Hz 調的，40Hz+ 會來不及減速→過衝回來。
+### 修改檔案
+- `Crane_control_PI/main.cpp` — `CMD_MEASURED_APPROACH_CM` 5 → **8**（涵蓋 live set_motion_hz 到 50Hz；代價每次量測移動多 ~3cm 走慢速 ≈ +0.3s，換不過衝）
+### 其他耦合（未動、記錄供 bench 判斷）
+- **輪詢 50ms**（cmd_side_measured）：40Hz 下 50ms≈1cm 粒度，減速觸發點偵測晚 ~1cm；可降 30ms（次要，未改）
+- **變頻器減速時間**（SE3 P.8 / MH300 01-13）：手動/motion_rope 直接從 motion_hz 煞停，40Hz 滑行較長；量測移動有減速尾段保護。若非量測移動過衝變大→變頻器調短減速時間（左右對齊）
+- **washrobot `crane_motion_timeout_sec_`**（ceil(cm/10)+5s）：假設 10cm/s、實際更快 → margin 更多，免動
+- **張力**：加減速動態張力升高，注意別誤觸（勿降門檻）
+### 原因
+user 主動問繩速改動的耦合。**規範權威：** motion_flow.md。⚠ crane 端重編。
+
+## 2026-07-14i Claude (Sadie) — 提速：crane 移動 30→40Hz + IMU 校正 settle 1200→800ms
+### 需求（user）
+IMU + 吊機矯正位置太慢；吊機移動也想更快。
+### 修改檔案
+- `Crane_control_PI/main.cpp` — `VFD_MOTION_HZ_DEFAULT` 30 → **40Hz**（rope ~15→~20cm/s）。每步繩移動 + IMU trim 移動都變快；`cmd_side_measured` 減速接近尾段（最後 5cm 仍 fine_adjust_hz）→ **停止精度/對平準度不受影響**。runtime `set_motion_hz <hz>` 可再上調到 `VFD_MAX_HZ=50`
+- `user_lib/WASH_ROBOT.h` — `FOLLOWER_IMU_SETTLE_MS` 1200 → **800ms**（IMU 每 pass 少等 400ms；多 pass 兜底收斂）
+### ⚠ Bench 觀察
+- crane 40Hz：注意張力動態 / 停止；若晃或張力尖峰 → `set_motion_hz` 降回測試。想再快可 live 調到 50、告訴我 sweet spot 我 bake 進 default
+- IMU settle 800ms：若第二腳讀 roll 時角落還在晃 → trim 抖 → 往回加（→1000）
+### 備註（未動、可選）
+小 IMU trim（≤5cm）整段都在減速區 → 全程 `fine_adjust_hz`(10Hz)、加快 motion_hz 對它無效。要更快得升 `fine_adjust_hz`（set_fine_adjust_hz），但犧牲精準停 —— 需要再說。
+### 原因
+user 要求。**規範權威：** motion_flow.md。⚠ crane 端要**單獨重編部署**（Crane_control_PI）；washrobot .h 也要重編。
+
+## 2026-07-14h Claude (Sadie) — realign 一律單段（取消 fast_path 分支 + 兩段 + jog）
+### 承 07-14g 討論後 user 定案
+不分大小 drift，realign **一律單段 @70rpm 收/伸、不做 Stage 0 jog**。
+### 修改檔案（`user_lib/WASH_ROBOT.cpp` `do_feet_realign_`）
+- 移除 `fast_path` 判定（07-14g 加的）
+- retract 一律單段（stageA=full delta @ RPM_FULL=70，stageB_mag=0 恆 no-op）
+- 移除 Stage 0 preload-relief jog（v2 腳不撐重、預載可忽略；單段 70 自行溫和破黏）
+- `run_stage(2)` 保留但恆跳過（結構留著）
+- `user_lib/WASH_ROBOT.h`：移除 `REALIGN_FAST_PATH_MAX_CM`（不再用）；`REALIGN_RETRACT_RPM`(100)/`REALIGN_RETRACT_ACC` 在 live realign 已不用（保留常數，retired copy 可能引用）
+### 為何比兩段好
+舊兩段的 Stage A 是 100rpm 破黏 → 正是脫封元凶；統一 70 更溫和、且省掉 jog + 分段開銷。大 drift 全程 70 稍慢但罕見、可接受。
+### 原因
+user 選定。**規範權威：** motion_flow.md。⚠ 增量改動、建議再 build。
+
+## 2026-07-14g Claude (Sadie) — realign 提速（砍段數）+ 修脫封：小 drift 快速路徑 + FULL rpm 降回 70
+### 背景（實機 log）
+`realign_post_unsealed=1,3 (seal lost during retract)` → 07-14e 把 RETRACT_RPM_FULL 拉到 120 扯破真空脫封。且 drift 只 ~1cm 卻硬跑三段（jog + 縮1/3 + 縮2/3），每段 ~450-600ms 固定開銷 → 時間花在開銷不是移動。結論：**加速沒用還脫封；要砍段數 + 降速**。
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`
+  - `REALIGN_RETRACT_RPM_FULL` 120 → **70**（治脫封）
+  - 新增 `REALIGN_FAST_PATH_MAX_CM = 1.5`
+- `user_lib/WASH_ROBOT.cpp` `do_feet_realign_`
+  - 算 `fast_path = max_drift ≤ 1.5cm`
+  - fast_path：**跳 Stage 0 jog** + retract **Stage A/B 併成一段**（full delta @ RPM_FULL=70，Stage B mag=0 skip）
+  - 大 drift：維持三段慢工（jog → 慢破黏 1/3 @100 → 快收 2/3 @70）
+### 效果
+小 drift（常態）realign 從 ~3.5s → ~1s（省 2 段開銷），**且降速修掉脫封**。
+### ⚠ 注意
+大 drift 路徑 Stage A 仍 100rpm；若大 drift 時也脫封，再降 `REALIGN_RETRACT_RPM`。
+### 原因
+user 選 A。**規範權威：** motion_flow.md。已 build（user 前一批確認可編）；此條為後續增量，建議再編一次。
+
+## 2026-07-14f Claude (Sadie) — 跨障礙物 Phase 1：錨側伸 2× 與移動側縮腳「同時做」（保留兩段脫壁）
+### 需求（user）
+跨障礙物 Phase 1 原本「右縮腳 → 左伸 2×」序列。要同時做、又要保留兩段慢脫壁。
+### 做法（`user_lib/WASH_ROBOT.cpp` `do_cross_obstacle_` pre_cycle）
+- 錨側(未動側)伸 2× 改用 **`motion_control_pos_mode_nowait(..., sync=0)`** 非阻塞發射：sync=0 = 立即執行、**不參與 broadcast sync-trigger**，所以不會跟移動側縮腳的 sync trigger 打架 → 兩者在 bus 上並行
+- 移動側照舊跑**完整 `pusher_two_stage_retract_`**（慢脫壁 stage1 + full stage2 全保留）
+- 最後 `zdt_wait_motion_done_many_(anchor)` join 錨側伸長
+### 效果
+Phase 1「縮+伸」從序列(相加)變並行(取 max) ≈ 省 ~0.2-0.3s/跨障礙步；**兩段脫壁 gentleness 不犧牲**。
+### 安全
+錨側 valve 全程不動、伸長期間持續吸住；join 有 stall/timeout 偵測。僅影響 cross-obstacle Phase 1（一般 step 不受影響）。
+### 原因
+user 要求。**規範權威：** motion_flow.md。⚠ 未 build 驗證。
+
+## 2026-07-14e Claude (Sadie) — realign 收放速度提速（每步一次，對連走最有感）
+### 修改檔案（`user_lib/WASH_ROBOT.h`）
+| 常數 | 舊 | 新 |
+|---|---|---|
+| `REALIGN_RETRACT_RPM`（Stage A 破黏）| 50 | **100** |
+| `REALIGN_RETRACT_RPM_FULL`（Stage B）| 60 | **120** |
+| `REALIGN_RETRACT_ACC_FULL` | 50 | **150** |
+| `REALIGN_EXTEND_RPM`（伸長）| 20 | **60** |
+### 理由
+v2 腳不撐重、torque spike 風險降。realign 每步末跑一次 → script 連走最有感。
+### ⚠ Bench 觀察
+realign 限速主因是「保持吸住拉太快會扯破真空、cup 脫落失錨」——若 bench 看到 realign 中途脫封/失錨，往回降 RETRACT_RPM。
+### 原因
+user 要求。**規範權威：** motion_flow.md。⚠ 未 build 驗證。
+
+## 2026-07-14d Claude (Sadie) — feet_topup 輕量化：縮短「一組吸好→換組」間隔
+### 需求（user）
+換組前補第 2 顆（feet_topup）跑整輪 disable_seal（最多 5 iter × plateau 2s）→ 換組 gap 太久。
+### 修改檔案
+- `user_lib/WASH_ROBOT.h/.cpp` `pusher_extend_with_disable_seal_`：加 `int max_iters = 0`（0 = 用 DISABLE_RETRY_MAX_ITERS 預設）；`MAX_ITERS = max_iters>0 ? max_iters : DISABLE_RETRY_MAX_ITERS`
+- `feet_topup_unsealed_`：呼叫傳 `max_iters=2` → 第 2 顆只快速試 2 次補不到就走（下一步再補，該側仍靠已吸那顆錨定）
+### 效果
+換組前 topup 最壞從 ~5 iter 砍到 2 iter；主密封 / attach / 障礙偵測**不受影響**（預設 0 = 原行為）。
+### 原因
+user 要求加快 step 間切換。**規範權威：** motion_flow.md。⚠ 未 build 驗證。
+
+## 2026-07-14c Claude (Sadie) — 第二腳對平預設改成 IMU
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — `follower_use_imu_{false}` → `{true}`（預設 imu）+ 註解更新
+- `web_backend/public/index.html` — follower mode hint「（預設）」從 METER 移到 IMU
+### 行為
+step 第二隻腳（follower）預設走「方案B 粗走 + IMU roll 精對平」；仍可 `set_follower_mode meter` 切回原本純計米。`follower_use_imu_` 非持久化 → 重啟回預設 imu。
+### ⚠ 注意
+imu 路徑收斂速度依賴 `FOLLOWER_SPAN_CM`（目前 100.0 PLACEHOLDER、待 bench 校）；若對平不穩先切 meter。
+### 原因
+user 要求。**規範權威：** motion_flow.md follower 對平（待 Jim 同步）。⚠ 未 build 驗證。
+
+## 2026-07-14b Claude (Sadie) — 走路提速（激進 Tier 1）：v2 腳不撐重、只定位
+### 需求（user）
+v2 ZDT 腳組不撐重量（重量在吊機繩）、只做定位 → pusher 運動可大幅提速。走激進版。
+### 修改檔案（`user_lib/WASH_ROBOT.h`）
+| 常數 | 舊 | 新 |
+|---|---|---|
+| `PUSHER_RPM`（伸腳）| 700 | **1200** |
+| `PUSHER_RPM_RETRACT`（慢脫壁）| 30 | **150** |
+| `PUSHER_RPM_RETRACT_FULL`（空走收回）| 500 | **1200** |
+| `RETRACT_SLOW_PEEL_CM`（慢脫壁距離）| 2.0 | **1.0** |
+| `PUSHER_STAGE1_SAFETY_FACTOR` | 3.0 | **1.0** |
+| `VACUUM_RELEASE_WAIT_MS`（洩壓等待）| 1500 | **700** |
+### 效果
+- 兩段收腳 stage1 慢脫壁延遲：`(1.0/(150×3.08/60))×1.0×1000` ≈ **130ms**（原 3896ms）
+- 每步粗估省 ~9s（脫壁 3766×2 + vent 800×2）
+### ⚠ Bench 觀察重點
+- `VACUUM_RELEASE_WAIT_MS=700` 是氣動洩壓物理下限：若 cup 帶負壓「啵」彈開 / 收腳瞬間 stall → 砍過頭，往回加。
+- `PUSHER_RPM=1200` 若掉步小頓，靠 ZDT 閉環補；真不穩再降。
+### 未動（Tier 2）
+- `PUSHER_RPM_DISABLE_SLOW=50`（重吸補伸，靠相電流判障礙/撞牆，加速要重調門檻）
+- realign 收放速度（另議，見下條/對話）
+### 原因
+**規範權威：** motion_flow.md 速度參數（待 Jim 同步）。⚠ 未 build 驗證。
+
+## 2026-07-14a Claude (Sadie) — script 可選往上/往下走
+### 需求（user）
+script（auto run）原本固定往下；加 up/down 方向選擇。
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — `cmd_run_script(csv, bool up=false)`、`cmd_run_saved(name, bool up=false)`（預設 down，向後相容）
+- `user_lib/WASH_ROBOT.cpp`
+  - `cmd_run_script`：加 `up` 參數；每步 `cross_i ? do_cross_obstacle_(up) : (up ? do_step_up_(...) : do_step_down_(...))`；log/EVT `script_start` 加 `dir=`
+  - `cmd_run_saved`：加 `up`，轉傳 cmd_run_script
+- `facade_cleaning_v2/main.cpp`
+  - `run_script`：解析可選前綴方向 `run_script [up|down] <csv>`（無方向→down，向後相容；CSV 為數字故無歧義）
+  - `run_saved`：解析可選尾端 `run_saved <name> [up|down]`
+- `web_backend/public/index.html` + `app.js`：script panel 加 `direction` 下拉（down↓/up↑）；btn-run-script 送 `run_script <dir> <csv>`；saved-script Run 送 `run_saved <name> <dir>`；confirm 顯示方向
+### 相容性
+舊指令 `run_script <csv>` / `run_saved <name>`（無方向）維持往下不變。每步方向套用到 plain step 與 cross-obstacle（`x`）步。
+### 原因
+**規範權威：** motion_flow.md scripted run（待 Jim 同步）。⚠ 未 build 驗證。承 07-13a/b（跨障礙物 + script x）。
+
+## 2026-07-13d Claude (Sadie) — 跨障礙物：錨側伸 2× 改用一般伸腳速度（PUSHER_RPM）
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `do_cross_obstacle_`：錨側 stand-off 伸 2×preset 的 `pusher_move_` 由 `REALIGN_EXTEND_RPM/ACC`(20/200 慢) 改為 `PUSHER_RPM/PUSHER_ACC`（與一般伸腳同速，per user）。重吸段本來就走 cycle_group_ 的 PUSHER_RPM，故現在跨障礙物全程伸長速度一致。
+### 原因
+user：跨障礙物伸長速度要和伸腳一樣。⚠ 錨側伸 2× 是頂機體重量、比一般伸腳負載重，若實機出現 stall 再考慮調回慢速或折衷。未 build 驗證。
+
+## 2026-07-13c Claude (Sadie) — realign 放寬：每側 ≥1 顆吸住即可做（原本要 4 顆全吸）
+### 需求（user）
+承 stop_on_first_seal（每側常只吸 1 顆）：realign 原本「任何一顆沒吸就拒絕」→ end-of-step realign 幾乎每次 `realign_refuse_unsealed` 失敗。放寬成「每側 ≥1 顆吸住 + 門檻到就做」。
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` `do_feet_realign_`：seal pre-check 從「vacuum_check_(all) 有任何 unsealed → refuse」改成「`group_seal_ok_(right/left)`：每側 ≥1 顆吸住才做，**整側全掉**才 refuse（`realign_refuse_side_off`）」；有殘留未吸顆數 → log `realign_partial_seal` 但繼續。doc comment 同步更新（seal 檢查一律跑、apply_threshold 只 gate 門檻）。
+### 行為
+- 每側 ≥1 吸住 + 門檻到 → 做 realign（吸住那顆拉機體貼牆，未吸那顆在空中歸位到 preset、順便把過伸的弱吸腳重置）
+- 整側（兩顆全掉）→ refuse（那側無錨可拉，危險）
+- 門檻邏輯（apply_threshold）不變；force（apply_threshold=false，如 cross-obstacle Phase3 / 手動 realign）一樣要每側 ≥1
+### 原因
+配合 [規範 project_v2_step_seal_per_side] 一顆即過 + [[project_v2_realign_sealed_retract]]。**規範權威：** motion_flow.md realign 條件（待 Jim 同步）。⚠ 未 build 驗證。
+
+## 2026-07-13b Claude (Sadie) — script CSV 加 `x` 後綴：某步跨障礙物
+### 需求（user）
+承 07-13a，讓 auto run script 的**某一步**也能指定跨障礙物。
+### 語法
+CSV token 文法擴充為 `<int>[n][x]['*'<count>]`：
+- `x` 後綴 = 該步走 `do_cross_obstacle_(down)`（2×preset 站離牆跨越），**覆蓋 sweep**（跨障礙物本來就無 arm sweep）
+- 與 `n` 可並存、順序不拘（`30nx`==`30xn`），例：`30,30x,30`（sweep→跨→sweep）、`30x*2`（兩步跨）
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — `ScriptStep` 加 `bool cross`；CSV 文法註解補 `x`
+- `user_lib/WASH_ROBOT.cpp`
+  - `parse_script_csv_`：改成迴圈剝除尾端旗標（`n`/`x`，順序不拘），`out.push_back({cm,sweep,cross})`
+  - `cmd_run_script`：計數加 n_cross；每步 `cross_i ? do_cross_obstacle_(false) : do_step_down_(...)`；EVT mode 字串加 `cross`
+- `web_backend/public/app.js` — JS `parseScriptCsv` 同步剝 `n`/`x` + 回傳 nCross；預覽/confirm breakdown 顯示 cross；進度標籤加 `🧗cross`
+- `web_backend/public/index.html` — CSV placeholder 補「x=跨障礙物」
+### 相容性
+舊 script（無 x）行為不變；`x` 為新增旗標、預設 false。
+### 原因
+**規範權威：** motion_flow.md 跨障礙物 + scripted run 語法（待 Jim 同步）。⚠ 未 build 驗證。相關 07-13a。
+
+## 2026-07-13a Claude (Sadie) — 新增「跨障礙物」功能（伸腳 2× 站離牆跨越後縮回）
+### 需求（user）
+一般 step 無法越過牆面突出物（窗框等）。跨障礙物 = 把腳伸到 **2×preset** 讓機體站離牆、騰出空間跨過去，兩邊都跨完再一起縮回正常長度。step up/down 都要、沿用 step_cm、兩邊都跨、重吸沿用一般 step 的穩健度（含 stop_on_first_seal 一顆吸住即過）。
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`
+  - `cycle_group_` 加 optional 參數 `std::function<int(int)> feet_target_override = {}`（預設空 → 現行 `feet_target_capped_` 行為，**do_step_*_ 完全不受影響**）；feet target 計算：override 有值就用它（bypass snowball cap）
+  - 宣告 `do_cross_obstacle_(bool up)`、`cmd_cross_obstacle_down/up(int)`
+- `user_lib/WASH_ROBOT.cpp`
+  - `do_cross_obstacle_(bool up)`：獨立 orchestrator（**不改 do_step_*_ 本體**，避免撞協作者）。Phase1 首側跨（釋放+縮腳 → 錨側保持吸住伸 2×preset 站離牆 → crane 移 → 重吸 2×preset）；Phase2 次側跨（錨已在 2×，不再伸）；Phase3 `do_feet_realign_(force)` 四顆保持吸住縮回正常 preset 對平。重吸走 `cycle_group_(..., tgt2x)` 保留 retry/backup/stop_on_first_seal。錨側伸 2× 用 `pusher_move_` per-slave @ REALIGN_EXTEND_RPM(20)、**valve 全程不動**。crane 沿用 crane_abs_target_cmd_（方案B）。
+  - `cmd_cross_obstacle_down/up`：mirror cmd_step_down/up（cm 檢查、set_state、ensure_arm_parked）
+- `facade_cleaning_v2/main.cpp`：dispatch `cross_obstacle_down` / `cross_obstacle_up`
+- `web_backend/public/index.html` + `app.js`：Home panel 加「🧗 跨障礙物 ↓ / ↑」兩顆，送 `cross_obstacle_down/up <cm>`
+### 安全 / 不變式
+- 保留「每側至少 1 顆錨定、整側全掉才硬停」；跨前 anchor check + 起步 gate 同 step。
+- 2×preset ≈ 11.4/12cm，仍在 SMC LEYG25 20cm 行程內。
+- ⚠ 未加額外張力/傾斜監控（錨側伸 2× 撐離牆會改變重心/繩張力）——crane 端 rope move 自帶張力安全；若實機 bench 發現撐離牆時不穩，再議加保護。
+### 原因
+**規範權威：** motion_flow.md（跨障礙物新流程，待 Jim 同步）。⚠ do_step_*_ 協作者正在改，本功能刻意做成獨立函式 + cycle_group_ 加法式參數以避免衝突；合併時請留意 cycle_group_ 簽名多了第 7 參數（預設值、向後相容）。
+
+## 2026-07-09g Claude (Sadie) — IMU 平衡通報門檻 15°→45°（= 緊急門檻）
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — `IMU_ASK_DEG` 15.0 → 45.0（`IMU_EMERGENCY_DEG` 本來就 45.0，不變）
+### 原因
+user 要求把 IMU 即時平衡監測的兩個門檻都設成 45°。
+### 行為（重要副作用）
+- `imu_monitor_loop_` 的 ASK 分支條件是 `avg >= IMU_ASK_DEG && avg < IMU_EMERGENCY_DEG`；兩者都 45 → **ASK 分支永不觸發** → **不再有 15° 中途「暫停問你確認平衡」**（`balance_ask` / WaitingConfirm 不會發生）。
+- 只剩 **45° 緊急停止**（avg≥45° 持續 ≥500ms → abort + crane stop + Error + EVT `imu_emergency`）仍有效。
+- 判定不變：`max(|roll−baseline|,|pitch−baseline|)`、100ms 取樣、10 筆(~1s)平均、需持續 ≥500ms。
+### 注意
+- `IMU_ASK_DEG` 是**執行期設定 `imu_ask_deg` 的預設值**（ctor `store(IMU_ASK_DEG)`，可 `set_setting imu_ask_deg` 調，範圍 1–45）。⚠ 若裝置上有舊 `settings.json` 存了 `imu_ask_deg=15` 會**覆蓋**新預設 → 需刪除/更新該檔或執行期 `set_setting imu_ask_deg 45`。
+- washrobot 端重編部署。
+### 規範權威
+本 changelog（IMU 門檻語意見 imu_monitor_loop_）。
+
+## 2026-07-09f Claude (Sadie) — 可選「第一步先走左腳/右腳」（後端＋Web 兩顆按鈕）
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — 新增 `std::atomic<bool> first_step_right_{true}` + `cmd_set_first_step(side)` 宣告
+- `user_lib/WASH_ROBOT.cpp`
+  - `cmd_run` / `cmd_run_script` loop：`right_first = ((i%2==1) == first_step_right_.load())` — 以選定起始腳為種子，之後每步交替
+  - `cmd_step_down` / `cmd_step_up`（單步）：傳 `first_step_right_.load()` → 單步也依選定起始腳
+  - `cmd_status` 加 `first_step=left|right`；新增 `cmd_set_first_step`
+- `facade_cleaning_v2/main.cpp` — 新增 `set_first_step <left|right>` dispatch
+- `web_backend/public/index.html` — follower-mode 列下加「第一步先走」列：`#btn-first-left`(左腳先)/`#btn-first-right`(右腳先) + `#first-step-status` + hint
+- `web_backend/public/app.js` — status 解析 `first_step=(left|right)` 同步（高亮 active 那顆 primary）；兩顆 click → `set_first_step left|right` + `status`
+### 原因
+user 要求 Web 上能選第一步先走左腳或右腳（原本寫死右先→交替）。
+### 行為
+- `set_first_step left|right`（或按鈕）決定 step 1 的先動腳，之後每步左右交替：右先→左→右…／左先→右→左…。
+- 套用範圍：多步 `run`/`run_script`（交替種子）＋ 單步 `step_down`/`step_up`。掃刷變體單步暫維持預設。
+- **預設 `right`＝原本行為**（`(i%2==1)==true` 等價舊式），向後相容。status 顯示 `first_step=`。非持久化。
+- Web 不用編譯（硬重整）；指令本體在 washrobot → **washrobot 重編部署**。
+### 相依
+接 07-09b（交替先動）＋07-09c/d（follower 模式切換 UI 樣式）。**規範權威：** 本 changelog；runbook 按鈕對應（待補）。
+
+## 2026-07-09e Claude (Sadie) — Linux_test 加 MH300 變頻器測試（menu 30，純捲揚機控制）
+### 修改檔案
+- `Linux_test/main.cpp`
+  - `#include "MH300_inverter.h"`
+  - 新增 `test_mh300_inverter()`：連 USR gateway（預設 192.168.1.30:4001 slave 1）直控台達 MH300；指令 `f/r <hz>`(fwd/rev run)、`s`(stop)、`e`(emergency B.B)、`h <hz>`(只設頻率)、`c`(configureModbusControl 設 RS485 為 run+freq 來源)、`a`(clearAlarm 清故障)、`m`(monitor: 輸出Hz/電流/電壓/status word/error code)、`q`(離開前自動 stop)
+  - menu 顯示 + dispatch 加 `30`
+- `Linux_test/Linux_test.vcxproj` — 納入 `MH300_inverter.cpp` / `.h`
+### 用途
+純捲揚機控制測試：設頻率 + 收放繩，**不需計米器**。對照既有 menu 23（SE3 單台）風格；MH300 特有的 `c`(先設 Modbus 來源否則拒收 run)、`a`(故障 reset)、monitor 讀 error code(0x2100)。FWD/REV 對應收/放繩由接線決定，先低 Hz 驗方向。**規範權威：** CLAUDE.md §Device Drivers（MH300_inverter）；memory project_new_crane_vfd_mh300 / project_crane_vfd_build_switch。
+
+## 2026-07-09d Claude (Sadie) — Web GUI 加「第二腳對平模式」切換按鈕（imu/meter）
+### 修改檔案
+- `web_backend/public/index.html` — run row 下加一列：`#btn-follower-mode` 切換鈕 + `#follower-mode-status` 狀態字 + hint(ul/li) 說明 imu/meter
+- `web_backend/public/app.js`
+  - status 解析加 `follower_mode=(imu|meter)` 同步：更新按鈕文字/`dataset.mode`/狀態字，IMU 時上 `primary` class 高亮
+  - `#btn-follower-mode` click：讀 `dataset.mode` 送相反的 `set_follower_mode <imu|meter>`，再送 `status` 重新同步
+### 行為
+- 按鈕顯示目前模式（`對平模式: IMU/METER`），點一下切換；靠既有 500ms washrobot status 輪詢自動同步初始狀態。
+- `server.js` 原封轉發指令、**不用改**。
+### 部署
+- **Web 不用「編譯」**（純 HTML/JS）：改完瀏覽器**硬重整**即可（若 Node 有快取靜態檔就重啟 backend）。指令本體 `set_follower_mode` 是 washrobot C++ 實作 → **washrobot 仍要重編部署**才吃得到。
+### 相依
+接 07-09c（後端指令＋status 欄位）。**規範權威：** runbook Web GUI 按鈕對應（待補）。
+
+## 2026-07-09c Claude (Sadie) — follower 第二腳對平模式改執行期可切換：imu / meter
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`
+  - 移除編譯期 `static constexpr bool FOLLOWER_IMU_LEVEL`（其餘 FOLLOWER_* 微調常數保留）
+  - 新增執行期 `std::atomic<bool> follower_use_imu_{false}`（in-class init）
+  - 新增 `cmd_set_follower_mode(mode)` 宣告
+- `user_lib/WASH_ROBOT.cpp`
+  - `follower_imu_level_` 開關改讀 `follower_use_imu_.load()`（meter 模式直接 return，只留 pre_cycle 的方案B 粗走）
+  - `cmd_status` 加 `follower_mode=imu|meter`
+  - 新增 `cmd_set_follower_mode` 實作
+- `facade_cleaning_v2/main.cpp` — 新增 `set_follower_mode <imu|meter>` dispatch
+### 原因
+user 要求把 follower（第二隻腳）拆成**兩個可切換功能**：`imu`＝第二腳依 IMU 對平（策略1）、`meter`＝依原本方法計米器同步（方案B）。方便 bench 比較兩者。
+### 行為
+- **兩模式共用 pre_cycle 的方案B 粗走（計米共同絕對目標）**；差別只在粗走後是否再跑 `follower_imu_level_`：
+  - `meter`：不跑 → 純方案B 計米同步（原本方法）
+  - `imu`：跑 → 粗走後再依 IMU roll 精對平（策略1）
+- 指令 `set_follower_mode imu|meter`；`status` 顯示 `follower_mode=`。
+- **⚠ 預設改成 `meter`**（07-09a 當時 constexpr=true 是 IMU-on；現在預設 meter=原本方法，比較安全、且 imu 需先 bench 量 `FOLLOWER_SPAN_CM`）。**要測 IMU 要先下 `set_follower_mode imu`。**
+- 非持久化（重開回 meter 預設）；要持久化再說。
+### 相依
+- washrobot 端重編部署。疊在 07-09a(IMU 對平)＋07-09b(交替先動)上。
+### 規範權威
+plan §12；本 changelog。
+
+## 2026-07-09b Claude (Sadie) — 多步走法交替先動腳（右→左→右…），單步右先
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — `do_step_down_` / `do_step_up_` 加末參數 `bool right_first = true`
+- `user_lib/WASH_ROBOT.cpp`
+  - `do_step_down_` / `do_step_up_`：加 `right_first` 參數；begin log 反映順序；run_side 呼叫拆成 `run_right(follower)`/`run_left(follower)` thunk，依 `right_first` 決定先跑哪側；**先動側 = datum(imu_level=false)、後動側 = follower(imu_level=true)**
+  - `cmd_run` loop：`right_first = (i%2==1)` → step1 右先、step2 左先、step3 右先…
+  - `cmd_run_script` loop：同上 `(i%2==1)`
+### 原因
+user 要求：所有走 ≥2 步的方法交替先動腳（右→左→右…），只走 1 步則右先。避免固定同一側先動造成不對稱（先動側是計米 datum、後動側才 IMU 對平；固定右先 → 右側絕對位置每步隨計米微飄，交替後左右對稱分攤）。
+### 行為
+- **統一規則 `right_first = (step_index % 2 == 1)`**：多步 run 從右先、逐步交替；單步 run（steps/N==1）只有 index 1 → 右先。→ 自動同時滿足「多步交替」與「單步右先」。
+- 單步指令（`cmd_step_down/up`、各 sweep 變體、obstacle 單步等）走預設 `right_first=true` → 右先，行為不變。
+- 交替後 follower（IMU 對平側）也交替；`follower_imu_level_` 本來就 general（move_group=="right" 方向邏輯已寫），right 當 follower 時 roll>0→retract_right / roll<0→pay_out_right。
+- 方案B 共同絕對目標 min/max 與順序無關，交替不影響 target 計算，只換「誰當 datum、誰當 follower＋先後」。
+### 相依
+- **washrobot 端重編部署**。疊在 07-09a(IMU 對平)＋07-08u(方案B) 上。
+### 附帶（回 user 轉彎提問）
+機構無法靠左右繩差「轉彎」：繩差只產生 roll(傾斜) 非 yaw；想斜向側移受限於(1)繩自上方固定點吊下的自復位橫向力、(2)持續傾斜使吸盤吸不牢、(3)機構未為 yaw 設計。真要水平移動需別的機構（吊車台車水平移動/專門橫向步態）。未寫入規範（僅討論）。
+### 規範權威
+plan §11（方案B 順序無關）；本 changelog。
+
+## 2026-07-09a Claude (Sadie) — 策略1：follower 側加 IMU 精對平（長繩計米不準的解法）
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`
+  - 新增常數群 `FOLLOWER_IMU_LEVEL(true)` / `FOLLOWER_ROLL_TOL_DEG(0.5)` / `FOLLOWER_IMU_MAX_PASSES(3)` / `FOLLOWER_IMU_MAX_TRIM_CM(15)` / `FOLLOWER_IMU_SETTLE_MS(1200)` / `FOLLOWER_SPAN_CM(100, placeholder)`
+  - 新增 `follower_imu_level_(move_group)` 宣告
+- `user_lib/WASH_ROBOT.cpp`
+  - 新增 `follower_imu_level_` 實作
+  - `do_step_down_` / `do_step_up_`：run_side 加參數 `bool imu_level`；pre_cycle 捕捉；粗走 crane 後（重伸吸盤前）呼叫 `follower_imu_level_`；call site 右 `false`、左 `true`
+### 原因
+user 擔心「繩越長計米作用越小」——長繩累積誤差 + 繩張力彈性伸長 → 「兩邊計米相等 ≠ 真水平」，方案B 純靠計米對平長繩會殘留傾斜。→ 加 IMU 當**真實水平基準**。
+### 行為（策略1 ＋ 監測，見 plan §12）
+- **第一側(右)** 純方案B 用計米走到共同目標、重吸 → 成為**真水平 datum**（`imu_level=false`）。
+- **第二側(左)=follower**：粗走(方案B measured, tension-safe)到 target 附近後，**IMU 精對平**——`follower_imu_level_` 反覆讀 `roll=imu_.x−imu_roll0_`，`|roll|<FOLLOWER_ROLL_TOL_DEG(0.5°)` 就停；否則用 `span·tan(roll)` 估距、下**小的 tension-safe measured move**（NOT raw on，保留 meter-death/tension 保護）、settle 再讀，最多 `MAX_PASSES(3)` 次。方向由 roll 正負決定（left high→pay_out_left / low→retract_left）。
+- **為何免疫長繩計米不準**：每 pass 重讀「真 roll」再修 → 收斂在真實水平，計米 scale 誤差只影響收斂速度不影響終點。span 不準也只影響 pace。
+- **非致命 / best-effort**：IMU read_error / roll panic(>BAL_CAL_ROLL_PANIC_DEG 15°) / crane fail / 3 pass 未收斂 → log+EVT 後照樣往下走（回退成純粗走）。**兼作監測**（每步 EVT `imu_level_ok/no_converge/roll_panic`）。
+- 維持「絕不同時放開 4 顆」不變式（只有 follower 側解真空時做）。
+### 待實機
+- **`FOLLOWER_SPAN_CM` 要量**（左右吸盤柱水平距，placeholder 100cm）；`FOLLOWER_ROLL_TOL_DEG` / `SETTLE_MS` / `MAX_PASSES` bench 調。
+- **`imu_roll0_` 基準可信度**：`imu_take_baseline_()` 在 attach(WASH_ROBOT.cpp:6019) 取，須確認取時機體確實水平。
+- step 太大時 mid-step 傾斜 `atan(step/span)` 可能逼近 15° panic（step20/span100≈11°，OK；step 大要留意）。
+- runtime 開關（現為 constexpr recompile）視需要再加指令。
+### 相依
+- **washrobot 端重編部署**（crane 協定沒變，raw 指令沿用）。疊在 07-08u(方案B)＋07-08s(減速接近)上。
+### 規範權威
+plan §12（＋機制 §10 L2/L3）；[[project_v2_level_match_left_to_right]]。
+
+## 2026-07-08v Claude (Sadie) — DISABLE_RETRY_MAX_ITERS 8 → 5（重吸補伸 iter 上限改回原本）
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — `DISABLE_RETRY_MAX_ITERS` 8 → **5**（per user 改回原本）
+### 連帶（自動）
+- seed `settings_.disable_retry_max_iters`、status、config 存檔皆從常數帶出；實際判斷走 `#define`→settings；clamp `[1,20]` 涵蓋
+### 注意（未一併改）
+- `DISABLE_RETRY_MAX_OVEREXTEND = 24000`（+8cm）**未動**。iter 改 5 後：5 push × 3000 = +15000 先 binding，cap 24000 迴圈吃不到 → 有效補伸上限降為 ~+5cm（phase1 ~5cm + 5cm ≈ 10cm 總伸長）。這回退了 07-08k「某幾隻要伸更長才勾到牆」拉高的搜尋深度（07-08k 前 cap=15000/iter=5 即 +5cm，正是此值）。若要維持長搜尋深度需另議 cap。
+### 原因
+user 要求把重吸補伸 iter 上限改回原本 5 次（配合 stop_on_first_seal + feet_topup：主迴圈一顆吸住即早退、第 2 顆交 topup，不需硬跑 8 iter）。**規範權威：** motion_flow.md 伸腳/重吸參數（待 Jim 同步）。
+
+## 2026-07-08u Claude (Sadie) — 步態改「共同絕對目標」（方案B，取代方案1 master/follower），杜絕失敗後過走
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`
+  - 新增常數 `LEVEL_MOVE_MARGIN_CM = 5`（單側單步移動上限＝step+margin，backstop）
+  - 移除 `crane_level_match_cmd_` 宣告；新增 `read_crane_meters_(L,R)`、`crane_abs_target_cmd_(move_group,dir_word,step,target_valid,target_len,out_timeout)`
+- `user_lib/WASH_ROBOT.cpp`
+  - `crane_level_match_cmd_` 定義 → 拆成 `read_crane_meters_` + `crane_abs_target_cmd_`
+  - `do_step_down_` / `do_step_up_`：run_side 參數 `bool is_follower` → `bool tgt_valid, double tgt_len`；pre_cycle 捕捉與 crane 呼叫改用 `crane_abs_target_cmd_`
+  - 兩個 step 函式在 run_side 呼叫「前」加**步前讀兩邊計米、鎖共同絕對目標**：down `target=min(L,R)+step`、up `target=max(L,R)-step`；讀不到 → `tgt_valid=false` → 兩側各自 fixed step fallback
+### 原因
+方案1（右 master 盲走固定 step、左 follower 追平右計米）在**某側 reseal 失敗、backup 退回原位**時，下一步 follower 要一次補 2×step（實測 log 出現 40cm 單次 `pay_out_left`）→ 單側在只有對側吸盤錨定時一次盪太遠。user 要求「step 開始前先確認兩邊計米、據此算收/放繩，避免上一步吸失敗、下一步走超過距離」。
+### 行為（方案B）
+- 步前讀兩邊 → 鎖共同絕對目標＝**從落後側推進一個 step**。落後側正好走 step、領先側**讓步**（走 ≤step，gap 大時甚至微退）→ **任何單側每步都不超過 step**、一步收斂回水平、不累積。
+- 不再有「盲走的 master」；方向由 `target−self` 正負自動決定（down/up 共用），`crane_word` 只當 fallback 方向。
+- 單側移動 backstop `min(step+5, 80)`；超過 clamp（不退回固定 step，餘量下一步補）。deadband `LEVEL_MATCH_TOL_CM=0.5` 沿用。
+- backup（重吸退回原位）沿用各自 `backup_word`，cumulative 仍以 `step` 為界（領先側若只走 step−gap，最壞退回略過原位，安全、下一步 re-level 吸收）。
+### 相依
+- 跟 07-08s（crane 減速接近，殘差 <1cm）疊加：殘差小 → 領先側 give-way 量也小，正常步 gap≈0 兩側都走 ~step。
+- **washrobot 端重編部署**（crane 端不需，指令協定沒變）。
+### 規範權威
+[[project_v2_level_match_left_to_right]]（方案1→方案B 演進）；plan §11。
+
+## 2026-07-08t Claude (Sadie) — step 換邊前 best-effort top-up 補吸剩下那顆（保留障礙/撞牆偵測）
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — 新增 `feet_topup_unsealed_(group)` 宣告
+- `user_lib/WASH_ROBOT.cpp`
+  - `feet_topup_unsealed_` 實作：對該側「還沒吸到的 cup 子集」再跑一次 `pusher_extend_with_disable_seal_`（stop_on_first_seal=false），valve 保持 ON、不縮回、不 rescue
+  - `do_step_down_` / `do_step_up_` 的 `run_side`：`cycle_group_` 成功後、換邊前呼叫 top-up（非致命、check_abort 保護）
+### 行為（選項 B 同步 top-up，per user）
+- 一側靠 1 顆密封 proceed 後，換邊變 anchor 前，**同步**盡量把剩下那顆補吸起來 → 盡量恢復「每側 2 顆」
+- **偵測全保留**：直接重用 disable_seal pipeline → 障礙 path A(電流) / STALL+EARLY / 撞牆 endpoint / weak_seal 偵測原封不動
+- **差別**：top-up **不做 obstacle rescue**（rescue 要放共用電磁閥 → 會把同側已吸那顆一起放掉）；偵測到障礙就 log/EVT `topup_obstacle` + 留著不吸、繼續。下一步該側主 cycle_group_ 仍帶完整 rescue
+- 非致命：seal / weak / obstacle / hard-fail 任何結果都 proceed；新吸到的 cup 會 record last_seal_pulse_
+- **不影響** attach / 手動 / probe / body
+### 原因
+承 [規範 project_v2_step_seal_per_side]：放寬成 1 顆即 proceed 後，仍希望把第 2 顆盡量補回來以恢復安全裕度（每側 2 顆）。user 選同步 top-up（無並發風險）且要求保留原偵測。**規範權威：** motion_flow.md 真空/伸腳流程（待 Jim 同步）。
+
+## 2026-07-08s Claude (Sadie) — crane 量測移動加「減速接近」尾段，消掉每步左右計米殘差
+### 修改檔案
+- `Crane_control_PI/main.cpp`
+  - 新增常數 `CMD_MEASURED_APPROACH_CM = 5`
+  - `cmd_side_measured` 迴圈：離目標剩 5cm 時把 VFD 降到 `g_fine_adjust_hz`（10Hz）再停；迴圈前加 `bool slowed` latch
+### 原因
+方案1（左對齊右計米）已生效、誤差不累積，但每步仍殘留 ~2-6cm 左右計米差 → 機體 roll 傾斜。log 追出根因：`cmd_side_measured` 全速 30Hz 衝到 `|len-base|>=cm` 才 `reliable_stop_one`，減速斜坡期間繩子繼續滑 → **過衝 2-6cm**（實測 self=199 下 pay_out_left 26，下一步讀到 231＝實走 32）。右主、左從都過衝，左從那次過衝就是每步的殘差傾斜量。
+### 效果
+- 兩側最後 5cm 降到 10Hz 精準停 → 過衝 <1cm → 每步左右殘差 <1cm。代價：每次量測移動最後 5cm 變慢，一步約多 ~2 秒。
+- tunable：`CMD_MEASURED_APPROACH_CM`（要夠長讓 30→10Hz 降速跑完）＋ crawl 頻率沿用 `g_fine_adjust_hz`（現場可用 `set_fine_adjust_hz` 調）。
+- **crane 端需重編部署**才生效。
+### 備註
+- 另發現左側 slave 2/4 長期吸不牢（disable_seal 衝到 iter3~4、pulse 27000~30000 仍 WEAK_SEAL）→ end-of-step realign 被 `realign_refuse_unsealed` 跳過。經 user 確認**是牆面問題**，非機構/程式，不在此處理。
+### 規範權威
+[[project_v2_level_match_left_to_right]]（殘差來源＝量測移動過衝，非累積）；plan §11。
+
+## 2026-07-08r Claude (Sadie) — ZDT 伸腳：一組 ≥1 顆真密封即停止補伸（stop_on_first_seal）
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`
+  - `pusher_extend_with_disable_seal_` 新增參數 `bool stop_on_first_seal = false`
+  - `cycle_group_`（step 的 extend 呼叫）傳 `stop_on_first_seal=true`
+- `user_lib/WASH_ROBOT.cpp`
+  - `pusher_extend_with_disable_seal_` 定義加參數；iter push-loop 頂端 exit 檢查新增：`stop_on_first_seal` 時，只要有 ≥1 顆**真密封**（`done && !weak_seal && !obstacle`）即 break，不再補伸其餘 cup
+### 行為
+- step_down/up 的腳組伸腳：一組(側) 2 顆只要 1 顆真密封 → 停止補伸、交給 wrap-up re-enable EN + 鎖位，cycle_group_ 的 vacuum_check（已放寬成 ≥1）接手 proceed
+- **不影響**：attach / 手動 pusher・zdt_pusher（走 smart_extend_subset_）/ probe / body → 皆用預設 false，維持「盡量每顆都吸」
+- **障礙物優先**：obstacle path（path A 電流 / STALL+EARLY）都先設 `early_abort_obstacle` 於此檢查前 break 走 rescue，不受早退影響
+### 原因
+承接 [規範 project_v2_step_seal_per_side] 的判準：既然 gate 已放寬成一組 ≥1 顆即算吸好，補伸迴圈也不該再花時間硬把其餘 cup 補到密封。user 指定「zdt 伸腳一組只要一隻吸好就繼續下一步」。**規範權威：** motion_flow.md 真空/伸腳流程（待 Jim 同步）。
+
+## 2026-07-08q Claude (Sadie) — 方案1 修正：re-seal 後大 delta 要照修（上限改 80cm，不再退固定 step）
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`：`LEVEL_MAX_EXTRA_CM(15)` → `LEVEL_MAX_DELTA_CM(80)`（硬上限）
+- `user_lib/WASH_ROBOT.cpp`（`crane_level_match_cmd_`）：原本 `|delta| > step+15` → 退回固定 step；改成**走完整 |delta|**（re-level），只有 `|delta| > 80cm` 才 clamp 到 80 + warn（剩下的下一步再修）
+### 原因
+Bench log：`[step_level] left delta=-47cm implausible (>step+15) — fixed step 20cm fallback`。slave 4 重吸/backup（step_up 左 backup=pay_out 往下）讓左繩多放、加上先前幾步的修正也被 `step+15=35` 這個 guard 擋掉 → 左比右長 47cm、越積越歪。User 指正：**每步左繩除非重吸否則應與右走同距離、計米位置也應相同；重吸後下一步要照 v1 DM2J「絕對目標自動補償」的機制修回**（已核對 WASH_ROBOT.cpp:6483：v1 最終用絕對 rail 目標、carryover 已移除）。我的「左對齊右絕對計米」正是同機制，錯的只是上限太緊。User 定**計米兩邊差 / 單次移動上限 = 80cm**。修正後 47cm 這種合法修正照做、一步就收斂。**規範權威：** `.claude/v2_app_redesign_plan.md` §11。
+
+## 2026-07-08p Claude (Sadie) — 方案1：左繩對齊右計米（消左右累積歪）
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`
+  - 新增常數 `LEVEL_MATCH_TOL_CM=0.5`、`LEVEL_MAX_EXTRA_CM=15`
+  - 新增 `crane_level_match_cmd_(move_group, dir_word, step, is_follower, out_timeout)` 宣告
+- `user_lib/WASH_ROBOT.cpp`
+  - 新增 `crane_level_match_cmd_`：master(右)→固定 `dir_word step`；follower(左)→讀 crane status `length_left`/`length_right`（cm）算 `delta = master − self`，回 `pay_out_/retract_<side> <|delta|>` 讓該側對齊另一側。`|delta|<0.5`→不動；`|delta|>step+15`（meter glitch）或讀不到→fixed step fallback。
+  - `do_step_down_` / `do_step_up_` 的 `run_side` 加 `is_follower` 參數 + pre_cycle 改用 `crane_level_match_cmd_`；call site 右=false（master 走固定 step）、左=true（follower 對齊右計米）。
+### 原因
+Sadie 回報：計米正常時多走幾步機體會歪，根因＝左右各用自身 SD76 獨立走 step、誤差**獨立累積** → 繩長差 → roll。方案1（Sadie 選定）把左側從「走固定 step」改成「放/收到左計米=右計米」→ 每步重新對齊、誤差**不累積**（殘差僅左右計米互差，固定不長大）。crane status length 本來就是 cm（cmd_side_measured 迴圈 `|len−base|>=cm` 為證），故全在 washrobot 實作、不動 crane。方案2（IMU 微調殘差）待方案1 bench 驗證後再視需要疊。**規範權威：** `.claude/v2_app_redesign_plan.md` §11。
+
+## 2026-07-08o Claude (Sadie) — realign 單顆門檻 1.5 → 1.0 cm
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — `REALIGN_THRESHOLD_CM` 1.5 → **1.0**（單顆 cup 最大漂移觸發門檻）+ 註解
+- `user_lib/WASH_ROBOT.cpp` — 更新一處 stale 註解（10452）1.5→1.0
+### 連帶（自動）
+- seed `settings_.realign_threshold_cm`（line 71）、status 輸出、config 存檔皆從常數帶出；實際判斷走 `#define`→settings_ runtime 值；clamp `[0.5,20.0]` 涵蓋
+- 平均門檻 `REALIGN_THRESHOLD_MEAN_CM` 不變（仍 1.0）
+### 原因
+user 要求把單顆觸發門檻收緊到 1.0cm（更早觸發 realign、減少單顆 outlier 漂移累積）。**規範權威：** motion_flow.md realign 參數（待 Jim 同步）。
+
+## 2026-07-08n Claude (Sadie) — [規劃] 累積歪的左右繩長差校正分析（plan §11，未動程式碼）
+### 修改檔案
+- `.claude/v2_app_redesign_plan.md`（新增 §11）
+### 內容
+Sadie 回報：計米正常時多走幾步機體會歪（根因＝左右各用自身 SD76 獨立走 step、誤差獨立累積 → 繩長差 → roll）。記錄 user 提的兩方案（1: 左繩對齊右計米；2: IMU 平衡微調）+ 方案3 結合 + Claude 建議（先做方案1 殺累積、殘差再疊 IMU）。**未動 step 程式碼**——等 Sadie 拍板方案（依「改檔前先確認」）。與 §10（計米*壞掉*的 IMU 降級）互補但不同情境。
+
+## 2026-07-08m Claude (Sadie) — cmd_run / cmd_run_script 拆掉 v1 arm-sweep pipeline（arm 未裝）
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp`
+  - `cmd_run` 重寫成純 step 迴圈（`do_step_up_` / `do_step_down_`），移除 arm-sweep pipeline（`launch_round` / `fut_sweep` / `SweepJoin` / before-after hook / is_pipeline / end-of-run PARK）。`down`/`up` 正常；`down_sweep_af`/`up_sweep_af` 保留（GUI 相容）但當 plain step 跑（log 提示 sweep deferred）。
+  - `cmd_run_script` 同款重寫：純迴圈跑 `do_step_down_`，每步 `sweep` flag 解析/回報但不作用（全當 plain 下降）。
+  - v1 sweep 版整段保留在 `#if 0`，改名 `_retired_cmd_run_v1_sweep_` / `_retired_cmd_run_script_v1_sweep_`（不編譯、供日後 arm 裝回參考）。
+### 原因
+用戶盤點：`run`/`run_script`「是否都改成 v2 step 方式」。查出：step 本身**已是 v2**（都呼叫 `do_step_down_/up_`：吊機 + 4 cup + cycle_group_ + 每步末 realign），但外層還拖著 v1「邊走邊刷」arm-sweep pipeline，而 v2 `do_step_down_/up_` 把 sweep hook `(void)` 掉 → 整套 dead code，還會 launch thread 誤連不存在的 arm service (127.0.0.1:9527)。用戶選 (A) 拆乾淨。日後 arm 裝回的接回步驟寫在 plan §5.6（含 hook 觸發點要重新對應 v2 兩側 cycle_group_ 結構、非單純 uncomment）。**規範權威：** `.claude/v2_app_redesign_plan.md` §5.6。
+
+## 2026-07-08l Claude (Sadie) — step down/up 真空判準放寬：一組 ≥1 顆吸住即算吸好
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`
+  - 新增 helper `group_seal_ok_(group, out_unsealed)`：該組 ≥1 顆到 `VACUUM_THRESHOLD_KPA` 即回 true（out_unsealed 回沒吸到的腳）
+  - `cycle_group_` template（① reseal 成功判準）：`fails.empty()` → `fails.size() < slaves.size()`（動側 2 顆 ≥1 顆吸住即 proceed；partial 時 log `vacuum_partial_ok`）
+- `user_lib/WASH_ROBOT.cpp`
+  - `group_seal_ok_` 實作
+  - ② anchor 前檢查（step_down + step_up run_side）：撐重側 ≥1 顆吸住即准放開動側；只有「整側全掉」才 REFUSE
+  - ③ 起步前檢查（step_down + step_up）：由「4 顆全吸」改成「左右**各** ≥1 顆」；只有某一整側全掉才拒絕起步
+### 安全取捨（user 2026-07-08 同意）
+- 最壞情況機體只靠 **2 顆吸盤（每側 1 顆）** 撐住作業（原本要求 4 顆）。維持不變式「每側至少 1 顆錨定 → 機體不會掉」；「整側全掉」仍是硬停條件。
+- end-of-step realign 未動（non-fatal、threshold-gated，不阻擋 step）
+- `cycle_group_` live 呼叫只有 step_down(6308)/step_up(6987)，move_group 皆 right/left；其餘呼叫在 `#if 0` 退役區。attach 走 smart_extend_subset_、不受影響
+### 原因
+腳組某幾隻常吸不牢導致 step 反覆重吸/卡 PausedOnError；user 要求「一組只要 1 隻到閥值就算吸好、繼續下一步」。**規範權威：** motion_flow.md 狀態機/真空判準（待 Jim 同步）。
+
+## 2026-07-08k Claude (Sadie) — 伸腳搜尋上限拉高（腳易歪、某幾隻要伸更長才勾到牆）
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`
+  - `DISABLE_RETRY_MAX_OVEREXTEND` 15000 (+5cm) → **24000 (+8cm)**
+  - `DISABLE_RETRY_MAX_ITERS` 5 → **8**（settings 可調 1~20）
+### 原因
+Bench log：slave 4 伸到搜尋上限（pulse 30012 ≈ 10cm）仍 `fresh_p=0kPa`、peakI 一路 146→220→365mA 但未過 400mA 接觸門檻 → WEAK SEAL。診斷＝**碰不到牆**（不是重試次數不夠）。用戶說明 v2 機構容易讓腳歪掉，某幾隻本來就要伸更長才勾到牆。單加 iter 無效（`accumulated >= MAX_OVEREXTEND` 會先擋），必須連伸長上限一起拉：現在每個 iter push +3000(=1cm)、push MAX_ITERS 次 → 8×3000=24000 剛好吃完新 cap，總伸長 ~phase1(5cm)+8cm ≈ 13cm（peakI 在 10cm 已爬到 365，多伸 2~3cm 應可過 400 接觸並密封），仍遠低於 SMC LEYG25 20cm 行程。`feet_target_capped_`（base snowball cap = preset+5cm）不擋 over-extend 搜尋，故此為正確旋鈕。**規範權威：** CLAUDE.md §Key Conventions（pusher pulse/cm）+ WASH_ROBOT.h disable_seal 參數區。
+
+## 2026-07-08j Claude (Sadie) — realign 接回 step（每步末、門檻觸發、保持吸住縮）
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`
+  - `do_feet_realign_` 簽名 `(force, in_window)` → `(apply_threshold=false, caller_holds_lock=false)`（含說明註解）。
+- `user_lib/WASH_ROBOT.cpp`
+  - `do_feet_realign_` 重構：(1) `caller_holds_lock`：caller（step）已持 `motion_mtx_` + 擁有 `motion_active_` 時不重鎖不翻 flag（避免同執行緒 deadlock，用 `unique_lock` defer_lock）；(2) `apply_threshold`：從 `last_seal_pulse_`（in-memory，不用讀 ZDT）算 drift，未超過 `REALIGN_THRESHOLD_CM(1.5)` / `REALIGN_THRESHOLD_MEAN_CM(1.0)` 就 skip → 每步末自動節流；(3) 所有 `motion_active_ = false` 與 PausedOnError 設定都改成 `if (!caller_holds_lock)`（in-step stall 非致命，只回 ERR 由 step 記錄，因 4 顆仍吸著機體仍錨定）。
+  - `do_step_down_` / `do_step_up_` 收尾（兩側都完成、4 顆全吸）呼叫 `do_feet_realign_(apply_threshold=true, caller_holds_lock=true)`，**非致命**（失敗只 log + evt_，step 照回 OK）。
+  - `cmd_realign` 改呼叫 `do_feet_realign_(false, false)`（手動：無門檻、自己鎖）。
+### 原因
+用戶要求把 realign 接回 step。realign 需 4 顆全吸才能做（保持吸住縮）→ 只能在**每步末兩側都錨定**時跑，mid-step 不可能（一定有一側放開）；因此觸發時機由物理條件定死＝每步末。門檻沿用 v1 的 1.5/1.0（settings 可調），超過才真的動、自動節流。in-step 失敗非致命對齊 v1（realign 不解真空、stall 也仍安全）。關鍵技術點：解掉 step 已持 `motion_mtx_` 的同執行緒 deadlock。**規範權威：** `.claude/v2_app_redesign_plan.md` §5.5（realign）。
+
+## 2026-07-08i Claude (Sadie) — Web GUI 對齊 v2 硬體結構（移除退役 UI、group 改 right/left）
+### 修改檔案
+- `web_backend/public/index.html`
+  - 移除 `tilt ON/OFF` 按鈕（tilt_mode 已退役）
+  - vacuum：`body` → `right`(slave1,2)/`left`(slave3,4)；移除 `center`（v2 無中心吸盤）
+  - vacuum readings：移除 body 列(p5~8)、center 列(p9)；feet 列拆成 right(p1右上,p2右下)/left(p3左上,p4左下)
+  - pusher：`body` → `right`/`left`；移除 `center`
+  - ZDT single-slave 下拉：刪 option 5~9，1~4 標籤改「右上/右下/左上/左下」
+  - zdt_zero：`body`/`center` → `right`/`left`（+保留 all）
+  - 移除整個「manual — wheels」panel 與「manual — DM2J group sync」panel（換成註解）
+- `web_backend/public/app.js`
+  - 移除 `btn-dm2j-group` / `btn-dm2j-zero` onclick handler（其 getElementById 目標已刪，留著會在載入時對 null 設 onclick 丟 TypeError 中斷整個 app.js）
+  - 註解 `p1..p9` → `p1..p4`
+### 保留（依 user 指示，v2 之後會重做）
+- **⚖️ 重心校正 panel**（balance_calibrate_*）、**🎥 窗框避障 panel**（obstacle_*/run_avoid）維持不動
+  - ⚠️ 主程式目前對這些指令仍回 `ERR removed_in_v2`（main.cpp 132-138）→ 按鈕現在按下去會拿到錯誤，待 backend 重做才通
+### 未動／待決
+- 設定面板 `pusher_extend_body_pulse` / `pusher_extend_body_pulse_short` 輸入框（index.html 694-700）：body 推桿(slave5-8)設定，v2 無此硬體、backend key 仍在（無作用），未移除
+- `server.js` 無需改（透明 TCP bridge）；網頁 Node/HTML 無需編譯
+### 原因
+v2 機械結構：4 吸盤（右2/左2）、無中心吸盤、無 DM2J 輪/滑軌。Web GUI 尚保留 v1 的 body/center 分區、slave5~9、輪子/DM2J/tilt UI，與新硬體不符。**規範權威：** memory project_v2_mechanical_gait；指令集以 facade_cleaning_v2/main.cpp dispatch 為準。
+
+## 2026-07-08h Claude (Sadie) — v2 realign 重寫（4 顆 feet 保持吸住一起縮回 preset，不動 crane）
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp`
+  - 新增 v2 `do_feet_realign_(force, in_window)`：只處理 4 顆 feet（RF1/RF2/LF1/LF2），**全程不解真空**——把每支推桿 relative-mode 縮回 preset（機體被吸盤拉近牆面，吸盤不脫離 → 維持「4 顆全吸」不變式），**完全不動吊機繩**。重用 v1 已驗證的 Phase 2 動作（Stage 0 outward jog 卸機構預載 → Stage A 慢縮 1/3 破真空黏著 → Stage B 快縮 2/3，sync-trigger 同動 + `zdt_wait_motion_done_many_` 平行等待）。preset 由 `preset_extend_pulse_for_slave_` 取（自動吃到 07-08g 改短後的 17100/18000）。收尾重讀位置更新 `last_seal_pulse_` 為新 baseline、`last_feet_max_over_cm_` 歸零。stall → e-stop 其餘軸 + PausedOnError；`force=false` 會先驗 4 顆都吸住才動；末端 post-check 真空、脫封只 warn（不重吸，交操作員/IMU）。
+  - 新增 v2 `cmd_realign()`：手動觸發，呼叫 `do_feet_realign_(force=false)`。
+  - retired v1 `do_feet_realign_` / `cmd_realign` 改名 `_retired_..._v1_`（仍在 `#if 0` 內、不編譯，避免與 v2 定義同名）。
+- `facade_cleaning_v2/main.cpp`
+  - `realign` 指令從 `ERR removed_in_v2` 改回接 `robot.cmd_realign()`。
+### 原因
+用戶：「現在只有左右腳，realign 改成全部一起往內縮就好，不用放繩也不用收繩。」v1 realign 有 feet+body+center、靠 crane 收放繩輔助 + feet/body 交替；v2 只剩 4 顆 feet。經 AskUserQuestion 確認「**不解真空、保持吸住縮**」（維持絕不同時放開 4 顆的安全不變式）。實作上正好對應 v1 realign 裡「feet 全程不解真空」的 Phase 2，抽出來去掉 crane/body 即可。**規範權威：** `.claude/v2_app_redesign_plan.md`（realign 節）+ memory `project_v2_mechanical_gait.md`（4 顆全吸不變式）。
+
+## 2026-07-08g Claude (Sadie) — 腳組 ZDT 伸長量改短（v2 牆距）5.7/6.0 cm
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`
+  - `PUSHER_EXTEND_FEET_PULSE` 29000 → **17100**（上排 slave 1,3 = 5.7 cm）
+  - `PUSHER_EXTEND_FEET_PULSE_LOWER` 29900 → **18000**（下排 slave 2,4 = 6.0 cm）
+  - 換算率用專案慣例 3000 pulse = 1.0 cm（`5.7×3000=17100`、`6.0×3000=18000`）
+  - 更新 `FEET_TARGET_OVER_CAP_CM` 上方註解算式（preset 縮短後 headroom `(60000-17100-12000)/2857≈10.8cm`，cap 5.0 仍安全、值不變）
+- `user_lib/WASH_ROBOT.cpp` — `feet_max_overextend_cm_()` 內註解 `upper=29000,lower=29900` → `upper=17100,lower=18000`
+### 連帶（自動跟著變、無需手改）
+- `settings_.pusher_extend_feet_pulse{,_lower}` boot 種子、status 輸出、config 存檔、`preset_extend_pulse_for_slave_()` 皆從常數帶出
+- runtime override clamp `[10000,50000]` 仍涵蓋新值
+### 未改／待決
+- `Linux_test/main.cpp` 有獨立常數 `PUSHER_EXTEND_FEET_PULSE=23000`（~8cm，單一值不分上下排）— 測試工具，未動，若 bench 幾何已改建議一併調
+- **部署提醒**：RPi 上若存在 runtime `settings` 檔含舊 `pusher_extend_feet_pulse` 會於 boot 覆蓋新常數 → 需刪檔或改檔
+### 原因
+v2 機體牆距比 v1 短，腳組推桿伸長量由 ~9.7/10.0 cm 縮到 5.7/6.0 cm（user 指定）。**規範權威：** motion_flow.md 硬體/參數常數（待 Jim 同步）。
+
+## 2026-07-08f Claude (Sadie) — step up/down 吸不好重吸的後退方向修正（退回原位）
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp`（`do_step_down_` / `do_step_up_` 的 `run_side`）
+  - **backup 方向反轉**：原本 backup（vacuum retry + obstacle rescue）用跟主動作**同方向**的 `crane_word`（step_up 失敗→繼續往上收、step_down 失敗→繼續往下放），錯了。改成 `run_side` 多收一個 `backup_word` = 主動作的**反方向**，退回原位方向找新牆點：
+    - step_down：主 `pay_out_*`（下），backup `retract_*`（上）
+    - step_up：主 `retract_*`（上），backup `pay_out_*`（下）← 用戶指定「往下放繩退回原位」
+  - **累積退回以原位為上限**：新增 `cumulative_backup_cm`（vacuum + rescue 共用），每次退回前 dry_run 檢查剩餘空間 `remaining = step - cumulative`；`remaining <= 0.5` → 回報 `<group>_backup_at_origin` 讓 cycle_group_ 停止重試進 PausedOnError；最後一跳 clamp 成剛好落在原位。補回 v1 靠 rail `[0,step]` range 擋、v2 無 rail 而漏掉的上限（否則最多退 VACUUM_RETRY_MAX×VACUUM_BACKUP_CM = 5×10 = 50cm，遠超一個 step）。
+### 原因
+用戶回報：step up 失敗重吸時後退方向錯了，應該往下放繩（退 10cm 直到原本的位置）。根因是 v2 rewrite 把 backup 沿用主動作的 crane_word（同方向），且未移植 v1 的「退回不超過起點」上限。**規範權威：** `.claude/v2_app_redesign_plan.md` §4（attach/step 序列）。
+
+## 2026-07-08e Claude (Sadie) — Crane 變頻器編譯期切換 SE3↔MH300（bench 先用士林）
+### 修改檔案
+- `Crane_control_PI/main.cpp`
+  - include 區塊改成硬體切換：`#define CRANE_VFD_IS_SE3 1`（1=士林 SE3-210 / 0=台達 MH300），依此 include 對應 header 並定義 `using CraneVFD = SE3_inverter / MH300_inverter`
+  - 原本寫死的 33 處 `MH300_inverter` 型別 → `CraneVFD`（兩 driver public API 為 drop-in：runForward/Reverse、stopDecel、emergencyStop、setFreqHz、readStatusWord、readFaultCode、invalidateCuModeCache、clearAlarm 皆同簽名）
+  - keepalive 唯一硬體差異（fault 偵測）抽成 helper：
+    - `vfd_poll_fault_()`：SE3 讀 status word 0x1001、MH300 讀 error-code 0x2100
+    - `vfd_status_is_fault_()`：SE3 檢查 b7(0x0080)、MH300 檢查 low byte(0x00FF)
+    - keepalive 左右兩處 `readErrorCode` → 改呼叫 helper，迴圈本體不再出現 `#if`
+- 不動任何 driver（SE3_inverter / MH300_inverter 皆未改）；vcxproj 兩個 .cpp 本來就都納入編譯，無需改
+### 原因
+Bench 現場硬體仍是舊士林 SE3，但遷移後的 crane 程式碼寫死驅動台達 MH300 暫存器（cmd 0x2000 / freq 0x2001）→ SE3 對這些位址回 illegal-address exception，導致所有寫入（setFreqHz/run/stop）err=1 全失敗（讀 0x2100/0x2101 剛好沒報錯才誤導）。改成一行編譯開關：現在用 SE3 測試，之後換 MH300 只要把 `CRANE_VFD_IS_SE3` 改 0 重編。**規範權威：** CLAUDE.md §Device Drivers（SE3_inverter / MH300_inverter 條目）。
+
+## 2026-07-08d Claude (Sadie) — 主程式吊機 IP 改 192.168.5.26
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`（`CRANE_IP`）
+### 內容
+`CRANE_IP` `192.168.1.10` → `192.168.5.26`（bench crane RPi）。唯一定義處，init/crane_cmd_/e-stop 連線全走此常數。
+
+## 2026-07-08c Claude (Sadie) — 485 只剩 2 條：ZDT 從 .21 搬到 .20
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp`（init 連線 + ZDT init bus）、`user_lib/WASH_ROBOT.h`（IP 常數 + member）
+### 原因
+實體 RS485 只剩兩顆 USR gateway：**.20 + .22**（v1 的 .21 沒了）。
+### 內容
+- **ZDT 推桿 1-4：cli_21_(.21) → cli_20_(.20)**（.20 因拆掉 DM2J 腳輪 rail 而空出）
+- `.22` 維持 JC100/PQW/arm-rail/XKC/DY500 不變
+- init 連線：cli_20_ 改成致命（ZDT 關鍵）、移除 cli_21_ 連線；log 改「.20(ZDT)/.22(sensors+PQW)」
+- .h：移除 `IP_485_2`(.21)、`cli_21_` member（live code 已 0 引用）
+- ⚠ **CLAUDE.md / motion_flow.md 硬體拓樸圖仍是舊 3-bus，需 Jim 更新**（規範層，非我負責範圍）
+- 未編譯
+
+## 2026-07-08b Claude (Sadie) — 規劃：計米器失效 → IMU 平衡保護/降級步進（未實作）
+### 修改檔案
+- `.claude/v2_app_redesign_plan.md` §10（新增）
+### 原因
+user 提需求：計米器連不到/壞掉時，用 IMU 保持平衡作保護。
+### 內容
+- 核心：`tan(roll) ≈ 單側下降量 / span` → IMU roll 直接量左右高低差，兼做保護與降級定位
+- 三層：L1 偵測 meter-death、L2 IMU roll/pitch 硬限保護（永遠開）、L3 raw on/off + IMU 閉環降級步進
+- 預設策略（可改）：單側 meter 壞→IMU 降級步進；兩側全壞→拒絕自動步進只留保護
+- 需新增常數（MAX_STEP_ROLL_DEG/MAX_PITCH_DEG/ROLL_TOL/span…）+ washrobot IMU guard/閉環 helper
+- ⚠ 尚未實作；策略待 user 定案（AskUserQuestion 未回）
+
 ## 2026-07-08a Claude (Sadie) — v2 WASH_ROBOT 應用層大重構（8→4 吸盤、吊機驅動）
 ### 修改檔案
 - `user_lib/WASH_ROBOT.h` / `user_lib/WASH_ROBOT.cpp` / `facade_cleaning_v2/main.cpp`

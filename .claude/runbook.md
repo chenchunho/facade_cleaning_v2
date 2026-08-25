@@ -72,20 +72,6 @@ node server.js
 # 或用 systemd unit 背景跑
 ```
 
-#### 1-alt. 測試模式：用 crane_shim 取代 Crane_control_PI
-
-若主吊車硬體尚未上線、想用簡易吊車（Crane_easy_PI @ .5.26）跑自動下洗測試：
-
-```bash
-# Terminal 1 改跑 shim（取代 Crane_control_PI）
-cd ~/facade_cleaning_v2/crane_shim
-python3 crane_shim.py --rate-down 3.0 --rate-up 3.0
-# → 印出 "[shim] ready :5002"
-# Terminal 2 (web_backend) 照跑不變
-```
-
-**⚠️ 限制：** 開環估算放繩時間、無左右差動、無自動召回、距離限 ≤ 3m、人員需現場。完整規範 + 指令對照 + 安全守則見 `.claude/easy_crane_test_mode.md`。
-
 ### 2. Washrobot RPi (192.168.1.100)
 
 ```bash
@@ -96,24 +82,13 @@ cd ~/facade_cleaning_v2/bin/ARM/Release
 # 會自動 lazy connect crane :5002（連不到會 WARN 但不擋 boot）
 ```
 
-### 3. Easy Crane RPi (192.168.5.26) — 獨立簡易吊車（可選）
-
-```bash
-ssh nexuni@192.168.5.26
-cd ~/Crane_easy_PI/bin/ARM/Release
-./Crane_easy_PI
-# → 印出 "[OK] easy crane server :5003"
-# 跟主系統完全獨立；不啟動也不影響 washrobot / main crane 運作
-```
-
-### 4. 瀏覽器
+### 3. 瀏覽器
 
 ```
 http://192.168.1.101:8080
 ```
 
-頂部三顆 dot 應變綠（washrobot / crane / easy）；banner 隱藏表示主系統正常模式。
-easy crane dot 若紅不影響 banner（獨立子系統），僅 easy crane panel 灰化。
+頂部 dot 應變綠（washrobot / crane / arm）；banner 隱藏表示主系統正常模式。
 
 ---
 
@@ -135,9 +110,6 @@ easy crane dot 若紅不影響 banner（獨立子系統），僅 easy crane pane
 | | 鋼索歸零（地面起點 / 洗窗起點） | `zero_meters ground` / `zero_meters top` |
 | | left/right × pay_out/retract ON/OFF | `pay_out_left on` / `retract_right off` … |
 | **🆘 緊急收繩** | 按住 | `retract_left on` + `retract_right on`（放開 → off + `stop`）|
-| **easy crane（獨立）** | ↑ 拉繩（按住）| `up on`（放開 → `up off` + `stop`）+ 每 500ms `ping` 心跳 |
-| | ↓ 釋放繩（按住）| `down on`（放開 → `down off` + `stop`）|
-| | refresh / STOP | `status` / `stop` |
 | **raw command** | 自由輸入 | 任何上面未覆蓋的指令 |
 
 ---
@@ -185,23 +157,6 @@ ping                           # watchdog
 status                         # 查狀態（三條計米器 + home_ground_cm）
 ```
 
-### C2b. Easy Crane 接受（`:5003`，獨立子系統）
-
-```
-up   <on|off>               # 拉繩（retract）ON/OFF，press-and-hold 模式
-down <on|off>               # 釋放繩（pay out）ON/OFF
-stop                        # 兩路繼電器立即 OFF
-status                      # 回 `OK weight=<kg> up=0|1 down=0|1 up_stop_kg=<kg> weight_valid=0|1`
-ping                        # watchdog 心跳（任何 inbound 都算心跳）
-set_up_stop_kg <kg>         # runtime 設定收繩停止門檻（預設 -20，可正可負）
-```
-
-**四層防呆：**
-1. Server watchdog — 動作中超過 2 秒沒 inbound → 自動 all_off + EVT `watchdog_timeout`
-2. UP 重量門檻 — UP 過程 `weight < up_stop_kg` 持續 300ms → 自動停 + EVT `weight_limit`（門檻前端可調）
-3. DY500 讀取失敗 — 連續讀失敗超過 500ms 且動作中 → 自動停 + EVT `weight_read_fail`；動作開始前若感測器讀不到則拒絕指令
-4. 前端 press-and-hold + 每 500ms `ping` heartbeat（任何網路抖動 2 秒內必觸發 (1)）
-
 ### C3. 主動事件（Washrobot 推到 GUI log）
 
 ```
@@ -237,8 +192,6 @@ EVT imu_emergency balance=<deg>
 | washrobot 整台失聯（懸空） | GUI 進救援模式（橘 banner）→ 「🆘 按住收繩」把機體拉回頂樓 |
 | crane 失聯但 washrobot 活著 | GUI 進紅 banner 模式，washrobot `run`/`step_down` 被鎖；人工現場救援 |
 | 全線失聯 | GUI 全紅 banner；人工去頂樓 E-stop + 直接控電箱 |
-| easy crane 失聯（動作中）| server watchdog 2 秒內自動 all_off；前端 dot 轉紅、panel 灰化；不影響主系統 |
-| easy crane 重量超標 | weight_loop 300ms 內自動 all_off + EVT；前端收到 EVT 把按鈕狀態解除 |
 
 ---
 

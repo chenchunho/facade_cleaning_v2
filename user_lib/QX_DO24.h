@@ -8,6 +8,24 @@
 
 class TCP_client;
 
+// ============================================================================
+// QX_DO24 — 四川旗芯 QX-DO24 四路 PWM 信號輸出模組 (Modbus-RTU)
+//
+// ⚠⚠ RETURN VALUE CONVENTION IS INVERTED vs the rest of this project ⚠⚠
+//   Every method here returns  true = SUCCESS / false = FAILURE.
+//   CLAUDE.md mandates the opposite (false = success) and every other driver
+//   in user_lib/ follows that. Calling this class with the project habit
+//   `if (drv.foo()) { error }` reports success as failure and vice versa —
+//   this exact mistake was made once in Linux_test menu 34 and made the whole
+//   bench readout lie. Read the polarity here before writing any caller.
+//
+// Register map (manual QX-DO24_Product_manual V1.16, holding regs, FC 03/06/10):
+//   0x00~0x03  ch1~4 duty      0~1000 = 0~100.0%   (16-bit)
+//   0x04~0x0B  ch1~4 frequency 1~200000 Hz, 32-bit ABCD (hi word first)
+//   0x0C~0x0F  ch1~4 control   0=off / 65535=continuous / 1~65534=pulse count
+//   0x10       save-to-flash   ⚠ ~1-2k write-cycle life, once per power-up only
+//   0x20 addr / 0x21 baud / 0x22 firmware version / 0x23 comm format
+// ============================================================================
 class QX_DO24 {
 public:
 	QX_DO24();
@@ -25,6 +43,12 @@ public:
 	bool setPWM_Freq(int channel, int freq);
 	bool setPWM_Control(int channel, uint16_t val);
 
+	// 讀回 (FC 0x03)
+	bool getPWM_Duty(int channel, double& duty_percent);
+	bool getPWM_Freq(int channel, uint32_t& freq);
+	bool getPWM_Control(int channel, uint16_t& val);
+	bool getVersion(uint16_t& version);
+
 private:
 	TCP_client* client = nullptr;
 	std::unique_ptr<TCP_client> owned_client;
@@ -34,6 +58,7 @@ private:
 
 	// 通訊核心
 	bool sendAndReceive(const std::vector<uint8_t>& request, std::vector<uint8_t>& response);
+	bool readRegs(uint16_t addr, uint16_t count, std::vector<uint16_t>& out);
 	uint16_t modbusCRC(const uint8_t* data, int len);
 };
 

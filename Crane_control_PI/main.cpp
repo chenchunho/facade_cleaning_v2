@@ -96,8 +96,44 @@
 #include "SD76_length_meters.h"
 #include "CLV900_inverter.h"
 #include "DSZL_107.h"
-#include "MH300_inverter.h"
 #include "PQW_IO_16O_RLY.h"
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Crane inverter hardware select (2026-07-08)
+//
+// The bench currently runs the OLD Shihlin SE3-210 inverters; production/v2 will
+// swap to Delta VFD-MH300. The two drivers were designed with the same public
+// API (runForward/Reverse, stopDecel, emergencyStop, setFreqHz, readStatusWord,
+// readFaultCode, invalidateCuModeCache, clearAlarm) so they are drop-in.
+//
+// The ONE difference: keepalive fault polling.
+//   MH300: dedicated error-code register 0x2100 (readErrorCode), low byte = code
+//   SE3  : status word 0x1001 bit7 (readStatusWord), b7 = fault/trip
+// That difference is isolated in vfd_poll_fault_ / vfd_status_is_fault_ below,
+// so the keepalive loop body stays hardware-agnostic.
+//
+// To switch hardware: flip this ONE macro (1 = Shihlin SE3, 0 = Delta MH300).
+#define CRANE_VFD_IS_SE3 1
+
+#if CRANE_VFD_IS_SE3
+  #include "SE3_inverter.h"
+  using CraneVFD = SE3_inverter;
+#else
+  #include "MH300_inverter.h"
+  using CraneVFD = MH300_inverter;
+#endif
+
+// Keepalive fault poll — abstracts the SE3-vs-MH300 fault-register difference.
+// vfd_poll_fault_ returns true on Modbus error (per project bool convention);
+// on success it fills `st`, and vfd_status_is_fault_(st) says whether a fault
+// is active. Both double as the keepalive ping.
+#if CRANE_VFD_IS_SE3
+static inline bool vfd_poll_fault_(CraneVFD& inv, uint16_t& st) { return inv.readStatusWord(st); }
+static inline bool vfd_status_is_fault_(uint16_t st) { return (st & 0x0080) != 0; }  // b7 = fault
+#else
+static inline bool vfd_poll_fault_(CraneVFD& inv, uint16_t& st) { return inv.readErrorCode(st); }
+static inline bool vfd_status_is_fault_(uint16_t st) { return (st & 0x00FF) != 0; }  // 0x2100 low byte
+#endif
 
 // ============ Manual-button trace (2026-05-15) ============
 // Forward declaration of ts_now() — body defined at ~line 953. HOLD_TRACE macro
@@ -161,17 +197,52 @@ static constexpr int    MOTION_TIMEOUT_MS    = 120000;
 static constexpr int    POLL_INTERVAL_MS     = 20;   // 50→20 (2026-05-15): motion_rope main loop tick. atomic cache load only, no extra bus traffic. Reduces stop-trigger lag at 30Hz/30cm-s motion: was ~50ms tick + 150ms cache lag = ~6cm worst, now ~20+100ms = ~3.6cm.
 static constexpr double MIDDLE_WINCH_RATIO_K = 1.00;
 static constexpr double CLV900_MAX_HZ        = 50.0;  // F8-03 default
-static constexpr double VFD_MAX_HZ           = 50.0;  // SE3 upper bound for setFreqHz
+// [2026-07-23 per user] 50.0 → 120.0: SE3-210 manual (P.1, 01-00 上限頻率)
+// factory default is 120.00Hz — that's the VFD's own ceiling, not 50. 50Hz is
+// actually the MOTOR's base/rated frequency (01-03), a different parameter;
+// this app-side clamp had been conflating the two. Raising it to match 01-00
+// only widens the range set_motion_hz/set_hold_hz/set_roll_correct_hz/
+// set_freeze_hz/set_balance_hz_* accept — none of today's runtime values
+// (hold 10 / motion 15 / roll_correct 5) are anywhere near either bound, so
+// this has no effect on current behavior by itself.
+// ⚠ Running the motor ABOVE its 50Hz base frequency (01-03) puts it into the
+// field-weakening region — output voltage is already capped at rated V at
+// 50Hz, so V/Hz drops above that and available torque falls off. For a crane
+// hoist under real load, sustained operation above 50Hz risks torque
+// shortfall (stall/overheat), not just "faster" — this clamp being 120 does
+// NOT mean 120Hz is a torque-safe operating point, only that the VFD itself
+// won't reject the setpoint. Bench-verify under load before actually running
+// any *_hz setting above ~50 in production.
+static constexpr double VFD_MAX_HZ           = 120.0;  // SE3 01-00 factory-default upper limit (P.1); was 50 (see note above)
+static constexpr int    CMD_MEASURED_APPROACH_CM = 8;  // cmd_side_measured: slow to fine_adjust_hz for the last Ncm so the decel coast doesn't overshoot (2026-07-14: 5→8 配 motion_hz 30→40、且涵蓋 live set_motion_hz 到 50；速度越高、減速到 fine_adjust_hz 需要越長距離，5cm 在 40Hz+ 會來不及減速→過衝)
+// [2026-07-23 per user] motion_rope-only (do_step_sync_'s pay_out/retract) —
+// three-stage brake: full motion_hz -> half motion_hz at this distance out ->
+// fine_adjust_hz at CMD_MEASURED_APPROACH_CM out -> stopDecel. Middle stage
+// added because motion_hz was just raised 15->40; going straight from 40Hz to
+// fine_adjust_hz at 8cm out left less margin than at the old 15Hz. NOT shared
+// with cmd_side_measured (step_down/up per-side gait) — that one stays
+// two-stage unless asked to mirror this.
+static constexpr int    CMD_HALF_SPEED_APPROACH_CM = 15;
 
 // Frequency presets — runtime adjustable via set_hold_hz / set_motion_hz /
 // set_middle_hz cmds. Defaults conservative (10 Hz) for first deploy / bench
 // validation; bump up via GUI once direction + safety verified.
 static constexpr double VFD_HOLD_HZ_DEFAULT      = 10.0;
-static constexpr double VFD_MOTION_HZ_DEFAULT    = 30.0;  // 10 → 20 (2026-05-13): user wants faster traversal; rope ~10 cm/s; fine_adjust still 10 Hz for precision tail
+static constexpr double VFD_MOTION_HZ_DEFAULT    = 50.0;  // 2026-08-04 per user: 40→50; 10→20 (2026-05-13)→30→40→35 (2026-07-14 per user: 40 衝太快、改 35 折衷)→15→40 (2026-07-23 per user，搭配剛加的 motion_rope 到位減速); fine_adjust 尾段仍 10Hz 保精度; runtime set_motion_hz 可 live 調 (0,VFD_MAX_HZ]
 static constexpr double MIDDLE_WINCH_HZ_DEFAULT  = 10.0;
 static std::atomic<double> g_vfd_hold_hz     {VFD_HOLD_HZ_DEFAULT};
 static std::atomic<double> g_vfd_motion_hz   {VFD_MOTION_HZ_DEFAULT};
 static std::atomic<double> g_middle_winch_hz {MIDDLE_WINCH_HZ_DEFAULT};
+
+// [2026-07-23 per user] roll_correct (differential IMU leveling — called by
+// WASH_ROBOT.cpp's do_sync_imu_roll_correct_ for the "sync" gait) used to
+// share g_vfd_motion_hz with plain pay_out/retract moves (see cmd_roll_correct
+// below, dual_vfd_sync_start call). User wants these independently tunable —
+// roll_correct is a small precision trim, not a full step move, and should be
+// able to run slower than the main auto pay_out/retract speed without also
+// slowing down every normal step. Decoupled into its own runtime knob.
+static constexpr double ROLL_CORRECT_HZ_DEFAULT  = 10.0;   // 2026-08-04 per user: 5→10
+static std::atomic<double> g_roll_correct_hz {ROLL_CORRECT_HZ_DEFAULT};
 
 // Periodic progress EVT during long ops (motion_rope main loop + fine_adjust).
 // Lets washrobot's watchdog know crane is alive even while RPC reply is
@@ -221,7 +292,7 @@ static constexpr bool PAY_OUT_INCREASES_DISPLAY = true;
 // Speed: fine_adjust_hz (runtime tunable; default 10Hz)
 // Timeout: 30 s (each side individually; loop bails if either side stalls)
 static constexpr int    FINE_ADJUST_TOLERANCE_CM = 2;
-static constexpr double FINE_ADJUST_HZ_DEFAULT   = 10.0;
+static constexpr double FINE_ADJUST_HZ_DEFAULT   = 10.0;  // 10→15→10 (2026-07-14: 15Hz 尾段雖快，但過衝大→IMU 微調 pass 變多、net 沒賺，改回 10。set_fine_adjust_hz 仍可 live 調)
 static constexpr int    FINE_ADJUST_TIMEOUT_MS   = 30000;
 static std::atomic<double> g_fine_adjust_hz {FINE_ADJUST_HZ_DEFAULT};
 
@@ -343,8 +414,8 @@ static SD76_length_meters meter_left;     // on cli_M slave 1
 static SD76_length_meters meter_right;    // on cli_M slave 2
 static SD76_length_meters meter_middle;   // on cli_M slave 4 (future install)
 static CLV900_inverter    inverter;       // middle winch (cli_A slave 3, future install)
-static MH300_inverter       vfd_left;       // left rope  (cli_A slave 1)
-static MH300_inverter       vfd_right;      // right rope (cli_B slave 2)
+static CraneVFD       vfd_left;       // left rope  (cli_A slave 1)
+static CraneVFD       vfd_right;      // right rope (cli_B slave 2)
 static DSZL_107           dsz_left;       // left tension (cli_C slave 1)
 static DSZL_107           dsz_right;      // right tension (cli_D slave 1)
 // [2026-06-05] Water inlet ball valve relay, moved from washrobot to crane side.
@@ -665,7 +736,7 @@ static void allMotionOff();
 //
 // Returns true iff all 8 attempts failed (motor didn't start; caller should
 // rollback any other side that did start).
-static bool reliable_start_one(MH300_inverter& inv, double hz, bool pay_out) {
+static bool reliable_start_one(CraneVFD& inv, double hz, bool pay_out) {
     constexpr int MAX_ATTEMPTS = 8;
     for (int i = 0; i < MAX_ATTEMPTS; ++i) {
         if (!inv.setFreqHz(hz, VFD_MAX_HZ)) {
@@ -687,7 +758,7 @@ static bool reliable_start_one(MH300_inverter& inv, double hz, bool pay_out) {
 // helper so the user never sees the transient as visible motor behavior.
 //
 // 8 attempts × 100ms backoff = up to ~900ms wall time worst case before giving
-// up. MH300_inverter::stopDecel already has its own internal CU-mode watchdog
+// up. CraneVFD::stopDecel already has its own internal CU-mode watchdog
 // reclaim (kicks in after 2 consecutive H1001 fails) so each attempt may
 // itself trigger driver-level retry — this outer loop covers transients the
 // driver-level watchdog can't recover from in a single invocation.
@@ -698,7 +769,7 @@ static bool reliable_start_one(MH300_inverter& inv, double hz, bool pay_out) {
 //
 // Returns true iff all 8 attempts failed (caller must treat as hard error;
 // motor likely still running — escalation would be a separate decision).
-static bool reliable_stop_one(MH300_inverter& inv) {
+static bool reliable_stop_one(CraneVFD& inv) {
     constexpr int MAX_ATTEMPTS = 8;
     for (int i = 0; i < MAX_ATTEMPTS; ++i) {
         if (!inv.stopDecel()) return false;
@@ -845,7 +916,7 @@ static bool dual_vfd_sync_retry(Fn fn, int max_attempts, int backoff_ms,
 // setFreqHz only with retry (no run command). Used by dual_vfd_sync_start
 // Phase A so the variable retry latency is absorbed BEFORE the run command,
 // not bundled with it. Returns true if all attempts failed.
-static bool reliable_setfreq_one(MH300_inverter& inv, double hz) {
+static bool reliable_setfreq_one(CraneVFD& inv, double hz) {
     constexpr int MAX_ATTEMPTS = 8;
     for (int i = 0; i < MAX_ATTEMPTS; ++i) {
         if (!inv.setFreqHz(hz, VFD_MAX_HZ)) return false;
@@ -864,7 +935,7 @@ static bool reliable_setfreq_one(MH300_inverter& inv, double hz) {
 //     DC brake injection (P.8 decel + P.55-57 brake duration, ~1-2s)
 //   - correction reversal: 6 × 200ms additionally absorbs firmware reversal
 //     lockout tail (already settled 2s outside, retry catches residual)
-static bool reliable_run_one(MH300_inverter& inv, bool pay_out,
+static bool reliable_run_one(CraneVFD& inv, bool pay_out,
                              int max_attempts = 2, int backoff_ms = 50) {
     for (int i = 0; i < max_attempts; ++i) {
         const bool err = pay_out ? VFD_DIR_PAY_OUT(inv) : VFD_DIR_RETRACT(inv);
@@ -918,7 +989,7 @@ static bool dual_vfd_sync_start(double hz, bool left_pay_out, bool right_pay_out
     // on either-side failure — bounds drift even when one side hits a transient.
     HOLD_TRACE("sync_start Phase A start (sync setFreq L+R)");
     const auto tA0 = std::chrono::steady_clock::now();
-    auto setfreq_fn = [hz](MH300_inverter& inv) { return inv.setFreqHz(hz, VFD_MAX_HZ); };
+    auto setfreq_fn = [hz](CraneVFD& inv) { return inv.setFreqHz(hz, VFD_MAX_HZ); };
     const bool freq_err = dual_vfd_sync_retry(setfreq_fn, 8, 100, "sync_start.setfreq");
     const auto tA1 = std::chrono::steady_clock::now();
     const auto durA = std::chrono::duration_cast<std::chrono::milliseconds>(tA1 - tA0).count();
@@ -936,10 +1007,10 @@ static bool dual_vfd_sync_start(double hz, bool left_pay_out, bool right_pay_out
     // Residual mechanical drift ≤ 1 attempt cycle (~150ms) — see dual_vfd_sync_retry
     // doc for why eliminating that would require commit-or-rollback.
     const auto tB0 = std::chrono::steady_clock::now();
-    auto run_left_fn  = [left_pay_out](MH300_inverter& inv)  {
+    auto run_left_fn  = [left_pay_out](CraneVFD& inv)  {
         return left_pay_out  ? VFD_DIR_PAY_OUT(inv) : VFD_DIR_RETRACT(inv);
     };
-    auto run_right_fn = [right_pay_out](MH300_inverter& inv) {
+    auto run_right_fn = [right_pay_out](CraneVFD& inv) {
         return right_pay_out ? VFD_DIR_PAY_OUT(inv) : VFD_DIR_RETRACT(inv);
     };
     const bool run_err = dual_vfd_sync_retry(run_left_fn, run_right_fn, 2, 50, "sync_start.run");
@@ -955,8 +1026,8 @@ static bool dual_vfd_sync_start(double hz, bool left_pay_out, bool right_pay_out
         // next run cmd works normally.
         HOLD_TRACE("sync_start Phase B FAIL -> EMERGENCY stop both -> EXIT");
         std::cout << "[sync_start] Phase B failed after retry — EMERGENCY stop both\n";
-        dual_vfd_concurrent([](MH300_inverter& inv){ return inv.emergencyStop(); });
-        dual_vfd_concurrent([](MH300_inverter& inv){ return inv.stopDecel();     });
+        dual_vfd_concurrent([](CraneVFD& inv){ return inv.emergencyStop(); });
+        dual_vfd_concurrent([](CraneVFD& inv){ return inv.stopDecel();     });
         return true;
     }
     HOLD_TRACE("sync_start EXIT OK (both running)");
@@ -970,7 +1041,7 @@ static bool dual_vfd_sync_start(double hz, bool left_pay_out, bool right_pay_out
 // reliable_stop_one which let one side complete in 5ms while the other ran
 // solo for 300-700ms.
 static void allRopeInvertersOff() {
-    dual_vfd_sync_retry([](MH300_inverter& inv){ return inv.stopDecel(); },
+    dual_vfd_sync_retry([](CraneVFD& inv){ return inv.stopDecel(); },
                         8, 100, "all_rope_off");
 }
 
@@ -989,7 +1060,7 @@ static void allMotionOff() {
 // safety event already happened and we want maximum speed cutoff. CLV900
 // stop also single-shot for same reason.
 static void allMotionEmergencyStop() {
-    dual_vfd_concurrent([](MH300_inverter& inv){ return inv.emergencyStop(); });
+    dual_vfd_concurrent([](CraneVFD& inv){ return inv.emergencyStop(); });
     if (g_dev_clv900.load()) inverter.stopDecel();   // CLV900 decel (no MRS-equivalent here); skip if uninited
 }
 
@@ -1006,12 +1077,12 @@ static void allMotionEmergencyStop() {
 //   pay_out=true  → release rope (motor "forward" by convention)
 //   pay_out=false → retract rope (motor "reverse")
 // Returns true on error after all retries exhausted.
-static bool vfdStartRopeMotion(MH300_inverter& inv, bool pay_out) {
+static bool vfdStartRopeMotion(CraneVFD& inv, bool pay_out) {
     return reliable_start_one(inv, g_vfd_motion_hz.load(), pay_out);
 }
 
 // Same but with HOLD_HZ (used by hold-to-pull for slower manual operation).
-static bool vfdStartRopeHold(MH300_inverter& inv, bool pay_out) {
+static bool vfdStartRopeHold(CraneVFD& inv, bool pay_out) {
     return reliable_start_one(inv, g_vfd_hold_hz.load(), pay_out);
 }
 
@@ -1044,8 +1115,8 @@ static void apply_balance_trim(double base_hz, int direction,
         // with 1 attempt / 0 backoff (BAL doesn't need retry — next tick will
         // re-issue on failure).
         dual_vfd_sync_retry(
-            [base_hz](MH300_inverter& inv){ return inv.setFreqHz(base_hz, VFD_MAX_HZ); },
-            [base_hz](MH300_inverter& inv){ return inv.setFreqHz(base_hz, VFD_MAX_HZ); },
+            [base_hz](CraneVFD& inv){ return inv.setFreqHz(base_hz, VFD_MAX_HZ); },
+            [base_hz](CraneVFD& inv){ return inv.setFreqHz(base_hz, VFD_MAX_HZ); },
             1, 0, "bal_reset");
         was_trimmed = false;
         std::cout << "[BAL] reset to base " << base_hz << " Hz\n";
@@ -1080,8 +1151,8 @@ static void apply_balance_trim(double base_hz, int direction,
 
     // [2026-05-29] Parallel L+R trim (was sequential). See reset_to_base comment.
     dual_vfd_sync_retry(
-        [left_hz ](MH300_inverter& inv){ return inv.setFreqHz(left_hz,  VFD_MAX_HZ); },
-        [right_hz](MH300_inverter& inv){ return inv.setFreqHz(right_hz, VFD_MAX_HZ); },
+        [left_hz ](CraneVFD& inv){ return inv.setFreqHz(left_hz,  VFD_MAX_HZ); },
+        [right_hz](CraneVFD& inv){ return inv.setFreqHz(right_hz, VFD_MAX_HZ); },
         1, 0, "bal_trim");
     was_trimmed = true;
     std::cout << "[BAL] err=" << err << "cm trim=" << trim
@@ -1255,7 +1326,7 @@ static void hold_all_off() {
     hold_up_right.store(false);
     hold_down_left.store(false);
     hold_down_right.store(false);
-    dual_vfd_sync_retry([](MH300_inverter& inv){ return inv.stopDecel(); },
+    dual_vfd_sync_retry([](CraneVFD& inv){ return inv.stopDecel(); },
                         8, 100, "hold_all_off");
     motion_active.store(false);
 }
@@ -1466,7 +1537,7 @@ static const char* vfd_fault_name(uint8_t code) {
 // Read and format SE3 fault history (H1007 + H1008) for diagnostic logging.
 // Caller passes the inverter ref + a side label ("left" / "right"). On read
 // failure, returns a placeholder string so log still tells us we tried.
-static std::string format_vfd_fault_codes(MH300_inverter& inv) {
+static std::string format_vfd_fault_codes(CraneVFD& inv) {
     uint8_t f1 = 0, f2 = 0, f3 = 0, f4 = 0;
     if (inv.readFaultCode(f1, f2, f3, f4)) {
         return "fault_code=READ_FAIL";
@@ -1535,17 +1606,18 @@ static void vfd_keepalive_loop() {
         const auto now_pt = std::chrono::steady_clock::now();
         if (g_dev_vfd_left.load()) {
             uint16_t st = 0;
-            // MH300: fault lives in the error-code register (0x2100), NOT a
-            // status-word bit like SE3 (b7). readErrorCode polls 0x2100 and
-            // doubles as the keepalive ping. Low byte nonzero = active fault.
-            bool read_err = vfd_left.readErrorCode(st);
-            if (read_err) read_err = vfd_left.readErrorCode(st);   // retry once
+            // Fault poll (hardware-agnostic via vfd_poll_fault_ / vfd_status_is_fault_):
+            //   MH300 → error-code register 0x2100 (low byte = code)
+            //   SE3   → status word 0x1001 b7 (fault/trip)
+            // Doubles as the keepalive ping.
+            bool read_err = vfd_poll_fault_(vfd_left, st);
+            if (read_err) read_err = vfd_poll_fault_(vfd_left, st);   // retry once
             if (read_err) {
                 l_fail++;
             } else {
                 l_ok++;
                 last_l_status = st;
-                const bool fault = (st & 0x00FF) != 0;   // 0x2100 low byte = error code
+                const bool fault = vfd_status_is_fault_(st);
                 g_vfd_left_fault.store(fault);    // expose for motion_rope abort
                 if (fault) {
                     const auto since = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1574,14 +1646,14 @@ static void vfd_keepalive_loop() {
         }
         if (g_dev_vfd_right.load()) {
             uint16_t st = 0;
-            bool read_err = vfd_right.readErrorCode(st);   // MH300 fault @ 0x2100 (see left)
-            if (read_err) read_err = vfd_right.readErrorCode(st);   // retry once — see left-side comment
+            bool read_err = vfd_poll_fault_(vfd_right, st);   // see left-side comment
+            if (read_err) read_err = vfd_poll_fault_(vfd_right, st);   // retry once
             if (read_err) {
                 r_fail++;
             } else {
                 r_ok++;
                 last_r_status = st;
-                const bool fault = (st & 0x00FF) != 0;   // 0x2100 low byte = error code
+                const bool fault = vfd_status_is_fault_(st);
                 g_vfd_right_fault.store(fault);
                 if (fault) {
                     const auto since = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2246,6 +2318,8 @@ static std::string motion_rope(int cm, bool is_retract) {
     // Now: stop on target reach. fine_adjust always starts from stationary +
     // already has kick start (20Hz × 500ms) to break cold-start static friction.
     bool left_frozen = false, right_frozen = false, middle_done = !use_middle;
+    bool left_half_slowed = false, right_half_slowed = false;   // stage 2: half motion_hz at CMD_HALF_SPEED_APPROACH_CM out
+    bool left_slowed = false, right_slowed = false;   // stage 3: fine_adjust_hz at CMD_MEASURED_APPROACH_CM out
     bool retract_tension_stopped = false;   // retract finished early on soft tension
     std::string abort_reason;
 
@@ -2310,7 +2384,7 @@ static std::string motion_rope(int cm, bool is_retract) {
                 // tension_alarm, no abort_reason). pay_out is exempt.
                 if (is_retract &&
                     std::max(l_kg, r_kg) >= g_retract_tension_stop_kg.load()) {
-                    dual_vfd_sync_retry([](MH300_inverter& inv){ return inv.stopDecel(); },
+                    dual_vfd_sync_retry([](CraneVFD& inv){ return inv.stopDecel(); },
                                         8, 100, "motion_rope.tension_soft_stop");
                     if (use_middle) inverter.stopDecel();
                     std::cout << "[motion_rope] soft tension stop — L=" << l_kg
@@ -2341,17 +2415,42 @@ static std::string motion_rope(int cm, bool is_retract) {
         if (!left_frozen && !right_frozen) {
             const bool l_valid = g_length_left_valid.load();
             const bool r_valid = g_length_right_valid.load();
-            const bool l_reached = l_valid &&
-                std::abs(g_length_left.load()  - base_left)  >= cm;
-            const bool r_reached = r_valid &&
-                std::abs(g_length_right.load() - base_right) >= cm;
+            const int32_t movedL = l_valid ? std::abs(g_length_left.load()  - base_left)  : 0;
+            const int32_t movedR = r_valid ? std::abs(g_length_right.load() - base_right) : 0;
+
+            // [2026-07-23 per user] Three-stage brake, applied independently per
+            // side — whichever side enters a zone first slows down first:
+            //   full motion_hz -> half motion_hz at CMD_HALF_SPEED_APPROACH_CM
+            //   (15cm) out -> fine_adjust_hz at CMD_MEASURED_APPROACH_CM (8cm)
+            //   out -> stopDecel. Stage 3 mirrors cmd_side_measured's existing
+            //   slow-approach; stage 2 is new, added once motion_hz went 15->40
+            //   (jumping straight from 40Hz to fine_adjust_hz at 8cm out left
+            //   less margin than the old 15Hz did). apply_balance_trim is held
+            //   off below once either side has entered EITHER stage (see its
+            //   guard further down) — it would otherwise fight these back up
+            //   toward motion_hz on the next tick.
+            if (l_valid && !left_half_slowed && !left_slowed && movedL >= cm - CMD_HALF_SPEED_APPROACH_CM) {
+                if (!vfd_left.setFreqHz(g_vfd_motion_hz.load() / 2.0, VFD_MAX_HZ)) left_half_slowed = true;
+            }
+            if (r_valid && !right_half_slowed && !right_slowed && movedR >= cm - CMD_HALF_SPEED_APPROACH_CM) {
+                if (!vfd_right.setFreqHz(g_vfd_motion_hz.load() / 2.0, VFD_MAX_HZ)) right_half_slowed = true;
+            }
+            if (l_valid && !left_slowed && movedL >= cm - CMD_MEASURED_APPROACH_CM) {
+                if (!vfd_left.setFreqHz(g_fine_adjust_hz.load(), VFD_MAX_HZ)) left_slowed = true;
+            }
+            if (r_valid && !right_slowed && movedR >= cm - CMD_MEASURED_APPROACH_CM) {
+                if (!vfd_right.setFreqHz(g_fine_adjust_hz.load(), VFD_MAX_HZ)) right_slowed = true;
+            }
+
+            const bool l_reached = l_valid && movedL >= cm;
+            const bool r_reached = r_valid && movedR >= cm;
             if (l_reached || r_reached) {
                 const int32_t curL = g_length_left.load();
                 const int32_t curR = g_length_right.load();
                 const char* leader = l_reached ? (r_reached ? "BOTH" : "L") : "R";
                 // Sync stop both (matches hold_off pattern). 8x retry covers
                 // transient Modbus failures so neither side is left running.
-                dual_vfd_sync_retry([](MH300_inverter& inv){ return inv.stopDecel(); },
+                dual_vfd_sync_retry([](CraneVFD& inv){ return inv.stopDecel(); },
                                     8, 100, "motion_rope.sync_stop");
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 const int32_t afterL = g_length_left.load();
@@ -2374,9 +2473,12 @@ static std::string motion_rope(int cm, bool is_retract) {
             middle_done = true;
         }
 
-        // Balance trim: tick every BALANCE_TICK_MS while NEITHER side is frozen.
-        // Once either freezes, balance trim would fight the freeze freq.
-        if (!left_frozen && !right_frozen) {
+        // Balance trim: tick every BALANCE_TICK_MS while NEITHER side is frozen
+        // AND neither side has entered EITHER slow-approach stage yet
+        // (2026-07-23). Once either freezes OR slows (half or fine), balance
+        // trim would fight the freeze/slow freq back up toward motion_hz.
+        if (!left_frozen && !right_frozen && !left_slowed && !right_slowed
+            && !left_half_slowed && !right_half_slowed) {
             const auto now_pt = std::chrono::steady_clock::now();
             if (std::chrono::duration_cast<std::chrono::milliseconds>(
                     now_pt - last_balance_tick).count() >= BALANCE_TICK_MS) {
@@ -2436,7 +2538,7 @@ static std::string motion_rope(int cm, bool is_retract) {
         // OPT timeout (panel-side, typically 2-4s). emergencyStop = MRS bit
         // = output cutoff in ~50ms. Then stopDecel to clear MRS for next cmd.
         allMotionEmergencyStop();
-        dual_vfd_concurrent([](MH300_inverter& inv){ return inv.stopDecel(); });   // clear MRS
+        dual_vfd_concurrent([](CraneVFD& inv){ return inv.stopDecel(); });   // clear MRS
     }
 
     // Broadcast EVT for hard-abort reasons so washrobot/GUI sees specific cause
@@ -2507,7 +2609,10 @@ static std::string cmd_roll_correct(int delta_cm) {
     // Two-phase sync start with opposing directions (left / right move
     // opposite ways for differential roll correction). Same rationale as
     // motion_rope — see dual_vfd_sync_start doc.
-    if (dual_vfd_sync_start(g_vfd_motion_hz.load(), left_pay, !left_pay)) {
+    // [2026-07-23 per user] Uses g_roll_correct_hz, NOT g_vfd_motion_hz — this
+    // is a small precision trim call, decoupled from the main auto pay_out/
+    // retract speed so it can run slower independently of it.
+    if (dual_vfd_sync_start(g_roll_correct_hz.load(), left_pay, !left_pay)) {
         return "ERR vfd_start_fail\n";
     }
 
@@ -2650,8 +2755,8 @@ static std::string cmd_align_lengths() {
 
 // ============ Other handlers ============
 
-// Raw debug-only manual control of one rope inverter. Bypasses tension safety
-// monitoring — use hold mode (`up_left on` etc.) for normal operation.
+// Raw debug-only manual control of one rope inverter. 不受張力感測門檻限制
+// — use hold mode (`up_left on` etc.) for normal operation.
 //   pay_out_left/right on  → setFreqHz(VFD_HOLD_HZ) + runForward (or convention)
 //   retract_left/right on  → setFreqHz(VFD_HOLD_HZ) + runReverse
 //   <any> off              → stopDecel
@@ -2662,7 +2767,7 @@ static std::string cmd_manual(const std::string& dir, const std::string& onoff) 
     else return "ERR expected_on_or_off\n";
 
     bool pay_out;
-    MH300_inverter* inv = nullptr;
+    CraneVFD* inv = nullptr;
     bool side_left = false;
     if      (dir == "pay_out_left")  { inv = &vfd_left;  pay_out = true;  side_left = true;  }
     else if (dir == "pay_out_right") { inv = &vfd_right; pay_out = true;  side_left = false; }
@@ -2670,7 +2775,7 @@ static std::string cmd_manual(const std::string& dir, const std::string& onoff) 
     else if (dir == "retract_right") { inv = &vfd_right; pay_out = false; side_left = false; }
     else return "ERR unknown_channel\n";
 
-    // Per-side SE3 availability check (manual = bypass tension safety, so DSZL
+    // Per-side SE3 availability check (manual = 不受張力感測門檻限制, so DSZL
     // not required — caller accepted that trade-off by using cmd_manual).
     if ( side_left && !g_dev_vfd_left.load())  return "ERR vfd_left_unavailable\n";
     if (!side_left && !g_dev_vfd_right.load()) return "ERR vfd_right_unavailable\n";
@@ -2701,7 +2806,7 @@ static std::string cmd_side_measured(const std::string& cmd, int cm) {
     else if (cmd == "retract_left")  { side_left = true;  is_retract = true;  }
     else                             { side_left = false; is_retract = true;  } // retract_right
 
-    MH300_inverter&       inv       = side_left ? vfd_left : vfd_right;
+    CraneVFD&       inv       = side_left ? vfd_left : vfd_right;
     std::atomic<int32_t>& len       = side_left ? g_length_left : g_length_right;
     std::atomic<bool>&    len_valid = side_left ? g_length_left_valid : g_length_right_valid;
     std::atomic<bool>&    fault     = side_left ? g_vfd_left_fault : g_vfd_right_fault;
@@ -2712,6 +2817,16 @@ static std::string cmd_side_measured(const std::string& cmd, int cm) {
     if (!dev_ok)           return std::string("ERR vfd_")   + side + "_unavailable\n";
     if (!meter_ok)         return std::string("ERR meter_") + side + "_unavailable\n";
     if (!len_valid.load()) return std::string("ERR meter_") + side + "_read_fail\n";
+
+    // [2026-07-14] Same try_lock pattern as motion_rope/cmd_roll_correct (see
+    // motion_mtx comment at its motion_rope use site) — reject an overlapping
+    // move instead of letting two threads drive the same VFD at once. This was
+    // missing here, which let a washrobot-side crane_cmd_ timeout+reconnect
+    // resend the identical retract/pay_out command while the original call was
+    // still running in another connection's thread.
+    std::unique_lock<std::mutex> lock(motion_mtx, std::try_to_lock);
+    if (!lock.owns_lock()) return "ERR motion_busy\n";
+    MotionScope ms;
 
     const int32_t base    = len.load();
     const bool    pay_out = !is_retract;
@@ -2724,6 +2839,7 @@ static std::string cmd_side_measured(const std::string& cmd, int cm) {
     const auto  start = std::chrono::steady_clock::now();
     std::string abort_reason;
     int64_t     invalid_since = 0;
+    bool        slowed        = false;   // slow-approach latch (drop to fine_adjust_hz once near target)
 
     while (true) {
         if (abort_flag.load()) { abort_reason = "aborted"; break; }
@@ -2743,7 +2859,15 @@ static std::string cmd_side_measured(const std::string& cmd, int cm) {
             }
         } else {
             invalid_since = 0;
-            if (std::abs(len.load() - base) >= cm) break;   // target reached — success
+            const int32_t moved = std::abs(len.load() - base);
+            if (moved >= cm) break;   // target reached — success
+            // Slow-approach: run the last CMD_MEASURED_APPROACH_CM at fine_adjust
+            // precision Hz so the stop's decel coast doesn't overshoot. At full
+            // motion_hz the rope coasted ~2-6cm past target on stop, which showed
+            // up as a fixed per-step left/right meter residual (roll tilt).
+            if (!slowed && moved >= cm - CMD_MEASURED_APPROACH_CM) {
+                if (!inv.setFreqHz(g_fine_adjust_hz.load(), VFD_MAX_HZ)) slowed = true;
+            }
         }
 
         // Tension safety: read both sides each iter (read failure → skip iter).
@@ -3027,6 +3151,7 @@ static std::string cmd_status() {
     oss << " fine_adjust_hz="   << g_fine_adjust_hz.load();
     oss << " freeze_hz="        << g_freeze_hz.load();
     oss << " kick_hz="          << g_kick_hz.load();
+    oss << " roll_correct_hz="  << g_roll_correct_hz.load();
     // Device availability — GUI uses these to grey out unavailable controls.
     oss << " dev_vfd_left="    << (g_dev_vfd_left.load()    ? 1 : 0);
     oss << " dev_vfd_right="   << (g_dev_vfd_right.load()   ? 1 : 0);
@@ -3069,7 +3194,7 @@ static std::string cmd_tension() {
 //   down=true → pay_out (motor forward)
 //   neither  → stopDecel
 // Returns true on inverter command failure.
-static bool apply_hold_one_side(MH300_inverter& inv, bool up, bool down,
+static bool apply_hold_one_side(CraneVFD& inv, bool up, bool down,
                                 const char* side_tag = "?") {
     const auto t0 = std::chrono::steady_clock::now();
     bool err;
@@ -3139,7 +3264,7 @@ static bool dual_vfd_hold_start(bool pay_out) {
     // we still can't get status, the comm channel is genuinely down → abort
     // is correct.
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    auto robust_read_status = [](MH300_inverter& inv, uint16_t& out, int& attempts_used) -> bool {
+    auto robust_read_status = [](CraneVFD& inv, uint16_t& out, int& attempts_used) -> bool {
         constexpr int MAX_ATTEMPTS = 4;
         for (int i = 0; i < MAX_ATTEMPTS; ++i) {
             attempts_used = i + 1;
@@ -3175,8 +3300,8 @@ static bool dual_vfd_hold_start(bool pay_out) {
                   << " — EMERGENCY stop both for safety\n";
         // Fast abort — see dual_vfd_sync_start comment. emergencyStop (MRS
         // output cutoff) instead of decel ramp; clear MRS for next run cmd.
-        dual_vfd_concurrent([](MH300_inverter& inv){ return inv.emergencyStop(); });
-        dual_vfd_concurrent([](MH300_inverter& inv){ return inv.stopDecel();     });
+        dual_vfd_concurrent([](CraneVFD& inv){ return inv.emergencyStop(); });
+        dual_vfd_concurrent([](CraneVFD& inv){ return inv.stopDecel();     });
         HOLD_TRACE("dual_vfd_hold_start EXIT (verification fail, both stopped)");
         return true;
     }
@@ -3303,7 +3428,7 @@ static std::string cmd_hold(const std::string& dir, const std::string& onoff) {
             // stop result.
             HOLD_TRACE("combined OFF -> dual_vfd_sync_retry(stopDecel)");
             const bool stop_err = dual_vfd_sync_retry(
-                [](MH300_inverter& inv){ return inv.stopDecel(); },
+                [](CraneVFD& inv){ return inv.stopDecel(); },
                 8, 100, "hold_off");
             HOLD_TRACE("combined OFF sync_retry return err=" << stop_err);
             if (stop_err) {
@@ -3320,8 +3445,8 @@ static std::string cmd_hold(const std::string& dir, const std::string& onoff) {
                 HOLD_TRACE("combined OFF ESCALATE -> emergencyStop both");
                 std::cout << "[cmd_hold] OFF sync_retry stopDecel failed — "
                              "ESCALATE to emergencyStop\n";
-                dual_vfd_concurrent([](MH300_inverter& inv){ return inv.emergencyStop(); });
-                dual_vfd_concurrent([](MH300_inverter& inv){ return inv.stopDecel();     });   // clear MRS
+                dual_vfd_concurrent([](CraneVFD& inv){ return inv.emergencyStop(); });
+                dual_vfd_concurrent([](CraneVFD& inv){ return inv.stopDecel();     });   // clear MRS
                 HOLD_TRACE("combined OFF ESCALATE done");
             }
             if (pay_out) {
@@ -3655,6 +3780,12 @@ static std::string cmd_set_fine_adjust_hz(double hz) {
     std::cout << "[crane] fine_adjust_hz = " << hz << " Hz\n";
     return "OK\n";
 }
+static std::string cmd_set_roll_correct_hz(double hz) {
+    if (hz <= 0 || hz > VFD_MAX_HZ) return "ERR hz_out_of_range\n";
+    g_roll_correct_hz.store(hz);
+    std::cout << "[crane] roll_correct_hz = " << hz << " Hz\n";
+    return "OK\n";
+}
 static std::string cmd_set_freeze_hz(double hz) {
     if (hz <= 0 || hz > VFD_MAX_HZ) return "ERR hz_out_of_range\n";
     g_freeze_hz.store(hz);
@@ -3723,7 +3854,7 @@ static std::string cmd_ping() {
 // confirm via this raw command before any reliance.
 // Usage:  vfd_fault left   or   vfd_fault right
 static std::string cmd_vfd_fault(const std::string& side) {
-    MH300_inverter* inv = nullptr;
+    CraneVFD* inv = nullptr;
     bool          available = false;
     if (side == "left")  { inv = &vfd_left;  available = g_dev_vfd_left .load(); }
     if (side == "right") { inv = &vfd_right; available = g_dev_vfd_right.load(); }
@@ -3927,6 +4058,11 @@ static std::string dispatch(const std::string& line) {
         double v = 0; iss >> v;
         if (iss.fail()) return "ERR usage:set_kick_hz_<hz>\n";
         return cmd_set_kick_hz(v);
+    }
+    if (cmd == "set_roll_correct_hz") {
+        double v = 0; iss >> v;
+        if (iss.fail()) return "ERR usage:set_roll_correct_hz_<hz>\n";
+        return cmd_set_roll_correct_hz(v);
     }
     if (cmd == "status") return cmd_status();
     if (cmd == "stop")   return cmd_stop();

@@ -63,6 +63,17 @@ public:
     std::string cmd_detach();
     std::string cmd_step_down(int cm = 0);   // cm = 0 → use current step_cm_; cm > 0 → validate 5..60, override
     std::string cmd_step_up(int cm = 0);     // mirror of step_down — feet phase first, body phase second; for ascending
+    // [2026-07-13 per user] 跨障礙物 — step that stands legs off the wall to 2×preset
+    // to clear a protruding obstacle, crosses, then realigns back to normal length.
+    std::string cmd_cross_obstacle_down(int cm = 0);
+    std::string cmd_cross_obstacle_up(int cm = 0);
+    // [2026-07-22 per user] 同步步伐 — 跟 cmd_step_down/up 的交替 inchworm 走法不同：
+    // 4 顆吸盤同時放開＋縮回、吊機兩側同步放/收繩（crane 端既有 pay_out/retract 雙繩同步）、
+    // IMU 差動微調水平、4 顆一起重新伸出吸附。純移動，不含清洗。
+    // ⚠ 安全性質跟其他重複執行的步伐不同：放繩期間 4 顆全放開，完全靠吊機繩索承重，
+    // 沒有任何吸盤錨定在牆上（其他步伐永遠保持至少一側黏牆防墜）。使用者已確認此設計。
+    std::string cmd_step_down_sync(int cm = 0);
+    std::string cmd_step_up_sync(int cm = 0);
     std::string cmd_step_up_with_sweep(int cm = 0);   // step_up + continuous cleaning sweep in parallel (2026-05-22)
     std::string cmd_step_down_with_sweep(int cm = 0); // step_down + continuous cleaning sweep in parallel (2026-05-22)
     std::string cmd_step_up_sweep_after_feet(int cm = 0);   // step_up + 1 round sweep launched after feet rail DM2J done (2026-05-22)
@@ -73,19 +84,27 @@ public:
     // 收推桿」並行,post-round 跟「body extend + crane」並行。
     std::string cmd_step_up_sweep_before_after(int cm = 0);
     std::string cmd_step_down_sweep_before_after(int cm = 0);
-    std::string cmd_run(int steps, int cm = 0, const std::string& direction = "down");   // direction = "down" | "up"
+    // [2026-07-23 per user] gait = "alt" (預設，向下相容既有呼叫) | "sync"。
+    // alt  → do_step_down_/do_step_up_ 交替走法（每步换边、cycle_group_ retry）
+    // sync → do_step_sync_ 同步走法（4 顆同時放開/放繩/重伸，見 do_step_sync_ 註解）
+    std::string cmd_run(int steps, int cm = 0, const std::string& direction = "down",
+                        const std::string& gait = "alt");   // direction = "down" | "up"
 
     // [2026-06-05] Scripted run — CSV of per-step cm values, fixed down_sweep_af
     // direction. Mirrors cmd_run's is_down_sweep path exactly; each step calls
     // cmd_step_down_sweep_after_feet(cm) with the per-iter cm. CSV supports `*`
     // repeat shorthand (e.g. "30*5,20*3" = 5×30 + 3×20). See scripted_run_plan.md.
-    std::string cmd_run_script(const std::string& csv);
+    // [2026-07-23 per user] gait = "alt" (預設，向下相容) | "sync" — same meaning
+    // as cmd_run's gait param, applied to every non-cross step in the script.
+    // cross steps always use do_cross_obstacle_ regardless of gait (no sync
+    // variant of cross-obstacle exists).
+    std::string cmd_run_script(const std::string& csv, bool up = false, const std::string& gait = "alt");
     // Named-script management (persisted to ./scripts.json key=value format).
     std::string cmd_save_script(const std::string& name, const std::string& csv);
     std::string cmd_list_scripts();
     std::string cmd_load_script(const std::string& name);
     std::string cmd_delete_script(const std::string& name);
-    std::string cmd_run_saved(const std::string& name);
+    std::string cmd_run_saved(const std::string& name, bool up = false, const std::string& gait = "alt");   // up=false → down (default); gait see cmd_run_script
 
     std::string cmd_arm_sweep();  // public: acquires motion_mtx_
     std::string cmd_tilt_mode(bool on);
@@ -174,6 +193,91 @@ public:
     std::atomic<int>  obstacle_user_response_{-1};  // -1=pending, 0=cancel, 1=confirm
     static constexpr int OBSTACLE_ASK_TIMEOUT_S = 300;  // 5 min before auto-abort
 
+    // [2026-07-20] D435i depth-camera continuous obstacle-avoid walk (v2 —
+    // BEFORE/AFTER captures bracket the whole step call, not step-internal
+    // hooks, so they work the same regardless of which gait engine runs
+    // inside). [2026-07-28 per user] normal steps now call do_step_sync_
+    // (both sides move together) instead of do_step_down_'s alternating
+    // inchworm gait — see cmd_run_depth_avoid's step loop; the auto
+    // cross-obstacle branch is unchanged (still do_cross_obstacle_).
+    // Per Sadie's design (2026-07-20):
+    //   - Every step (including the first, fixed at DEPTH_AVOID_FIRST_STEP_CM)
+    //     captures before/after via the hooks during ITS OWN tail motion, then
+    //     that step's result is shown to the user before deciding the NEXT step
+    //     (act-then-review, simpler than v1's decide-before-acting bootstrap).
+    //   - No automatic step_cm suggestion — user decides every time, optionally
+    //     typing a custom cm instead of the current default step_cm_.
+    //   - candidates whose height_cm > DEPTH_BIG_OBSTACLE_HEIGHT_CM additionally
+    //     get a photo shown (served via /snap/depth, see depth_cam_service.py).
+    // Loop: step -> depth_cam AFTER result -> EVT depth_obstacle_result ->
+    //       wait cmd_depth_avoid_continue(cm) / cmd_depth_avoid_stop() -> repeat.
+    std::string cmd_run_depth_avoid();
+    // GUI: user typed/kept a cm value and pressed Continue. Validates
+    // STEP_CM_MIN..STEP_CM_MAX same as cmd_step_down.
+    std::string cmd_depth_avoid_continue(int cm);
+    // GUI: user pressed Stop — end the loop after this point.
+    std::string cmd_depth_avoid_stop();
+
+    // Reuses obstacle_ask_pending_ / obstacle_user_response_ above for the
+    // wait — response value doesn't carry the cm (continue always ships one
+    // via depth_avoid_next_step_cm_), so 1=continue(see next_step_cm_), 0=stop.
+    std::atomic<int> depth_avoid_next_step_cm_{0};
+    std::atomic<int> depth_last_candidates_{0};
+    std::atomic<double> depth_last_max_height_cm_{0.0};
+    std::atomic<double> depth_last_max_protrusion_cm_{0.0};
+    // [2026-07-21] Raw slant range (camera optical axis -> closest point of
+    // the closest candidate) from depth_cam_service.py, plus the along-
+    // travel remaining-clearance figure derived from it — see
+    // cmd_run_depth_avoid's min_distance_cm parsing for the trig.
+    std::atomic<double> depth_last_min_distance_cm_{0.0};
+    std::atomic<double> depth_last_remaining_travel_cm_{0.0};
+    static constexpr int    DEPTH_AVOID_FIRST_STEP_CM     = 5;    // fixed first step (per user 2026-07-20) — no prior frame data before this
+    static constexpr double DEPTH_BIG_OBSTACLE_HEIGHT_CM  = 10.0; // candidate height_cm above this -> attach photo, per user spec
+    // [2026-07-21] Camera mount geometry — used to convert
+    // depth_cam_service.py's raw slant-range reading into "how much further
+    // can the robot travel before its leading edge reaches the obstacle",
+    // along the direction of travel:
+    //   horizontal_cm   = sqrt(min_distance_cm^2 - DEPTH_CAM_STANDOFF_CM^2)
+    //   remaining_cm    = horizontal_cm - DEPTH_CAM_LEAD_OFFSET_CM
+    // (right-triangle: camera sits DEPTH_CAM_STANDOFF_CM perpendicular off
+    // the wall, tilted down/forward; horizontal_cm is the projection of the
+    // slant range onto the wall along the tilt/travel direction.)
+    //
+    // [2026-07-21] Original measurement: standoff 50cm + tilt ~35° ->
+    // predicted slant range ~61cm, matched a real bench reading of 62.3cm —
+    // confirmed the STANDOFF/tilt geometry (the d/H relationship) was right.
+    //
+    // [2026-07-23] LEAD_OFFSET_CM was still off by ~2x: with a real
+    // candidate at center_distance_m=61.5cm (see depth_reflection_bench.py's
+    // center_distance_m — the earlier near_m-based reading's off-axis-pixel
+    // bug was already fixed by then), the formula gave remaining_travel_cm
+    // =19.8cm with the old LEAD_OFFSET_CM=16, but the user's own on-site
+    // tape measurement of camera-to-actual-sucker-leading-edge was only
+    // 3-4cm at that point — solving backward (35.8 - remaining ≈ offset)
+    // pointed at ~32cm, not 16. User re-measured and confirmed: the correct
+    // leading-edge offset is 32cm (the original 16cm likely measured to
+    // some other reference point, not the true sucker leading edge). Same
+    // re-measurement also updated the standoff itself, 50cm -> 56cm — both
+    // constants below are the corrected 2026-07-23 measurements.
+    static constexpr double DEPTH_CAM_STANDOFF_CM    = 56.0; // camera height above wall, perpendicular
+    static constexpr double DEPTH_CAM_LEAD_OFFSET_CM = 32.0; // robot leading edge (actual sucker front) is this much CLOSER to the wall-ahead than the camera mount
+
+    // [2026-07-22] Cross-obstacle step suggestion, per user spec: when the
+    // normal remaining clearance is too tight to keep taking small steps
+    // (< DEPTH_AVOID_LOW_CLEARANCE_CM), suggest one bigger step that clears
+    // the WHOLE obstacle instead — near edge to obstacle + the obstacle's
+    // own thickness along the travel direction (candidate height_cm, "how
+    // much the sill occupies along the path") + a full sucker diameter (so
+    // the NEXT sucker placement lands with full contact area past the far
+    // edge, not straddling it) + a small safety margin. Clamped to
+    // STEP_CM_MAX — never suggest more than the robot can physically step.
+    // Suggestion only (fills the GUI's default next-step-cm field) — per
+    // the 2026-07-20 "no automatic step_cm suggestion" design still in
+    // force, the user can always type a different value before Continue.
+    static constexpr double DEPTH_AVOID_LOW_CLEARANCE_CM = 20.0; // remaining_travel_cm below this -> suggest crossing instead of another small step
+    static constexpr double DEPTH_AVOID_SUCKER_DIAMETER_CM = 20.0; // 吸盤直徑
+    static constexpr double DEPTH_AVOID_CROSS_MARGIN_CM = 5.0;     // extra safety buffer on top of near+thickness+sucker
+
     // [2026-06-04] Step shortfall tracking for vacuum_retry compensation.
     // do_step_down_ writes after Phase A complete; cmd_run_avoid reads to add
     // missed cm to next step's planned distance.
@@ -222,6 +326,12 @@ public:
     // save: persist current values to settings.json (working dir).
     std::string cmd_get_settings();
     std::string cmd_set_setting(const std::string& key, const std::string& value);
+    // [2026-07-09] Switch the follower (second-moving) side's leveling mode:
+    //   "imu"   → second leg IMU fine-levels to the datum (策略1)
+    //   "meter" → second leg meter-syncs only (方案B, original method)
+    std::string cmd_set_follower_mode(const std::string& mode);
+    // [2026-07-09] Choose which foot leads the first step: "left" | "right".
+    std::string cmd_set_first_step(const std::string& side);
     std::string cmd_save_settings();
     // Public init-time wrapper: load settings.json if present (overrides defaults).
     // Called by main.cpp before robot.init(). Returns true on file I/O error
@@ -252,8 +362,10 @@ public:
 private:
     //=========== constants ===========
 
+    // [v2 2026-07-08] Two RS485 gateways only: .20 (ZDT pushers 1-4) + .22
+    // (JC100/PQW/arm-rail/XKC/DY500). v1's .21 (IP_485_2) bus retired — ZDT
+    // moved to .20 (freed by removing DM2J feet/wheel rails).
     static constexpr const char* IP_485_1   = "192.168.1.20";
-    static constexpr const char* IP_485_2   = "192.168.1.21";
     static constexpr const char* IP_485_3   = "192.168.1.22";
     static constexpr int         PORT_485   = 4001;
 
@@ -262,7 +374,9 @@ private:
     // test-mode "192.168.5.26" / "127.0.0.1" (easy crane shim) earlier rounds —
     // see changelog 2026-04-21e / 2026-04-24ao / 2026-05-07. Tension query goes
     // via crane_cmd_("tension"). Restore to 192.168.1.101 for production deploy.
-    static constexpr const char* CRANE_IP   = "192.168.1.10";
+    // [2026-08-03 per user] crane Pi 實際在 .27，不是 .26 — 這很可能就是那次
+    // "reconnect failed + crane 端完全沒收到任何連線" 的真正原因（一直敲錯 IP 的門）。
+    static constexpr const char* CRANE_IP   = "192.168.5.27";   // [v2 2026-07-08] bench crane RPi (was 192.168.1.10); 2026-08-03: .26→.27
     static constexpr int         CRANE_PORT = 5002;
 
     // Cleaning arm — standalone damiao motor service on the same Pi.
@@ -271,9 +385,14 @@ private:
     static constexpr const char* ARM_IP   = "127.0.0.1";
     static constexpr int         ARM_PORT = 9527;
 
-    // PQW relay channels (slave 12, 8CH)
+    // Depth-camera obstacle detection — standalone D435i service on the same
+    // Pi. TCP commands: BEFORE / AFTER / PING. See frame_capture/depth_cam_service.py.
+    static constexpr const char* DEPTH_CAM_IP   = "127.0.0.1";
+    static constexpr int         DEPTH_CAM_PORT = 9530;
+
+    // PQW relay channels (slave 12, now 16CH physically — CH_BRUSH moved to CH15)
     static constexpr int PQW_SLAVE       = 12;
-    static constexpr int PQW_TOTAL_CH    = 8;
+    static constexpr int PQW_TOTAL_CH    = 16;  // 2026-07-24: 8→16 so readAllStatus()/pqw_set_relay_verified_ actually covers CH15
     // [v2 2026-07-07] 4-cup rewiring on the same PQW @ .22 slave 12:
     //   CH1 = right-foot valve (cups slave 1,2)
     //   CH2 = vacuum pump dp0105 (was CH1 in v1)   ← moved
@@ -282,8 +401,13 @@ private:
     static constexpr int CH_VALVE_RIGHT  = 1;  // VT307 right-foot cups (slave 1,2)
     static constexpr int CH_PUMP         = 2;  // dp0105 vacuum pump (always ON while running)
     static constexpr int CH_VALVE_LEFT   = 3;  // VT307 left-foot cups (slave 3,4)
-    static constexpr int CH_BRUSH        = 5;  // arm roller brush motor
+    static constexpr int CH_BRUSH        = 15; // arm roller brush motor (2026-07-24 per user: 5→15, arm now physically installed)
     static constexpr int CH_WATER_PUMP   = 6;  // water tank pump (spray)
+    // [2026-07-31 per user] Break-vacuum valve — air-charge into the cups to
+    // actively force the seal open, replacing the old two-stage slow-peel
+    // retract. ON = charge air, OFF = closed. Mirrors Linux_test menu 31
+    // (test_break_vacuum_leg) exactly, CH16 (bench-only) -> CH14 (production).
+    static constexpr int CH_BREAK_VACUUM = 14;
     // [2026-06-05] CH_WATER_INLET 移除 — 進水球閥控制權搬到 crane 端 PQW
     // (192.168.1.34 slave 12 CH4)，washrobot 不再直接控制。所有原本走
     // pqw_.controlRelay(CH_WATER_INLET, x) / pqw_set_relay_verified_(CH_WATER_INLET, x)
@@ -317,15 +441,23 @@ private:
 
     // Pusher motion
     static constexpr int PUSHER_EXTEND_PULSE       = 30000;    // center / fallback ~10 cm (對齊 body，2026-04-24)
-    static constexpr int PUSHER_EXTEND_FEET_PULSE       = 29000;  // feet upper (slave 1,3) ~9.7 cm (2026-05-28: 26000→29000 +3000=+1cm，bench iter 0 plateau no contact、iter 1+ 才 seal 浪費 ~3-5s/iter)
-    static constexpr int PUSHER_EXTEND_FEET_PULSE_LOWER = 29900;  // feet lower (slave 2,4) ~10.0 cm (2026-05-28: 26900→29900 +3000=+1cm 同上)
+    static constexpr int PUSHER_EXTEND_FEET_PULSE       = 24300;  // feet upper (slave 1,3) 8.1 cm (2026-07-27: 統一兩顆都 8.1cm per user；2026-07-24: 23400→24300 per user，跟 slave 2,4 分開；慣例 3000 pulse=1cm)
+    static constexpr int PUSHER_EXTEND_FEET_PULSE_LOWER = 24300;  // feet lower (slave 2,4) 8.1 cm (2026-07-27: 23400→24300 per user，統一成跟 slave 1,3 一樣)
     static constexpr int PUSHER_EXTEND_BODY_PULSE       = 34000;  // body upper (slave 5,6) ~11.3 cm (2026-05-28: 30000→36000 +6000=+2cm; 2026-05-28i: 36000→33000 -3000=-1cm，bench 顯示 36000+over 害 Phase 1 fast 700rpm 撞 wall peakI 1500mA+；2026-05-29: 33000→34000 +1000=+0.8cm，邊際提速 iter loop 收斂)
     static constexpr int PUSHER_EXTEND_BODY_PULSE_SHORT = 35400;  // body lower (slave 7,8) ~11.8 cm (2026-05-28: 29400→32400 +3000=+1cm；2026-05-28h: 32400→35400 +3000=+1cm，bench log body lower wall at 42798、SHORT 仍不夠導致 iter 0 plateau,加深一輪)
-    static constexpr int PUSHER_RETRACT_PULSE      = 0;
-    static constexpr int PUSHER_RPM           = 700;     // extend 用（feet / center）
-    static constexpr int PUSHER_RPM_RETRACT      = 30;      // two-stage retract 第一段（慢速脫壁）(2026-05-22: 30 → 50 → 30 改回)
-    static constexpr int PUSHER_RPM_RETRACT_FULL = 500;     // two-stage retract 第二段（收到 0）— 脫壁後空走可快
-    static constexpr double RETRACT_SLOW_PEEL_CM = 2.0;     // two-stage retract 第一段慢速脫壁距離 (2026-05-22: 2.0 → 2.3 → 2.6; 2026-05-27: 2.6 → 2.3; 2026-05-29: 2.3 → 2.0 提速)
+    static constexpr int PUSHER_RETRACT_PULSE      = 300;   // 收腳目標 (2026-07-14: 0→300 ≈0.1cm)。高速收到 0=機械原點會撞 hardstop「叩」一聲；停在原點前 0.1cm 避免撞擊。<FAKE-DONE 容差 50°(500pulse)、300pulse=30° 仍算收好
+    static constexpr int PUSHER_RPM           = 900;     // extend 用（feet）(2026-07-14: 700→1200 激進提速；2026-07-23 per user: 1200→900 調降)
+    // [2026-07-31 per user] pusher_two_stage_retract_ 改成比照 Linux_test 功能31
+    // 的破真空輔助單段直收（CH_BREAK_VACUUM 主動破壞真空 + 直接快收，不再需要
+    // 慢慢剝離）。PUSHER_RPM_RETRACT / RETRACT_SLOW_PEEL_CM / PUSHER_STAGE1_DELAY_MS
+    // 這三個「第一段慢脫壁」專用的常數不再被 retract 邏輯使用（保留常數定義本身，
+    // 因為 RETRACT_SLOW_PEEL_CM 還有 runtime settings_ 可調路徑，懶得順便拆）。
+    static constexpr int PUSHER_RPM_RETRACT      = 150;     // [已不用於 retract] 原兩段式第一段（慢脫壁）
+    static constexpr int PUSHER_RPM_RETRACT_FULL = 500;     // 破真空輔助單段直收速度 (2026-07-31 per user: 900→1000 比照 bench 初版 → bench 上又測過 900→700→500，同步拉回正式程式)
+    static constexpr double RETRACT_SLOW_PEEL_CM = 1.0;     // [已不用於 retract] 原兩段式第一段慢脫壁距離
+    // [2026-07-31 per user] 破真空閥時序，比照 Linux_test 功能31 bench 驗證值。
+    static constexpr int BREAK_VACUUM_PRE_RETRACT_MS = 80;   // CH_BREAK_VACUUM ON -> 收腳指令送出
+    static constexpr int BREAK_VACUUM_TOTAL_ON_MS    = 500;  // CH_BREAK_VACUUM ON -> OFF（收腳指令在這段時間內送出）
     static constexpr int PUSHER_RPM_BODY_EXTEND = 700;   // body 組 extend 速度（與其他組同速）
     static constexpr int PUSHER_ACC           = 255;     // acc 用（feet / center extend，max）
     static constexpr int PUSHER_ACC_RETRACT   = 255;     // retract 用（所有組，高 acc 快速收回）
@@ -346,7 +478,8 @@ private:
     // Safety factor for stage 1 delay. Higher = more conservative (longer wait,
     // gives over-extended cup more time to peel before stage 2 hits).
     // 2026-05-29: 2.0 → 3.0 per user request, "拉長一點".
-    static constexpr double PUSHER_STAGE1_SAFETY_FACTOR = 3.0;
+    // 2026-07-14: 3.0 → 1.0 激進提速（腳不撐重，脫壁延遲=脫壁時間本身、不加保險）。
+    static constexpr double PUSHER_STAGE1_SAFETY_FACTOR = 1.0;
     static constexpr int    PUSHER_STAGE1_DELAY_MS    =
         (int)((RETRACT_SLOW_PEEL_CM / PUSHER_RETRACT_CM_PER_SEC) *
               PUSHER_STAGE1_SAFETY_FACTOR * 1000.0);
@@ -355,8 +488,14 @@ private:
     // Step parameters
     static constexpr int STEP_CM_DEFAULT  = 30;   // initial value of step_cm_ (settable via cmd_set_step_cm)
     static constexpr int STEP_CM_MIN      = 5;
-    static constexpr int STEP_CM_MAX      = 50;
+    static constexpr int STEP_CM_MAX      = 80;
     static constexpr int STEP_MARGIN_CM   = 10;   // crane extra slack before feet move (2026-05-27: 15→10 提速)
+    // [2026-07-27 per user] do_step_sync_ backoff-retry: if a whole side is
+    // still unsealed after the in-place per-side retry, retreat the crane
+    // toward the pre-step position in this many cm per attempt (full 4-cup
+    // retract → crane back → re-extend → recheck), until sealed or fully
+    // backed off to the original position (see do_step_sync_ for the loop).
+    static constexpr int STEP_SYNC_BACKOFF_CM = 10;
     static constexpr int TOTAL_DISTANCE_CM = 30;  // TODO: set actual building height
 
     // Crane watchdog
@@ -379,7 +518,7 @@ private:
     // IMU
     static constexpr const char* IMU_PORT           = "/dev/ttyUSB0";  // TODO confirm
     static constexpr int         IMU_BAUD           = 115200;
-    static constexpr double      IMU_ASK_DEG        = 15.0;
+    static constexpr double      IMU_ASK_DEG        = 45.0;  // 2026-07-09 per user: 15→45 (== emergency). ASK branch needs avg∈[ASK,EMERGENCY); with ASK==EMERGENCY it never fires → no intermediate pause-to-ask, only the 45° emergency stop stays active.
     static constexpr double      IMU_EMERGENCY_DEG  = 45.0;
     static constexpr int         IMU_BASELINE_SEC   = 3;
     static constexpr double      IMU_HYSTERESIS_DEG = 1.0;
@@ -394,10 +533,31 @@ private:
 
     // Arm sweep (上滑台 / DM2J slave 14 @ cli_22_ since 2026-05-26)
     // NOTE: DM2J ACC/DEC unit is ms/1000rpm (Leadshine convention) — LOWER = faster ramp.
-    static constexpr int ARM_SWEEP_CM  = 55;   // sweep cm (2026-05-21: 30→40→45→50→55; 2026-05-25: 55→60→100→80; 2026-05-26: 80→100; 2026-05-28: 100→80; 2026-06-06: 80→90→100→90→85; 2026-06-11: 85→60→55 per user 縮短行程)
+    static constexpr int ARM_SWEEP_CM  = -8;   // sweep cm (2026-07-27 per user: -6→-8; 2026-07-24 per user: -10→-6; 2026-05-21: 30→40→45→50→55; 2026-05-25: 55→60→100→80; 2026-05-26: 80→100; 2026-05-28: 100→80; 2026-06-06: 80→90→100→90→85; 2026-06-11: 85→60→55; 2026-07-23 per user: 55→-10 — 手臂還沒裝，「所有上滑台移動」統一改小行程+同一方向，涵蓋 do_arm_sweep_ / do_arm_clean_sweep_ / do_arm_clean_sweep_continuous_ 共用此常數)
     static constexpr int ARM_SWEEP_RPM = 1000;   // top speed (2026-05-26 bench menu28: 2300 + ACC/DEC 200/200 穩定; 2026-05-27: 2300→2000→1000 per user 因仍觀察失步)
     static constexpr int ARM_SWEEP_ACC = 100;    // start ramp (ms/1000rpm) — 2026-05-26: 100→200; 2026-05-27: 200→100 配合 RPM 1000
     static constexpr int ARM_SWEEP_DEC = 100;    // stop ramp (ms/1000rpm) — 2026-05-26: 100→200; 2026-05-27: 200→100 配合 RPM 1000
+
+    // [2026-07-23 per user] do_step_sync_ 專用的小行程滑台掃動（0→-10cm→0 來回一次）
+    // — 跟上面 ARM_SWEEP_* 是完全不同的動作/參數組，行程短很多（10cm vs 55cm）所以
+    // 另外設一組。手臂本身（damiao M1/M2）跟刷滾筒（CH5）都不碰，純粹只動 DM2J:14。
+    // ⚠ RPM/ACC/DEC 是初次上機前的保守猜測值，還沒實機驗證，上機後依實際手感調整。
+    static constexpr double DM2J_ARM_STEP_SWEEP_CM  = -8.0;  // 0 → 此值 → 0，一次來回 (2026-07-27 per user: -6→-8; 2026-07-24 per user: -10→-6→-4→-6)
+    static constexpr int    DM2J_ARM_STEP_SWEEP_RPM = 250;    // 2026-07-27 per user: 300→250 稍微放慢；300→600→500→400→300 (2026-07-24 per user)
+    static constexpr int    DM2J_ARM_STEP_SWEEP_ACC = 100;
+    static constexpr int    DM2J_ARM_STEP_SWEEP_DEC = 100;
+    // [2026-07-23 per user] 估計單趟 (10cm @ 600rpm, 1cm/rev 螺桿換算同
+    // ARM_SWEEP_EST_MS 的公式) 走完所需時間：加速斜坡 ~60ms(0.3cm) + 巡航
+    // ~940ms(9.4cm) + 減速斜坡 ~60ms(0.3cm) + fire retry/緩衝 ~150ms ≈ 1.5s。
+    // [2026-07-24 per user] 行程 -10→-4、RPM 500→400→300 後重算：
+    // 巡航距離 4−0.6(加減速)=3.4cm，300rpm=5cm/s → 巡航 ~680ms +
+    // 加速 60ms + 減速 60ms + 緩衝 150ms ≈ 950ms → 抓 1000ms。
+    // ⚠ 純計算估計值，未實機驗證；跟 ARM_SWEEP_EST_MS 分開設，避免沿用 55cm
+    // 那組估計值讓同步步伐的滑台掃動平白多等好幾秒（沒有實際意義的等待）。
+    static constexpr int    DM2J_ARM_STEP_SWEEP_EST_MS = 1000;
+    // [2026-07-24 per user] LEFT/RIGHT deploy wall_mm for this sync-step sweep
+    // — separate from ARM_CLEAN_WALL_MM(330) used by the continuous sweep engine.
+    static constexpr int    DM2J_ARM_STEP_SWEEP_WALL_MM = 380;   // 2026-07-27 per user: 360→380
 
     // 2026-05-26: Fire-and-forget sweep (avoid cli_22_ contention from PR_move_cm's
     // status poll fighting JC100 pressure reads during disable_seal). PR_move_cm_nowait
@@ -418,6 +578,11 @@ private:
     // History: 5500ms (100cm@2300rpm) → 5700 (85cm@1000rpm) → 4200 (60cm@1000rpm) → 3900 (55cm@1000rpm, 2026-06-11)
     // If arm hasn't reached target before next fire, next fire overrides (arm jumps
     // to new target mid-motion). Tune up if bench shows arm not reaching extremes.
+    // [2026-07-23] NOT re-derived for the new |ARM_SWEEP_CM|=10cm (was 55cm) —
+    // left at 3900ms deliberately: an over-long estimate just means the monitor
+    // waits longer than the (much shorter) real 10cm move actually needs, which
+    // is safe (no correctness impact), just not time-optimal. Tighten this if
+    // the extra wait is annoying on the bench.
     static constexpr int ARM_SWEEP_EST_MS          = 3900;
 
     // [2026-05-28] Sweep obstacle monitor (Option A + C).
@@ -457,7 +622,7 @@ private:
     static constexpr float ARM_SWEEP_M2_RATE_THRESHOLD_NM    = 100.0f; // 實質 disable
 
     // Cleaning sweep at the end of each step_up / step_down (2026-05-21 per user)
-    static constexpr int ARM_CLEAN_WALL_MM = 330;  // DEPLOY wall distance (fixed); 2026-06-02: 350→330 試「上貼下不貼」是不是 M1 過度外擺造成；2026-05-27: 300→350 拉大讓 M1 往前推更多（靠刮刀座彈性吸收過壓）
+    static constexpr int ARM_CLEAN_WALL_MM = 380;  // DEPLOY wall distance (fixed); 2026-07-27 per user: 360→380；2026-07-24: 330→360 per user，手臂已實機裝上；2026-06-02: 350→330 試「上貼下不貼」是不是 M1 過度外擺造成；2026-05-27: 300→350 拉大讓 M1 往前推更多（靠刮刀座彈性吸收過壓）
     static constexpr int ARM_CLEAN_ROUNDS  = 1;    // wet+dry rounds per step
 
     // Vacuum
@@ -469,9 +634,41 @@ private:
     static constexpr int VACUUM_EARLY_STOP_KPA  = -45;   // kPa — early-stop threshold near verified-sealed (was -30, too lenient → early-stopped at marginal seal)
     static constexpr int DETACH_THRESHOLD_KPA   = -10;   // kPa
     static constexpr int VACUUM_SETTLE_MS     = 1500;   // 2026-05-22: 2000 → 1500
-    static constexpr int VACUUM_RELEASE_WAIT_MS = 1500;  // wait after valve OFF before pusher retract (cup adhesion + line vent) (2026-05-22: 4000 → 3000; 2026-06-01: 3000 → 1500，bench 觀察 valve OFF 瞬間 vent 完成，剩下殘留要靠 slow peel 拉開，3000 大部分是浪費)
+    static constexpr int VACUUM_RELEASE_WAIT_MS = 700;   // wait after valve OFF before pusher retract (cup adhesion + line vent) (2026-06-01: 3000→1500; 2026-07-14: 1500→700 激進提速。⚠ 這是氣動洩壓時間、物理下限，若 bench 看到 cup 帶負壓「啵」彈開或瞬間 stall 就是砍過頭，往回加)
     static constexpr int POLL_INTERVAL_MS     = 50;
     static constexpr double VACUUM_BACKUP_CM  = 10.0;  // rail backup on each vacuum retry (2026-05-29: 5→10，weak_seal 後找新位置 5cm 不夠遠，常吸到同一個漏氣點)
+
+    // Left/right rope level-match (方案1, 2026-07-08). The follower side (left)
+    // moves its rope until its SD76 meter matches the master (right) side's meter
+    // instead of walking a fixed `step` → re-levels every step so per-side error
+    // can't accumulate. crane status length_left/length_right are in cm.
+    static constexpr double LEVEL_MATCH_TOL_CM = 0.5;  // follower already-level deadband (skip crane move if |delta| below this)
+    // Safety cap on a single level-match move = max allowed left/right meter diff.
+    // A re-seal (backup) can legitimately leave one side up to ~step longer, so the
+    // follower must be allowed a large correction (NOT clamped to ~step); it walks
+    // the full |delta| to re-level — same as v1's absolute DM2J rail target auto-
+    // absorbing a rail backup on the next step. Only |delta| > this (meters wildly
+    // apart) is clamped + warned, with the remainder corrected over later steps.
+    static constexpr int    LEVEL_MAX_DELTA_CM = 60;   // 2026-07-15 per user: 兩邊計米差 / 單次移動上限 60cm (hard ceiling)
+    // [方案B 2026-07-08] Per-side per-step move ceiling = step + this margin.
+    // With the common-absolute-target gait each side moves at most ~one step
+    // (lagging side moves exactly step; leading side gives way and moves ≤step),
+    // so this only bites on a pathological gap — remainder corrects next step.
+    // Kills the old failure where a follower caught up 2×step in one swing.
+    static constexpr int    LEVEL_MOVE_MARGIN_CM = 5;
+    // [策略1 2026-07-09] Follower-side IMU fine-leveling — after the follower's
+    // coarse measured descent (方案B), iterate small tension-safe measured moves
+    // (span·tan(roll) estimate) until |roll-baseline| < tol. Uses the already-
+    // resealed first side as the true-level datum → robust to long-rope meter
+    // scale error / rope stretch (converges on real roll, not meter cm). See §12.
+    // Reuses BAL_CAL_ROLL_PANIC_DEG (15°) as the abort-and-leave-to-guard ceiling.
+    // Enable is the RUNTIME flag follower_use_imu_ (set_follower_mode imu|meter),
+    // not a compile constant — so imu/meter can be compared on the bench.
+    static constexpr double FOLLOWER_ROLL_TOL_DEG    = 2.0;    // |roll-baseline| below this = level enough (2026-08-04 per user: 1.0→2.0; 2026-07-23 per user: 0.5→1.0 — small tilts were triggering trim passes that then oscillated sign each pass; only correct bigger tilts now). Shared by BOTH follower_imu_level_ (step_down/up per-side leveling) AND do_sync_imu_roll_correct_ (step_sync differential correction) — this raises the threshold for both.
+    static constexpr int    FOLLOWER_IMU_MAX_PASSES  = 3;      // cap trim iterations per step
+    static constexpr int    FOLLOWER_IMU_MAX_TRIM_CM = 15;     // per-pass measured-move ceiling (backstop vs bad span/roll)
+    static constexpr int    FOLLOWER_IMU_SETTLE_MS   = 800;    // let the released corner stop swinging before reading roll (2026-07-14: 1200→800 提速；多 pass 兜底)
+    static constexpr double FOLLOWER_SPAN_CM         = 100.0;  // L/R cup-column horizontal span — PLACEHOLDER, bench-cal (only affects convergence speed, not final level)
     // step_up body backup (2026-05-19): pay out (backup_cm + this margin) before
     // the rail descends the body, then retract backup_cm back with
     // crane_retract_safe_ (weight-threshold stop). The extra margin gives the
@@ -536,8 +733,8 @@ private:
     static constexpr int    VACUUM_NO_CONTACT_FAST_MS    = 1000;  // 2026-05-28ag: 1000→2000，cup 5 在 1000ms 還只到 -5、需更多時間; 2026-06-01: 2000 → 1000，peakI < 400mA fast-skip (DISABLE_LOW_CONTACT_PEAK_MA) 已先擋掉大部分 no-contact 情境，剩下「有接觸但真空慢」的 cup 1000ms 仍有機會 seal，沒到 -1kPa 就 fast-skip 合理
     static constexpr int    VACUUM_NO_CONTACT_KPA        = -1;   // 2026-05-28ag: -5→-1，best_p 到 -5 也算「有接觸」不該被 fast-skip。only true 大氣壓 (p>=0) 才算無接觸
     static constexpr int    DISABLE_RETRY_INCR_PULSE     = 3000; // 弱密封時每 iter 補伸 1.0 cm (2026-05-22: 2400→3000 per user；慣例 3000 pulse=1.0cm)
-    static constexpr int    DISABLE_RETRY_MAX_OVEREXTEND = 15000; // 上限 +5.0 cm (2026-05-19: 7500→15000) — 配 1.0cm 步進(INCR 3000) → iter 0~4 = +1.0~+5.0cm 五輪都能 push，cap 不再提早截斷；weak_seal 改由 MAX_ITERS 收尾判定
-    static constexpr int    DISABLE_RETRY_MAX_ITERS      = 5;    // iter 上限 → iter 0~4 共 5 次 push（cap 拉到 15000 後此值才是真正的 binding limit）
+    static constexpr int    DISABLE_RETRY_MAX_OVEREXTEND = 24000; // 上限 +8.0 cm (2026-07-08: 15000→24000) — v2 機構容易讓腳歪掉，某幾隻要伸更長才勾到牆；配 1.0cm 步進(INCR 3000) → 8 次 push 都能到 cap；總伸長 ~phase1(5cm)+8cm ≈ 13cm，仍遠低於 SMC LEYG25 20cm 行程
+    static constexpr int    DISABLE_RETRY_MAX_ITERS      = 5;    // iter 上限 (2026-07-08: 8→5 per user 改回原本)。注意：5 次 push × 3000 = +15000 先 binding，cap 24000(+8cm) 迴圈吃不到；有效補伸上限 ~+5cm。settings 可調 (1~20)
 
     // [2026-06-05] Snowball protection (A+B+C):
     //   A — WEAK_SEAL 不 record_seal_pulse_，避免污染 last_seal_pulse_
@@ -549,7 +746,7 @@ private:
     //   body preset = 34000 / 35400
     //   iter loop 還會在 target 之上推 +12000 pulses (4 iter × INCR 3000)
     //   → feet_over cap = (60000 - 34000 - 12000) / 3000 ≈ 4.67 cm，取 4.5 留餘裕
-    //   feet 同理 (60000 - 29000 - 12000) / 2857 ≈ 6.65 cm，取 5.0 保守
+    //   feet 同理 (60000 - 17100 - 12000) / 2857 ≈ 10.8 cm，取 5.0 保守（v2 preset 縮短後餘裕更大）
     //
     // 牆距超過 cap 時的後果：cup 在 free air、no contact → iter loop 內 fast-skip
     // → MAX_ITERS 後 WEAK_SEAL。A 會接手不去污染 last_seal，下一輪重新從 preset 起算。
@@ -649,12 +846,12 @@ private:
     // Realign sequence (E) — periodic feet/body cup re-zero when fine_tune drift accumulates.
     // 2026-05-22: 從單一 max 門檻換成 hybrid（max OR mean），避免單顆 cup outlier
     // 過於頻繁觸發 realign。
-    //   - 單顆 cup 漂超過 REALIGN_THRESHOLD_CM (1.5cm) → 觸發（safety net for outlier）
+    //   - 單顆 cup 漂超過 REALIGN_THRESHOLD_CM (1.0cm) → 觸發（safety net for outlier）
     //   - 全部 cup 平均漂超過 REALIGN_THRESHOLD_MEAN_CM (1.0cm) → 觸發（累積式判斷）
     // 2026-06-05: Phase 1 加速 — 提前 trigger 讓每次 realign 工作量小、body cup
     // 不再撞 endpoint → disable_seal iter 大減（連鎖效益）。前提是 2026-06-01h
     // fix 讓 Stage 0 stall non-fatal、realign 整體更穩。
-    static constexpr double REALIGN_THRESHOLD_CM            = 1.5;   // single-cup max trigger (2026-06-05: 3.0 → 1.5 Phase 1 speedup) (2026-05-22: 1.5 → 3.0)
+    static constexpr double REALIGN_THRESHOLD_CM            = 1.0;   // single-cup max trigger (2026-07-08: 1.5 → 1.0 per user) (2026-06-05: 3.0 → 1.5 Phase 1 speedup) (2026-05-22: 1.5 → 3.0)
     static constexpr double REALIGN_THRESHOLD_MEAN_CM       = 1.0;   // mean of |drift| across cups → trigger (2026-06-05: 2.0 → 1.0 Phase 1 speedup) (2026-05-22: 1.0 → 1.5; 2026-05-28: 1.5 → 2.0)
     // Realign crane assist target = the per-sensor weight limit (rope_weight_
     // limit_per_sensor_kg_, 2026-05-19 per user — was a fixed 2kg). Not a
@@ -663,11 +860,11 @@ private:
     // Two-stage retract pattern (matches cycle_group_ body retract):
     //   Stage A: retract delta/3 at SLOW rpm — break cup adhesion to wall
     //   Stage B: retract remaining 2*delta/3 at FULL rpm — finish quickly once unstuck
-    static constexpr int    REALIGN_RETRACT_RPM             = 50;    // Stage A: slow retract while sealed (break adhesion)
+    static constexpr int    REALIGN_RETRACT_RPM             = 100;   // Stage A: retract while sealed (break adhesion) (2026-07-14: 50→100; v2 腳不撐重、torque spike 風險降；限速主因是拉太快扯破真空脫落，100 仍受控)
     static constexpr int    REALIGN_RETRACT_ACC             = 200;
-    static constexpr int    REALIGN_RETRACT_RPM_FULL        = 60;    // Stage B: 1.2× of Stage A — minimize speed jump (avoid 80 RPM ramp-up torque spike that stalled slave 5 / 2026-05-06)
-    static constexpr int    REALIGN_RETRACT_ACC_FULL        = 50;    // Gentle ramp-up — lowers peak torque demand at Stage 2 start
-    static constexpr int    REALIGN_EXTEND_RPM              = 20;    // very slow extend for short cups (push cup into wall, machine load builds gradually)
+    static constexpr int    REALIGN_RETRACT_RPM_FULL        = 90;    // realign 單段收速度 (2026-07-14: 60→120→70；120 實機扯破真空脫封 realign_post_unsealed，降回 70。2026-07-15 per user: 70→90 試探，介於已知安全值 70 跟已知會脫封的 120 之間 — 上機台要盯 realign_post_unsealed 有沒有再出現)
+    static constexpr int    REALIGN_RETRACT_ACC_FULL        = 150;   // (2026-07-14: 50→150，無載 torque spike 風險降)
+    static constexpr int    REALIGN_EXTEND_RPM              = 60;    // extend short cups to preset (2026-07-14: 20→60，v2 無載、原「load builds gradually」不再適用)
     static constexpr int    REALIGN_EXTEND_ACC              = 200;
     // [2026-06-01] Phase 2 stage 0 "preload jog" — before Stage A retract, give
     // each retract slave a tiny outward push (~0.1cm) to relieve elastic mechanism
@@ -686,11 +883,16 @@ private:
 
     //=========== hardware ===========
 
-    TCP_client cli_20_, cli_21_, cli_22_;
+    TCP_client cli_20_, cli_22_;   // [v2] .20 = ZDT pushers 1-4, .22 = JC100/PQW/arm-rail/XKC/DY500 (.21/cli_21_ retired)
     TCP_client crane_cli_;
     // Cleaning arm — separate TCP connection to local motor_api service (127.0.0.1:9527)
     TCP_client arm_cli_;
     std::mutex arm_mtx_;
+    // Depth-camera (D435i) obstacle-detection service — separate TCP connection
+    // to local depth_cam_service.py (127.0.0.1:9530). Same lazy-connect +
+    // background-reconnect pattern as arm_cli_.
+    TCP_client depth_cli_;
+    std::mutex depth_mtx_;
     // Dedicated 2nd connection for emergency stop sent from weight-monitor thread
     // during in-flight retract. Bypasses crane_mtx_ to avoid deadlock with the
     // main thread holding it for the long-running retract reply wait.
@@ -732,6 +934,16 @@ private:
     // sets+clears atomically across all return paths in step cmd entrypoints.
     std::atomic<bool>    step_in_progress_{false};
     std::mutex           motion_mtx_;
+    // [2026-07-15] Serializes ZDT pusher bus ops (pusher_move_many_ /
+    // pusher_two_stage_retract_ / pusher_extend_with_disable_seal_) across
+    // threads. Needed once feet_topup_unsealed_ started running in the
+    // background (see run_side in do_step_down_/do_step_up_) — without this,
+    // the background topup and the main thread's other-side pusher calls could
+    // both be mid-Modbus-transaction on cli_20_ (shared by all 4 ZDT slaves) at
+    // the same time, with no guarantee a thread's receiveData() gets the reply
+    // meant for its own request (TCP_client::socket_mtx only protects a single
+    // send/recv call, not a whole request-response transaction).
+    std::mutex           zdt_bus_mtx_;
 
     std::mutex           crane_mtx_;
     std::atomic<bool>    crane_wd_running_;
@@ -813,7 +1025,7 @@ private:
     std::set<int>          disabled_zdt_slaves_;
 
     // Per-step rail travel (cm). Settable per cmd_step_down / cmd_run call.
-    // Default STEP_CM_DEFAULT (30); valid range STEP_CM_MIN..STEP_CM_MAX (5..50).
+    // Default STEP_CM_DEFAULT (30); valid range STEP_CM_MIN..STEP_CM_MAX (5..80).
     std::atomic<int>     step_cm_;
 
     // [2026-06-01] Camera-based obstacle detection toggle. Default OFF — does
@@ -826,6 +1038,21 @@ private:
     // Detector: D:/洗窗戶機器人/window_detect/detect_server.py (UDP :5040,
     //           YOLOv8 + Hailo NPU, class=window_frame).
     std::atomic<bool>    obstacle_detect_enabled_;
+
+    // [2026-07-09] Follower (second-moving) side leveling mode, runtime-switchable
+    // via `set_follower_mode imu|meter`:
+    //   false (meter) = 原本方法：第二腳走方案B 計米共同目標，不做 IMU 微調
+    //   true  (imu)   = 第二腳粗走(方案B)後再 follower_imu_level_ 依 IMU 精對平
+    // Default imu (2026-07-14 per user; ⚠ imu path needs FOLLOWER_SPAN_CM bench-cal
+    // for good convergence speed — switch to meter via set_follower_mode if unstable).
+    std::atomic<bool>    follower_use_imu_{true};
+
+    // [2026-07-09] Which foot leads the FIRST step, runtime-switchable via
+    // `set_first_step left|right`. true = right leads step 1 (then alternates
+    // right→left→right…); false = left leads step 1 (left→right→left…). Applies to
+    // multi-step run/run_script (alternation seed) AND single step_down/step_up.
+    // Default true (right first) = prior behaviour.
+    std::atomic<bool>    first_step_right_{true};
 
     // [2026-06-02] Balance calibration state. See cmd_balance_calibrate_*.
     //   running_: true between cmd_balance_calibrate_start and either record
@@ -879,6 +1106,8 @@ private:
         std::atomic<double> vacuum_backup_cm;
         std::atomic<double> retract_slow_peel_cm;
         std::atomic<int>    disable_retry_max_iters;
+        std::atomic<int>    pusher_rpm_disable_slow;         // [2026-07-14] Tier2 重吸補伸速度 live-tune
+        std::atomic<int>    disable_phase_current_limit_ma;  // [2026-07-14] 障礙偵測相電流門檻 live-tune
         std::atomic<int>    step_margin_cm;
         std::atomic<double> imu_ask_deg;
         std::atomic<double> arm_deploy_pos_tol_rad;
@@ -974,7 +1203,7 @@ private:
     // is tagged for batch deletion.
     // ============================================================
     static constexpr bool ARM_ROPE_PROTECTION       = true;
-    static constexpr int  ARM_ROPE_PROTECT_WALL_MM  = 250;   // 2026-05-22: 300 → 250 per user
+    static constexpr int  ARM_ROPE_PROTECT_WALL_MM  = 380;   // 2026-07-27 per user: 360→380，跟 ARM_CLEAN_WALL_MM 統一；2026-07-24: 250→360 per user；2026-05-22: 300→250 per user
     enum class ArmStowState { Unknown, Center, Parked };
     std::atomic<ArmStowState> arm_stow_state_{ArmStowState::Unknown};
 
@@ -991,8 +1220,11 @@ private:
     static constexpr float ARM_M1_PASSIVE_EXT_MM   = 86.46f;
     static constexpr float ARM_M1_VERTICAL_OFF_RAD = 0.38f;
     static constexpr float ARM_M2_TOOL_CENTER_MM   = 160.00f;
-    static constexpr float ARM_M2_TOOL_LEFT_MM     = 148.09f;
-    static constexpr float ARM_M2_TOOL_RIGHT_MM    = 134.07f;
+    // [2026-08-18 per user] LEFT/RIGHT SWAPPED to match the physical tool heads
+    // being swapped left-for-right. Was LEFT=148.09 / RIGHT=134.07. Kept in sync
+    // with cleaning_arm/main_api.h TOOL_EXT_LEFT_MM / TOOL_EXT_RIGHT_MM.
+    static constexpr float ARM_M2_TOOL_LEFT_MM     = 134.07f;
+    static constexpr float ARM_M2_TOOL_RIGHT_MM    = 148.09f;
     static constexpr float ARM_DEPLOY_POS_TOL_RAD  = 0.15f;   // ~8.6° / ~48mm (2026-05-22: 0.10 → 0.15, motor PD variance ~0.10 rad 自然 jitter 會誤判)
 
     // Set by crane_cmd_ when an EVT tension_alarm / tension_total_limit line is
@@ -1115,11 +1347,15 @@ private:
     // after_body_rail_hook: DM2J move 完成、rail 已到 step_cm 後呼叫一次。
     //   給 cmd_run_avoid 用來拍 "after" frame（rail 在 step_cm = 下一步起點）。
     // 兩個 hook 構成 motion parallax 的 before/after pair，給下一輪 detector 用。
+    // right_first (2026-07-09): which side leads this step. true = right side is the
+    // datum (方案B meter) + left is the IMU-leveled follower; false = swapped. Multi-
+    // step runs alternate it each step; single step = true (right first).
     std::string do_step_down_(bool skip_cleaning_sweep = false,
                               std::function<void()> after_feet_rail_hook = {},
                               std::function<void()> before_feet_rail_hook = {},
                               std::function<void()> during_body_rail_hook = {},
-                              std::function<void()> after_body_rail_hook = {});
+                              std::function<void()> after_body_rail_hook = {},
+                              bool right_first = true);
     // mirror of do_step_down_; skip_cleaning_sweep=true 給 cmd_step_up_with_sweep 用（sweep 由背景 thread 接手）。
     // after_feet_rail_hook：非空時，在 feet phase 的 rail DM2J move 完成那刻呼叫一次
     // （給 cmd_step_up_sweep_after_feet 用來 launch 背景 sweep）。
@@ -1127,16 +1363,96 @@ private:
     // （給 cmd_step_up_sweep_before_after 用來 join pre-feet sweep round）。
     std::string do_step_up_(bool skip_cleaning_sweep = false,
                             std::function<void()> after_feet_rail_hook = {},
-                            std::function<void()> before_feet_rail_hook = {});
+                            std::function<void()> before_feet_rail_hook = {},
+                            bool right_first = true);   // see do_step_down_ right_first note
 
-    // Realign sequence (E): when last_seal_pulse_ exceeds preset by REALIGN_THRESHOLD_CM
-    // (or force=true), synchronously retract all 9 cups back to preset extension
-    // while keeping valves ON (cups stay sealed → vacuum pulls machine toward wall).
-    // Crane retract incrementally until rope tension reaches the per-sensor
-    // weight limit (rope_weight_limit_per_sensor_kg_), capped at
-    // REALIGN_CRANE_ASSIST_MAX_CM, to share weight via rope.
-    // Returns "" on success / not-needed; "ERR ..." on failure (caller decides).
-    std::string do_feet_realign_(bool force = false, bool in_window = false);
+    // [2026-07-13 per user] 跨障礙物 cross-obstacle engine. up=false descend / up=true
+    // ascend. Both sides cross; anchor side stands off to 2×preset to clear the
+    // obstacle; reseals at 2×preset (cycle_group_ + feet_target_override); final
+    // do_feet_realign_(force) retracts all 4 back to normal preset. See .cpp.
+    std::string do_cross_obstacle_(bool up);
+
+    // [2026-07-22 per user] Synchronized step engine backing cmd_step_down_sync/
+    // cmd_step_up_sync. up=false descend (crane pay_out) / up=true ascend (crane
+    // retract). Sequence: release vacuum + retract all 4 cups together → crane
+    // moves BOTH ropes simultaneously by step_cm_ (bare pay_out/retract, crane-
+    // side dual_vfd_sync_start — NOT the per-side alternating pay_out_left/right
+    // do_step_down_/up_ use) → do_sync_imu_roll_correct_() → vacuum on + extend
+    // all 4 cups together → do_step_sync_rail_sweep_() (2026-07-23: small DM2J:14
+    // rail-only sweep, no arm/brush). See .cpp for the explicit zero-anchor-
+    // during-move safety note.
+    std::string do_step_sync_(bool up);
+
+    // [2026-07-23 per user] Small 上滑台 (DM2J:14 only, no arm/motor_api, no
+    // brush roller) sweep tacked onto the end of do_step_sync_ — same slot in
+    // the sequence the full arm-clean-sweep pipeline would occupy (see
+    // v2_app_redesign_plan.md §5.6), stripped down to just the rail since the
+    // arm still isn't installed. 0 → DM2J_ARM_STEP_SWEEP_CM (-10cm) → 0, one
+    // round trip, sequential/blocking (runs after cups are already re-sealed,
+    // so no cli_22_ contention with JC100/PQW ops earlier in the same step).
+    // Non-fatal: any failure/abort here is logged and the step still reports
+    // OK — rail sweep isn't safety-critical the way vacuum/crane moves are.
+    // init_ok: result of arm_cmd_("INIT") already run in parallel with the
+    // crane rope move by the caller (do_step_sync_) — see fut_arm_init there.
+    void do_step_sync_rail_sweep_(const char* tag, bool init_ok);
+
+    // [v2] Feet-only realign: retract all 4 feet cups back to preset while they
+    // stay SEALED (valves ON → vacuum pulls the machine toward the wall; cups
+    // never release, so the "4 cups anchored" invariant holds). No crane rope.
+    //   apply_threshold : true  → only run when drift exceeds REALIGN_THRESHOLD_CM
+    //                             (single) or REALIGN_THRESHOLD_MEAN_CM (mean);
+    //                             used by the end-of-step auto-call so realign only
+    //                             fires once drift accumulates. Skip returns "".
+    //                     false → run on any nonzero drift (manual cmd_realign).
+    //   caller_holds_lock: true → caller (do_step_*_) already holds motion_mtx_ and
+    //                             owns motion_active_ — don't re-lock / don't flip
+    //                             the flag (same-thread deadlock guard).
+    // Returns "" on success / skipped; "ERR ..." on failure (caller decides).
+    std::string do_feet_realign_(bool apply_threshold = false, bool caller_holds_lock = false);
+
+    // [方案B 2026-07-08] Read both crane meters (length_left/right, cm). Returns
+    // true on failure (crane detached / meter invalid / parse fail), false + both
+    // filled on success. Inverse convention (true = error).
+    bool read_crane_meters_(double& len_left, double& len_right);
+
+    // [方案B 2026-07-08] Build the crane command to move one step side to a
+    // pre-computed common ABSOLUTE target length (locked at step start from both
+    // meters), so neither side ever travels more than ~one step catching up after
+    // a failed reseal (replaces 方案1 master-fixed/follower-match, which let the
+    // follower swing up to 2×step). Reads this side's own meter fresh, moves the
+    // signed delta toward target_len (pay_out if longer needed / retract if
+    // shorter). Per-move clamped to step+LEVEL_MOVE_MARGIN_CM (remainder next
+    // step). !target_valid or meter read fail → fixed `dir_word <step>` fallback.
+    // Returns "" when already at target (within LEVEL_MATCH_TOL_CM). out_timeout set.
+    // [2026-07-15 per user] out_mv_cm = the actual cm this call is moving this
+    // side (0 if already at target; step if the fixed-step fallback fired).
+    // Callers must use THIS (not the flat `step`) as the retry/backup retreat
+    // budget — otherwise a leading side that only needed to move e.g. 20cm of
+    // a 35cm step could retreat the full 35cm during vacuum retries and end up
+    // BELOW where it started before this step.
+    std::string crane_abs_target_cmd_(const std::string& move_group,
+                                      const std::string& dir_word,
+                                      int step, bool target_valid,
+                                      double target_len, int& out_timeout,
+                                      double& out_mv_cm);
+
+    // [策略1 2026-07-09] Fine-level the follower (second-moving) side to the datum
+    // (first side already resealed) using IMU roll, after its coarse measured
+    // descent and BEFORE re-extending its cups. Iterates small tension-safe
+    // measured moves until |roll-baseline| < FOLLOWER_ROLL_TOL_DEG. No raw-on
+    // (keeps cmd_side_measured's tension/meter-death safety). Non-fatal & best-
+    // effort: skipped if IMU unhealthy / disabled; logs+EVTs outcome, never blocks
+    // the step. move_group = follower side ("left" in the current gait). See §12.
+    void follower_imu_level_(const std::string& move_group);
+
+    // [2026-07-22] Differential IMU roll correction for do_step_sync_ — unlike
+    // follower_imu_level_ (nudges ONE side against an already-resealed datum
+    // side), do_step_sync_ has no datum side (all 4 cups released together), so
+    // this drives crane's "roll_correct <delta_cm>" differential primitive
+    // instead (both ropes move oppositely in one call). Non-fatal: any failure
+    // or non-convergence just leaves residual tilt for the next step, same
+    // philosophy as follower_imu_level_.
+    void do_sync_imu_roll_correct_();
 
     // [2026-06-02] Orchestrate balance calibration Phase 1-4. Runs synchronously
     // in caller's thread (typically cmd_balance_calibrate_start's TCP handler
@@ -1186,6 +1502,11 @@ private:
     // causing motor_api to see 3 simultaneous source-port connections + ~30s
     // recovery (bench 2026-06-03).
     std::string arm_cmd_(const std::string& line, int timeout_sec = 30);
+    // Mirrors arm_cmd_ exactly (lazy connect + background reconnect via
+    // TCP_client, 2-attempt retry, no retry on recv timeout). Longer default
+    // timeout than arm_cmd_ — AFTER runs optical flow + plane fit + connected
+    // components, can take longer than a simple motor status round-trip.
+    std::string depth_cam_cmd_(const std::string& line, int timeout_sec = 10);
 
     // [arm rope protect TEMP 2026-05-21] — gated by ARM_ROPE_PROTECTION.
     // Both return true on error, false on success / no-op.
@@ -1207,7 +1528,11 @@ private:
     //   C: damiao M2 tau spike vs baseline captured at entry
     // On detection: set arm_sweep_obstacle_pending_ + detail + EVT, then return
     // early. Main thread's try_or_pause_ external-pause check picks it up next op.
-    void arm_monitor_during_sweep_();
+    // est_ms (2026-07-23 per user, default ARM_SWEEP_EST_MS): the plain-sleep
+    // fallback duration and polling-loop total duration scale to this instead
+    // of the hardcoded 55cm/1000rpm estimate — do_step_sync_rail_sweep_ passes
+    // its own much-shorter DM2J_ARM_STEP_SWEEP_EST_MS for its 10cm move.
+    void arm_monitor_during_sweep_(int est_ms = ARM_SWEEP_EST_MS);
     // [2026-05-29] Post-sweep obstacle handler — for continuous sweep mode.
     // Background sweep can only set arm_sweep_obstacle_pending_ flag + stop slide
     // (can't safely call await_user_intervention_ from non-main thread). Main
@@ -1240,16 +1565,12 @@ private:
 
     // Read max rope tension (kg) with crane DSZL-107 as primary source.
     // 1. Primary: crane_cmd_("tension"), parse "left=<kg> right=<kg>" → return max
-    // 2. Fallback: easy crane weight via shim (read_easy_weight_kg_) — kept as
-    //    redundancy if DSZL-107 read fails (Q4=(a) decision 2026-05-07)
-    // Returns kg; -1 if all sources fail.
+    // 2. Fallback: washrobot-end DY-500 cache (slave 10/11, if installed)
+    // [2026-08-04 per user] 3rd fallback (easy crane weight via crane_shim)
+    // removed — Crane_easy_PI hardware decommissioned.
+    // Returns kg; WEIGHT_NO_DATA_KG if all sources fail.
     double      read_rope_weight_max_kg_();
 
-    // Query easy crane weight via shim (test mode primary source until real
-    // crane arrives). Sends 'status' on estop channel (bypasses crane_mtx_ so
-    // it's safe to call during in-flight retract). Parses 'weight=<kg>' field.
-    // Returns kg; -1 on comm fail / parse fail / detached.
-    double      read_easy_weight_kg_();
     // Read max rope weight (kg) via the dedicated estop channel — bypasses
     // crane_mtx_, so it works WHILE a retract holds that mutex (the normal
     // read_rope_weight_max_kg_ would block). Used by crane_retract_safe_'s
@@ -1324,7 +1645,13 @@ private:
     // (50ms spacing) for redundancy against lost Modbus writes, then sleeps
     // ARM_SWEEP_EST_MS to let the arm physically reach target before next fire.
     // Does NOT return error — sweep cleanup runs regardless.
-    void arm_sweep_fire_nowait_(double target_cm);
+    // rpm/acc/dec/est_ms (2026-07-23 per user, default ARM_SWEEP_* — every
+    // existing caller unaffected): lets do_step_sync_rail_sweep_ fire at its
+    // own DM2J_ARM_STEP_SWEEP_* speed/estimate instead of the 55cm/1000rpm
+    // tuning this function was originally built around.
+    void arm_sweep_fire_nowait_(double target_cm,
+                                 int rpm = ARM_SWEEP_RPM, int acc = ARM_SWEEP_ACC, int dec = ARM_SWEEP_DEC,
+                                 int est_ms = ARM_SWEEP_EST_MS);
 
     //=========== pusher / vacuum ===========
 
@@ -1375,11 +1702,34 @@ private:
     // slave's internal obstacle[] flag was set during the seal cycle (pos_error
     // + phase_current both above limits during push). Used by cycle_group_ to
     // trigger obstacle rescue (bigger backup, doesn't consume vacuum retry).
+    //
+    // stop_on_first_seal (2026-07-08 per user): when true, the iter push-loop
+    // exits as soon as AT LEAST ONE cup in `slaves` TRULY sealed (not weak /
+    // obstacle) — remaining un-sealed cups are NOT pushed further; the wrap-up
+    // re-enables their EN + locks position. Used by step_down/up feet extend so
+    // a side proceeds on the first sealed cup. Default false = seal all cups
+    // (attach / manual / probe keep the original "push every cup" behaviour).
+    // max_iters (2026-07-14): Phase 2 iter-loop cap override. 0 = use
+    // DISABLE_RETRY_MAX_ITERS (default). feet_topup_ passes a small value (2) so
+    // the best-effort 2nd-cup top-up gives up quickly → shorter group-switch gap.
+    // stop_group_ids (2026-07-23 per user): optional, same size as `slaves`.
+    // When null (default — every existing caller), stop_on_first_seal behaves
+    // exactly as before: ANY slave in `slaves` sealing stops the WHOLE call.
+    // When provided, each slave's group id partitions `slaves` into
+    // independent stop domains — a group only stops pushing/polling ITS OWN
+    // members once ANY member of THAT group truly seals; other groups keep
+    // going until they independently satisfy their own bar (or MAX_ITERS).
+    // Lets one single simultaneous 4-slave call (one trigger_sync_move) give
+    // do_step_sync_ per-side early-stop without splitting into two sequential
+    // calls — see do_step_sync_ for the caller that needs this.
     bool             pusher_extend_with_disable_seal_(const std::vector<int>& slaves,
                                                        const std::vector<int>& target_pulses,
                                                        int fast_rpm = PUSHER_RPM,
                                                        int acc = PUSHER_ACC,
-                                                       bool* any_obstacle_out = nullptr);
+                                                       bool* any_obstacle_out = nullptr,
+                                                       bool stop_on_first_seal = false,
+                                                       int max_iters = 0,
+                                                       const std::vector<int>* stop_group_ids = nullptr);
 
     // Smart extend on a subset of slaves in a given group. Mirrors cycle_group_'s
     // extend section: per-slave start_pulses (from last_seal_pulse_ + body delta),
@@ -1389,7 +1739,19 @@ private:
     //   group  : "feet" / "body" / "center"
     //   slaves : subset of group_slaves_(group); for full group pass group_slaves_(group)
     // Returns true on hard fail (extend send / fine_tune size mismatch), false otherwise.
-    bool             smart_extend_subset_(const std::string& group, const std::vector<int>& slaves);
+    // stop_on_first_seal (2026-07-23 per user, default false = existing
+    // cmd_attach behavior "try to seal every cup"): true makes the underlying
+    // pusher_extend_with_disable_seal_ stop pushing a slave's group the moment
+    // any ONE member of that group seals.
+    // stop_group_ids (2026-07-23 per user, optional): same size as `slaves`,
+    // partitions them into independent stop domains — pass this when calling
+    // with a mixed multi-side slave list (e.g. all 4 in one simultaneous call)
+    // so each side stops independently instead of the whole call stopping on
+    // the first cup sealing ANYWHERE. Omit (nullptr) when `slaves` is already
+    // a single side/group — see pusher_extend_with_disable_seal_ for detail.
+    bool             smart_extend_subset_(const std::string& group, const std::vector<int>& slaves,
+                                           bool stop_on_first_seal = false,
+                                           const std::vector<int>* stop_group_ids = nullptr);
 
     // After group broadcast extend, monitor vacuum per-cup and incrementally
     // extend unsealed cups (up to base + FINE_TUNE_MAX_OVEREXTEND). Returns
@@ -1427,6 +1789,21 @@ private:
     bool             set_water_inlet_(bool on);
 
     std::vector<int> vacuum_check_(const std::string& group);
+    // [2026-07-08 per user] Per-side "sealed enough" test used by step_down/up.
+    // Returns true if AT LEAST ONE cup in `group` reached VACUUM_THRESHOLD_KPA
+    // (was: all cups). Fills out_unsealed with the cups that did NOT seal (for
+    // logging/telemetry). A side has 2 cups → true unless BOTH failed.
+    bool             group_seal_ok_(const std::string& group, std::vector<int>& out_unsealed);
+    // [2026-07-08 per user] Best-effort synchronous "top-up": after a side has
+    // sealed >=1 cup (stop_on_first_seal), re-run the SAME disable_seal pipeline
+    // on JUST that side's still-unsealed cup(s) to try to recover 2-cups-per-side.
+    // Preserves ALL obstacle / wall / weak-seal DETECTION (reuses the extend
+    // helper), but does NO rescue and NEVER toggles the valve or retracts — the
+    // already-sealed cup keeps holding (shared per-side valve stays ON). NON-FATAL:
+    // any outcome (seal / weak / obstacle / hard-fail) just proceeds; the next
+    // step's cycle_group_ retries the cup from scratch with full rescue. Caller
+    // must hold motion_mtx_ and have the group's valve already ON.
+    void             feet_topup_unsealed_(const std::string& group);
     // Poll JC-100 every 200ms until all listed slaves' pressure rises above
     // DETACH_THRESHOLD_KPA (-10 kPa) OR timeout. Returns false on success
     // (all released), true on timeout (any slave still attached or comms fail).
@@ -1461,7 +1838,13 @@ private:
                              Backup       backup,
                              RescueBackup rescue_backup,
                              int&         out_retry_count,
-                             int&         out_rescue_count);
+                             int&         out_rescue_count,
+                             // [2026-07-13] optional per-slave feet extend-target
+                             // override. Empty (default) → normal feet_target_capped_
+                             // behaviour (do_step_*_ unaffected). Used by
+                             // do_cross_obstacle_ to reseal at 2×preset. Ignored for
+                             // the "body" group.
+                             std::function<int(int)> feet_target_override = {});
 
     // Internal impl — the real init logic. Public cmd_init() wraps this so it
     // can broadcast an EVT init_complete regardless of success/failure.
@@ -1484,17 +1867,23 @@ private:
     //     "30n,30,30"       → 1 transit + 2 sweep (e.g. skip 30cm then clean)
     //     "30n*3,30*5"      → 3 transit + 5 sweep
     //     "30,30n*2,30"     → sweep, transit, transit, sweep
+    // - optional "x" suffix = 跨障礙物 (cross-obstacle) step (do_cross_obstacle_ down,
+    //   2×preset stand-off). Overrides sweep (cross has no arm sweep). [2026-07-13]
+    //     "30,30x,30"       → sweep, cross-obstacle, sweep
+    //     "30x*2"           → 2 cross-obstacle steps
     // Persistence: ./scripts.json — same flat key=value format as settings.json
     // (key = script name, value = original CSV string). Loaded once at startup.
     static constexpr int SCRIPT_TOTAL_STEP_MAX = 1000;   // soft cap on expanded step count
     static constexpr int SCRIPT_REPEAT_MAX     = 1000;   // soft cap on a single `*N` multiplier
     static constexpr int SCRIPT_NAME_MAX_LEN   = 32;     // [A-Za-z0-9_-]{1,32}
 
-    // One step of a scripted run: cm + per-step sweep flag.
+    // One step of a scripted run: cm + per-step sweep flag + cross-obstacle flag.
     // sweep=true  → cmd_step_down_sweep_after_feet(cm)
     // sweep=false → do_step_down_(skip_cleaning_sweep=true) — pure down, no
     //               arm sweep at all (transit only).
-    struct ScriptStep { int cm; bool sweep; };
+    // cross=true  → do_cross_obstacle_(down) — 2×preset stand-off cross ("x" suffix;
+    //               overrides sweep — cross has no arm sweep). [2026-07-13 per user]
+    struct ScriptStep { int cm; bool sweep; bool cross; };
 
     std::map<std::string, std::string> saved_scripts_;   // name → CSV
     std::mutex                         saved_scripts_mtx_;
@@ -1550,7 +1939,8 @@ std::string WashRobot::cycle_group_(const std::string& group,
                                     Backup       backup,
                                     RescueBackup rescue_backup,
                                     int&         out_retry_count,
-                                    int&         out_rescue_count) {
+                                    int&         out_rescue_count,
+                                    std::function<int(int)> feet_target_override) {
     const int  valve_ch = group_valve_ch_(group);
     const auto slaves   = group_slaves_(group);
     out_retry_count   = 0;
@@ -1673,6 +2063,10 @@ std::string WashRobot::cycle_group_(const std::string& group,
                 const double over_cm = last_feet_max_over_cm_.load();
                 target = preset_extend_pulse_for_slave_(s)
                        + ((over_cm > 0) ? cm_to_pulses_for_slave_(s, over_cm) : 0);
+            } else if (feet_target_override) {
+                // [2026-07-13] cross-obstacle: explicit target (e.g. 2×preset),
+                // bypassing the snowball cap so the cup can reach the stood-off wall.
+                target = feet_target_override(s);
             } else {
                 // [2026-06-05] Snowball protection (fix C): cap feet target.
                 target = feet_target_capped_(s);
@@ -1697,7 +2091,9 @@ std::string WashRobot::cycle_group_(const std::string& group,
         while (true) {
             any_obstacle = false;
             if (try_or_pause_([this, &slaves, extend_pulses, extend_rpm, extend_acc, &any_obstacle]() {
-                                  return pusher_extend_with_disable_seal_(slaves, extend_pulses, extend_rpm, extend_acc, &any_obstacle);
+                                  // [2026-07-08 per user] step feet: stop extending the
+                                  // group as soon as >=1 cup seals (stop_on_first_seal).
+                                  return pusher_extend_with_disable_seal_(slaves, extend_pulses, extend_rpm, extend_acc, &any_obstacle, /*stop_on_first_seal=*/true);
                               },
                               "cycle_" + group + "_pusher_extend")) return "aborted";
 
@@ -1797,11 +2193,23 @@ std::string WashRobot::cycle_group_(const std::string& group,
         // Release any deferred stall flags from extend.
         for (int s : slaves) Z_(s).release_stall_flag();
 
-        if (fails.empty()) {
+        // [2026-07-08 per user] Proceed if AT LEAST ONE cup in this group sealed
+        // (was: fails.empty() = all cups). slaves = this side's 2 cups; retry
+        // only when EVERY cup failed. Surface the weak cup(s) when proceeding on
+        // a partial seal so telemetry/operator knows this side is one-cup-only.
+        if (fails.size() < slaves.size()) {
+            if (!fails.empty()) {
+                std::string wmsg = "vacuum_partial_ok " + group + " sealed="
+                    + std::to_string(slaves.size() - fails.size()) + "/"
+                    + std::to_string(slaves.size()) + " unsealed=";
+                for (size_t i = 0; i < fails.size(); ++i) { if (i) wmsg += ","; wmsg += std::to_string(fails[i]); }
+                std::cout << "[cycle_" << group << "] " << wmsg << " — proceed (>=1 sealed)\n";
+                evt_(wmsg);
+            }
             out_retry_count = attempt;
             return "";
         }
-        std::string msg = "vacuum_fail " + group + " attempt=" + std::to_string(attempt) + " slaves=";
+        std::string msg = "vacuum_fail_all " + group + " attempt=" + std::to_string(attempt) + " slaves=";
         for (size_t i = 0; i < fails.size(); ++i) {
             if (i) msg += ",";
             msg += std::to_string(fails[i]);
