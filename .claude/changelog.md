@@ -13,6 +13,48 @@
 
 ---
 
+## 2026-08-26d Claude (Sadie) — ⚠ 占空比寫入路徑全稽核：NaN 穿透範圍檢查（UB）
+
+### 起因
+
+user 要求「非常仔細幫我確定一次，占空比在寫入時是否有問題」。逐步稽核 `setPWM_Duty` 整條路徑（範圍檢查 → 數值換算 → 位址計算 → 組frame → CRC → echo 驗證），找到一個真的漏洞。
+
+### 漏洞：NaN 會穿過所有範圍檢查，後續是未定義行為
+
+原本的檢查寫成看起來很自然的否定形式：
+
+```cpp
+if (duty_percent < duty_min_pct || duty_percent > duty_max_pct) return false;
+```
+
+**IEEE754 規定任何與 NaN 的比較都回傳 false**，所以 `NaN < 5.0` 和 `NaN > 10.0` 都是 false → 兩個條件都不成立 → **不拒絕、繼續往下執行**。接著：
+
+```cpp
+uint16_t val = static_cast<uint16_t>(std::round(duty_percent * 10.0));
+```
+
+`static_cast<uint16_t>(NaN)` 在 C++ 是**未定義行為**。實務上常得到 0（→ 占空比 0% → 馬達無預警停止），但標準上可以是任意值；只要落在裝置合法的 0~1000 內，模組就會照單全收，寫進一個誰也沒指定的占空比。
+
+**觸發路徑**：`d 1 nan`（C++ `istream >> double` 依標準接受 "nan" 字面值），或未來任何呼叫端用除法算占空比時出現 `0.0/0.0`。
+
+### 修法：改成正向形式
+```cpp
+if (!(duty_percent >= duty_min_pct && duty_percent <= duty_max_pct)) return false;
+```
+`NaN >= 5.0` 是 false → `&&` 短路 → `!false` = true → **正確拒絕**。同樣手法也套用到 `setDutyLimits()` 的參數檢查（避免把 NaN 存進上下限）。
+
+另外把 `static_cast<uint16_t>(std::round(...))` 換成 `std::lround` 取 `long`，再檢查 `0~1000` 才轉 `uint16_t`——即使日後有人放寬上下限，送上線的暫存器值也不可能越界。
+
+### 稽核結論（其餘部分確認無誤）
+逐 byte 模擬驗證通過：
+- 換算 `reg = round(pct*10)`：5.0→50、7.5→75、10.0→100，5.1/5.3/6.7/9.1/9.9 等非整數值浮點乘法皆精確、無 off-by-one
+- 位址 `0x0000 + channel` → 4 個通道分別是 0x0000~0x0003，**不會跟頻率暫存器 0x04+ 重疊**
+- Frame/CRC 正確（例：通道1 設 5% = `06 06 00 00 00 32 09 A8`）
+- 邊界值 5.0 與 10.0 **含端點**通過；0/4.9/10.1/50/100/-1/±inf/nan 全部拒絕且不送出任何封包
+- echo 驗證 `res == req`：Modbus FC06 正常回覆就是原封echo，比對失敗只會產生「誤報失敗」（安全方向），不會把失敗誤判成成功；重試占空比寫入是冪等的
+
+---
+
 ## 2026-08-26c Claude (Sadie) — ⚠ QX-DO24 頻率鎖死 50Hz（跟占空比限制連動）
 
 ### 問題
