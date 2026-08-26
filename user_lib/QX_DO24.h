@@ -59,6 +59,22 @@ public:
 	double dutyMinPct() const { return duty_min_pct; }
 	double dutyMaxPct() const { return duty_max_pct; }
 
+	// ---- 頻率安全上下限（跟占空比限制是連動的，別分開看）----------------
+	// setPWM_Freq 會拒絕落在 [freq_min_hz, freq_max_hz] 之外的值，預設鎖死
+	// 50Hz（min=max=50）。
+	//
+	// ⚠ 為什麼頻率也要鎖：占空比的 5%=停止 / 10%=全速 **只有在 50Hz 才成立**
+	//   （50Hz → 週期20ms → 5%=1.0ms、10%=2.0ms）。換成模組的上電預設 1000Hz，
+	//   同樣的 10% 只有 0.1ms，調速器收到的是無效訊號。占空比限制只看百分比、
+	//   看不到頻率，擋不住這種情況，所以兩個限制必須一起存在才有意義。
+	//
+	// ⚠ 模組上電預設頻率是 **1000Hz 不是 50Hz**，而且 0x00~0x0F 都是「臨時
+	//   生效、斷電恢復」——每次重新上電都會跳回 1000Hz，必須重下一次 50Hz。
+	// [2026-08-26 per user] 四個通道一律鎖 50Hz。
+	void setFreqLimits(int min_hz, int max_hz);
+	int freqMinHz() const { return freq_min_hz; }
+	int freqMaxHz() const { return freq_max_hz; }
+
 	// 讀回 (FC 0x03)
 	bool getPWM_Duty(int channel, double& duty_percent);
 	bool getPWM_Freq(int channel, uint32_t& freq);
@@ -76,6 +92,10 @@ private:
 	// (5% = stop, 10% = full speed)
 	double duty_min_pct = 5.0;
 	double duty_max_pct = 10.0;
+	// see setFreqLimits() — locked to 50Hz; the duty window above is only
+	// physically meaningful at this frequency
+	int freq_min_hz = 50;
+	int freq_max_hz = 50;
 
 	// 通訊核心
 	bool sendAndReceive(const std::vector<uint8_t>& request, std::vector<uint8_t>& response);

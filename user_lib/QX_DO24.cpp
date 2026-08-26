@@ -62,6 +62,17 @@ void QX_DO24::setDutyLimits(double min_pct, double max_pct) {
 	LOG_INF(_log_tag, "duty safety limits set to [%.1f, %.1f]%%", duty_min_pct, duty_max_pct);
 }
 
+// Widen/narrow the frequency safety window. Same fail-safe reasoning as
+// setDutyLimits: default is the single value (50Hz) the duty window depends on.
+void QX_DO24::setFreqLimits(int min_hz, int max_hz) {
+	if (min_hz > max_hz) return;                 // nonsense range: ignore
+	if (min_hz < 1)      min_hz = 1;
+	if (max_hz > 200000) max_hz = 200000;
+	freq_min_hz = min_hz;
+	freq_max_hz = max_hz;
+	LOG_INF(_log_tag, "freq safety limits set to [%d, %d] Hz", freq_min_hz, freq_max_hz);
+}
+
 // Set duty ratio. Fractional percent supported: reg = round(pct * 10), e.g.
 // 7.5% -> 75. Refuses anything outside the safety window (see setDutyLimits).
 bool QX_DO24::setPWM_Duty(int channel, double duty_percent) {
@@ -102,6 +113,15 @@ bool QX_DO24::setPWM_Duty(int channel, double duty_percent) {
 bool QX_DO24::setPWM_Freq(int channel, int freq) {
 	if (!client || channel < 0 || channel > 3) return false;
 	if (freq < 1 || freq > 200000) return false;   // manual: 1~200000 Hz
+
+	// Safety clamp — see setFreqLimits(). Locked to 50Hz by default because the
+	// duty window (5%=stop / 10%=full) is only valid at 50Hz; at the module's
+	// 1000Hz power-on default the same percentages are meaningless pulse widths.
+	if (freq < freq_min_hz || freq > freq_max_hz) {
+		LOG_ERR(_log_tag, "freq %d Hz outside safety limits [%d, %d] — refused",
+		        freq, freq_min_hz, freq_max_hz);
+		return false;
+	}
 	uint16_t addr = 0x0004 + (channel * 2);
 
 	// ABCD byte order: reg[addr]=high word, reg[addr+1]=low word. The high word

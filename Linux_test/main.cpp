@@ -5626,7 +5626,14 @@ static void test_qx_do24() {
         cout << "  通道" << ch << ": duty=";
         if (!ok1) cout << "ERR"; else cout << duty << "%";
         cout << "  freq=";
-        if (!ok2) cout << "ERR"; else cout << freq << "Hz";
+        if (!ok2) cout << "ERR";
+        else {
+            cout << freq << "Hz";
+            // Module powers up at 1000Hz and 0x00~0x0F revert on power-cycle, so
+            // a wrong frequency here silently invalidates the whole duty mapping.
+            if ((int)freq != pwm.freqMinHz())
+                cout << " ⚠不是" << pwm.freqMinHz() << "Hz! 占空比對應無效, 請先下 f " << ch << " " << pwm.freqMinHz();
+        }
         cout << "  control=";
         if (!ok3) cout << "ERR";
         else if (ctrl == 0) cout << "0(關閉)";
@@ -5635,12 +5642,16 @@ static void test_qx_do24() {
         cout << "\n";
     };
 
-    cout << "\n⚠ 占空比安全限制：" << pwm.dutyMinPct() << "~" << pwm.dutyMaxPct()
-         << "%（" << pwm.dutyMinPct() << "%=停止, " << pwm.dutyMaxPct()
-         << "%=全速），超出範圍一律拒絕、不送出\n";
+    cout << "\n⚠ 安全限制（超出一律拒絕、不送出）：\n"
+         << "   占空比 " << pwm.dutyMinPct() << "~" << pwm.dutyMaxPct()
+         << "%（" << pwm.dutyMinPct() << "%=停止, " << pwm.dutyMaxPct() << "%=全速）\n"
+         << "   頻率   鎖定 " << pwm.freqMinHz() << "Hz\n"
+         << "⚠ 模組上電預設是 1000Hz 不是 " << pwm.freqMinHz() << "Hz，而且斷電就跳回去。\n"
+         << "   占空比對應只有在 " << pwm.freqMinHz() << "Hz 成立，**通電後請先下 f <ch> "
+         << pwm.freqMinHz() << " 再調占空比**（可用 r all 確認）\n";
     cout << "\n指令（<ch> = 通道 1~4，跟手冊/原廠工具同編號）：\n"
          << "  d <ch> <percent>   設占空比 (限 " << pwm.dutyMinPct() << "~" << pwm.dutyMaxPct() << ")\n"
-         << "  f <ch> <hz>        設頻率 (1~200000)\n"
+         << "  f <ch> <hz>        設頻率 (鎖定 " << pwm.freqMinHz() << ")\n"
          << "  c <ch> <val>       設控制 (0=關閉 / 65535=持續輸出 / 1~65534=脈衝數)\n"
          << "  on <ch>            捷徑：持續輸出 (control=65535)\n"
          << "  off <ch>           捷徑：關閉 (control=0)\n"
@@ -5705,8 +5716,13 @@ static void test_qx_do24() {
         } else if (verb == "f") {
             int freq;
             if (!(iss >> freq)) { cout << "  [!] 用法: f <通道1~4> <頻率Hz>\n"; continue; }
-            cout << (pwm.setPWM_Freq(dch, freq) ? tag + "freq=" + std::to_string(freq) + "Hz\n"
-                                                : "  [WARN] setPWM_Freq failed (range 1~200000?)\n");
+            if (pwm.setPWM_Freq(dch, freq)) {
+                cout << tag << "freq=" << freq << "Hz\n";
+            } else {
+                cout << "  [WARN] 拒絕 — 頻率鎖定 " << pwm.freqMinHz();
+                if (pwm.freqMaxHz() != pwm.freqMinHz()) cout << "~" << pwm.freqMaxHz();
+                cout << "Hz（占空比 5%=停止/10%=全速 只有在 50Hz 成立）\n";
+            }
         } else if (verb == "c") {
             int val;
             if (!(iss >> val)) { cout << "  [!] 用法: c <通道1~4> <0/65535/1~65534>\n"; continue; }

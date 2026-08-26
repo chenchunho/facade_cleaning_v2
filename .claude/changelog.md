@@ -13,6 +13,35 @@
 
 ---
 
+## 2026-08-26c Claude (Sadie) — ⚠ QX-DO24 頻率鎖死 50Hz（跟占空比限制連動）
+
+### 問題
+
+user 問「頻率有固定都是 50hz 嗎」——**沒有**，`setPWM_Freq` 接受 1~200000Hz 任意值。查手冊時發現一個更關鍵的風險：
+
+**模組上電預設頻率是 1000Hz，不是 50Hz**（手冊：頻率暫存器 `0x04~0x05` 預設 1000），而且 `0x00~0x0F` 全部是「臨時生效、斷電恢復」——**每次重新上電都會跳回 1000Hz**。
+
+前一筆才加的占空比限制（5%=停止／10%=全速）**只有在 50Hz 才成立**，但占空比限制只看百分比、看不到頻率，完全擋不住頻率跑掉的情況：
+
+| 頻率 | 週期 | 5% 脈寬 | 7.5% 脈寬 | 10% 脈寬 |
+|---|---|---|---|---|
+| **50Hz（正確）** | 20.00ms | **1.000ms** | **1.500ms** | **2.000ms** |
+| 60Hz | 16.67ms | 0.833ms | 1.250ms | 1.667ms |
+| 100Hz | 10.00ms | 0.500ms | 0.750ms | 1.000ms |
+| **1000Hz（上電預設）** | 1.00ms | 0.050ms | 0.075ms | 0.100ms |
+
+也就是模組重新上電後直接下 `d 1 10` 想要全速，實際送出的是 0.1ms 脈衝，調速器收到的是無效訊號、行為無法預期。
+
+### 修改檔案
+- `user_lib/QX_DO24.{h,cpp}`：新增 `setFreqLimits(min,max)` + `freqMinHz()`/`freqMaxHz()`；成員預設 `freq_min_hz = freq_max_hz = 50`（鎖死單一值）；`setPWM_Freq()` 超出即拒絕
+- `Linux_test/main.cpp`：menu 開頭把「上電預設 1000Hz、斷電會跳回去、通電後請先下 `f <ch> 50`」寫成明確警告；`r`/`r all` 讀回時若頻率不是 50Hz 會直接標紅字提示「占空比對應無效」；`f` 被拒時說明原因
+
+### 為什麼兩個限制必須一起存在
+占空比限制是「相對值」的保護，頻率限制是讓那個相對值有意義的前提。**只鎖其中一個等於沒鎖**——這也是為什麼 header 把兩者的註解互相交叉引用，避免以後有人只放寬一邊。
+[2026-08-26 per user] 四個通道一律鎖 50Hz。
+
+---
+
 ## 2026-08-26b Claude (Sadie) — ⚠ QX-DO24 占空比加安全上下限 5~10%
 
 ### 問題
@@ -130,6 +159,56 @@ public method，兩顆 class 已知是照這個介面設計成 drop-in 的，比
 測過就永久有效。所以下次換裝/重裝時，把這幾項當作標準複查清單即可，不代表之前測試不完整。
 
 ---
+
+## 2026-08-26b Claude (Sadie) — 跨障礙物手動按鈕也移除
+### 需求（user）
+「跨障礙物那邊也刪掉」——推翻前一條把它搬到「上下移動」panel 保留的處置。
+
+### 修改檔案
+- `web_backend/public/index.html`：移除跨障礙物整個 row（`btn-cross-down` / `btn-cross-up` + 說明）；step-cm 與 sync panel 的說明文字一併移除跨障礙物字樣
+- `web_backend/public/app.js`：移除兩顆按鈕的 handler
+
+後端 `cross_obstacle_down` / `cross_obstacle_up` 指令保留，可用 raw command 發送。
+
+### ⚠ GUI 還有兩處 cross 相關功能**未移除**，待 user 決定
+1. **SCRIPT RUN 的 CSV `x` 旗標**（`app.js` parse 於 1323-1351、預覽統計 `nCross`、placeholder 說明）——CSV 仍可寫 `30x` 標記該步為跨障礙物。移除需改 CSV 解析與預覽邏輯，且後端仍支援該旗標。
+2. **`run_depth_avoid` 的自動 cross**（`index.html:860` 的 `modal-depth-cross-notice`、`app.js:647` 的 `next_step_gait=cross` 解析）——**這是後端自動觸發的**：`cmd_run_depth_avoid` 偵測到大障礙物時會 `next step will AUTO use cross_obstacle gait`。前端只是顯示通知。
+
+**第 2 點刻意保留通知**：刪掉前端通知並不會阻止後端自動改用 cross 步伐，只會讓操作者不知道機器下一步要做什麼動作（一側伸腳 2× 站離牆）——那反而更危險。若要真正停用這條路徑，該改的是後端 `cmd_run_depth_avoid`，屬於「改網頁」以外的範圍。
+
+## 2026-08-26 Claude (Sadie) — GUI 移除交替走法，全面改用同步步伐
+### 需求（user）
+「幫我把走法:左右交替走的功能都拿掉，現在全部都是同上同下」——只改網頁，後端指令保留。
+
+### 修改檔案
+- `web_backend/public/index.html`
+  - 移除 `run-gait`、`script-gait` 兩個走法下拉選單
+  - 移除整個「左右輪流移動」panel（`step_down`/`step_up` + 六個 `*-sweep-*` 變體 + 「step 第二腳對平」+ 「第一步先走」）
+  - 「同步上下移動」改名為「上下移動」，**跨障礙物按鈕搬進此 panel**
+  - 修正過時說明：sync panel 原寫「純移動不清洗」，實際上 `do_step_sync_` 內含 `do_step_sync_rail_sweep_`（伸腳後即開始刷洗，2026-07-24 手臂實裝後接回）
+  - step-cm 說明由「同步與交替走法共用」改為「同步步伐 / run / SCRIPT RUN / 跨障礙物」
+- `web_backend/public/app.js`
+  - `run` / `run_script` / `run_saved` 三處改為固定送 `sync`
+  - **`btn-descend-to-ground` 補上 `sync`**（見下方陷阱）
+  - 移除已刪除元素的 handler 與 `follower_mode=` / `first_step=` 的 status 解析
+
+### ⚠ 兩個「只刪 HTML 會出事」的陷阱
+1. **JS handler 沒有 null 檢查**：`document.getElementById('btn-step-down').onclick = ...` 是直接賦值。HTML 刪掉而 JS 留著會在該行拋 `TypeError`，**之後整個 app.js 都不會執行**，GUI 全毀。兩邊必須成對處理。
+2. **gait 的 fallback 是 `alt`**：三處都寫 `const gait = gaitEl ? gaitEl.value : 'alt';`。只刪選單而不改這行，會**靜默退回交替走法**——症狀是「選單不見了但機器還是左右輪流走」，非常難查。
+
+### 漏網之魚：走到地面
+`btn-descend-to-ground` 送的是 `run ${n} ${cm} down`，**根本沒帶第 4 個參數 gait**，會落到後端預設。而後端預設是 `alt`（`main.cpp:195`、`WASH_ROBOT.h:91`），所以在移除選單後這顆按鈕仍會走交替走法。已補上 `sync`。
+
+### 保留的項目與理由
+- **跨障礙物**（`cross_obstacle_down/up`）：不屬於走法。原 `script-gait` 的 title 即註明「cross 步驟不受影響，一律照原邏輯」，故搬移而非刪除。
+- **`run_depth_avoid`**：後端 2026-07-28 已改成呼叫 `do_step_sync_`（「窗框避障走法改成跟 do_step_sync_ 一樣兩邊同動」），本來就是同步，不需改。
+- **所有後端指令**：`step_down` / `step_up` / `*_sweep_*` / `set_follower_mode` / `set_first_step` 全部保留，需要時可用 raw command 發送。
+
+### 待確認：後端預設仍是 alt
+`main.cpp:195,222,257` 與 `WASH_ROBOT.h:91,101,107` 的 gait 預設都是 `"alt"`。GUI 現在每次都明確送 `sync`，所以不受影響；但任何**未帶 gait 的 raw command**（例如 `run 5 30 down`）仍會走交替走法。是否要把後端預設一併改成 `sync`，尚未與 user 確認——那會改變 raw command 行為，超出「只改網頁」的範圍。
+
+### 部署
+只改 `public/` 靜態檔，`server.js` 未動 → **web_backend 不用重啟**，瀏覽器 hard refresh（Ctrl+Shift+R）即可。C++ 端無異動，不需重編。
 
 ## 2026-08-18p Claude (Sadie) — M2 甩頭：加 creep + 阻尼拉到協定上限
 ### 現象（user）
