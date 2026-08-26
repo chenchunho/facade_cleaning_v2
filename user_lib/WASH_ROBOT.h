@@ -19,6 +19,7 @@
 #include "FrameAnalyzer.h"
 #include "JC_100_METER.h"
 #include "PQW_IO_16O_RLY.h"
+#include "QX_DO24.h"
 #include "DY_500_weight_sensor.h"
 #include "XKC_Y25_RS485.h"
 #include "Serial_port.h"
@@ -114,6 +115,17 @@ public:
     std::string cmd_vacuum(const std::string& group, bool on);
     std::string cmd_pump(bool on);                       // dp0105 vacuum pump (PQW CH1)
     std::string cmd_brush(bool on);                      // arm roller brush motor (PQW CH5)
+
+    // QX-DO24 PWM (cli_22_ slave 6). Web panel "PWM 控制" 用。
+    //   cmd_pwm_set : 暫存寫入 —— 寫 0x00~0x0F，斷電即還原，可無限次改
+    //   cmd_pwm_save: 保存參數 —— 寫 flash 0x10，⚠ 壽命 1~2 千次、每次上電
+    //                 只能一次，且若當下 control=65535 會變成「插電就輸出」
+    //   cmd_pwm_status: 讀回 4 通道現況給面板顯示
+    // 占空比只收 5.0~10.0（5%=停止 / 10%=全速），頻率鎖 50Hz —— 兩個限制都
+    // 由 QX_DO24 driver 強制，這層只做參數解析與回覆字串。
+    std::string cmd_pwm_set(int ch, int hz, int control, double duty_pct);
+    std::string cmd_pwm_save();
+    std::string cmd_pwm_status();
     std::string cmd_water_pump(bool on);                 // water tank pump (PQW CH6)
     std::string cmd_water_inlet(bool on);                // water inlet ball valve [2026-06-05 控制權移到 crane PQW (.34 slave 12 CH4)]
     std::string cmd_water_level();                       // XKC-Y25 一次性讀取水位 (2026-06-06)
@@ -422,6 +434,13 @@ private:
     static constexpr int XKC_SLAVE              = 13;
     static constexpr int WATER_FILL_TIMEOUT_MS  = 180000;  // 180s — 2026-06-03 拉長，實機 60s 不夠水填滿（log 顯示需要 ~80s+）
     static constexpr int WATER_POLL_INTERVAL_MS = 200;     // poll output reg every 200 ms while filling
+
+    // QX-DO24 四路 PWM 輸出模組（2026-08-26 新增，共用 cli_22_）
+    // cli_22_ 上已用的 slave：JC100 1~4 / DY500 10,11 / PQW 12 / XKC 13 /
+    // DM2J 上滑台 14 —— slave 6 是空的，不撞號。
+    // ⚠ 模組波特率已被改成 115200（非出廠 9600），USR-TCP232 .22 的串口設定
+    //   必須一致，否則整條 bus 上的其他裝置也會通訊不良。
+    static constexpr int PWM_SLAVE = 6;
 
     // ZDT pusher slave IDs — [v2] 4 cups only: right{1,2} / left{3,4}
     //   right foot: upper = slave 1, lower = slave 2   (valve CH1)
@@ -913,6 +932,7 @@ private:
     ZDT_motor_control zdt_[9];   // index 0..8 → slave 1..9
     JC_100_METER      meter_[9]; // index 0..8 → slave 1..9
     PQW_IO_16O_RLY    pqw_;
+    QX_DO24           pwm_;      // 4-ch PWM output, cli_22_ slave 6
     DY_500_weight_sensor weight_[2];  // index 0 = slave 10 (left rope), 1 = slave 11 (right rope)
     XKC_Y25_RS485     lvl_;            // water tank level sensor (slave 13 on cli_22_)
 

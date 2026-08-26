@@ -162,6 +162,12 @@ bool WashRobot::init() {
     lvl_.init(cli_22_, XKC_SLAVE, dbg);
     std::cout << "[OK] XKC water level slave " << XKC_SLAVE << " (sensor presence not probed)\n";
 
+    // QX-DO24 PWM output (slave 6, same bus). Mode B init does no probe, so a
+    // missing module is only discovered on the first pwm command — that's fine
+    // here because nothing in the automatic gait depends on it (web panel only).
+    pwm_.init(cli_22_, PWM_SLAVE, dbg);
+    std::cout << "[OK] QX-DO24 PWM slave " << PWM_SLAVE << " (presence not probed)\n";
+
     // DY-500 weight sensors (slaves 10, 11): NOT physically installed on this
     // robot (2026-05-19, per user). Init the driver objects but hard-disable
     // polling — weight_present_=false so the background loop never reads them
@@ -3008,18 +3014,19 @@ std::string WashRobot::_retired_do_arm_clean_sweep_v1_(int wall_mm, int rounds) 
                           "clean_arm_ready")) return "ERR aborted\n";
     }
 
-    // ---------- Phase C: rounds × (LEFT 滾筒+水 → RIGHT 刮刀乾) ----------
+    // ---------- Phase C: rounds × (RIGHT 滾筒+水 → LEFT 刮刀乾) ----------
+    // [2026-08-26 per user] 工具頭實體左右對調：滾筒 LEFT→RIGHT、刮刀 RIGHT→LEFT。
     // Per user flow 2026-05-20: each sub-round =
     //   1) arm DEPLOY <wall_mm> <slot>      (M1 retract → M2 LR_SLOT → M1 TOUCHWALL)
-    //   2) water pump + brush ON/OFF        (LEFT = ON / RIGHT = OFF)
+    //   2) water pump + brush ON/OFF        (RIGHT = ON / LEFT = OFF)
     //   3) 上滑台 sweep — see target_cm
     // Pump and brush track each other — no point spinning the roller motor when
-    // the scraper is engaged. RIGHT round runs dry to wipe residual water.
+    // the scraper is engaged. LEFT round runs dry to wipe residual water.
     //
     // [2026-05-28] Bidirectional sweep (do single sweep per sub-round, no return).
     // Pattern per round:
-    //   LEFT  (roller) : slide 0 → ARM_SWEEP_CM  (wet going RIGHT)
-    //   RIGHT (scraper): slide ARM_SWEEP_CM → 0  (wipe going LEFT)
+    //   RIGHT (roller) : slide 0 → ARM_SWEEP_CM  (wet)
+    //   LEFT  (scraper): slide ARM_SWEEP_CM → 0  (wipe)
     // Eliminates the wasted "return to 0" sweep after each sub-round (was ~7s each).
     // Assumes slide starts at 0 at round entry (true after init / previous round).
     auto sweep_with_tool = [&](const char* m2_slot, bool water_on,
@@ -3154,30 +3161,30 @@ std::string WashRobot::_retired_do_arm_clean_sweep_v1_(int wall_mm, int rounds) 
     // remaining sub-rounds (and rounds) are skipped.
     for (int r = 0; r < rounds; ++r) {
         std::cout << "[arm_clean_sweep] round " << (r + 1) << "/" << rounds
-                  << " — LEFT(滾筒+水) 0→" << ARM_SWEEP_CM
-                  << " → LEFT " << ARM_SWEEP_CM << "→0"
-                  << " → RIGHT(刮刀乾) 0→" << ARM_SWEEP_CM
-                  << " → RIGHT " << ARM_SWEEP_CM << "→0\n";
+                  << " — RIGHT(滾筒+水) 0→" << ARM_SWEEP_CM
+                  << " → RIGHT " << ARM_SWEEP_CM << "→0"
+                  << " → LEFT(刮刀乾) 0→" << ARM_SWEEP_CM
+                  << " → LEFT " << ARM_SWEEP_CM << "→0\n";
         if (check_abort_()) return "ERR aborted\n";
         // [2026-06-05] 每 round 4 個 sub-stroke：滾筒濕拖 ×2 + 刮刀乾掃 ×2。
         // 同 slot+water 連續切換時 skip_deploy=true 省 DEPLOY 時間。
-        // 1: LEFT 0→80 (滾筒往右，首次 DEPLOY)
-        if (!sweep_with_tool("LEFT",  true,  "roller-1",   (double)ARM_SWEEP_CM, false))  return "ERR aborted\n";
+        // 1: RIGHT 0→80 (滾筒往右，首次 DEPLOY)
+        if (!sweep_with_tool("RIGHT", true,  "roller-1",   (double)ARM_SWEEP_CM, false))  return "ERR aborted\n";
         if (arm_sweep_skip_rest_of_run_.load()) {
             std::cout << "[arm_clean_sweep] skip_rest_of_run_=true → break round loop\n";
             break;
         }
         if (check_abort_()) return "ERR aborted\n";
-        // 2: LEFT 80→0 (滾筒往左，skip_deploy 同 slot+water)
-        if (!sweep_with_tool("LEFT",  true,  "roller-2",   0.0,                  true))   return "ERR aborted\n";
+        // 2: RIGHT 80→0 (滾筒往左，skip_deploy 同 slot+water)
+        if (!sweep_with_tool("RIGHT", true,  "roller-2",   0.0,                  true))   return "ERR aborted\n";
         if (arm_sweep_skip_rest_of_run_.load()) break;
         if (check_abort_()) return "ERR aborted\n";
-        // 3: RIGHT 0→80 (換刮刀往右，DEPLOY + 關水/刷)
-        if (!sweep_with_tool("RIGHT", false, "scraper-1",  (double)ARM_SWEEP_CM, false)) return "ERR aborted\n";
+        // 3: LEFT 0→80 (換刮刀往右，DEPLOY + 關水/刷)
+        if (!sweep_with_tool("LEFT",  false, "scraper-1",  (double)ARM_SWEEP_CM, false)) return "ERR aborted\n";
         if (arm_sweep_skip_rest_of_run_.load()) break;
         if (check_abort_()) return "ERR aborted\n";
-        // 4: RIGHT 80→0 (刮刀往左，skip_deploy 同 slot+water)
-        if (!sweep_with_tool("RIGHT", false, "scraper-2",  0.0,                  true))  return "ERR aborted\n";
+        // 4: LEFT 80→0 (刮刀往左，skip_deploy 同 slot+water)
+        if (!sweep_with_tool("LEFT",  false, "scraper-2",  0.0,                  true))  return "ERR aborted\n";
         if (arm_sweep_skip_rest_of_run_.load()) break;
     }
 
@@ -3219,14 +3226,17 @@ std::string WashRobot::do_arm_clean_sweep_(int wall_mm, int rounds) {
         if (!init_ok) {
             std::cerr << "[arm_clean_sweep] arm INIT failed — rail sweep only, no brush\n";
         } else {
-            std::ostringstream oss_left;
-            oss_left << "DEPLOY " << wall_mm << " LEFT";
-            deployed = (arm_cmd_(oss_left.str(), 30).rfind("OK", 0) == 0);
+            // [2026-08-26 per user] 滾筒側 LEFT → RIGHT（工具頭實體對調，見
+            // do_step_sync_rail_sweep_ 的同批說明）。這段序列跟那邊是複製關係，
+            // 兩處必須一起改，否則手動 CLEAN SWEEP 跟步伐內建清洗會用相反的工具頭。
+            std::ostringstream oss_brush;
+            oss_brush << "DEPLOY " << wall_mm << " RIGHT";   // RIGHT = 滾筒側
+            deployed = (arm_cmd_(oss_brush.str(), 30).rfind("OK", 0) == 0);
             if (deployed) {
                 pqw_.controlRelay(CH_BRUSH, true);
                 sleep_ms_(2500);
             } else {
-                std::cerr << "[arm_clean_sweep] arm deploy LEFT failed — rail sweep only, no brush\n";
+                std::cerr << "[arm_clean_sweep] arm deploy RIGHT (brush) failed — rail sweep only, no brush\n";
             }
         }
 
@@ -3247,10 +3257,11 @@ std::string WashRobot::do_arm_clean_sweep_(int wall_mm, int rounds) {
 
         if (deployed) {
             pqw_.controlRelay(CH_BRUSH, false);
-            std::ostringstream oss_right;
-            oss_right << "DEPLOY " << wall_mm << " RIGHT";
-            if (arm_cmd_(oss_right.str(), 30).rfind("OK", 0) != 0) {
-                std::cerr << "[arm_clean_sweep] arm deploy RIGHT failed — continuing rail only\n";
+            // [2026-08-26 per user] 刮刀側 RIGHT → LEFT（同上）
+            std::ostringstream oss_squeegee;
+            oss_squeegee << "DEPLOY " << wall_mm << " LEFT";   // LEFT = 刮刀側
+            if (arm_cmd_(oss_squeegee.str(), 30).rfind("OK", 0) != 0) {
+                std::cerr << "[arm_clean_sweep] arm deploy LEFT (squeegee) failed — continuing rail only\n";
             } else {
                 sleep_ms_(2500);
             }
@@ -3486,12 +3497,13 @@ std::string WashRobot::do_arm_clean_sweep_continuous_(int wall_mm,
         return "ERR arm_not_ready\n";
     }
 
-    // ---------- Phase C: 連續 LOOP（LEFT 滾筒 → RIGHT 刮刀）until keep_going=false ----------
+    // ---------- Phase C: 連續 LOOP（RIGHT 滾筒 → LEFT 刮刀）until keep_going=false ----------
+    // [2026-08-26 per user] 工具頭實體左右對調：滾筒 LEFT→RIGHT、刮刀 RIGHT→LEFT。
     // 每個 sub-round 內部不檢查 keep_going（避免半 round 停在牆上）。
-    // round 之間（LEFT 跟 RIGHT 之間、RIGHT 結束之後）才檢查。
+    // round 之間（滾筒段跟刮刀段之間、刮刀段結束之後）才檢查。
     // [2026-05-28] Bidirectional sweep (single sweep per sub-round):
-    //   LEFT  (roller) : slide 0 → ARM_SWEEP_CM  (wet going RIGHT)
-    //   RIGHT (scraper): slide ARM_SWEEP_CM → 0  (wipe going LEFT, returns to 0)
+    //   RIGHT (roller) : slide 0 → ARM_SWEEP_CM  (wet)
+    //   LEFT  (scraper): slide ARM_SWEEP_CM → 0  (wipe, returns to 0)
     // Eliminates the wasted "return to 0" sweep that doubled each sub-round time.
     // Saves ~ARM_SWEEP_EST_MS × 2 (sub-rounds) per round.
     auto sweep_with_tool = [&](const char* m2_slot, bool water_on,
@@ -3624,29 +3636,29 @@ std::string WashRobot::do_arm_clean_sweep_continuous_(int wall_mm,
         round_cnt++;
         std::cout << "[arm_clean_sweep_cont] round " << round_cnt
                   << (max_rounds > 0 ? "/" + std::to_string(max_rounds) : std::string(""))
-                  << " — LEFT(滾筒+水) 0→" << ARM_SWEEP_CM
-                  << " → LEFT " << ARM_SWEEP_CM << "→0"
-                  << " → RIGHT(刮刀乾) 0→" << ARM_SWEEP_CM
-                  << " → RIGHT " << ARM_SWEEP_CM << "→0\n";
+                  << " — RIGHT(滾筒+水) 0→" << ARM_SWEEP_CM
+                  << " → RIGHT " << ARM_SWEEP_CM << "→0"
+                  << " → LEFT(刮刀乾) 0→" << ARM_SWEEP_CM
+                  << " → LEFT " << ARM_SWEEP_CM << "→0\n";
         // [2026-06-05] 每 round 4 個 sub-stroke：滾筒濕拖 ×2 + 刮刀乾掃 ×2。
         // 同 slot+water 連續切換時 skip_deploy=true 省 DEPLOY 時間。
-        // 1: LEFT 0→80 (滾筒往右，首次 DEPLOY)
-        if (!sweep_with_tool("LEFT",  true,  "roller-1",   (double)ARM_SWEEP_CM, false)) {
+        // 1: RIGHT 0→80 (滾筒往右，首次 DEPLOY)
+        if (!sweep_with_tool("RIGHT", true,  "roller-1",   (double)ARM_SWEEP_CM, false)) {
             std::cerr << "[arm_clean_sweep_cont] LEFT-1 round " << round_cnt << " failed — abort loop\n";
             return "ERR sweep_left_fail\n";
         }
-        // 2: LEFT 80→0 (滾筒往左，skip_deploy 同 slot+water)
-        if (!sweep_with_tool("LEFT",  true,  "roller-2",   0.0,                  true)) {
+        // 2: RIGHT 80→0 (滾筒往左，skip_deploy 同 slot+water)
+        if (!sweep_with_tool("RIGHT", true,  "roller-2",   0.0,                  true)) {
             std::cerr << "[arm_clean_sweep_cont] LEFT-2 round " << round_cnt << " failed — abort loop\n";
             return "ERR sweep_left_fail\n";
         }
-        // 3: RIGHT 0→80 (換刮刀往右，DEPLOY + 關水/刷)
-        if (!sweep_with_tool("RIGHT", false, "scraper-1",  (double)ARM_SWEEP_CM, false)) {
+        // 3: LEFT 0→80 (換刮刀往右，DEPLOY + 關水/刷)
+        if (!sweep_with_tool("LEFT",  false, "scraper-1",  (double)ARM_SWEEP_CM, false)) {
             std::cerr << "[arm_clean_sweep_cont] RIGHT-1 round " << round_cnt << " failed — abort loop\n";
             return "ERR sweep_right_fail\n";
         }
-        // 4: RIGHT 80→0 (刮刀往左，skip_deploy 同 slot+water)
-        if (!sweep_with_tool("RIGHT", false, "scraper-2",  0.0,                  true)) {
+        // 4: LEFT 80→0 (刮刀往左，skip_deploy 同 slot+water)
+        if (!sweep_with_tool("LEFT",  false, "scraper-2",  0.0,                  true)) {
             std::cerr << "[arm_clean_sweep_cont] RIGHT-2 round " << round_cnt << " failed — abort loop\n";
             return "ERR sweep_right_fail\n";
         }
@@ -8510,16 +8522,22 @@ void WashRobot::do_step_sync_rail_sweep_(const char* tag, bool init_ok) {
     if (!init_ok) {
         std::cerr << "[" << tag << "] arm INIT failed — rail sweep only, no brush\n";
     } else {
-        std::ostringstream oss_left;
-        oss_left << "DEPLOY " << DM2J_ARM_STEP_SWEEP_WALL_MM << " LEFT";
-        deployed = (arm_cmd_(oss_left.str(), 30).rfind("OK", 0) == 0);
+        // [2026-08-26 per user] 滾筒側 LEFT → RIGHT、刮刀側 RIGHT → LEFT。
+        // 工具頭實體左右對調了（同一批改動也把 main_api.h / WASH_ROBOT.h 的
+        // TOOL_EXT_LEFT/RIGHT 幾何常數對調），滾筒現在裝在 RIGHT。
+        // 流程順序「先濕刷、後乾刮」不變，變的只是各自對應哪一側工具頭；
+        // 因此 CH_BRUSH 仍是第一段 ON、第二段 OFF，只有 DEPLOY 的方位字串換邊。
+        // 變數改用語意命名（brush / squeegee）而非方位，之後再換邊就不會又看錯。
+        std::ostringstream oss_brush;
+        oss_brush << "DEPLOY " << DM2J_ARM_STEP_SWEEP_WALL_MM << " RIGHT";   // RIGHT = 滾筒側
+        deployed = (arm_cmd_(oss_brush.str(), 30).rfind("OK", 0) == 0);
         if (deployed) {
             pqw_.controlRelay(CH_BRUSH, true);
             // [2026-07-24 per user] 滾筒 deploy 後等 2.5s 再讓 DM2J 滑台開始移動，給滾筒
             // 轉起來/貼牆穩定的時間，避免滑台一動滾筒還沒轉穩（2026-07-24: 2000→2500 per user +500ms）。
             sleep_ms_(2500);
         } else {
-            std::cerr << "[" << tag << "] arm deploy LEFT failed — rail sweep only, no brush\n";
+            std::cerr << "[" << tag << "] arm deploy RIGHT (brush) failed — rail sweep only, no brush\n";
         }
     }
 
@@ -8535,14 +8553,15 @@ void WashRobot::do_step_sync_rail_sweep_(const char* tag, bool init_ok) {
     }
 
     if (deployed) {
-        // [2026-07-27 per user] 換成 RIGHT（刮刀）的同時關掉滾筒馬達——刮刀是乾刮，
+        // [2026-07-27 per user] 換成刮刀側的同時關掉滾筒馬達——刮刀是乾刮，
         // 滾筒(濕刷+CH_BRUSH)沒道理繼續轉。跟原本收尾才關（PARK 前）分開，提早到
         // 切換的當下就關，不要等到整段結束。
+        // [2026-08-26 per user] 刮刀側 RIGHT → LEFT（見上方對調說明）。
         pqw_.controlRelay(CH_BRUSH, false);
-        std::ostringstream oss_right;
-        oss_right << "DEPLOY " << DM2J_ARM_STEP_SWEEP_WALL_MM << " RIGHT";
-        if (arm_cmd_(oss_right.str(), 30).rfind("OK", 0) != 0) {
-            std::cerr << "[" << tag << "] arm deploy RIGHT failed — continuing rail only\n";
+        std::ostringstream oss_squeegee;
+        oss_squeegee << "DEPLOY " << DM2J_ARM_STEP_SWEEP_WALL_MM << " LEFT";   // LEFT = 刮刀側
+        if (arm_cmd_(oss_squeegee.str(), 30).rfind("OK", 0) != 0) {
+            std::cerr << "[" << tag << "] arm deploy LEFT (squeegee) failed — continuing rail only\n";
         } else {
             // [2026-07-24 per user] 每次 deploy 後都先等 2.5s 再讓滑台移動（2000→2500 per user +500ms）。
             sleep_ms_(2500);
@@ -8556,8 +8575,8 @@ void WashRobot::do_step_sync_rail_sweep_(const char* tag, bool init_ok) {
     if (deployed) {
         arm_cmd_("PARK", 30);
     }
-    std::cout << "[" << tag << "] rail sweep done (LEFT deploy -> " << DM2J_ARM_STEP_SWEEP_CM
-              << " -> RIGHT deploy -> 0 -> PARK)\n";
+    std::cout << "[" << tag << "] rail sweep done (RIGHT/brush deploy -> " << DM2J_ARM_STEP_SWEEP_CM
+              << " -> LEFT/squeegee deploy -> 0 -> PARK)\n";
 }
 
 // [2026-07-22 per user] Synchronized step gait — deliberately DIFFERENT safety
@@ -11813,6 +11832,67 @@ std::string WashRobot::cmd_water_pump(bool on) {
     if (cur == State::Error) return state_violation_(cur);
     if (pqw_.controlRelay(CH_WATER_PUMP, on)) return "ERR water_pump_fail\n";
     return "OK\n";
+}
+
+//=========== QX-DO24 PWM output (cli_22_ slave 6) ===========
+//
+// ⚠ QX_DO24 uses the INVERTED return convention (true = success) — see the
+//   banner at the top of QX_DO24.h. The checks below follow the driver.
+//
+// Write order is deliberately Freq -> Duty -> Control (same reasoning as
+// QX_DO24::setChannel): duty is only meaningful once the frequency is right,
+// and control goes last so the load never sees an intermediate state.
+std::string WashRobot::cmd_pwm_set(int ch, int hz, int control, double duty_pct) {
+    State cur = state_.load();
+    if (cur == State::Error) return state_violation_(cur);
+    if (ch < 1 || ch > 4)                 return "ERR pwm_channel_must_be_1_to_4\n";
+    if (control < 0 || control > 65535)   return "ERR pwm_control_out_of_range\n";
+
+    const int dch = ch - 1;                       // driver API is 0-based
+
+    if (!pwm_.setPWM_Freq(dch, hz))
+        return "ERR pwm_freq_rejected_locked_" + std::to_string(pwm_.freqMinHz()) + "hz\n";
+    if (!pwm_.setPWM_Duty(dch, duty_pct))
+        return "ERR pwm_duty_rejected_must_be_" + std::to_string((int)pwm_.dutyMinPct())
+             + "_to_" + std::to_string((int)pwm_.dutyMaxPct() ) + "_pct\n";
+    if (!pwm_.setPWM_Control(dch, (uint16_t)control))
+        return "ERR pwm_control_write_fail\n";
+
+    return "OK\n";
+}
+
+// ⚠ Writes flash. Deliberately NOT called by any automatic flow — only the
+// web panel's explicit 「保存參數」 button reaches here. See the warning block
+// on QX_DO24::saveOutputAsDefault(): ~1-2k write-cycle life, the module accepts
+// only ONE such write per power-up, and saving while control=65535 makes the
+// module start driving the motor the instant it is powered on.
+std::string WashRobot::cmd_pwm_save() {
+    State cur = state_.load();
+    if (cur == State::Error) return state_violation_(cur);
+    if (!pwm_.saveOutputAsDefault()) return "ERR pwm_save_fail\n";
+    return "OK\n";
+}
+
+// Reports all 4 channels for the panel. freq_ok=0 flags "frequency is not the
+// locked value", which invalidates the 5~10% duty mapping — the module reverts
+// to 1000Hz on every power cycle, so this is the normal state after a reboot.
+std::string WashRobot::cmd_pwm_status() {
+    std::ostringstream oss;
+    oss << "OK";
+    for (int ch = 1; ch <= 4; ++ch) {
+        double   duty = 0; uint32_t freq = 0; uint16_t ctrl = 0;
+        bool ok = pwm_.getPWM_Duty(ch - 1, duty)
+               && pwm_.getPWM_Freq(ch - 1, freq)
+               && pwm_.getPWM_Control(ch - 1, ctrl);
+        oss << " ch" << ch << "=";
+        if (!ok) { oss << "ERR"; continue; }
+        oss << duty << "," << freq << "," << ctrl
+            << "," << (((int)freq == pwm_.freqMinHz()) ? 1 : 0);
+    }
+    oss << " duty_min=" << pwm_.dutyMinPct()
+        << " duty_max=" << pwm_.dutyMaxPct()
+        << " freq_lock=" << pwm_.freqMinHz() << "\n";
+    return oss.str();
 }
 
 // [2026-06-05] Water inlet moved to crane PQW (192.168.1.34 slave 12 CH4).

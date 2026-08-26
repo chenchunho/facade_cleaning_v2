@@ -189,6 +189,30 @@ bool QX_DO24::setPWM_Control(int channel, uint16_t val) {
 	return (sendAndReceive(req, res) && res == req);
 }
 
+//=========== control: save current values as power-on default (0x10) ===========
+
+// ⚠ Touches flash. See the warning block in QX_DO24.h before calling.
+// Writes any non-zero value to reg 0x10; the module snapshots 0x00~0x0F.
+bool QX_DO24::saveOutputAsDefault() {
+	if (!client) return false;
+
+	const uint16_t addr = 0x0010;
+	const uint16_t val  = 0x0001;          // manual: "写入一个任意非 0 值"
+
+	std::vector<uint8_t> req = {
+		(uint8_t)deviceID, 0x06,
+		(uint8_t)(addr >> 8), (uint8_t)(addr & 0xFF),
+		(uint8_t)(val >> 8), (uint8_t)(val & 0xFF)
+	};
+	uint16_t crc = modbusCRC(req.data(), (int)req.size());
+	req.push_back(crc & 0xFF); req.push_back(crc >> 8);
+
+	LOG_INF(_log_tag, "SAVE to flash (reg 0x10) — limited write cycles, once per power-up");
+
+	std::vector<uint8_t> res;
+	return (sendAndReceive(req, res) && res == req);
+}
+
 //=========== control: readback (FC 0x03) ===========
 
 bool QX_DO24::getPWM_Duty(int channel, double& duty_percent) {

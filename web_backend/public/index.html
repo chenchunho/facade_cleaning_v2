@@ -37,7 +37,7 @@
     <h2>auto cycle</h2>
     <div class="row">
       <label>step cm: <input type="number" id="step-cm" value="30" min="5" max="60" step="1"></label>
-      <span class="label">(5-60，套用到 step_down / run，同步與交替走法共用)</span>
+      <span class="label">(5-60，套用到同步步伐 / run / SCRIPT RUN)</span>
     </div>
     <div class="row">
       <button data-tgt="washrobot" data-cmd="init">init</button>
@@ -53,18 +53,24 @@
           <option value="up">up ↑</option>
         </select>
       </label>
-      <label title="alt=左右輪流走（交替 inchworm）；sync=4 顆同時放開/放繩/重伸">走法:
-        <select id="run-gait">
-          <option value="alt" selected>交替（左右輪流）</option>
-          <option value="sync">同步（4 顆一起）</option>
-        </select>
-      </label>
+      <!-- [2026-08-26 per user] 走法選單移除——交替走法全面停用，run 一律送 sync。 -->
       <button id="btn-run">run</button>
-      <button id="btn-run-avoid" class="primary" title="每 step 前自動偵測障礙物、跳通知問你確認">🛡️ RUN (avoid 障礙)</button>
       <button id="btn-descend-to-ground" class="primary">↓ 走到地面（含清洗）</button>
       <button data-tgt="washrobot" data-cmd="pause">pause</button>
       <button data-tgt="washrobot" data-cmd="resume">resume</button>
       <button class="danger" data-tgt="washrobot" data-cmd="emergency_stop">STOP (robot)</button>
+    </div>
+    <!-- [2026-08-26 per user] 原「上下移動」panel 併入這裡：單步點動就兩顆按鈕，
+         走一步就停。跟上面的 run 是同一種步伐，run steps=1 等同於按一次。 -->
+    <div class="row">
+      <span class="label">單步點動（走一步就停）：</span>
+      <button id="btn-step-down-sync" class="primary">⇅ 同步 ↓</button>
+      <button id="btn-step-up-sync" class="primary">⇅ 同步 ↑</button>
+      <ul class="hint">
+        <li>一步 = 4 顆吸盤同時放開 → 吊機兩側同步放/收繩 → IMU 微調 → 4 顆同時重新吸附，步長吃上面的 step cm</li>
+        <li>清洗內建在步伐裡（伸腳後上滑台即開始刷洗）</li>
+        <li>⚠ 放繩期間 4 顆吸盤全放開，完全靠吊機繩索承重</li>
+      </ul>
     </div>
     <div class="row error-pause-row">
       <div class="error-pause-status" id="error-pause-status">
@@ -87,54 +93,14 @@
     </div>
   </section>
 
-  <section class="panel panel-washrobot" data-page="home">
-    <h2>同步上下移動</h2>
-    <div class="row">
-      <span class="label">同步步伐（4 顆同時放開→吊機兩側同步放/收繩→IMU 微調→4 顆同時重新吸附，純移動不清洗）：</span>
-      <button id="btn-step-down-sync" class="primary">⇅ 同步 ↓</button>
-      <button id="btn-step-up-sync" class="primary">⇅ 同步 ↑</button>
-      <ul class="hint">
-        <li>⚠ 放繩期間 4 顆吸盤全放開，完全靠吊機繩索承重（其他步伐都保持至少一側黏牆防墜）</li>
-      </ul>
-    </div>
-  </section>
+  <!-- [2026-08-26 per user]「上下移動」panel 已併入上方 auto cycle 的「單步點動」那一列 -->
 
-  <section class="panel panel-washrobot" data-page="home">
-    <h2>左右輪流移動</h2>
-    <div class="row">
-      <button id="btn-step-down">step_down</button>
-      <button id="btn-step-down-sweep" class="primary">↓ 下移 + 連續清洗</button>
-      <button id="btn-step-down-sweep-af" class="primary">↓ 下移 + 清洗(腳組後)</button>
-      <button id="btn-step-down-sweep-ba" class="primary">↓ 下移 + 移動前後各刷</button>
-      <button id="btn-step-up">step_up</button>
-      <button id="btn-step-up-sweep" class="primary">↑ 上移 + 連續清洗</button>
-      <button id="btn-step-up-sweep-af" class="primary">↑ 上移 + 清洗(腳組後)</button>
-      <button id="btn-step-up-sweep-ba" class="primary">↑ 上移 + 移動前後各刷</button>
-    </div>
-    <div class="row">
-      <span class="label">跨障礙物（伸腳 2× 站離牆跨越後縮回）：</span>
-      <button id="btn-cross-down" class="primary">🧗 跨障礙物 ↓</button>
-      <button id="btn-cross-up" class="primary">🧗 跨障礙物 ↑</button>
-    </div>
-    <div class="row">
-      <span class="label">step 第二腳對平：</span>
-      <button id="btn-follower-mode" title="切換 step 第二隻腳的對平方式（點一下切換）">對平模式: ?</button>
-      <span class="label" id="follower-mode-status">(currently: ?)</span>
-      <ul class="hint">
-        <li><b>IMU</b>：第二腳粗走後再依 IMU roll 精對平（長繩計米不準時用）（預設）</li>
-        <li><b>METER</b>：第二腳只走計米同步＝原本方法</li>
-      </ul>
-    </div>
-    <div class="row">
-      <span class="label">第一步先走：</span>
-      <button id="btn-first-left">左腳先</button>
-      <button id="btn-first-right">右腳先</button>
-      <span class="label" id="first-step-status">(currently: ?)</span>
-      <ul class="hint">
-        <li>選第一步先動哪隻腳，之後每步左右交替（右先→左→右…／左先→右→左…）</li>
-      </ul>
-    </div>
-  </section>
+  <!-- [2026-08-26 per user] 「左右輪流移動」panel 整個移除——交替走法停用，
+       全部改走同步步伐。同時移除的還有「step 第二腳對平」與「第一步先走」
+       ——兩者都是交替走法特有的概念（同步步伐 4 顆一起動，沒有第二腳、也
+       沒有先走哪隻的問題），以及「跨障礙物」手動按鈕（user 二次確認要一併
+       移除）。後端 step_down / step_up / *_sweep_* / cross_obstacle_* 等指令
+       都還在，需要時仍可用 raw command 發送。 -->
 
   <!-- [2026-06-05] scripted run — CSV of per-step cm. [2026-07-14] direction (up/down) selectable -->
   <section class="panel panel-washrobot panel-script" data-page="home">
@@ -143,7 +109,7 @@
       <label class="script-csv-label">
         CSV
         <textarea id="script-csv" rows="2" spellcheck="false"
-                  placeholder="例如：30*5,20*3 或 30n,30,30 （n=不刷洗；x=跨障礙物，如 30x）"></textarea>
+                  placeholder="例如：30*5,20*3 或 30n,30,30 （n=不刷洗）"></textarea>
       </label>
     </div>
     <div class="row script-preview-row">
@@ -156,12 +122,8 @@
           <option value="up">up ↑</option>
         </select>
       </label>
-      <label title="alt=左右輪流走（交替 inchworm）；sync=4 顆同時放開/放繩/重伸（cross 步驟不受影響，一律照原邏輯）">走法:
-        <select id="script-gait">
-          <option value="alt" selected>交替（左右輪流）</option>
-          <option value="sync">同步（4 顆一起）</option>
-        </select>
-      </label>
+      <!-- [2026-08-26 per user] 走法選單移除——一律送 sync。CSV 的 x（跨障礙物）
+           旗標也已移除，舊腳本若含 30x 會被前端擋下並報格式錯誤。 -->
       <button id="btn-run-script" class="primary">▶ Run</button>
       <button id="btn-save-script">💾 Save as…</button>
       <button id="btn-list-scripts">↻ 重新整理列表</button>
@@ -256,6 +218,48 @@
     </div>
     <ul class="hint">
       <li>auto sweep 失敗後手動關 relay；Error 狀態拒絕</li>
+    </ul>
+  </section>
+
+  <!-- [2026-08-26] QX-DO24 四路 PWM 輸出模組 (cli_22_ slave 6) -->
+  <section class="panel panel-washrobot" data-page="manual">
+    <h2>PWM 控制 (QX-DO24)</h2>
+    <div class="row">
+      <label>通道:
+        <select id="pwm-ch">
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+        </select>
+      </label>
+      <label title="頻率鎖定 50Hz：占空比 5~10% 的停止/全速對應只有在 50Hz 才成立">頻率:
+        <input type="number" id="pwm-hz" value="50" readonly style="width:6em">
+      </label>
+      <span class="label">Hz（鎖定）</span>
+      <label title="0=關閉輸出 / 65535=持續輸出 / 1~65534=送出這麼多個脈衝後停">控制:
+        <select id="pwm-control">
+          <option value="65535" selected>65535 持續輸出</option>
+          <option value="0">0 關閉輸出</option>
+        </select>
+      </label>
+      <label>占空比:
+        <input type="number" id="pwm-duty" value="5.0" min="5" max="10" step="0.1" style="width:6em">
+      </label>
+      <span class="label">%（<span id="pwm-duty-pulse">1.00</span> ms）</span>
+    </div>
+    <div class="row">
+      <button id="btn-pwm-write" class="primary">暫存寫入</button>
+      <button id="btn-pwm-save">保存參數</button>
+      <button id="btn-pwm-status">讀回現況</button>
+      <span class="label" id="pwm-status-text">—</span>
+    </div>
+    <ul class="hint">
+      <li><b>占空比 5.0~10.0%</b>（可到小數第一位）：<b>5% = 停止</b>、<b>10% = 全速</b>，超出範圍後端一律拒絕、不送出</li>
+      <li>順序是<b>頻率 → 占空比 → 控制</b>，控制最後才開，馬達不會在開輸出瞬間衝出去</li>
+      <li><b>暫存寫入</b>：斷電就還原（模組回到 1000Hz / 50% / 關閉），可無限次修改</li>
+      <li><b>⚠ 保存參數</b>：寫入 flash 存成開機預設。<b>壽命只有 1~2 千次</b>、<b>每次上電只能存一次</b>；若存檔當下控制是「持續輸出」，模組<b>以後一通電就會立刻驅動馬達</b>——按下前請先確認控制值</li>
+      <li>模組每次上電頻率會跳回 1000Hz，占空比對應會失效 → 先按「讀回現況」確認，需要時重按一次暫存寫入</li>
     </ul>
   </section>
 
@@ -633,38 +637,17 @@
     </ul>
   </section>
 
-  <section class="panel panel-washrobot" data-page="home">
-    <h2>🎥 窗框避障 (camera obstacle detect)</h2>
-    <ul class="hint">
-      <li>底部相機偵測窗框，動態調 step_cm；OFF=不影響現有流程</li>
-    </ul>
-    <div class="row">
-      <span class="label">avoidance 驅動狀態:</span>
-      <span class="link-badge" id="obstacle-link-badge">? unknown</span>
-    </div>
-    <div class="row">
-      <span class="label">啟用窗框避障:</span>
-      <button data-tgt="washrobot" data-cmd="obstacle_detect on">avoidance ON</button>
-      <button data-tgt="washrobot" data-cmd="obstacle_detect off">avoidance OFF</button>
-      <span class="label" id="obstacle-detect-status">(currently: ?)</span>
-    </div>
-    <ul class="hint">
-      <li>⚠ FrameAnalyzer 未整合，目前 ON 只是 flag — 無實際偵測</li>
-    </ul>
-  </section>
-
-  <!-- [2026-07-20] D435i depth-camera continuous obstacle-avoid walk -->
-  <section class="panel panel-depth-avoid" data-page="home">
-    <h2>📷 AUTO RUN - 深度相機避障行走 (D435i)</h2>
-    <ul class="hint">
-      <li>持續往下走，每走一步偵測完跳出結果，由你決定是否繼續、要走多長</li>
-      <li>第一步固定走 5cm（還沒有前一步的照片可比對）</li>
-      <li>候選物高度超過 10cm 時，彈窗會多附上偵測截圖</li>
-    </ul>
-    <div class="row">
-      <button id="btn-run-depth-avoid" class="primary">開始持續避障行走</button>
-    </div>
-  </section>
+  <!-- [2026-08-26 per user] 「🎥 窗框避障 (camera obstacle detect)」panel 整個移除。
+       這套 v1 舊避障在 v2 已經是死的：main.cpp:157 把 run_avoid 直接 stub 成
+       `ERR removed_in_v2`（因為 v1 實作依賴 DM2J 滑軌的 80%/100% 行程 hook，
+       而 v2 沒有 DM2J、改用吊機繩），而 obstacle_detect on/off 依 WASH_ROBOT.cpp:832
+       的註解也只是個不影響 step_down 流程的 flag。同批移除的還有 auto cycle 裡的
+       「🛡️ RUN (avoid 障礙)」按鈕與 run_avoid modal。
+       [2026-08-26 per user] D435i 的「📷 AUTO RUN - 深度相機避障行走」panel 也一併
+       移除——「現在不用攝影機避開障礙物了」。連同 run_depth_avoid modal、EVT 處理
+       與 depth_avoid_continue/stop 的 handler 一起刪。後端 run_depth_avoid /
+       depth_avoid_continue / depth_avoid_stop 指令仍在，需要時可用 raw command。
+       Camera panel 裡的 D435i 拍照顯示是獨立功能（只是看畫面），未移除。 -->
 
   <section class="panel panel-emergency" data-page="home">
     <h2>🆘 緊急收繩（救援模式）</h2>
@@ -862,56 +845,10 @@
   </section>
 </main>
 
-<!-- [2026-06-04] run_avoid modal — pops on EVT obstacle_ask per step, user confirms or cancels -->
-<div id="modal-obstacle" class="modal modal-hidden">
-  <div class="modal-content">
-    <h3>🛡️ 偵測結果（第 <span id="modal-obstacle-iter">?</span> 次）</h3>
-    <p>建議動作：<strong id="modal-obstacle-action" class="hl">?</strong></p>
-    <p>建議步長：<strong id="modal-obstacle-step" class="hl">?</strong> cm</p>
-    <p>原因：<span id="modal-obstacle-reason">?</span></p>
-    <div class="modal-btns">
-      <button id="btn-obstacle-confirm" class="primary">確認往下走</button>
-      <button id="btn-obstacle-cancel" class="danger">取消停止</button>
-    </div>
-  </div>
-</div>
+<!-- [2026-08-26 per user] run_avoid modal 移除（v1 舊避障整套停用，見上方 panel 位置的註解） -->
 
-<!-- [2026-07-20] run_depth_avoid modal — pops on EVT depth_obstacle_result per step -->
-<!-- [2026-07-21] Always shows BEFORE/AFTER/結果 三張照片（不再只有 big_obstacle 才顯示），
-     方便在 candidates=0（完全沒偵測到）時也能看到相機實際拍到什麼、判斷為什麼認不出來 -->
-<div id="modal-depth-obstacle" class="modal modal-hidden">
-  <div class="modal-content modal-content-wide">
-    <h3>📷 深度相機偵測結果（第 <span id="modal-depth-iter">?</span> 步）</h3>
-    <p>候選物數量：<strong id="modal-depth-candidates" class="hl">?</strong></p>
-    <p>最大高度：<strong id="modal-depth-height" class="hl">?</strong> cm　最大凸出量：<strong id="modal-depth-protrusion" class="hl">?</strong> cm</p>
-    <p>相機到障礙物斜距：<strong id="modal-depth-distance" class="hl">?</strong> cm　機器人前緣尚可安全走：<strong id="modal-depth-remaining" class="hl">?</strong> cm</p>
-    <p id="modal-depth-big-warning" class="warn modal-hidden">⚠ 偵測到高度超過 10cm 的障礙物，請確認下方截圖</p>
-    <p id="modal-depth-cross-notice" class="warn modal-hidden">🧗 偵測到候選物 — 下一步將自動改用「跨障礙物」步伐（一側伸腳 2× 站離牆跨越）</p>
-    <div class="modal-depth-photos">
-      <div class="modal-depth-photo-cell">
-        <div class="modal-depth-photo-label">走之前 BEFORE</div>
-        <img id="modal-depth-photo-before" class="modal-depth-photo" alt="depth camera before this step">
-      </div>
-      <div class="modal-depth-photo-cell">
-        <div class="modal-depth-photo-label">走之後 AFTER（原始）</div>
-        <img id="modal-depth-photo-after" class="modal-depth-photo" alt="depth camera after this step (raw)">
-      </div>
-      <div class="modal-depth-photo-cell">
-        <div class="modal-depth-photo-label">偵測結果（masked depth）</div>
-        <img id="modal-depth-photo-result" class="modal-depth-photo" alt="depth camera detection result">
-      </div>
-    </div>
-    <div class="row">
-      <span class="label">下一步走幾公分：</span>
-      <input type="number" id="modal-depth-step-input" value="30" min="1" max="200" step="1">
-      <span class="label">cm</span>
-    </div>
-    <div class="modal-btns">
-      <button id="btn-depth-continue" class="primary">繼續往下走</button>
-      <button id="btn-depth-stop" class="danger">停止</button>
-    </div>
-  </div>
-</div>
+<!-- [2026-08-26 per user] run_depth_avoid modal 移除——不再用攝影機避開障礙物。
+     Camera panel 的 D435i 拍照顯示是另一個獨立功能，未受影響。 -->
 
 <div id="modal-balance" class="modal modal-hidden">
   <div class="modal-content">

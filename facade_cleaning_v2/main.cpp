@@ -287,6 +287,24 @@ static std::string dispatch(const std::string& line) {
         if (s == "off") return robot.cmd_pump(false);
         return "ERR expected_on_or_off\n";
     }
+    // [2026-08-26] QX-DO24 4-ch PWM output (cli_22_ slave 6), web panel 用。
+    //   pwm set <ch1-4> <hz> <control> <duty%>   暫存寫入（斷電還原）
+    //   pwm save                                 ⚠ 寫 flash 存成開機預設
+    //   pwm status                               讀回 4 通道
+    // 占空比 5~10% 與頻率鎖 50Hz 由 QX_DO24 driver 強制，這裡只解析參數。
+    if (cmd == "pwm") {
+        std::string sub; iss >> sub;
+        if (iss.fail() || sub.empty()) return "ERR usage:pwm_<set|save|status>\n";
+        if (sub == "status") return robot.cmd_pwm_status();
+        if (sub == "save")   return robot.cmd_pwm_save();
+        if (sub == "set") {
+            int ch = 0, hz = 0, control = 0; double duty = 0;
+            iss >> ch >> hz >> control >> duty;
+            if (iss.fail()) return "ERR usage:pwm_set_<ch1-4>_<hz>_<control>_<duty%>\n";
+            return robot.cmd_pwm_set(ch, hz, control, duty);
+        }
+        return "ERR usage:pwm_<set|save|status>\n";
+    }
     if (cmd == "brush") {
         std::string s; iss >> s;
         if (iss.fail()) return "ERR usage:brush_<on|off>\n";

@@ -13,6 +13,50 @@
 
 ---
 
+## 2026-08-26g Claude (Sadie) — Web GUI 新增「PWM 控制 (QX-DO24)」面板（跨三層）
+
+### 需求
+user：在主程式網頁加一個 panel 控制 PWM（channel / hz / 控制 / 占空比），占空比限 5~10%、可到小數第一位，兩顆按鈕：暫存寫入、保存參數。
+
+### slave 撞號疑慮解除 ✅
+先前一直標「`.22` bus 上 slave 6 可能撞到 JC-100（slave 1~9）」。查 `WASH_ROBOT.cpp` 實際初始化程式碼確認：**v2 只用 JC-100 slave 1~4**（v1 才是 1~9）。cli_22_ 現況：JC100 `1~4`、DY500 `10,11`（未實裝）、PQW `12`、XKC `13`、DM2J 上滑台 `14`。**slave 5~9 全空，slave 6 可用。**
+
+### 修改檔案
+- `user_lib/QX_DO24.{h,cpp}`：新增 `saveOutputAsDefault()`（寫 flash 0x10）。**先前刻意沒做這個功能**，這次因 user 明確要求「保存參數」按鈕才加，header 帶完整警語
+- `user_lib/WASH_ROBOT.{h,cpp}`：`#include` + 成員 `pwm_`、常數 `PWM_SLAVE=6`、init 掛上 cli_22_；新增 `cmd_pwm_set` / `cmd_pwm_save` / `cmd_pwm_status`
+- `facade_cleaning_v2/main.cpp`：`pwm <set|save|status>` 指令 dispatch
+- `facade_cleaning_v2/facade_cleaning_v2.vcxproj`：納入 `QX_DO24.cpp/.h`（原本只有 Linux_test 有）
+- `web_backend/public/index.html`：新增 panel（`data-page="manual"`）
+- `web_backend/public/app.js`：`pwmSend()` / `parsePwmStatus()` / 三顆按鈕 handler + 即時脈寬換算顯示
+
+### Hz 欄位的處理（跟先前決定的衝突）
+需求說面板要能控制 hz，但 2026-08-26c 已決定「頻率鎖死 50Hz 不允許改」。[per user] 採**顯示但鎖死**：欄位帶出 50、設 `readonly`，標明「鎖定」，保留安全鎖同時讓使用者看得到目前頻率。
+
+### 安全設計
+- **占空比 5~10% 的保護在後端 driver**，前端的檢查只是「即時回饋」不是防護——raw command 面板可以繞過前端直接送 `pwm set`。這點寫進 app.js 註解，避免以後有人以為前端擋得住
+- **寫入順序 Freq → Duty → Control**（跟 `setChannel` 一致），control 最後才開，負載不會看到中間狀態
+- **「保存參數」加 `confirm()` 對話框**，內容會**動態帶出當下的控制值**；若控制是 65535 會額外跳出警告：存下去之後模組每次一通電就會立刻驅動馬達，不需要任何人按任何按鈕。並提醒「存的是模組目前的值，不是畫面上的值」
+- panel 用 `⚠` 明列：斷電還原、flash 壽命 1~2 千次、每次上電只能存一次
+
+### 驗證
+HTML id ↔ app.js `getElementById` 9 個全部對得上；app.js 新增段括號/引號平衡；`pwm set|save|status` 三個字串與 `main.cpp` dispatch 對得上；用模擬的後端回覆字串（含 `ch3=ERR` 與 `freq_ok=0` 兩種異常）餵前端解析邏輯，輸出正確。
+
+### 🚫 接線前的硬阻礙：波特率衝突（必須先解決）
+
+**一條 RS485 bus 只能有一個波特率**——USR-TCP232 的串口設定套用到整條 bus 上的所有裝置。
+
+- QX-DO24 目前是 **115200**（bench 測試時被改過，非出廠 9600）
+- `.22` bus 上既有的 JC100×4 / PQW / XKC / DM2J 上滑台跑的是 gateway 設定值（幾乎確定 9600）
+
+**兩者不可能共存。** 正確做法是**把模組改回去配合 bus**（寫暫存器 `0x21 = 3` → 9600），而不是把整條 bus 改成 115200 去配合一顆新模組——後者要動到四顆壓力感測器、繼電器、水位計、上滑台馬達全部既有且正常運作的裝置，風險完全不成比例。
+
+⚠ **順序關鍵**：改波特率必須在**接上 bus 之前**用原廠工具（USB-485 直連）完成。一旦接上去而波特率不對，就無法跟模組通訊，也就改不回來了。
+
+### ⚠ 其餘未驗證
+**全部未編譯、未實機**。washrobot 主程式這次首度納入 `QX_DO24.cpp`。另外新增裝置會跟 JC100 壓力輪詢、PQW 閥動作、上滑台 sweep 共用 cli_22_（專案已知的 bus contention 議題），PWM 寫入頻率低應該影響不大，但實機要留意。
+
+---
+
 ## 2026-08-26f Claude (Sadie) — 對照原廠 Modbus 協定文件：錯誤回覆幀處理
 
 ### 起因
@@ -261,6 +305,33 @@ public method，兩顆 class 已知是照這個介面設計成 drop-in 的，比
 測過就永久有效。所以下次換裝/重裝時，把這幾項當作標準複查清單即可，不代表之前測試不完整。
 
 ---
+
+## 2026-08-26f Claude (Sadie) — 清洗工具頭左右對調（滾筒 LEFT→RIGHT、刮刀 RIGHT→LEFT）
+### 需求（user）
+「現在滾筒在 right，幫我把 left right 交換」——承 2026-08-26 的 TOOL_EXT 對調，工具頭實體已左右互換，清洗流程選用的側別也要跟著換。
+
+### ⚠ 這不只是兩個字串：共四處，散在三個函式
+LEFT/RIGHT 在清洗流程裡代表**工具種類**（滾筒/刮刀）而非單純方位，所以每處都連帶 `CH_BRUSH` 開關與水的開關。漏改任一處，兩條清洗路徑就會用相反的工具頭。
+
+| 函式 | 位置 | 改動 |
+|---|---|---|
+| `do_step_sync_rail_sweep_` | 8531 / 8561 | `DEPLOY … LEFT`→`RIGHT`（滾筒段）、`RIGHT`→`LEFT`（刮刀段）|
+| `do_arm_clean_sweep_` | 3233 / 3262 | 同上（此函式註解自述與 sync 版是複製關係）|
+| `cmd_arm_clean_sweep` | 3172-3187 | `sweep_with_tool("LEFT",true,"roller-…")` → `("RIGHT",true,…)`；`("RIGHT",false,"scraper-…")` → `("LEFT",false,…)` |
+| `do_arm_clean_sweep_continuous_` | 3645-3660 | 同上 |
+
+**只換方位字串，不動 `water_on` 與工具標籤** —— 滾筒仍是濕刷（water_on=true）、刮刀仍是乾刮（false），「先濕刷後乾刮」的順序也不變。`CH_BRUSH` 依然是滾筒段 ON、刮刀段 OFF，只是各自對應到另一側。
+
+### 順帶清掉會誤導的註解與 log
+`sweep_with_tool` 那兩處的呼叫參數本身就寫著 `roller` / `scraper`，但周邊還有一批寫死 `LEFT=滾筒`、`RIGHT=刮刀` 的註解與**執行期 log 字串**（`round N/M — LEFT(滾筒+水) 0→…`）。log 會實際印出來誤導操作者，已全部同步更新（3017-3028、3164-3187、3500-3505、3638-3660）。
+
+變數名也由方位改成語意命名（`oss_left`/`oss_right` → `oss_brush`/`oss_squeegee`），下次再換邊就不會又看錯。
+
+### 未動
+`#if 0` 區塊裡的 `_retired_do_arm_clean_sweep_v1_`（2798 起）不編譯，保持原樣。
+
+### 待驗證（未編譯）
+實機跑清洗時確認：滾筒段確實是 RIGHT 工具頭在轉（`CH15` ON）、刮刀段是 LEFT 且乾刮；log 的 `RIGHT(滾筒+水) → LEFT(刮刀乾)` 與實際動作一致。
 
 ## 2026-08-26e Claude (Sadie) — 移除 D435i 深度相機避障行走整套 GUI
 ### 需求（user）

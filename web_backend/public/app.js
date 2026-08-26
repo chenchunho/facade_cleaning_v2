@@ -597,64 +597,11 @@ function onWashrobotLine(line) {
         showBalanceModal(r ? r[1] : '?', p ? p[1] : '?');
     }
 
-    // [2026-06-04] run_avoid modal trigger.
-    //   EVT obstacle_ask action=X step_cm=Y iter=Z reason=...
-    if (line.startsWith('EVT obstacle_ask')) {
-        const a = line.match(/action=(\S+)/);
-        const s = line.match(/step_cm=(\S+)/);
-        const i = line.match(/iter=(\S+)/);
-        const r = line.match(/reason=(.+)$/);
-        showObstacleModal(
-            a ? a[1] : '?',
-            s ? s[1] : '?',
-            i ? i[1] : '?',
-            r ? r[1].trim() : ''
-        );
-    }
-    // Auto-close modal if loop ended (cancel/abort/done)
-    if (line.startsWith('EVT run_avoid_done') ||
-        line.startsWith('EVT run_avoid_user_cancel') ||
-        line.startsWith('EVT run_avoid_block') ||
-        line.startsWith('EVT run_avoid_detector_fail') ||
-        line.startsWith('EVT run_avoid_step_down_fail') ||
-        line.startsWith('EVT run_avoid_user_timeout')) {
-        hideObstacleModal();
-    }
+    // [2026-08-26 per user] v1 run_avoid 的 EVT 處理（obstacle_ask / run_avoid_*）
+    // 已移除——該指令在 v2 是 `ERR removed_in_v2` stub，永遠不會發出這些事件。
 
-    // [2026-07-20] run_depth_avoid modal trigger.
-    //   EVT depth_obstacle_result iter=N candidates=N max_height_cm=X.X
-    //       max_protrusion_cm=Y.Y min_distance_cm=Z.Z remaining_travel_cm=W.W
-    //       big_obstacle=yes|no default_step_cm=Z
-    if (line.startsWith('EVT depth_obstacle_result')) {
-        const iter   = line.match(/iter=(\S+)/);
-        const cand   = line.match(/candidates=(\S+)/);
-        const height = line.match(/max_height_cm=(\S+)/);
-        const prot   = line.match(/max_protrusion_cm=(\S+)/);
-        const dist   = line.match(/min_distance_cm=(\S+)/);
-        const remain = line.match(/remaining_travel_cm=(\S+)/);
-        const big    = line.match(/big_obstacle=(\S+)/);
-        const step   = line.match(/default_step_cm=(\S+)/);
-        const gait   = line.match(/next_step_gait=(\S+)/);
-        showDepthObstacleModal(
-            iter   ? iter[1]   : '?',
-            cand   ? cand[1]   : '?',
-            height ? height[1] : '?',
-            prot   ? prot[1]   : '?',
-            big    ? big[1] === 'yes' : false,
-            step   ? step[1]   : '30',
-            dist   ? dist[1]   : '?',
-            remain ? remain[1] : '?',
-            gait   ? gait[1] === 'cross' : false
-        );
-    }
-    // Auto-close modal if loop ended (stop/abort/done/fail)
-    if (line.startsWith('EVT depth_avoid_done') ||
-        line.startsWith('EVT depth_avoid_user_cancel') ||
-        line.startsWith('EVT depth_avoid_detector_fail') ||
-        line.startsWith('EVT depth_avoid_step_fail') ||
-        line.startsWith('EVT depth_avoid_user_timeout')) {
-        hideDepthObstacleModal();
-    }
+    // [2026-08-26 per user] run_depth_avoid 的 EVT 處理（depth_obstacle_result /
+    // depth_avoid_*）已移除——不再用攝影機避開障礙物，該流程的 UI 全數刪除。
 
     // [2026-06-05] Scripted run — replies + progress EVTs.
     //   OK scripts=[a,b,c]     ← list_scripts reply
@@ -709,6 +656,9 @@ function onWashrobotLine(line) {
     // "OK water_full=<0|1> rssi=<N>" or "ERR xkc_unreachable"
     parseWaterLevel(line);
 
+    // [2026-08-26] Update PWM panel from cmd_pwm_status / pwm error replies
+    parsePwmStatus(line);
+
     // [2026-06-01] Update IMU panel from any line containing roll=N pitch=N
     parseImuValues(line);
 
@@ -744,47 +694,13 @@ function onWashrobotLine(line) {
         }
     }
 
-    // [2026-06-01] Sync obstacle_detect toggle status (same pattern as arm/crane)
-    const od = line.match(/\bobstacle_detect=?\s*(on|off)/);
-    if (od) {
-        const on = (od[1] === 'on');
-        const txt = document.getElementById('obstacle-detect-status');
-        if (txt) txt.textContent = `(currently: ${od[1]})`;
-        const badge = document.getElementById('obstacle-link-badge');
-        if (badge) {
-            badge.textContent = on ? '🟢 ENABLED (pre-step check active)' : '⚪ DISABLED (skip)';
-            badge.classList.toggle('link-ok',   on);
-            badge.classList.toggle('link-down', !on);
-        }
-    }
+    // [2026-08-26 per user] obstacle_detect= 的 status 解析已移除——對應的
+    // 「窗框避障」panel 整個刪掉了（該 flag 在 v2 不影響任何流程）。
 
-    // [2026-07-09] Sync follower (step 2nd-leg) leveling mode: follower_mode=imu|meter
-    const fm = line.match(/\bfollower_mode=(imu|meter)/);
-    if (fm) {
-        const mode  = fm[1];
-        const isImu = (mode === 'imu');
-        const btn = document.getElementById('btn-follower-mode');
-        if (btn) {
-            btn.dataset.mode  = mode;   // click handler reads this to send the opposite
-            btn.textContent   = isImu ? '對平模式: IMU（依IMU）' : '對平模式: METER（計米同步）';
-            btn.classList.toggle('primary', isImu);   // highlight when IMU mode active
-        }
-        const st = document.getElementById('follower-mode-status');
-        if (st) st.textContent = isImu ? '(currently: imu — 第二腳依 IMU 精對平)'
-                                       : '(currently: meter — 第二腳計米同步/原本方法)';
-    }
-
-    // [2026-07-09] Sync first-step lead side: first_step=left|right
-    const fs = line.match(/\bfirst_step=(left|right)/);
-    if (fs) {
-        const side = fs[1];
-        const bl = document.getElementById('btn-first-left');
-        const br = document.getElementById('btn-first-right');
-        if (bl) bl.classList.toggle('primary', side === 'left');
-        if (br) br.classList.toggle('primary', side === 'right');
-        const st = document.getElementById('first-step-status');
-        if (st) st.textContent = `(currently: ${side} 腳先)`;
-    }
+    // [2026-08-26 per user] follower_mode= / first_step= 的 status 解析已移除——
+    // 對應的 UI（「step 第二腳對平」「第一步先走」）隨交替走法一併刪除。washrobot
+    // 仍會在 status 回覆裡帶這兩個欄位，只是前端不再顯示；後端的
+    // set_follower_mode / set_first_step 指令也還在，需要時可用 raw command。
 }
 
 function updateErrorPauseUI() {
@@ -880,6 +796,97 @@ function parseWaterLevel(line) {
 const btnRefreshWaterLevel = document.getElementById('btn-refresh-water-level');
 if (btnRefreshWaterLevel) {
     btnRefreshWaterLevel.onclick = () => send('washrobot', 'water_level');
+}
+
+//=========== [2026-08-26] QX-DO24 PWM panel ===========
+//
+// Backend (WashRobot::cmd_pwm_*) is the authority on the safety limits — duty
+// 5~10% and the 50Hz lock are enforced in the QX_DO24 driver and rejected there.
+// The checks below are convenience only: they give instant feedback instead of
+// a round trip, they are NOT the protection. Never treat the browser as the
+// safety layer — anyone can send `pwm set ...` from the raw-command panel.
+const pwmEl = {
+    ch:      document.getElementById('pwm-ch'),
+    hz:      document.getElementById('pwm-hz'),
+    control: document.getElementById('pwm-control'),
+    duty:    document.getElementById('pwm-duty'),
+    pulse:   document.getElementById('pwm-duty-pulse'),
+    status:  document.getElementById('pwm-status-text'),
+};
+
+// Live pulse-width readout: at 50Hz the period is 20ms, so 5%→1.0ms (stop)
+// and 10%→2.0ms (full speed). Showing ms makes a wrong number obvious.
+function pwmUpdatePulse() {
+    if (!pwmEl.duty || !pwmEl.pulse || !pwmEl.hz) return;
+    const duty = parseFloat(pwmEl.duty.value);
+    const hz   = parseFloat(pwmEl.hz.value);
+    if (!isFinite(duty) || !isFinite(hz) || hz <= 0) { pwmEl.pulse.textContent = '—'; return; }
+    pwmEl.pulse.textContent = (duty / 100 * (1000 / hz)).toFixed(2);
+}
+if (pwmEl.duty) pwmEl.duty.addEventListener('input', pwmUpdatePulse);
+
+// "OK ch1=<duty>,<freq>,<ctrl>,<freq_ok> ch2=... duty_min=5 duty_max=10 freq_lock=50"
+function parsePwmStatus(line) {
+    if (!pwmEl.status) return;
+    if (line.startsWith('ERR pwm_')) { pwmEl.status.textContent = line.trim(); return; }
+    if (!/\bch1=/.test(line) || !/freq_lock=/.test(line)) return;
+    const parts = [];
+    for (let ch = 1; ch <= 4; ++ch) {
+        const m = line.match(new RegExp('\\bch' + ch + '=([^\\s]+)'));
+        if (!m) continue;
+        if (m[1] === 'ERR') { parts.push(`ch${ch}:讀取失敗`); continue; }
+        const [duty, freq, ctrl, freqOk] = m[1].split(',');
+        const ctrlTxt = ctrl === '0' ? '關閉' : (ctrl === '65535' ? '持續輸出' : `脈衝剩${ctrl}`);
+        // freq_ok=0 means the module is not at the locked frequency (it reverts
+        // to 1000Hz on every power cycle), which invalidates the duty mapping.
+        parts.push(`ch${ch}: ${duty}% / ${freq}Hz${freqOk === '1' ? '' : ' ⚠非鎖定值,占空比對應無效'} / ${ctrlTxt}`);
+    }
+    pwmEl.status.textContent = parts.join('　|　');
+}
+
+function pwmSend() {
+    const ch   = parseInt(pwmEl.ch.value, 10);
+    const hz   = parseInt(pwmEl.hz.value, 10);
+    const ctrl = parseInt(pwmEl.control.value, 10);
+    const duty = parseFloat(pwmEl.duty.value);
+    if (!isFinite(duty)) { pwmEl.status.textContent = '占空比請填數字'; return; }
+    // Mirror of the backend limit purely for fast feedback (see note above).
+    if (duty < 5 || duty > 10) {
+        pwmEl.status.textContent = '占空比必須在 5.0~10.0% 之間（5%=停止, 10%=全速）';
+        return;
+    }
+    send('washrobot', `pwm set ${ch} ${hz} ${ctrl} ${duty.toFixed(1)}`);
+}
+
+const btnPwmWrite = document.getElementById('btn-pwm-write');
+if (btnPwmWrite) btnPwmWrite.onclick = pwmSend;
+
+const btnPwmStatus = document.getElementById('btn-pwm-status');
+if (btnPwmStatus) btnPwmStatus.onclick = () => send('washrobot', 'pwm status');
+
+// 保存參數 — the only path in the whole project that writes the module's flash.
+// Two things make this genuinely destructive rather than merely persistent:
+//   * ~1-2k write-cycle life, and the module accepts only ONE write per power-up
+//   * saving while 控制=持續輸出 means the module drives the motor the moment it
+//     is powered on, with nobody having pressed anything
+// Hence an explicit confirm() that spells out the current control value.
+const btnPwmSave = document.getElementById('btn-pwm-save');
+if (btnPwmSave) {
+    btnPwmSave.onclick = () => {
+        const ctrl = parseInt(pwmEl.control.value, 10);
+        const ctrlTxt = ctrl === 65535 ? '持續輸出 (65535)' : (ctrl === 0 ? '關閉 (0)' : String(ctrl));
+        let msg = '把模組「目前」的 4 通道設定存成開機預設？\n\n'
+                + '⚠ 寫入 flash：壽命約 1~2 千次，且模組每次上電只接受一次。\n'
+                + `⚠ 目前控制值 = ${ctrlTxt}\n`;
+        if (ctrl === 65535) {
+            msg += '\n★ 控制是「持續輸出」——存下去之後，模組每次一通電就會\n'
+                 + '　 立刻開始驅動馬達，不需要任何人按下任何按鈕。\n'
+                 + '　 確定要這樣嗎？如果不要，先把控制改成「關閉」再存。\n';
+        }
+        msg += '\n注意：存的是模組目前的值，不是畫面上的值 —— 想存畫面上的設定，\n請先按「暫存寫入」。';
+        if (!confirm(msg)) return;
+        send('washrobot', 'pwm save');
+    };
 }
 
 // ====================================================================
@@ -1170,26 +1177,26 @@ function readStepCm() {
     return cm;
 }
 
-document.getElementById('btn-step-down').onclick = () => {
-    const cm = readStepCm();
-    if (cm === null) return;
-    send('washrobot', `step_down ${cm}`);
-};
+// [2026-08-26 per user] 交替走法的按鈕 handler 全部移除（btn-step-down /
+// btn-step-up / 六個 *-sweep-* / btn-follower-mode / btn-first-left|right），
+// 對應的 HTML 已在 index.html 刪除。注意這裡的 handler 是
+// `getElementById(...).onclick =` 直接賦值、沒有 null 檢查——HTML 刪了而 JS
+// 留著會在該行拋 TypeError，之後整個 app.js 都不會執行，所以兩邊必須成對處理。
+// 後端指令都還在，需要時可用 raw command 發送。
 
-// [2026-07-13] 跨障礙物 — stand legs off wall to 2×preset, cross, realign back.
-document.getElementById('btn-cross-down').onclick = () => {
-    const cm = readStepCm();
-    if (cm === null) return;
-    send('washrobot', `cross_obstacle_down ${cm}`);
-};
-document.getElementById('btn-cross-up').onclick = () => {
-    const cm = readStepCm();
-    if (cm === null) return;
-    send('washrobot', `cross_obstacle_up ${cm}`);
-};
+// [2026-08-26 per user] 跨障礙物手動按鈕（btn-cross-down / btn-cross-up）已移除，
+// 對應 HTML 同步刪除。後端 cross_obstacle_down / cross_obstacle_up 指令仍在，
+// 需要時可用 raw command 發送。
+// GUI 端已無任何跨障礙物入口：CSV 'x' 旗標（2026-08-26d）與 run_depth_avoid
+// 整套 UI（2026-08-26e）都已移除。**但後端仍保有自動 cross 的邏輯**——
+// cmd_run_depth_avoid 偵測到大障礙物時會自行改用 cross 步伐。目前前端沒有任何
+// 按鈕能啟動 run_depth_avoid，所以走不到那條路；若之後有人用 raw command 直接
+// 發 run_depth_avoid，機器仍可能自己跨障礙物，而前端已經不會顯示提示了。
 
-// [2026-07-22] 同步步伐 — 4 顆吸盤同時放開/放繩/重伸，跟 step_down/up 交替走法不同，
-// 沒有清洗選項（純移動）。見 WASH_ROBOT.cpp do_step_sync_ 的安全性註解。
+// [2026-07-22] 同步步伐 — 4 顆吸盤同時放開/放繩/重伸。
+// [2026-08-26] 原註解寫「沒有清洗選項（純移動）」已不正確：do_step_sync_ 內含
+// do_step_sync_rail_sweep_，伸腳後上滑台就開始刷洗（2026-07-24 手臂實裝後接回）。
+// 見 WASH_ROBOT.cpp do_step_sync_ 的安全性註解。
 document.getElementById('btn-step-down-sync').onclick = () => {
     const cm = readStepCm();
     if (cm === null) return;
@@ -1199,71 +1206,6 @@ document.getElementById('btn-step-up-sync').onclick = () => {
     const cm = readStepCm();
     if (cm === null) return;
     send('washrobot', `step_up_sync ${cm}`);
-};
-
-// [2026-07-09] Toggle step 2nd-leg leveling mode (imu ⇄ meter). dataset.mode is
-// kept in sync by the follower_mode= parser above; click sends the opposite then
-// refreshes status to re-sync the label.
-{
-    const btnFollowerMode = document.getElementById('btn-follower-mode');
-    if (btnFollowerMode) {
-        btnFollowerMode.onclick = () => {
-            const next = (btnFollowerMode.dataset.mode === 'imu') ? 'meter' : 'imu';
-            send('washrobot', `set_follower_mode ${next}`);
-            send('washrobot', 'status');   // re-sync label/badge
-        };
-    }
-}
-
-// [2026-07-09] First-step lead-foot selection (left / right). Active side is
-// highlighted by the first_step= parser above.
-{
-    const btnFirstLeft  = document.getElementById('btn-first-left');
-    const btnFirstRight = document.getElementById('btn-first-right');
-    if (btnFirstLeft)  btnFirstLeft.onclick  = () => { send('washrobot', 'set_first_step left');  send('washrobot', 'status'); };
-    if (btnFirstRight) btnFirstRight.onclick = () => { send('washrobot', 'set_first_step right'); send('washrobot', 'status'); };
-}
-
-document.getElementById('btn-step-up').onclick = () => {
-    const cm = readStepCm();
-    if (cm === null) return;
-    send('washrobot', `step_up ${cm}`);
-};
-
-document.getElementById('btn-step-up-sweep').onclick = () => {
-    const cm = readStepCm();
-    if (cm === null) return;
-    send('washrobot', `step_up_with_sweep ${cm}`);
-};
-
-document.getElementById('btn-step-up-sweep-af').onclick = () => {
-    const cm = readStepCm();
-    if (cm === null) return;
-    send('washrobot', `step_up_sweep_after_feet ${cm}`);
-};
-
-document.getElementById('btn-step-down-sweep-af').onclick = () => {
-    const cm = readStepCm();
-    if (cm === null) return;
-    send('washrobot', `step_down_sweep_after_feet ${cm}`);
-};
-
-document.getElementById('btn-step-up-sweep-ba').onclick = () => {
-    const cm = readStepCm();
-    if (cm === null) return;
-    send('washrobot', `step_up_sweep_ba ${cm}`);
-};
-
-document.getElementById('btn-step-down-sweep-ba').onclick = () => {
-    const cm = readStepCm();
-    if (cm === null) return;
-    send('washrobot', `step_down_sweep_ba ${cm}`);
-};
-
-document.getElementById('btn-step-down-sweep').onclick = () => {
-    const cm = readStepCm();
-    if (cm === null) return;
-    send('washrobot', `step_down_with_sweep ${cm}`);
 };
 
 // Cleaning arm DEPLOY — read wall_mm + slot, send "DEPLOY <mm> <slot>" DIRECTLY
@@ -1324,10 +1266,10 @@ document.getElementById('btn-run').onclick = () => {
     const cm = readStepCm();
     if (cm === null) return;
     const dir = document.getElementById('run-direction').value;   // "down" | "up"
-    // [2026-07-23] gait: "alt" (交替，預設) | "sync" (同步，4 顆一起)
-    const gaitEl = document.getElementById('run-gait');
-    const gait = gaitEl ? gaitEl.value : 'alt';
-    send('washrobot', `run ${n} ${cm} ${dir} ${gait}`);
+    // [2026-08-26 per user] 走法選單已移除，一律送 sync。
+    // 注意：先前這裡是 `gaitEl ? gaitEl.value : 'alt'`，fallback 是 alt——只刪
+    // HTML 而不改這行的話會靜默退回交替走法，所以必須成對處理。
+    send('washrobot', `run ${n} ${cm} ${dir} sync`);
 };
 
 // ↓ 走到地面（含清洗）— 從 crane-remaining 算 N 步、confirm、跑 run ... down_sweep_af
@@ -1360,7 +1302,10 @@ document.getElementById('btn-descend-to-ground').onclick = () => {
               + `確認開始?`;
     if (!confirm(msg)) return;
 
-    send('washrobot', `run ${n} ${cm} down`);
+    // [2026-08-26 per user] 補上 sync。這行原本沒帶第 4 個參數 gait，而後端
+    // (main.cpp cmd=="run" / WASH_ROBOT.h cmd_run) 的預設是 "alt"——所以在移除
+    // 走法選單之後，這顆「走到地面」仍會靜默走交替走法。
+    send('washrobot', `run ${n} ${cm} down sync`);
 };
 
 // ====================================================================
@@ -1369,11 +1314,12 @@ document.getElementById('btn-descend-to-ground').onclick = () => {
 // See .claude/scripted_run_plan.md for the full spec.
 //
 // Token grammar (mirror C++ parse_script_csv_):
-//     <int>[n][x]['*'<count>]
+//     <int>[n]['*'<count>]
 // - <int>   : cm (5..50)
 // - 'n'     : (optional) marks step as no-sweep (transit only)
-// - 'x'     : (optional) marks step as 跨障礙物 cross-obstacle (down); overrides sweep
 // - '*<N>'  : (optional) repeat shorthand
+// [2026-08-26 per user] 'x'（跨障礙物）已從前端移除。C++ 端的
+// parse_script_csv_ 仍認得 x，所以這裡不再是完全的 mirror——前端會先擋下來。
 // Default = sweep (matches 99% use case + preserves backward-compat).
 // ====================================================================
 
@@ -1401,12 +1347,14 @@ function parseScriptCsv(csv) {
             count = parseInt(cntStr, 10);
         }
 
-        // Peel optional trailing flags (order-independent): 'n'=no-sweep, 'x'=cross.
-        let sweep = true, cross = false;
+        // Peel optional trailing flag: 'n' = no-sweep.
+        // [2026-08-26 per user] 'x'（跨障礙物）旗標已移除——該功能整個停用。
+        // 舊腳本裡的 "30x" 這種 token 會在下面的數字檢查落空並明確報「格式錯誤」，
+        // 這是刻意的：讓它報錯，好過被靜默當成普通步驟走掉。
+        let sweep = true;
         while (head) {
             const f = head[head.length - 1];
-            if (f === 'n' || f === 'N')      { sweep = false; head = head.slice(0, -1); }
-            else if (f === 'x' || f === 'X') { cross = true;  head = head.slice(0, -1); }
+            if (f === 'n' || f === 'N') { sweep = false; head = head.slice(0, -1); }
             else break;
         }
 
@@ -1420,16 +1368,15 @@ function parseScriptCsv(csv) {
         if (count < 1 || count > 1000)
             return { ok: false, err: `token #${i+1} count=${count} 超出 1..1000` };
         for (let k = 0; k < count; ++k) {
-            steps.push({ cm, sweep, cross });
+            steps.push({ cm, sweep });
             if (steps.length > 1000) return { ok: false, err: '總 step 數 > 1000' };
         }
     }
     if (!steps.length) return { ok: false, err: '展開後 0 步' };
     const totalCm   = steps.reduce((a, s) => a + s.cm, 0);
-    const nCross    = steps.filter(s => s.cross).length;
-    const nSweep    = steps.filter(s => s.sweep && !s.cross).length;
-    const nTransit  = steps.length - nSweep - nCross;
-    return { ok: true, steps, totalCm, nSweep, nTransit, nCross };
+    const nSweep    = steps.filter(s => s.sweep).length;
+    const nTransit  = steps.length - nSweep;
+    return { ok: true, steps, totalCm, nSweep, nTransit };
 }
 
 const $scriptCsv      = document.getElementById('script-csv');
@@ -1453,9 +1400,7 @@ function updateScriptPreview() {
         $scriptPreview.className = 'script-preview-err';
     } else {
         // Show breakdown when mixed; collapse when all-sweep (the common case).
-        const mix = (r.nTransit > 0 || r.nCross > 0)
-            ? ` (${r.nSweep} sweep + ${r.nTransit} transit${r.nCross ? ' + ' + r.nCross + ' cross' : ''})`
-            : '';
+        const mix = r.nTransit > 0 ? ` (${r.nSweep} sweep + ${r.nTransit} transit)` : '';
         $scriptPreview.textContent =
             `✓ ${r.steps.length} 步${mix}，總 ${r.totalCm} cm`;
         $scriptPreview.className = 'script-preview-ok';
@@ -1468,21 +1413,16 @@ document.getElementById('btn-run-script').onclick = () => {
     if (!csv) { alert('CSV 是空的'); return; }
     const r = parseScriptCsv(csv);
     if (!r.ok) { alert('CSV 不正確：\n' + r.err); return; }
-    const mix = (r.nTransit > 0 || r.nCross > 0)
-        ? ` (${r.nSweep} sweep + ${r.nTransit} transit${r.nCross ? ' + ' + r.nCross + ' cross' : ''})`
-        : '';
+    const mix = r.nTransit > 0 ? ` (${r.nSweep} sweep + ${r.nTransit} transit)` : '';
     const dir = document.getElementById('script-direction').value === 'up' ? 'up' : 'down';
-    // [2026-07-23] gait: "alt" (交替，預設) | "sync" (同步，4 顆一起)
-    const gaitEl = document.getElementById('script-gait');
-    const gait = gaitEl ? gaitEl.value : 'alt';
-    const msg = `▶ Run Script（${dir === 'up' ? '往上 ↑' : '往下 ↓'}，`
-              + `${gait === 'sync' ? '同步走法' : '交替走法'}）\n\n`
+    // [2026-08-26 per user] 走法選單已移除，一律送 sync（原 fallback 是 alt）。
+    const msg = `▶ Run Script（${dir === 'up' ? '往上 ↑' : '往下 ↓'}，同步走法）\n\n`
               + `${r.steps.length} 步${mix}，總 ${r.totalCm} cm\n\n`
               + `CSV: ${csv}\n\n`
               + `確認開始?`;
     if (!confirm(msg)) return;
     // Server: run_script [up|down] [alt|sync] <csv>. CSV read as rest-of-line (spaces ok).
-    send('washrobot', `run_script ${dir} ${gait} ${csv}`);
+    send('washrobot', `run_script ${dir} sync ${csv}`);
 };
 
 document.getElementById('btn-save-script').onclick = () => {
@@ -1528,11 +1468,10 @@ function renderSavedScripts(names) {
     $scriptList.querySelectorAll('.saved-script-run').forEach(b => {
         b.onclick = () => {
             const dir = document.getElementById('script-direction').value === 'up' ? 'up' : 'down';
-            const gaitEl = document.getElementById('script-gait');
-            const gait = gaitEl ? gaitEl.value : 'alt';
+            // [2026-08-26 per user] 一律 sync（原 fallback 是 alt）
             if (!confirm(`執行 saved script "${b.dataset.name}"（${dir === 'up' ? '往上 ↑' : '往下 ↓'}，`
-                       + `${gait === 'sync' ? '同步走法' : '交替走法'}）?`)) return;
-            send('washrobot', `run_saved ${b.dataset.name} ${dir} ${gait}`);
+                       + `同步走法）?`)) return;
+            send('washrobot', `run_saved ${b.dataset.name} ${dir} sync`);
         };
     });
     $scriptList.querySelectorAll('.saved-script-delete').forEach(b => {
@@ -1550,8 +1489,9 @@ function showScriptProgress(step, total, cm, mode) {
         ? `準備中 — 共 ${total} 步`
         : `Step ${step} / ${total}`;
     if (cm > 0) {
-        const modeLbl = mode === 'transit' ? ' transit'
-                      : (mode === 'cross' ? ' 🧗cross' : (mode === 'sweep' ? ' sweep' : ''));
+        // [2026-08-26] 'cross' 分支移除（跨障礙物停用）。C++ 端理論上不會再回報
+        // 這個 mode；真的收到也只會顯示成無標籤，不影響進度條。
+        const modeLbl = mode === 'transit' ? ' transit' : (mode === 'sweep' ? ' sweep' : '');
         $scriptProgCm.textContent = `(${cm} cm${modeLbl})`;
         $scriptProgCm.className = 'script-progress-cm' +
             (mode === 'transit' ? ' script-progress-mode-transit' : '');
@@ -1660,109 +1600,16 @@ function showBalanceModal(roll, pitch) {
 }
 function hideBalanceModal() { modalBalance.classList.add('modal-hidden'); }
 
-// [2026-06-04] run_avoid obstacle modal
-const modalObstacle = document.getElementById('modal-obstacle');
-function showObstacleModal(action, stepCm, iter, reason) {
-    document.getElementById('modal-obstacle-action').textContent = action;
-    document.getElementById('modal-obstacle-step').textContent   = stepCm;
-    document.getElementById('modal-obstacle-iter').textContent   = iter;
-    document.getElementById('modal-obstacle-reason').textContent = reason || '(無原因說明)';
-    modalObstacle.classList.remove('modal-hidden');
-}
-function hideObstacleModal() { modalObstacle.classList.add('modal-hidden'); }
+// [2026-08-26 per user] v1 run_avoid 的 modal、按鈕與 obstacle_response 處理全部
+// 移除（modal-obstacle / btn-run-avoid / btn-obstacle-confirm|cancel）。後端
+// run_avoid 在 v2 是 `ERR removed_in_v2` stub，obstacle_response 也隨之無用。
+// （D435i 的 run_depth_avoid 當時保留，之後於 2026-08-26e 也一併移除。）
 
-// Wire run_avoid button + modal confirm/cancel
-const btnRunAvoid = document.getElementById('btn-run-avoid');
-if (btnRunAvoid) {
-    btnRunAvoid.onclick = () => {
-        if (!confirm(
-            '開始 RUN with avoidance?\n\n' +
-            '系統會在每個 step 前自動偵測障礙物、跳通知問你確認。\n' +
-            '隨時可按 STOP (robot) 中斷。'
-        )) return;
-        send('washrobot', 'run_avoid');
-    };
-}
-const btnObstacleConfirm = document.getElementById('btn-obstacle-confirm');
-if (btnObstacleConfirm) {
-    btnObstacleConfirm.onclick = () => {
-        send('washrobot', 'obstacle_response 1');
-        hideObstacleModal();
-    };
-}
-const btnObstacleCancel = document.getElementById('btn-obstacle-cancel');
-if (btnObstacleCancel) {
-    btnObstacleCancel.onclick = () => {
-        send('washrobot', 'obstacle_response 0');
-        hideObstacleModal();
-    };
-}
-
-// [2026-07-20] run_depth_avoid modal (D435i depth camera)
-const modalDepthObstacle = document.getElementById('modal-depth-obstacle');
-function showDepthObstacleModal(iter, candidates, heightCm, protrusionCm, bigObstacle, defaultStepCm, distanceCm, remainingCm, nextIsCross) {
-    document.getElementById('modal-depth-iter').textContent       = iter;
-    document.getElementById('modal-depth-candidates').textContent = candidates;
-    document.getElementById('modal-depth-height').textContent     = heightCm;
-    document.getElementById('modal-depth-protrusion').textContent = protrusionCm;
-    document.getElementById('modal-depth-step-input').value       = defaultStepCm;
-
-    // [2026-07-21] distance/remaining-clearance readout — informational only,
-    // the step-cm input above stays a manual field (per the original 2026-07-20
-    // "no automatic step_cm suggestion — user decides every time" design in
-    // WASH_ROBOT.h); this just gives the operator the number to decide with
-    // instead of eyeballing the photo.
-    const distEl = document.getElementById('modal-depth-distance');
-    const remainEl = document.getElementById('modal-depth-remaining');
-    if (distEl) distEl.textContent = distanceCm;
-    if (remainEl) remainEl.textContent = remainingCm;
-
-    document.getElementById('modal-depth-big-warning').classList.toggle('modal-hidden', !bigObstacle);
-    // [2026-07-23 per user] candidates>0 this AFTER → next step auto-switches
-    // to do_cross_obstacle_ (fully automatic, no confirm — this is purely
-    // informational so the operator isn't surprised when it happens).
-    document.getElementById('modal-depth-cross-notice').classList.toggle('modal-hidden', !nextIsCross);
-
-    // [2026-07-21] Always fetch all three — before / after (raw) / result
-    // (annotated) — regardless of candidates/big_obstacle, so a "nothing
-    // detected" step is still visually debuggable instead of showing nothing.
-    // cache-bust: these are fixed paths, browser would otherwise keep
-    // showing whatever it fetched for a previous step's photo.
-    const t = Date.now();
-    document.getElementById('modal-depth-photo-before').src = '/snap/depth_before?t=' + t;
-    document.getElementById('modal-depth-photo-after').src  = '/snap/depth_after?t='  + t;
-    document.getElementById('modal-depth-photo-result').src = '/snap/depth?t='        + t;
-
-    modalDepthObstacle.classList.remove('modal-hidden');
-}
-function hideDepthObstacleModal() { modalDepthObstacle.classList.add('modal-hidden'); }
-
-const btnRunDepthAvoid = document.getElementById('btn-run-depth-avoid');
-if (btnRunDepthAvoid) {
-    btnRunDepthAvoid.onclick = () => {
-        if (!confirm(
-            '開始深度相機持續避障行走？\n\n' +
-            '第一步固定走 5cm，之後每走一步會跳出偵測結果讓你決定下一步。\n' +
-            '隨時可按 STOP (robot) 中斷。'
-        )) return;
-        send('washrobot', 'run_depth_avoid');
-    };
-}
-const btnDepthContinue = document.getElementById('btn-depth-continue');
-if (btnDepthContinue) {
-    btnDepthContinue.onclick = () => {
-        const cm = document.getElementById('modal-depth-step-input').value;
-        send('washrobot', 'depth_avoid_continue ' + cm);
-        hideDepthObstacleModal();
-    };
-}
-const btnDepthStop = document.getElementById('btn-depth-stop');
-if (btnDepthStop) {
-    btnDepthStop.onclick = () => {
-        send('washrobot', 'depth_avoid_stop');
-        hideDepthObstacleModal();
-    };
-}
+// [2026-08-26 per user] run_depth_avoid 的 modal 函式與 handler 全部移除
+// （modal-depth-obstacle / btn-run-depth-avoid / btn-depth-continue|stop）。
+// 後端 run_depth_avoid / depth_avoid_continue / depth_avoid_stop 指令仍在，
+// 需要時可用 raw command 發送。Camera panel 的 D435i 拍照顯示是獨立功能，
+// 見下方 "depth camera (snapshot-only)" 區塊，未受影響。
 
 //=========== press-and-hold helper ===========
 

@@ -78,6 +78,22 @@ public:
 	int freqMinHz() const { return freq_min_hz; }
 	int freqMaxHz() const { return freq_max_hz; }
 
+	// ---- 保存為開機預設（⚠ 破壞性、有壽命上限，非必要不要用）--------------
+	// 對暫存器 0x10 寫非 0 值，把 0x00~0x0F 目前的值（4 通道的占空比/頻率/
+	// 控制）存成模組的上電預設。
+	//
+	// ⚠ 手冊明列的限制與風險：
+	//   1. 內部儲存體擦寫壽命只有約 **1~2 千次**，寫壞不保固。
+	//   2. 模組**每次上電只接受一次**這個寫入（廠商為防呆刻意加的限制），
+	//      第二次會被拒絕 —— 這是裝置行為，不是本 driver 的 bug。
+	//   3. **最危險的一點**：如果保存時 control=65535（持續輸出），那模組
+	//      之後**一通電就會立刻開始輸出 PWM**，變成「插電馬達就轉」。要存
+	//      之前先想清楚當下的 control 值是什麼。
+	//
+	// 0x00~0x0F 本身是「臨時生效、斷電恢復」，可無限次修改、不耗擦寫壽命；
+	// 只有這個函式會動到 flash。
+	bool saveOutputAsDefault();
+
 	// 讀回 (FC 0x03)
 	bool getPWM_Duty(int channel, double& duty_percent);
 	bool getPWM_Freq(int channel, uint32_t& freq);
