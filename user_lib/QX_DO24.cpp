@@ -38,11 +38,25 @@ bool QX_DO24::init(TCP_client& extClient, int ID, bool debug) {
 
 //=========== control: composite setChannel ===========
 
+// Order is FREQ -> DUTY -> CONTROL, and that order is deliberate:
+//
+//   * Frequency first, because duty is only meaningful relative to it. A duty
+//     written while the module is still at its 1000Hz power-on default is a
+//     completely different pulse width than the caller intended (10% = 0.1ms
+//     instead of 2.0ms). The old order (duty -> freq) meant that on a channel
+//     that was ALREADY running, the motor briefly saw new-duty x old-frequency.
+//   * Control last, so the output only goes live once frequency AND duty are
+//     both already correct — the load never sees an intermediate state.
+//
+// This matches the manual start-up sequence documented in Linux_test menu 34.
+// NOTE: a mid-sequence failure leaves the earlier writes applied (e.g. freq set
+// but duty not). Caller should re-read with the get* functions if it needs to
+// know the resulting state.
 bool QX_DO24::setChannel(int channel, double duty, int freq, uint16_t control) {
 	LOG_DBG(_log_tag, "--- Setting Channel %d ---", channel);
 
-	if (!setPWM_Duty(channel, duty)) return false;
 	if (!setPWM_Freq(channel, freq)) return false;
+	if (!setPWM_Duty(channel, duty)) return false;
 	if (!setPWM_Control(channel, control)) return false;
 
 	return true;

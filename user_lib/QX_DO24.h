@@ -5,6 +5,7 @@
 #include <string>
 #include <memory>
 #include <chrono>
+#include <cstdint>   // uint16_t / uint32_t used below — don't rely on transitive includes
 
 class TCP_client;
 
@@ -35,7 +36,9 @@ public:
 	bool init(const std::string& ip, int port, int ID = 1, bool debug = false);
 	bool init(TCP_client& extClient, int ID = 1, bool debug = false);
 
-	// 綜合控制：依序執行 Duty -> Freq -> Control，全部成功才回傳 true
+	// 綜合控制：依序執行 **Freq -> Duty -> Control**，全部成功才回傳 true。
+	// 順序是刻意的（理由見 .cpp）：頻率先設好，占空比才有意義；control 最後
+	// 才開，負載不會看到中間狀態。中途失敗會保留前面已寫入的部分。
 	// control 預設 65535 = 持續輸出（伺服/風扇/無刷馬達要求一直有訊號；
 	// 帶 0 進來等於關掉輸出，撐著負載的裝置會失去保持力）
 	bool setChannel(int channel, double duty, int freq, uint16_t control = 65535);

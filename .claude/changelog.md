@@ -13,6 +13,32 @@
 
 ---
 
+## 2026-08-26e Claude (Sadie) — QX-DO24 最後一輪全檔稽核（setChannel 順序 + 2 個穩健性）
+
+user 要求「再檢查最後一次」。這次逐行讀完 `QX_DO24.{h,cpp}` 全檔 + menu 34 全段，找到 3 個問題。
+
+### 1. `setChannel()` 的寫入順序是錯的（Duty → Freq → Control）
+
+原本先寫占空比、後寫頻率，**跟 menu 34 自己文件寫的安全順序剛好相反**。占空比是相對於頻率才有意義的量：在模組還停在 1000Hz 上電預設時先寫 6%，實際脈寬是 0.06ms 而不是意圖中的 1.2ms。若該通道**已經在輸出中**，馬達會先吃到「新占空比 × 舊頻率」這個誰也沒指定的值。
+
+**改成 Freq → Duty → Control**，理由寫進 .cpp：
+- 頻率先設好，占空比才有意義
+- **control 放最後**——輸出一啟動時頻率跟占空比都已經正確，負載完全看不到中間狀態
+
+（誠實記錄：Modbus 沒有原子性的跨暫存器寫入，所以「已在輸出中」時改參數，兩種順序都會有中間狀態。新順序的實質保證在「從停止／剛上電開始」這條主要路徑上。中途失敗會保留前面已寫入的部分，這點也在註解裡標明。）
+
+### 2. `r <ch>` 用 `stoi()`，打錯字會讓整個程式崩潰
+`stoi("x")` 丟出未捕捉的 `std::invalid_argument` → 整個 `Linux_test` process 死掉。危險之處不在崩潰本身，而在**馬達運轉中工具掛掉，操作者就失去下 `d 1 5` 停它的能力**。改用 `istringstream` 解析，失敗就印用法。
+（同檔其他地方 port/slave 也用 `stoi`，但那是在任何輸出開始前，崩了無害，維持原有風格不動。）
+
+### 3. `QX_DO24.h` 用了 `uint16_t`/`uint32_t` 卻沒 include `<cstdint>`
+先前靠 `<memory>`/`<string>` 的傳遞性 include 剛好編得過，換工具鏈就可能爆。補上明確的 `#include <cstdint>`。
+
+### 其餘逐行確認無誤
+frame 組成（FC06 單寫 / FC10 雙暫存器 ABCD / FC03 讀）、CRC16 演算法與 byte 序、回覆長度判斷（FC10 固定 8、FC03 為 `5+count*2`、FC06 為 echo）、`readRegs` 的 `res[1]`/`res[2]` 驗證與 index 3 起始的解析、四個通道位址不互相重疊、`getPWM_*` 雖沒自行檢查 `client` 但 `readRegs` 有擋。
+
+---
+
 ## 2026-08-26d Claude (Sadie) — ⚠ 占空比寫入路徑全稽核：NaN 穿透範圍檢查（UB）
 
 ### 起因
@@ -201,6 +227,59 @@ public method，兩顆 class 已知是照這個介面設計成 drop-in 的，比
 測過就永久有效。所以下次換裝/重裝時，把這幾項當作標準複查清單即可，不代表之前測試不完整。
 
 ---
+
+## 2026-08-26d Claude (Sadie) — 移除 CSV 跨障礙物旗標 + 上下移動 panel 併入 auto cycle
+### 需求（user）
+1. 跨障礙物拿掉（指 SCRIPT RUN 的 CSV `x` 旗標，承 08-18b 的待決項）
+2.（提問）run_depth_avoid 是哪個按鈕 → 答：「📷 AUTO RUN - 深度相機避障行走 (D435i)」panel 的「開始持續避障行走」
+3. 上下移動整合進 auto cycle，變成兩個按鈕
+
+### 修改檔案
+- `web_backend/public/app.js`
+  - `parseScriptCsv()`：移除 `'x'` 旗標的 peel 與 `cross` 欄位；`steps.push({cm, sweep})`
+  - 統計簡化為 `nSweep` / `nTransit`（移除 `nCross`），兩處 `mix` 顯示字串同步簡化
+  - script 進度標籤移除 `'cross'` 分支（`🧗cross`）
+  - token grammar 註解由 `<int>[n][x]['*'<count>]` 改為 `<int>[n]['*'<count>]`
+- `web_backend/public/index.html`
+  - CSV placeholder 移除「x=跨障礙物，如 30x」
+  - 「上下移動」panel 整個移除，兩顆單步按鈕（`btn-step-down-sync` / `btn-step-up-sync`）搬進 auto cycle 成為「單步點動」那一列，原 panel 的說明併成三條 hint
+
+### 舊腳本相容性：刻意讓它報錯而非靜默降級
+移除 `'x'` 的 peel 之後，`30x` 這種 token 會走到 `/^-?\d+$/` 檢查而失敗，前端直接回「token 格式錯誤」。**這是刻意的**——若改成靜默忽略 x、當普通步驟走，操作者會以為機器要跨越障礙物、實際上卻直直走過去，那比報錯危險得多。
+
+注意 C++ 端 `parse_script_csv_` **仍認得 `x`**，所以前後端不再是完全 mirror；前端會先擋下來，已在註解標明。
+
+### 未動：depth avoid 的自動 cross
+`index.html` 的 `modal-depth-cross-notice` 與 `app.js` 的 `next_step_gait=cross` 解析保留。理由同 08-26b：後端 `cmd_run_depth_avoid` 偵測到大障礙物時會自行改用 cross 步伐，前端刪掉通知不會阻止它，只會讓操作者不知道機器下一步要伸腳站離牆。要真正停用得改 C++。
+
+### 驗證
+`<section>` 18→17 平衡；兩顆 sync 按鈕在 HTML 各出現一次、app.js handler 仍對得上；grep 確認 `nCross` / `s.cross` / `'x'` 的實際程式碼皆已清除（僅存註解）。
+
+## 2026-08-26c Claude (Sadie) — 移除 v1 舊避障整套 GUI（窗框避障）
+### 需求（user）
+「窗框避障panel也拿掉」
+
+### 為什麼這不是取捨而是清死 UI
+這套 v1 舊避障在 v2 **已經完全不能用**：
+- `facade_cleaning_v2/main.cpp:157` → `if (cmd == "run_avoid") return "ERR removed_in_v2\n";`——按鈕按下去只會拿到錯誤
+- 原因記在 `WASH_ROBOT.cpp:1739` 註解：v1 的 `cmd_run_avoid` 靠 DM2J 滑軌的 ~80%/100% 行程 hook 抓 before/after 影格，而 **v2 沒有 DM2J**（改吊機繩），`do_step_down_` 的四個 hook 參數全被 `(void)` 掉，是死參數
+- `obstacle_detect on/off` 依 `WASH_ROBOT.cpp:832` 註解只是個 flag，**不影響 step_down 流程**；panel 自己的 hint 也寫著「FrameAnalyzer 未整合，目前 ON 只是 flag — 無實際偵測」
+
+### 修改檔案
+- `web_backend/public/index.html`
+  - 移除「🎥 窗框避障 (camera obstacle detect)」整個 panel
+  - 移除 auto cycle 裡的「🛡️ RUN (avoid 障礙)」按鈕（`btn-run-avoid`）
+  - 移除 run_avoid modal（`modal-obstacle` 及其 confirm/cancel 按鈕）
+- `web_backend/public/app.js`
+  - 移除 `EVT obstacle_ask` / `EVT run_avoid_*` 的事件處理
+  - 移除 `obstacle_detect=` 的 status 解析
+  - 移除 `showObstacleModal` / `hideObstacleModal` / `btn-run-avoid` / `btn-obstacle-confirm|cancel` 的 handler
+
+### 保留
+**D435i 深度相機避障（`run_depth_avoid`）完全不動** —— 那是 v2 實際在用、有真實偵測的那套（`cmd_run_depth_avoid` 呼叫 `do_step_sync_`，2026-07-28 起走同步步伐）。兩者只是名字都有「避障」，實作與狀態完全不同。
+
+### 驗證
+`<section>` 18/18 平衡（19→18）、modal div 4→3、app.js brace 305→301 皆與移除量吻合；grep 確認無 dangling 元素參照（只剩註解）。
 
 ## 2026-08-26b Claude (Sadie) — 跨障礙物手動按鈕也移除
 ### 需求（user）

@@ -5688,8 +5688,12 @@ static void test_qx_do24() {
             string arg; iss >> arg;
             if (arg == "all") { for (int ch = 1; ch <= 4; ++ch) print_channel(ch); }
             else {
-                int ch = arg.empty() ? -1 : stoi(arg);
-                if (ch < 1 || ch > 4) { cout << "  [!] 通道必須是 1~4\n"; continue; }
+                // NOT stoi(): it throws on non-numeric input, and an uncaught
+                // exception here would kill the whole Linux_test process —
+                // losing the operator's ability to stop a running motor.
+                int ch = -1;
+                istringstream a(arg);
+                if (!(a >> ch) || ch < 1 || ch > 4) { cout << "  [!] 通道必須是 1~4（或 r all）\n"; continue; }
                 print_channel(ch);
             }
             continue;
