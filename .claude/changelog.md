@@ -13,6 +13,33 @@
 
 ---
 
+## 2026-08-26h Claude (Sadie) — ⚠ QX-DO24 改用 atomic transaction（運動中操作 PWM 的前提）
+
+### 起因
+user 問：「主機器人在做上下移動過程中，有辦法使用 panel 控制 pwm 嗎？」
+
+查下去發現**技術上可以（沒有任何鎖擋著），但當時的實作有實際的 bus 競態風險**。
+
+### 問題
+`cmd_pwm_set` 不搶 `motion_mtx_`，只擋 `State::Error` —— 所以步伐執行中 Web panel 送 `pwm set` 會**直接跟步伐執行緒並行**打同一條 `cli_22_`。
+
+而 `QX_DO24::sendAndReceive` 當時用的是 `sendData()` + `receiveData()` **兩次分開呼叫**。`TCP_client` 的 mutex **只保護單次呼叫**，兩次之間會放開 —— 另一個執行緒可以把自己的請求插進那個空隙，兩邊的回覆就被錯誤的呼叫者讀走。
+
+**為什麼這件事嚴重**：同一條 bus 上的 JC-100 壓力讀值，正是步伐用來判斷「這一側還吸得夠牢，可以放開另一側嗎」的依據。讀值被污染不只是通訊雜訊，是**墜落風險**。JC-100 當初就是為此被遷移到 atomic API，PWM 沒有理由例外。
+
+### 修改檔案
+- `user_lib/QX_DO24.cpp` `sendAndReceive()`：改用 `TCP_client::sendAndReceive()`（atomic drain→send→recv，整段交易握住 mutex），比照 JC_100_METER / SD76 / SE3 / CLV900 的既有做法
+
+### 取捨（誠實記錄）
+舊版是「迴圈累積直到湊滿預期長度」，能容忍回覆被分片；atomic API 是單次 recv，不累積分片。RS485 上一個 8 byte frame 遠小於 MTU，實務上都是一次到齊（JC100/SD76/SE3 都這樣用），**用一點分片容忍度換掉一個真實的競態，這筆交易划算**。錯誤幀偵測與 CRC 檢查不受影響，仍在 atomic 回來後照跑。
+
+### 結論：現在可以在運動中用 panel 控制 PWM
+- **bus 層安全**：PWM 的 Modbus 交易現在是不可分割的，不會跟 JC100 壓力輪詢／PQW 閥動作互相污染
+- **刻意不搶 `motion_mtx_`**：搶了的話運動中會被拒絕（`ERR busy`），就達不到 user 要的「移動中也能調 PWM」
+- ⚠ **仍未回答的是「語意上該不該」**：PWM 目前驅動什麼裝置、在步伐進行中改變它的轉速會不會影響機構，這要看實際接什麼負載，程式層擋不了也不該擋
+
+---
+
 ## 2026-08-26g Claude (Sadie) — Web GUI 新增「PWM 控制 (QX-DO24)」面板（跨三層）
 
 ### 需求
@@ -305,6 +332,39 @@ public method，兩顆 class 已知是照這個介面設計成 drop-in 的，比
 測過就永久有效。所以下次換裝/重裝時，把這幾項當作標準複查清單即可，不代表之前測試不完整。
 
 ---
+
+## 2026-08-26g Claude (Sadie) — 新增「乾式清洗」測試指令 arm_clean_sweep_dry
+### 需求（user）
+想測「上滑台移動 + 手臂清洗」但**不噴水**，且不要真的走路。
+
+### 現有入口都不符合
+| 入口 | 問題 |
+|---|---|
+| `arm_sweep`（auto cycle）| 有刷、無水，但**不 DEPLOY**——手臂留在 PARK 位，滾筒空轉不貼牆（`do_arm_sweep_` 內 `arm_cmd_` 出現 0 次）|
+| `CLEAN SWEEP`（手臂 panel）| 完整流程但**會噴水**，`water_on=true` 寫死在 `sweep_with_tool` 呼叫參數裡，GUI 關不掉 |
+| `⇅ 同步 ↓/↑` | 清洗確實無水，但**會真的走一步**（放繩、收腳、重新吸附）|
+
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`：宣告 `cmd_arm_clean_sweep_dry()`
+- `user_lib/WASH_ROBOT.cpp`：實作（放在 `cmd_arm_sweep()` 旁）——取 `motion_mtx_`、清 `abort_flag`、補一次 `arm_cmd_("INIT")`，然後直接呼叫 `do_step_sync_rail_sweep_("arm_dry_sweep", init_ok)`
+- `facade_cleaning_v2/main.cpp`：dispatch 新增 `arm_clean_sweep_dry`
+- `web_backend/public/index.html`：手臂 panel 新增「🧪 乾式測試」一列（用 `data-tgt`/`data-cmd`，不需改 app.js）
+
+### 設計取捨：直接復用步伐的清洗段，不另寫一份
+`do_step_sync_rail_sweep_` 本來就完全沒有水路動作（水閥/水泵尚未接管路），而且它**正是實際走路時會跑的那段**。復用它意味著：
+- 測到的行為 = 正式流程的行為，不會出現「測試版跟正式版不一致」
+- 之後調整清洗流程只需改一處
+- INIT 失敗的降級行為（退化成純上滑台掃動、不開刷）也完全一致
+
+代價是牆距固定用 `DM2J_ARM_STEP_SWEEP_WALL_MM`（380mm），不吃 GUI 上那個牆距欄位——這是刻意的，因為要跟步伐內建清洗一致才有測試意義。已在按鈕的 hint 標明。
+
+`do_step_sync_rail_sweep_` 不自己做 INIT（在 `do_step_sync_` 裡是跟吊機放繩並行跑完再把結果傳進來），所以新指令要自己補一次。
+
+### 順帶修正
+手臂 panel 的 hint 原本寫「C × N rounds（LEFT 滾筒+水 → RIGHT 刮刀乾）」，隨 2026-08-26f 的左右對調更新為「RIGHT 滾筒+水 → LEFT 刮刀乾」。
+
+### 待驗證（未編譯）
+需重編 washrobot 主程式（`WASH_ROBOT.*` + `main.cpp`）。前端只要 hard refresh。上機確認：手臂會 DEPLOY 貼牆、滾筒轉、上滑台 0→−8→0 來回、最後 PARK，且**全程無水**。
 
 ## 2026-08-26f Claude (Sadie) — 清洗工具頭左右對調（滾筒 LEFT→RIGHT、刮刀 RIGHT→LEFT）
 ### 需求（user）

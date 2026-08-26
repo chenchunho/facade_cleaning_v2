@@ -298,30 +298,24 @@ bool QX_DO24::sendAndReceive(const std::vector<uint8_t>& request, std::vector<ui
 
 	LOG_HEX(_log_tag, "TX", request.data(), (int)request.size());
 
-	if (!client->sendData(reinterpret_cast<const char*>(request.data()), (int)request.size(), 500)) return false;
-
+	// ⚠ MUST use TCP_client::sendAndReceive (the atomic drain→send→recv), NOT a
+	// bare sendData()+receiveData() pair.
+	//
+	// This module shares the RS485_3 gateway (cli_22_) with JC-100 ×4, PQW relay,
+	// XKC water level and the DM2J arm rail — and the Web GUI's PWM panel runs on
+	// a different thread from the gait. TCP_client's mutex only covers ONE call,
+	// so a send/recv pair releases it in between: another thread can slip its own
+	// request into that gap and the two replies get read by the wrong callers.
+	//
+	// The JC-100 pressure readings are what gate "is this side still sealed
+	// enough to let the other side go" during a step, so corrupting them is a
+	// fall risk, not just a comms nuisance. JC-100 was migrated to the atomic
+	// API for exactly this reason; PWM has to play by the same rule.
+	char rx[256];
+	int len = client->sendAndReceive(reinterpret_cast<const char*>(request.data()),
+	                                 (int)request.size(), rx, sizeof(rx), 500, 500);
 	response.clear();
-	uint8_t buf[256];
-	size_t expected_len;
-	if (request[1] == 0x10)      expected_len = 8;                                             // write-multi fixed reply
-	else if (request[1] == 0x03) expected_len = 5 + ((request[4] << 8) | request[5]) * 2;       // read reply: hdr+data+crc
-	else                          expected_len = request.size();                                // write-single: echo
-	auto start = std::chrono::steady_clock::now();
-
-	while (true) {
-		int n = client->receiveData(reinterpret_cast<char*>(buf), sizeof(buf), 20);
-		if (n > 0) response.insert(response.end(), buf, buf + n);
-
-		// An error reply is shorter than any success reply, so without this the
-		// loop would sit out the whole 500ms timeout on every rejected command.
-		// Vendor error frame is 6 bytes with the FC's high bit set (0x03->0x83).
-		if (response.size() >= 2 && (response[1] & 0x80)) expected_len = 6;
-
-		if (response.size() >= expected_len) break;
-
-		auto now = std::chrono::steady_clock::now();
-		if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() > 500) break;
-	}
+	if (len > 0) response.insert(response.end(), (uint8_t*)rx, (uint8_t*)rx + len);
 
 	LOG_HEX(_log_tag, "RX", response.data(), (int)response.size());
 
