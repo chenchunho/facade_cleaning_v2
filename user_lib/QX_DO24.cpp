@@ -50,12 +50,35 @@ bool QX_DO24::setChannel(int channel, double duty, int freq, uint16_t control) {
 
 //=========== control: PWM Duty (0x06) ===========
 
-// 1. set duty ratio — supports fractional (3.8 -> 38 = 0x26)
+// Widen/narrow the duty safety window. Must be called EXPLICITLY — the
+// constructor defaults are the conservative 5~10% of the currently wired motor
+// so that forgetting to configure yields a safe range, not a dangerous one.
+void QX_DO24::setDutyLimits(double min_pct, double max_pct) {
+	if (min_pct > max_pct) return;                       // nonsense range: ignore
+	if (min_pct < 0.0)   min_pct = 0.0;
+	if (max_pct > 100.0) max_pct = 100.0;
+	duty_min_pct = min_pct;
+	duty_max_pct = max_pct;
+	LOG_INF(_log_tag, "duty safety limits set to [%.1f, %.1f]%%", duty_min_pct, duty_max_pct);
+}
+
+// Set duty ratio. Fractional percent supported: reg = round(pct * 10), e.g.
+// 7.5% -> 75. Refuses anything outside the safety window (see setDutyLimits).
 bool QX_DO24::setPWM_Duty(int channel, double duty_percent) {
 	// ch>3 would write into 0x04+ = channel-1 frequency registers, silently
 	// corrupting frequency instead of failing. QX-DO24 has 4 channels only.
 	if (!client || channel < 0 || channel > 3) return false;
 	if (duty_percent < 0.0 || duty_percent > 100.0) return false;   // reg range 0~1000
+
+	// Safety clamp — see setDutyLimits() in the header. Defaults to the wired
+	// motor's 5%=stop / 10%=full-speed window; anything outside is refused
+	// rather than clamped, so a wrong number is a visible failure, not a
+	// silently-different speed.
+	if (duty_percent < duty_min_pct || duty_percent > duty_max_pct) {
+		LOG_ERR(_log_tag, "duty %.1f%% outside safety limits [%.1f, %.1f] — refused",
+		        duty_percent, duty_min_pct, duty_max_pct);
+		return false;
+	}
 
 	uint16_t val = static_cast<uint16_t>(std::round(duty_percent * 10.0));
 	uint16_t addr = 0x0000 + channel;

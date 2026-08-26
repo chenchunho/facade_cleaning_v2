@@ -5635,8 +5635,11 @@ static void test_qx_do24() {
         cout << "\n";
     };
 
+    cout << "\n⚠ 占空比安全限制：" << pwm.dutyMinPct() << "~" << pwm.dutyMaxPct()
+         << "%（" << pwm.dutyMinPct() << "%=停止, " << pwm.dutyMaxPct()
+         << "%=全速），超出範圍一律拒絕、不送出\n";
     cout << "\n指令（<ch> = 通道 1~4，跟手冊/原廠工具同編號）：\n"
-         << "  d <ch> <percent>   設占空比 (0~100.0)\n"
+         << "  d <ch> <percent>   設占空比 (限 " << pwm.dutyMinPct() << "~" << pwm.dutyMaxPct() << ")\n"
          << "  f <ch> <hz>        設頻率 (1~200000)\n"
          << "  c <ch> <val>       設控制 (0=關閉 / 65535=持續輸出 / 1~65534=脈衝數)\n"
          << "  on <ch>            捷徑：持續輸出 (control=65535)\n"
@@ -5646,10 +5649,13 @@ static void test_qx_do24() {
          << "  r all              讀回全部 4 通道\n"
          << "  v                  讀版本號\n"
          << "  q                  離開 (⚠ 輸出保持不變，不會自動關閉)\n"
-         << "\n舵機範例 (bench 驗證過: 50Hz, 脈寬1~2ms):\n"
-         << "  f 1 50   → 週期20ms\n"
-         << "  c 1 65535 → 持續輸出\n"
-         << "  d 1 7.5  → 脈寬1.5ms (中位)；5.0=1ms、10.0=2ms\n\n";
+         << "\n馬達調速範例 (bench 驗證過: 50Hz / 週期20ms, 脈寬1~2ms):\n"
+         << "  f 1 50    → 設 50Hz\n"
+         << "  c 1 65535 → 持續輸出 (調速訊號必須一直送)\n"
+         << "  d 1 5     → 脈寬1.0ms = 停止\n"
+         << "  d 1 7.5   → 脈寬1.5ms = 半速\n"
+         << "  d 1 10    → 脈寬2.0ms = 全速\n"
+         << "  ⚠ 起步請從 5 開始慢慢加, 不要直接下 10\n\n";
 
     while (true) {
         cout << "[QX_DO24 slave=" << slave << "] > ";
@@ -5683,16 +5689,27 @@ static void test_qx_do24() {
         const int dch = ch - 1;             // driver API is 0-based
         const string tag = "  [OK] 通道" + std::to_string(ch) + " ";
 
+        // ⚠ A missing/garbled numeric arg makes `iss >> x` leave x = 0 (C++11).
+        // For `d` that means 0% duty and for `c` it means "turn the output off" —
+        // i.e. a typo would silently stop a running motor. Reject instead.
         if (verb == "d") {
-            double duty; iss >> duty;
-            cout << (pwm.setPWM_Duty(dch, duty) ? tag + "duty=" + std::to_string(duty) + "%\n"
-                                                : "  [WARN] setPWM_Duty failed (range 0~100.0?)\n");
+            double duty;
+            if (!(iss >> duty)) { cout << "  [!] 用法: d <通道1~4> <占空比%>\n"; continue; }
+            if (pwm.setPWM_Duty(dch, duty)) {
+                cout << tag << "duty=" << duty << "%\n";
+            } else {
+                cout << "  [WARN] 拒絕 — 占空比必須在 " << pwm.dutyMinPct() << "~"
+                     << pwm.dutyMaxPct() << "% 之間（" << pwm.dutyMinPct() << "%=停止, "
+                     << pwm.dutyMaxPct() << "%=全速）\n";
+            }
         } else if (verb == "f") {
-            int freq; iss >> freq;
+            int freq;
+            if (!(iss >> freq)) { cout << "  [!] 用法: f <通道1~4> <頻率Hz>\n"; continue; }
             cout << (pwm.setPWM_Freq(dch, freq) ? tag + "freq=" + std::to_string(freq) + "Hz\n"
                                                 : "  [WARN] setPWM_Freq failed (range 1~200000?)\n");
         } else if (verb == "c") {
-            int val; iss >> val;
+            int val;
+            if (!(iss >> val)) { cout << "  [!] 用法: c <通道1~4> <0/65535/1~65534>\n"; continue; }
             cout << (pwm.setPWM_Control(dch, (uint16_t)val) ? tag + "control=" + std::to_string(val) + "\n"
                                                              : "  [WARN] setPWM_Control failed\n");
         } else if (verb == "on") {
@@ -5702,7 +5719,8 @@ static void test_qx_do24() {
             cout << (pwm.setPWM_Control(dch, 0) ? tag + "OFF\n"
                                                 : "  [WARN] setPWM_Control failed\n");
         } else if (verb == "pulse") {
-            int n; iss >> n;
+            int n;
+            if (!(iss >> n)) { cout << "  [!] 用法: pulse <通道1~4> <脈衝數1~65534>\n"; continue; }
             if (n < 1 || n > 65534) { cout << "  [!] pulse count must be 1~65534\n"; continue; }
             cout << (pwm.setPWM_Control(dch, (uint16_t)n) ? tag + "pulse burst " + std::to_string(n) + "\n"
                                                           : "  [WARN] setPWM_Control failed\n");

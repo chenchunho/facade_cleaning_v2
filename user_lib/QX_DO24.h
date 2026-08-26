@@ -45,6 +45,20 @@ public:
 	bool setPWM_Freq(int channel, int freq);
 	bool setPWM_Control(int channel, uint16_t val);
 
+	// ---- 占空比安全上下限（重要，出廠預設就是保守值）--------------------
+	// setPWM_Duty 會拒絕落在 [duty_min_pct, duty_max_pct] 之外的值。
+	//
+	// 預設 5.0~10.0 對應目前實際接的那顆馬達規格：**5% = 停止、10% = 全速**。
+	// 低於 5% 是規格外，高於 10% 等於下超過全速的指令 —— 兩者都不該送出去。
+	// [2026-08-26 per user] 四個通道一律套用同一組限制。
+	//
+	// 這是 fail-safe 設計：預設就是最嚴格的範圍，接了規格不同的裝置（風扇
+	// 0~100%、其他伺服 2.5~12.5% 等）必須「主動」呼叫 setDutyLimits 放寬，
+	// 忘記設定時得到的是安全的窄範圍，而不是危險的全範圍。
+	void setDutyLimits(double min_pct, double max_pct);
+	double dutyMinPct() const { return duty_min_pct; }
+	double dutyMaxPct() const { return duty_max_pct; }
+
 	// 讀回 (FC 0x03)
 	bool getPWM_Duty(int channel, double& duty_percent);
 	bool getPWM_Freq(int channel, uint32_t& freq);
@@ -57,6 +71,11 @@ private:
 	int deviceID = 6;
 	bool debug_mode = false;
 	std::string _log_tag;
+
+	// see setDutyLimits() — fail-safe defaults matching the wired motor
+	// (5% = stop, 10% = full speed)
+	double duty_min_pct = 5.0;
+	double duty_max_pct = 10.0;
 
 	// 通訊核心
 	bool sendAndReceive(const std::vector<uint8_t>& request, std::vector<uint8_t>& response);
