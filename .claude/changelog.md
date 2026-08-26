@@ -13,6 +13,40 @@
 
 ---
 
+## 2026-08-26f Claude (Sadie) — 對照原廠 Modbus 協定文件：錯誤回覆幀處理
+
+### 起因
+先前只讀了產品手冊 `QX-DO24_Product_manual.pdf`，**沒讀同資料夾的 `modbus-RTU_Protocol_description.pdf`**（原廠的 Modbus 協定說明 V1.4）。user 要求把封包格式跟手冊對清楚，補讀後逐項核對。
+
+### 核對結果：frame 格式與 CRC 全部相符 ✅
+用協定文件裡的 7 個實例反驗我們的 `modbusCRC()` 與 byte 序，**全部 PASS**：
+`01 03 00 00 00 02 C4 0B`（FC03 req）／`01 03 04 01 60 01 61 3B A9`（FC03 resp）／`01 06 00 20 00 01 49 C0`（FC06）／`01 10 00 20 00 02 04 00 01 00 03 E0 76`（FC10 req）／`01 10 00 20 00 02 40 02`（FC10 resp）／`01 02 00 00 00 0A F8 0D`／`01 86 01 02 60 60`（錯誤幀）
+
+確認一致的項目：CRC16 演算法（init 0xFFFF、poly 0xA001、右移）與文件 §4 參考 C 碼逐行相同；frame 內 CRC **低位在前**；FC03 回覆的「數據長度 = 2×N」與 index 3 起始的高低位解析；FC06「回覆與發送完全相同表示成功」；FC10 回覆固定 8 bytes 且 `[2][3]` 是起始位址高低位。
+
+### 找到的缺口：錯誤回覆幀沒有被處理
+
+⚠ **這家的錯誤幀不是標準 Modbus 格式**。標準例外幀是 5 bytes（`ID | FC|0x80 | ExceptionCode | crc`），但文件 §D 顯示他們**多插一個「數據長度」byte（固定 0x01）**變成 6 bytes：
+
+```
+ID | FC|0x80 | 0x01 | ERR | crcLo | crcHi
+```
+
+**錯誤碼在 index 3，不是標準的 index 2。**
+
+原本的行為雖然「能正確判定成失敗」（長度／echo 結構檢查擋掉了），但有兩個缺點：
+1. 錯誤幀 6 bytes < `expected_len`(7~8) → 迴圈**每次都空等滿 500ms** 才逾時退出
+2. 錯誤碼被整個丟棄，呼叫端只拿到一個籠統的 false
+
+### 修改檔案
+- `user_lib/QX_DO24.cpp` `sendAndReceive()`：收到 `response[1] & 0x80` 就把 `expected_len` 改成 6 → **立即返回不再空等**；CRC 通過後若是錯誤幀，用新的 `qx_err_name()` 把錯誤碼翻成中文記進 log（位址不合法／值不合法／裝置忙…），再回 false。順便把 CRC 不符也改成有 log 而非靜默 false。
+
+錯誤碼對照表（文件 §D）：`0x01` 功能碼不支援、`0x02` 暫存器位址不合法、`0x03` 暫存器值不合法、`0x04` 校驗錯誤、`0x06` 裝置忙或該暫存器不可更改、`0xFF` 其它。
+
+**為什麼值得做**：第一次實際接線時，「slave ID 撞號」「位址寫錯」「值超出裝置可接受範圍」三種狀況的表徵都是「就是不動」，有錯誤碼才分得出來是哪一種。
+
+---
+
 ## 2026-08-26e Claude (Sadie) — QX-DO24 最後一輪全檔稽核（setChannel 順序 + 2 個穩健性）
 
 user 要求「再檢查最後一次」。這次逐行讀完 `QX_DO24.{h,cpp}` 全檔 + menu 34 全段，找到 3 個問題。
@@ -227,6 +261,39 @@ public method，兩顆 class 已知是照這個介面設計成 drop-in 的，比
 測過就永久有效。所以下次換裝/重裝時，把這幾項當作標準複查清單即可，不代表之前測試不完整。
 
 ---
+
+## 2026-08-26e Claude (Sadie) — 移除 D435i 深度相機避障行走整套 GUI
+### 需求（user）
+「📷 AUTO RUN - 深度相機避障行走 (D435i) 也刪掉，現在不用攝影機避開障礙物了」
+
+### 修改檔案
+- `web_backend/public/index.html`
+  - 移除「📷 AUTO RUN - 深度相機避障行走 (D435i)」panel（`btn-run-depth-avoid`）
+  - 移除 `modal-depth-obstacle` 整個彈窗（含三張 BEFORE/AFTER/結果照片、步長輸入、繼續/停止按鈕、`modal-depth-cross-notice`）
+- `web_backend/public/app.js`
+  - 移除 `EVT depth_obstacle_result` 與 `EVT depth_avoid_*` 的事件處理
+  - 移除 `showDepthObstacleModal` / `hideDepthObstacleModal` 與 `btn-run-depth-avoid` / `btn-depth-continue` / `btn-depth-stop` 的 handler
+
+後端 `run_depth_avoid` / `depth_avoid_continue` / `depth_avoid_stop` 指令保留，可用 raw command 發送。
+
+### 未移除：Camera panel 的 D435i 拍照顯示
+`index.html` 的 `cam-cell[data-cam-id="depth"]`（`depth-stream` / `depth-stream-map` / `depth-snap` 📸拍照 / `depth-status`）與 `app.js` 的 "depth camera (snapshot-only)" 區塊**完全未動**。那是獨立的看畫面功能（走 `/snap/depth_live`），跟避障行走流程無關。
+
+### ⚠ 後端的自動 cross 邏輯仍在
+`cmd_run_depth_avoid` 偵測到大障礙物時仍會自行改用 cross 步伐。目前前端**沒有任何按鈕能啟動 run_depth_avoid**，所以正常操作走不到那條路；但若有人用 raw command 直接發 `run_depth_avoid`，機器仍可能自己跨障礙物，而前端已不會顯示任何提示。已在 `app.js` 對應處註記。
+
+### 驗證方法的教訓
+先前用的 `balance.py`（自製括號平衡檢查）在這個檔案上**不可靠**——它不處理 JS regex literal，會把 `/action=(\S+)/` 這類字面量裡的引號誤判成字串起點，導致 HEAD 版本也出現 172 行的假「字串」span。改用**不受字串狀態影響的原始字元計數**與 HEAD 對照才得到可信結果：
+
+| | `{`/`}` | `(`/`)` | `[`/`]` | 行數 |
+|---|---|---|---|---|
+| HEAD | 510/510 (0) | 1678/1680 (−2) | 178/178 (0) | 2240 |
+| 現在 | 448/448 (0) | 1437/1439 (−2) | 161/161 (0) | 1993 |
+
+三組差值與 HEAD 完全一致（`(` 的 −2 是字串／註解內既有的括號）。另 `<section>` 16/16、modal div 剩 2 個。
+
+### 相關：depth_cam_service.py 可以不用啟動了
+`scripts/wr.sh` 的 `depth` window 會啟動 `frame_capture/depth_cam_service.py`。避障流程停用後，該服務只剩 Camera panel 的拍照會用到（`/snap/depth_live`）。若連拍照也不需要，可以把那個 window 註解掉——**尚未變更**，待 user 決定。
 
 ## 2026-08-26d Claude (Sadie) — 移除 CSV 跨障礙物旗標 + 上下移動 panel 併入 auto cycle
 ### 需求（user）

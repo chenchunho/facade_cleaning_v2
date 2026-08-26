@@ -251,6 +251,24 @@ bool QX_DO24::readRegs(uint16_t addr, uint16_t count, std::vector<uint16_t>& out
 
 //=========== utility: send/receive (500ms window) ===========
 
+// Protocol doc "modbus-RTU_Protocol_description" V1.4 §D 错误返回帧.
+// ⚠ NOT the standard Modbus exception layout. Standard is 5 bytes
+//     ID | FC|0x80 | ExceptionCode | crcLo | crcHi
+// but this vendor inserts a 数据长度 byte (always 0x01), giving 6 bytes:
+//     ID | FC|0x80 | 0x01 | ERR | crcLo | crcHi
+// so the error code lives at index 3, not index 2.
+static const char* qx_err_name(uint8_t err) {
+	switch (err) {
+		case 0x01: return "功能碼不支援";
+		case 0x02: return "暫存器位址不合法";
+		case 0x03: return "暫存器值不合法";
+		case 0x04: return "校驗錯誤";
+		case 0x06: return "裝置忙或該暫存器不可更改";
+		case 0xFF: return "其它錯誤";
+		default:   return "未定義錯誤碼";
+	}
+}
+
 bool QX_DO24::sendAndReceive(const std::vector<uint8_t>& request, std::vector<uint8_t>& response) {
 	if (!client) return false;
 
@@ -270,6 +288,11 @@ bool QX_DO24::sendAndReceive(const std::vector<uint8_t>& request, std::vector<ui
 		int n = client->receiveData(reinterpret_cast<char*>(buf), sizeof(buf), 20);
 		if (n > 0) response.insert(response.end(), buf, buf + n);
 
+		// An error reply is shorter than any success reply, so without this the
+		// loop would sit out the whole 500ms timeout on every rejected command.
+		// Vendor error frame is 6 bytes with the FC's high bit set (0x03->0x83).
+		if (response.size() >= 2 && (response[1] & 0x80)) expected_len = 6;
+
 		if (response.size() >= expected_len) break;
 
 		auto now = std::chrono::steady_clock::now();
@@ -281,7 +304,21 @@ bool QX_DO24::sendAndReceive(const std::vector<uint8_t>& request, std::vector<ui
 	if (response.size() < 5) return false;
 	uint16_t calc_crc = modbusCRC(response.data(), (int)response.size() - 2);
 	uint16_t recv_crc = response[response.size() - 2] | (response[response.size() - 1] << 8);
-	return (calc_crc == recv_crc);
+	if (calc_crc != recv_crc) {
+		LOG_ERR(_log_tag, "CRC mismatch (calc %04X != recv %04X)", calc_crc, recv_crc);
+		return false;
+	}
+
+	// Device rejected the request — surface WHY. Without this the caller only
+	// sees a generic false and the actual reason (bad address / bad value /
+	// device busy) is thrown away, which matters most on first wiring-up.
+	if (response[1] & 0x80) {
+		uint8_t err = (response.size() >= 4) ? response[3] : 0;   // vendor layout: ERR at [3]
+		LOG_ERR(_log_tag, "device rejected FC 0x%02X: err 0x%02X (%s)",
+		        (unsigned)(response[1] & 0x7F), (unsigned)err, qx_err_name(err));
+		return false;
+	}
+	return true;
 }
 
 //=========== utility: Modbus CRC ===========
