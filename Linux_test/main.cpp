@@ -5645,7 +5645,7 @@ static void test_qx_do24() {
          << "  r <ch>             讀回單一通道 (duty/freq/control)\n"
          << "  r all              讀回全部 4 通道\n"
          << "  v                  讀版本號\n"
-         << "  q                  離開 (自動關閉全部 4 通道)\n"
+         << "  q                  離開 (⚠ 輸出保持不變，不會自動關閉)\n"
          << "\n舵機範例 (bench 驗證過: 50Hz, 脈寬1~2ms):\n"
          << "  f 1 50   → 週期20ms\n"
          << "  c 1 65535 → 持續輸出\n"
@@ -5711,8 +5711,17 @@ static void test_qx_do24() {
         }
     }
 
-    cout << "[CLEANUP] turning off all 4 channels before exit\n";
-    for (int dch = 0; dch < 4; ++dch) pwm.setPWM_Control(dch, 0);
+    // ⚠⚠ DO NOT turn the channels off here. ⚠⚠
+    // [2026-08-26 per user: 這個絕對不能出錯 會出大事]
+    // An earlier version wrote control=0 to all 4 channels on exit. For a servo
+    // (or anything else) that is holding a load via continuous PWM, cutting the
+    // signal makes it go limp — merely quitting this bench menu would drop
+    // whatever the output was holding. Leaving the menu is NOT a request to
+    // change the physical output state: whatever the module was driving keeps
+    // being driven. Use `off <ch>` explicitly if you actually want output off.
+    cout << "[EXIT] 輸出狀態保持不變（不關閉通道）。目前狀態：\n";
+    for (int ch = 1; ch <= 4; ++ch) print_channel(ch);
+    cout << "  要關閉請在離開前用 `off <ch>` 明確關掉。\n";
     cli.close();
 }
 

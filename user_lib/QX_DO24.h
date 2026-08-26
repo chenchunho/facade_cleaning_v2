@@ -36,7 +36,9 @@ public:
 	bool init(TCP_client& extClient, int ID = 1, bool debug = false);
 
 	// 綜合控制：依序執行 Duty -> Freq -> Control，全部成功才回傳 true
-	bool setChannel(int channel, double duty, int freq, uint16_t control);
+	// control 預設 65535 = 持續輸出（伺服/風扇/無刷馬達要求一直有訊號；
+	// 帶 0 進來等於關掉輸出，撐著負載的裝置會失去保持力）
+	bool setChannel(int channel, double duty, int freq, uint16_t control = 65535);
 
 	// 獨立控制函式 (皆含 500ms 等待與正確性檢查)
 	bool setPWM_Duty(int channel, double duty_percent);
