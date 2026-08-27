@@ -2,6 +2,26 @@
 #include "log_utils.h"
 #include <cstring>
 
+namespace {
+
+// Writing to a socket whose peer has already closed raises SIGPIPE on Linux, and
+// SIGPIPE's default disposition TERMINATES THE PROCESS — no error return, no
+// exception, just a dead program and a "Broken pipe" line in the shell. This was
+// hit in the field (washrobot died mid-run when the peer dropped).
+// MSG_NOSIGNAL turns that into an ordinary -1/EPIPE return, which the existing
+// `<= 0` checks below already treat as a dead socket. Windows has neither SIGPIPE
+// nor the flag, so it stays 0 there.
+// [2026-08-27] Moved down here from the callers: signal(SIGPIPE, SIG_IGN) only
+// protects a main.cpp that remembers to call it, and 1 of the binaries linking
+// this driver did not (Linux_test). Per-send is the defence that cannot be
+// forgotten by a future caller.
+#ifdef _WIN32
+constexpr int SEND_FLAGS = 0;
+#else
+constexpr int SEND_FLAGS = MSG_NOSIGNAL;
+#endif
+} // namespace
+
 //=========== init ===========
 
 #ifdef _WIN32
@@ -165,14 +185,14 @@ void TCP_server::handleClient(socket_t clientSock) {
 //=========== utility: send/broadcast ===========
 
 bool TCP_server::sendToClient(socket_t clientSock, const char* buf, int len) {
-	int res = send(clientSock, buf, len, 0);
+	int res = send(clientSock, buf, len, SEND_FLAGS);
 	return res != SOCKET_ERROR;
 }
 
 void TCP_server::broadcast(const char* buf, int len) {
 	std::lock_guard<std::mutex> lock(clients_mtx);
 	for (auto const& sock : clients) {
-		send(sock, buf, len, 0);
+		send(sock, buf, len, SEND_FLAGS);
 	}
 }
 
