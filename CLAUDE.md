@@ -58,7 +58,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### 模組邊界：user_lib 的介面契約
 
-**原則：** `user_lib/*.h` 的 public API 簽名是**跨模組契約** — 應用層（`WASH_ROBOT.{h,cpp}`、各 `main.cpp`）與測試程式（`Linux_test/`、`windows_test/`）全都綁在上面。**改簽名的爆炸半徑遠大於改實作。**
+**原則：** `user_lib/*.h` 的 public API 簽名是**跨模組契約** — 應用層（`WASH_ROBOT.{h,cpp}`、各 `main.cpp`）與測試程式（`Linux_test/`）全都綁在上面。**改簽名的爆炸半徑遠大於改實作。**
 
 - 🔴 **改 public API 簽名**（參數、回傳型別、method 名稱）＝架構層級改動：所有呼叫端都得跟著改，動手前先掃過全 repo 的呼叫點
 - **優先用累加式改動**：加新 method / 新 overload，而不是改既有簽名，讓既有呼叫端維持可編譯
@@ -298,8 +298,6 @@ bool init(TCP_client& extClient, int ID, bool debug = false);
 There is no automated test framework. Testing is done interactively via `Linux_test/main.cpp`, which provides a menu-driven console interface to exercise each device command (enable, disable, zero, position, speed, home, stop, etc.).
 
 To test a device, deploy `Linux_test` to the target machine and run interactively. The test connection address defaults to `10.0.0.42:4001` in the test harness.
-
-`windows_test/` provides minimal Windows-only validation (TCP connection, motor position, pressure read loop, relay control).
 
 ## Key Conventions
 
