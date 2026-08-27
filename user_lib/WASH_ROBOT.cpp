@@ -49,6 +49,7 @@ WashRobot::WashRobot()
     , step_cm_(STEP_CM_DEFAULT)
     , pause_action_((int)PauseAction::None)
     , crane_attached_(true)
+    , imu_guard_enabled_(true)   // [2026-08-27] 預設開啟；只有操作者明確關閉才會停用
     , arm_attached_(true)
     , arm_calibrated_(false)
     , arm_sweep_obstacle_pending_(false)
@@ -104,6 +105,13 @@ bool WashRobot::init() {
     // (1-4, moved here from the retired .21 bus — .20 was freed when the DM2J
     // feet/wheel rails were removed); .22 hosts JC100 / PQW / arm-rail / XKC /
     // DY500. The v1 .21 gateway (cli_21_) is physically gone.
+    // [2026-08-27 per user] PQW relay 搬到 .20（cli_22_ → cli_20_）。現況：
+    //   .20 (cli_20_): ZDT 1-4, PQW 12
+    //   .22 (cli_22_): JC100 1-4, QX PWM 6, DY500 10-11, XKC 13, DM2J arm-rail 14
+    // 兩條 bus 的 slave ID 各自唯一，無衝突。
+    // ⚠ 注意：檔案裡還有數十處註解沿用舊配置在描述 bus 競爭（例如「cli_22_ bus
+    // 有 JC100/PQW 競爭」）。PQW 已不在 cli_22_，那些敘述關於 PQW 的部分已過時；
+    // JC100 的部分仍然成立。真正的競爭關係以本段為準。
     if (!cli_20_.connectToServer(IP_485_1, PORT_485)) {
         std::cerr << "[WashRobot] connect " << IP_485_1 << " fail\n"; return true;
     }
@@ -134,27 +142,31 @@ bool WashRobot::init() {
     }
     std::cout << "[OK] DM2J arm rail (slave " << DM2J_ARM << " @ cli_22_)\n";
 
-    // ZDT slave 1..4 on cli_20_ ([v2] 4 cups: right{1,2} / left{3,4})
-    for (int i = 1; i <= 4; ++i) {
+    // ZDT slave 5..8 on cli_20_ ([v2] 4 cups: right{5,6} / left{7,8})
+    // [2026-08-27 per user] slave 1-4 → 5-8，見 WASH_ROBOT.h CUP_SLAVE_FIRST。
+    for (int i = CUP_SLAVE_FIRST; i <= CUP_SLAVE_LAST; ++i) {
         if (Z_(i).init(cli_20_, i, dbg)) {
             std::cerr << "[FATAL] ZDT slave " << i << " init fail\n"; return true;
         }
     }
-    std::cout << "[OK] ZDT 1~4\n";
+    std::cout << "[OK] ZDT " << CUP_SLAVE_FIRST << "~" << CUP_SLAVE_LAST << "\n";
 
-    // JC-100 slave 1..4 ([v2] one vacuum-pressure sensor per cup)
-    for (int i = 1; i <= 4; ++i) {
+    // JC-100 slave 5..8 ([v2] one vacuum-pressure sensor per cup)
+    // 與 ZDT 同號（推桿 slave N 末端的吸盤 = 真空表 slave N），分屬 .20/.22 兩條 bus，不衝突。
+    for (int i = CUP_SLAVE_FIRST; i <= CUP_SLAVE_LAST; ++i) {
         if (M_(i).init(cli_22_, i, dbg)) {
             std::cerr << "[FATAL] JC-100 slave " << i << " init fail\n"; return true;
         }
     }
-    std::cout << "[OK] JC-100 1~4\n";
+    std::cout << "[OK] JC-100 " << CUP_SLAVE_FIRST << "~" << CUP_SLAVE_LAST << "\n";
 
     // PQW 8CH relay
-    if (pqw_.init(cli_22_, PQW_SLAVE, PQW_TOTAL_CH, dbg)) {
-        std::cerr << "[FATAL] PQW slave " << PQW_SLAVE << " init fail\n"; return true;
+    // [2026-08-27 per user] cli_22_ → cli_20_（relay 搬到 .20，見 init() 開頭說明）。
+    // .20 上原本只有 ZDT 1-4，PQW 是 slave 12，不撞號。
+    if (pqw_.init(cli_20_, PQW_SLAVE, PQW_TOTAL_CH, dbg)) {
+        std::cerr << "[FATAL] PQW slave " << PQW_SLAVE << " init fail (cli_20_ / .20)\n"; return true;
     }
-    std::cout << "[OK] PQW slave " << PQW_SLAVE << "\n";
+    std::cout << "[OK] PQW slave " << PQW_SLAVE << " @ cli_20_ (.20)\n";
 
     // XKC-Y25 water level sensor (slave 13, same bus as PQW/JC100/DY500)
     // Mode B init does no probe — first read in cmd_arm_clean_sweep will catch
@@ -165,8 +177,18 @@ bool WashRobot::init() {
     // QX-DO24 PWM output (slave 6, same bus). Mode B init does no probe, so a
     // missing module is only discovered on the first pwm command — that's fine
     // here because nothing in the automatic gait depends on it (web panel only).
-    pwm_.init(cli_22_, PWM_SLAVE, dbg);
-    std::cout << "[OK] QX-DO24 PWM slave " << PWM_SLAVE << " (presence not probed)\n";
+    // [2026-08-27] 停用中 — PWM_SLAVE=6 撞 JC100 slave 6（吸盤改號 1-4→5-8 的
+    // 副作用），完整理由與重啟條件見 WASH_ROBOT.h 的 PWM_ENABLED 註解。
+    // 連 init 都不做：Mode B init 只是記下 client+ID 不發包，但不 init 就能保證
+    // 任何漏掉 gate 的呼叫路徑也發不出東西到 slave 6。
+    if (PWM_ENABLED) {
+        pwm_.init(cli_22_, PWM_SLAVE, dbg);
+        std::cout << "[OK] QX-DO24 PWM slave " << PWM_SLAVE << " (presence not probed)\n";
+    } else {
+        std::cout << "[--] QX-DO24 PWM DISABLED — slave " << PWM_SLAVE
+                  << " 撞 JC100 slave " << PWM_SLAVE
+                  << "（見 WASH_ROBOT.h PWM_ENABLED 註解）\n";
+    }
 
     // DY-500 weight sensors (slaves 10, 11): NOT physically installed on this
     // robot (2026-05-19, per user). Init the driver objects but hard-disable
@@ -182,7 +204,7 @@ bool WashRobot::init() {
     std::cout << "[--] DY-500 slaves 10/11 not installed — polling disabled\n";
 
     // Init last_seal_pulse_ to per-slave preset; will be updated by fine_tune on success.
-    for (int s = 1; s <= 4; ++s)
+    for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s)
         last_seal_pulse_[s - 1].store(preset_extend_pulse_for_slave_(s));
     last_feet_max_over_cm_.store(0.0);
     cached_weight_kg_[0].store(-1.0);
@@ -215,6 +237,14 @@ bool WashRobot::init() {
     // [2026-07-20] Depth camera (D435i) obstacle-detection service — same
     // lazy-connect pattern as arm_cli_ (don't fail boot if the python service
     // isn't running yet; depth_cam_cmd_ relies on the background reconnect).
+    // [2026-08-27 per user] 靜音重連 log（同 arm_cli_ 的處置）。bench 觀察到
+    // 每 500ms 一組 "reconnecting → reconnect success" 無限洗版，把其他訊息
+    // 全部沖掉。TCP_client::available() 是回 -1（r==0，對方送 FIN）才觸發重連，
+    // 也就是 depth_cam_service.py 那端會主動關閉連線，不是本地誤判。
+    // 這條連線目前也沒有任何用途——depth_cam_cmd_ 只被 cmd_run_depth_avoid 使用，
+    // 而該功能的 GUI 已於 2026-08-26 全數移除。保留連線本身（不刪 connectToServer）
+    // 是為了將來要用 depth avoid 時不必再改；只是不再吵。
+    depth_cli_.set_quiet_reconnect_log(true);
     if (!depth_cli_.connectToServer(DEPTH_CAM_IP, DEPTH_CAM_PORT))
         std::cerr << "[WARN] depth_cam " << DEPTH_CAM_IP << ":" << DEPTH_CAM_PORT << " not yet reachable\n";
     else
@@ -230,7 +260,7 @@ bool WashRobot::init() {
         std::cerr << "[WARN] IMU read error on startup\n";
     else
         std::cout << "[OK] IMU " << IMU_PORT
-                  << " roll=" << imu_.x << " pitch=" << imu_.y << "\n";
+                  << " roll=" << imu_.z << " pitch=" << imu_.x << "\n";
 
     // Start background threads
     imu_mon_running_ = true;
@@ -1362,7 +1392,7 @@ std::string WashRobot::bal_cal_release_feet_center_() {
 //   - converged                                  → break (OK)
 //   - sign-flip (overshoot)                       → break (OK, may flip dir next outer)
 //   - imu_.read_error                             → emergency stop
-//   - imu_.x frozen >1s (no IMU updates)          → emergency stop
+//   - imu_.z frozen >1s (no IMU updates; 2026-08-26: IMU 改垂直地面放後 roll 軸改讀 .z/yaw，理由見下方 comment) → emergency stop
 //   - crane_cli_ TCP disconnect                   → emergency stop (best-effort off + SE3 07-10 backup)
 //   - |roll| > BAL_CAL_ROLL_PANIC_DEG             → emergency stop
 //   - single outer iter motor-on > INNER_MAX_MS   → emergency stop
@@ -1423,7 +1453,7 @@ std::string WashRobot::bal_cal_balance_loop_() {
         if (balance_cal_abort_requested_.load()) return "ERR aborted";
 
         // === Pre-motor checks ===
-        const double init_roll = imu_.x - imu_roll0_;
+        const double init_roll = imu_.z - imu_roll0_;
 
         // Tension watchdog (one-shot before motor on)
         double l_kg = 0, r_kg = 0;
@@ -1470,7 +1500,7 @@ std::string WashRobot::bal_cal_balance_loop_() {
         const int64_t motor_on_ms = now_ms_();
 
         // === Inner poll loop ===
-        double  prev_imu_x   = imu_.x;
+        double  prev_imu_z   = imu_.z;
         int     stale_count  = 0;
         std::string emergency_err;
         std::string exit_reason = "converged";  // or "overshoot" — both OK exits
@@ -1499,15 +1529,15 @@ std::string WashRobot::bal_cal_balance_loop_() {
                 break;
             }
             // IMU staleness (value frozen → IMU likely dead/disconnected)
-            const double cur_imu_x = imu_.x;
-            if (std::abs(cur_imu_x - prev_imu_x) < 1e-6) {
+            const double cur_imu_z = imu_.z;
+            if (std::abs(cur_imu_z - prev_imu_z) < 1e-6) {
                 if (++stale_count > BAL_CAL_INNER_STALE_LIMIT) {
                     emergency_err = "ERR imu_stale";
                     break;
                 }
             } else {
                 stale_count = 0;
-                prev_imu_x  = cur_imu_x;
+                prev_imu_z  = cur_imu_z;
             }
             // Crane TCP disconnect mid-run
             if (!crane_cli_.isConnected()) {
@@ -1515,7 +1545,7 @@ std::string WashRobot::bal_cal_balance_loop_() {
                 break;
             }
             // Roll panic
-            const double roll = cur_imu_x - imu_roll0_;
+            const double roll = cur_imu_z - imu_roll0_;
             if (std::abs(roll) > BAL_CAL_ROLL_PANIC_DEG) {
                 emergency_err = "ERR roll_panic " + std::to_string(roll);
                 break;
@@ -1544,7 +1574,7 @@ std::string WashRobot::bal_cal_balance_loop_() {
             return emergency_err;
         }
 
-        const double end_roll = imu_.x - imu_roll0_;
+        const double end_roll = imu_.z - imu_roll0_;
         std::cout << "[bal_cal] outer " << outer << " end: " << exit_reason
                   << " roll=" << end_roll << "° (motor was on "
                   << (now_ms_() - motor_on_ms) << "ms)\n";
@@ -1633,7 +1663,7 @@ std::string WashRobot::cmd_balance_calibrate_start() {
     // 2. IMU roll 雙門檻：
     //    - 太小 (< MIN) → 機體已平衡，校正無意義
     //    - 太大 (> MAX) → 太歪，preload/release 階段風險高
-    const double init_roll = imu_.x - imu_roll0_;
+    const double init_roll = imu_.z - imu_roll0_;
     const double abs_roll  = std::abs(init_roll);
     if (abs_roll < BAL_CAL_START_ROLL_MIN_DEG) {
         std::cout << "[bal_cal] REJECT cmd_start: already balanced roll="
@@ -3106,10 +3136,14 @@ std::string WashRobot::_retired_do_arm_clean_sweep_v1_(int wall_mm, int rounds) 
             // 3) Post-DEPLOY: if WET round, turn pump+brush ON now that roller is
             //    pressed against wall (water lands where it should, not in air).
             if (water_on) {
-                if (try_or_pause_([this]() {
-                                      return pqw_set_relay_verified_(CH_WATER_PUMP, true);
-                                  },
-                                  std::string("clean_pump_on_post_") + tag_prefix)) return false;
+                // [2026-08-27 per user] 水泵先拿掉——實體水泵/管路目前沒有裝。
+                // 只註解掉「開」的動作，關的動作全部保留（OFF 是安全狀態，就算
+                // CH_WATER_PUMP 的號碼日後被別的裝置佔用，寫 OFF 也不會誤動作）。
+                // 裝回水泵時把這行解註解即可，其餘流程未動。
+                //if (try_or_pause_([this]() {
+                //                      return pqw_set_relay_verified_(CH_WATER_PUMP, true);
+                //                  },
+                //                  std::string("clean_pump_on_post_") + tag_prefix)) return false;
                 if (try_or_pause_([this]() {
                                       return pqw_set_relay_verified_(CH_BRUSH, true);
                                   },
@@ -3606,10 +3640,11 @@ std::string WashRobot::do_arm_clean_sweep_continuous_(int wall_mm,
             }
             // [2026-06-03] Post-DEPLOY pqw ON for wet round — SYNCHRONOUS.
             if (water_on) {
-                if (pqw_set_relay_verified_(CH_WATER_PUMP, true)) {
-                    std::cerr << "[arm_clean_sweep_cont] pqw ON water_pump FAIL\n";
-                    return false;
-                }
+                // [2026-08-27 per user] 水泵先拿掉（同 sweep_with_tool，理由見那邊註解）
+                //if (pqw_set_relay_verified_(CH_WATER_PUMP, true)) {
+                //    std::cerr << "[arm_clean_sweep_cont] pqw ON water_pump FAIL\n";
+                //    return false;
+                //}
                 if (pqw_set_relay_verified_(CH_BRUSH, true)) {
                     std::cerr << "[arm_clean_sweep_cont] pqw ON brush FAIL\n";
                     return false;
@@ -4235,12 +4270,35 @@ void WashRobot::crane_keepalive_loop_() {
 
 //=========== IMU ===========
 
+// [2026-08-27 per user] 由加速度計算傾斜角（見 WASH_ROBOT.h 的完整說明）。
+bool WashRobot::imu_tilt_from_accel_(double& roll_deg, double& pitch_deg) const {
+    const double ax = imu_.ax, ay = imu_.ay, az = imu_.az;
+    const double amag = std::sqrt(ax * ax + ay * ay + az * az);
+
+    // 靜止時加速度模長應該 ≈1g。低於 0.5 表示模組根本沒送加速度封包（bench 上
+    // ax/ay/az 恆為 0，n_accel 計數不動），或資料異常。
+    // ⚠ 這裡一定要回報失敗，不能讓 atan2(0,0)=0 被當成「完美水平」——那會讓
+    // 傾斜保護在毫無資料的情況下永遠不觸發，比誤報危險得多。
+    if (amag < 0.5) return true;
+
+    constexpr double RAD2DEG = 57.29577951308232;   // 180/π
+    roll_deg  = std::atan2(ay, ax) * RAD2DEG;                          // 左右傾斜（主要）
+    pitch_deg = std::atan2(az, std::sqrt(ax * ax + ay * ay)) * RAD2DEG; // 前後傾斜（輔助）
+    return false;
+}
+
 bool WashRobot::imu_take_baseline_() {
     double sum_roll = 0.0, sum_pitch = 0.0;
     int n = 0;
     auto end = std::chrono::steady_clock::now() + std::chrono::seconds(IMU_BASELINE_SEC);
     while (std::chrono::steady_clock::now() < end) {
         if (!imu_.read_error.load()) {
+            // 2026-08-26: IMU 改垂直地面放後 pitch(舊 imu_.y) 卡 gimbal lock（~±90°），
+            // 實測 roll 改讀 yaw(imu_.z) 才會隨左右傾斜穩定變化，pitch 改讀舊 roll 軸(imu_.x) 當輔助監控。
+            // [2026-08-27 per user] IMU 換成另一顆、改回水平安裝，基準也跟著改回
+            // 尤拉角 roll(imu_.x) / pitch(imu_.y)，與 imu_monitor_loop_ / status
+            // 的定義保持一致。三者必須用同一套定義，否則相減出來的偏差沒有意義
+            // （本日早先一度出現 baseline 存尤拉角、monitor 用加速度的不一致）。
             sum_roll  += imu_.x;
             sum_pitch += imu_.y;
             ++n;
@@ -4270,7 +4328,7 @@ std::string WashRobot::do_phase5_roll_correct_() {
     // Steps 2-6: iterative roll correction
     std::string err;
     for (int attempt = 1; attempt <= ROLL_CORRECT_RETRY_MAX; ++attempt) {
-        double roll = imu_.x - imu_roll0_;
+        double roll = imu_.z - imu_roll0_;
         if (std::abs(roll) < IMU_HYSTERESIS_DEG) { err = ""; break; }
 
         // Monitor center vacuum on every iteration
@@ -4291,7 +4349,7 @@ std::string WashRobot::do_phase5_roll_correct_() {
         sleep_ms_(500);
 
         if (attempt == ROLL_CORRECT_RETRY_MAX &&
-            std::abs(imu_.x - imu_roll0_) >= IMU_HYSTERESIS_DEG)
+            std::abs(imu_.z - imu_roll0_) >= IMU_HYSTERESIS_DEG)
             err = "phase5_no_converge";
     }
 
@@ -4315,6 +4373,9 @@ void WashRobot::imu_monitor_loop_() {
     int  over_ask_ms  = 0;
     int  over_stop_ms = 0;
     bool ask_sent     = false;
+    // [2026-08-27] 「IMU 未輸出加速度」只警告一次的旗標。用 loop-local 變數而非
+    // static：一旦加速度恢復輸出就重置，之後若再中斷仍會重新提醒一次。
+    bool accel_missing_warned = false;
 
     while (imu_mon_running_.load()) {
         sleep_ms_(SAMPLE_MS);
@@ -4325,9 +4386,44 @@ void WashRobot::imu_monitor_loop_() {
             continue;
         }
 
+        // [2026-08-27 per user] 傾斜保護被關閉時完全跳過判斷（見 WASH_ROBOT.h
+        // imu_guard_enabled_ 的說明）。歸零累積計時，避免關閉期間累積的時間在
+        // 重新開啟的瞬間立刻觸發 emergency。
+        if (!imu_guard_enabled_.load()) {
+            over_ask_ms = over_stop_ms = 0;
+            continue;
+        }
+
+        // [2026-08-27 per user] IMU 換成另一顆、改回水平安裝，因此改回使用內建
+        // 尤拉角 roll(imu_.x) / pitch(imu_.y)——即 2026-08-26 改垂直之前的設計。
+        //
+        // 為什麼水平安裝下尤拉角才是最佳選擇：
+        //   1. 沒有 gimbal lock（pitch 遠離 ±90°），這是垂直安裝時唯一的致命問題
+        //   2. WT901 的 roll/pitch 本身就是相對重力算的，且經過陀螺儀融合，
+        //      動態下比純加速度換算更穩（純加速度會被機器移動的加速度污染）
+        //   3. 只有 yaw(imu_.z) 吃磁力計會漂——而我們不用 yaw
+        //
+        // imu_tilt_from_accel_() 保留，但用途改為「安裝方位健全性檢查」（見下）：
+        // 水平安裝時重力應幾乎全落在 Z 軸，az≈±1。若哪天 IMU 又被改成立起來，
+        // 這個檢查會主動警告，而不是讓尤拉角悄悄回到 gimbal lock 的壞狀態。
+        {
+            const double amag = std::sqrt(imu_.ax * imu_.ax + imu_.ay * imu_.ay
+                                        + imu_.az * imu_.az);
+            if (amag >= 0.5 && std::abs(imu_.az) < 0.70 && !accel_missing_warned) {
+                accel_missing_warned = true;   // 借用同一個 once 旗標，避免洗版
+                std::cerr << "[imu_monitor] ⚠ IMU 疑似不是水平安裝：|az|="
+                          << std::abs(imu_.az) << " (<0.70)，重力主分量不在 Z 軸。\n"
+                             "               水平安裝時 az 應接近 ±1。若 IMU 被改成"
+                             "立起來，尤拉角會卡 gimbal lock、roll/pitch 不可信，\n"
+                             "               需改用加速度推導（imu_tilt_from_accel_ "
+                             "已備妥，只需改軸並接回 monitor）。\n";
+            }
+        }
+
         double roll  = imu_.x - imu_roll0_;
         double pitch = imu_.y - imu_pitch0_;
-        double deg   = std::max(std::abs(roll), std::abs(pitch));
+        // 扣掉水平基準（imu_zero 取的），用途是吸收 IMU 安裝的固定偏差。
+        double deg = std::max(std::abs(roll), std::abs(pitch));
 
         window.push_back(deg);
         if ((int)window.size() > AVG_SAMPLES) window.pop_front();
@@ -6092,10 +6188,14 @@ bool WashRobot::smart_extend_subset_(const std::string& group, const std::vector
 //   body/center groups retired.
 std::vector<int> WashRobot::group_slaves_(const std::string& group) const {
     std::vector<int> all;
-    if (group == "right")       all = {ZDT_RF1, ZDT_RF2};                     // {1,2}
-    else if (group == "left")   all = {ZDT_LF1, ZDT_LF2};                     // {3,4}
+    // Slave numbers below are the CURRENT ones (2026-08-27: 1-4 → 5-8).
+    // right/left still genuinely address only that side's two motors — the Web
+    // GUI stopped exposing them separately, but the commands are not aliases
+    // for "feet" and must keep working for raw-command / step-gait callers.
+    if (group == "right")       all = {ZDT_RF1, ZDT_RF2};                     // {5,6}
+    else if (group == "left")   all = {ZDT_LF1, ZDT_LF2};                     // {7,8}
     else if (group == "all" || group == "feet")
-                                all = {ZDT_RF1, ZDT_RF2, ZDT_LF1, ZDT_LF2};   // {1,2,3,4}
+                                all = {ZDT_RF1, ZDT_RF2, ZDT_LF1, ZDT_LF2};   // {5,6,7,8}
     if (disabled_zdt_slaves_.empty()) return all;
     std::vector<int> out;
     for (int s : all)
@@ -6117,12 +6217,14 @@ int WashRobot::preset_extend_pulse_for_slave_(int slave) const {
 }
 
 // Convert cm overextension to ZDT pulses based on slave's group ratio
-//   feet (1-4): 20000 pulses = 7 cm → 2857 pulses/cm
-//   body (5-9): 30000 pulses = 10 cm → 3000 pulses/cm
+//   feet (CUP_SLAVE_FIRST..LAST): 20000 pulses = 7 cm → 2857 pulses/cm
+// [2026-08-27] ⚠ 這裡原本是「feet=1-4 / body=5-9」的 v1 分組。吸盤 slave 由 1-4
+// 改為 5-8 之後，若保留那個 body 分支，feet 會掉進去拿到 3000 pulses/cm，比正確
+// 的 2857 多 5%——而且不會報錯，是靜默算錯。v2 沒有 body 推桿，該分支直接移除。
 int WashRobot::cm_to_pulses_for_slave_(int slave, double cm) {
-    if (slave >= 1 && slave <= 4) return (int)(cm * (20000.0 / 7.0));
-    if (slave >= 5 && slave <= 9) return (int)(cm * (30000.0 / 10.0));
-    return (int)(cm * 3000.0);
+    if (slave >= CUP_SLAVE_FIRST && slave <= CUP_SLAVE_LAST)
+        return (int)(cm * (20000.0 / 7.0));
+    return (int)(cm * 3000.0);   // fallback（v2 已無 body 推桿，正常不會走到）
 }
 
 // Record successful seal pulse — used by fine_tune & cycle_group_
@@ -6180,7 +6282,11 @@ bool WashRobot::vacuum_valve_(const std::string& group, bool on) {
     if (group == "all" || group == "feet") {
         bool err = false;
         err |= pqw_set_relay_verified_(CH_VALVE_RIGHT, on);
-        err |= pqw_set_relay_verified_(CH_VALVE_LEFT,  on);
+        // [2026-08-27 per user] 左右現在是同一顆閥（CH_VALVE_LEFT == CH_VALVE_RIGHT），
+        // 對同一個 channel 再寫一次只是多一趟 Modbus 來回（含 verify 讀回），跳過。
+        // 寫成條件式而非直接刪掉：若之後改回兩顆獨立閥，改常數即可自動恢復雙寫。
+        if (CH_VALVE_LEFT != CH_VALVE_RIGHT)
+            err |= pqw_set_relay_verified_(CH_VALVE_LEFT,  on);
         return err;
     }
     int ch = group_valve_ch_(group);
@@ -6549,7 +6655,7 @@ bool WashRobot::ensure_group_stall_clear_(const std::string& group) {
 // → cup yanked off wall by valve release → cascade failure.
 bool WashRobot::ensure_all_zdt_stall_clear_() {
     int cleared = 0;
-    for (int s = 1; s <= 4; ++s) {   // [v2] 4 cups
+    for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) {   // [v2] 4 cups
         if (disabled_zdt_slaves_.count(s)) continue;
         if (Z_(s).get_system_status()) continue;   // comm fail, best-effort skip
         if (Z_(s).status.stall_flag) {
@@ -6566,7 +6672,7 @@ bool WashRobot::ensure_all_zdt_stall_clear_() {
     }
     sleep_ms_(100);   // firmware settle
     int persistent = 0;
-    for (int s = 1; s <= 4; ++s) {
+    for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) {
         if (disabled_zdt_slaves_.count(s)) continue;
         if (Z_(s).get_system_status()) continue;
         if (Z_(s).status.stall_flag) {
@@ -6676,7 +6782,7 @@ std::string WashRobot::cmd_init_impl_() {
     std::cout << "[init] ZDT 1-4 → release_stall + driver enable"
               << (disabled_zdt_slaves_.empty() ? "" : " (disabled slaves skipped)")
               << "\n";
-    for (int s = 1; s <= 4; ++s) {
+    for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) {
         if (disabled_zdt_slaves_.count(s)) {
             std::cout << "[init] ZDT " << s << " disabled — skip\n";
             continue;
@@ -6691,7 +6797,7 @@ std::string WashRobot::cmd_init_impl_() {
     // [v2] init does NOT extend any pusher — all 4 cups stay retracted at 0.
     // cmd_attach opens the valves then extends via smart_extend_subset_ (the
     // disable_seal 「一點一點補伸」 pipeline). Just clear any stale stall flags.
-    for (int s = 1; s <= 4; ++s)
+    for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s)
         if (!disabled_zdt_slaves_.count(s)) Z_(s).release_stall_flag();
 
     std::cout << "[init] DM2J arm (slave " << DM2J_ARM << ") → set current as zero\n";
@@ -6852,6 +6958,16 @@ std::string WashRobot::cmd_attach() {
     //    Non-fatal: any error path (unsealed gate / tension sensor offline /
     //    crane detached / pay_out reply non-OK) → skip + EVT, proceed to
     //    Attached anyway (cups are sealed — that's the load-bearing part).
+    //
+    // [2026-08-27 per user] 整段停用——attach 結尾不再放繩。
+    // 效果：機體重量一直留在吊繩上，吸盤只負責貼牆定位、不承重。
+    // 這與 v2 的同步步伐更一致：do_step_sync_ 本來就是「4 顆全放開、完全靠鋼索
+    // 承重」的設計，原本 attach 把重量交給吸盤、下一步 step 又立刻放開吸盤讓重量
+    // 彈回繩上，那次轉移是多餘的。
+    // 副作用：吸盤不再預先承重，因此 attach 之後不會有「吸盤是否撐得住整機重量」
+    // 的實測驗證——原本 pay_out 前的 vacuum_check_ 安全閘也隨之失效。若日後要恢復
+    // 承重式 attach，把下面的 #if 0 改回 #if 1 即可（內含完整的未密封安全閘邏輯）。
+#if 0
     {
         auto pre_payout_fails = vacuum_check_("all");
         if (!pre_payout_fails.empty()) {
@@ -6882,8 +6998,9 @@ std::string WashRobot::cmd_attach() {
             }
         }
     }
+#endif  // [2026-08-27] end disabled attach-end pay_out
 
-    std::cout << "[attach] done → Attached\n";
+    std::cout << "[attach] done → Attached (rope keeps bearing weight; no pay_out)\n";
     set_state_(State::Attached);
     return "OK attached\n";
 }
@@ -6946,6 +7063,33 @@ std::string WashRobot::cmd_arm_sweep() {
     if (cur == State::Error) return state_violation_(cur);
     std::lock_guard<std::mutex> lk(motion_mtx_);
     return do_arm_sweep_();
+}
+
+// [2026-08-26 per user] 乾式清洗（bench 測試用）——見 WASH_ROBOT.h 的說明。
+// 完整 DEPLOY + 滾筒 + 上滑台 + PARK，不噴水、不移動機器人。
+std::string WashRobot::cmd_arm_clean_sweep_dry() {
+    State cur = state_.load();
+    if (cur == State::Error) return state_violation_(cur);
+    std::lock_guard<std::mutex> lk(motion_mtx_);
+
+    abort_flag = false;   // 比照 do_step_sync_：進入點清掉上一次殘留的 abort
+
+    // do_step_sync_rail_sweep_ 不自己做 INIT（在 do_step_sync_ 裡是跟吊機放繩並行
+    // 跑完後把結果傳進來），所以這裡補上。INIT 失敗不擋——該函式會退化成純上滑台
+    // 掃動、不開刷，跟正式流程的降級行為一致。
+    std::cout << "[arm_dry_sweep] INIT (arm re-calibrate)\n";
+    const bool init_ok = (arm_cmd_("INIT", 60).rfind("OK", 0) == 0);
+    arm_calibrated_.store(init_ok);
+    if (!init_ok)
+        std::cerr << "[arm_dry_sweep] arm INIT failed — rail sweep only, no brush\n";
+
+    // force_enable=true：這支是拿來測上滑台裝好沒有的工具，不受
+    // STEP_SYNC_ARM_CLEAN_ENABLED（正式步伐的清潔開關）影響。
+    do_step_sync_rail_sweep_("arm_dry_sweep", init_ok, /*force_enable=*/true);
+
+    if (check_abort_()) return "ERR aborted\n";
+    return init_ok ? "OK arm_clean_sweep_dry_done\n"
+                   : "OK arm_clean_sweep_dry_done_rail_only\n";
 }
 
 // [方案B 2026-07-08] Read both crane meters (cm). See header.
@@ -7064,10 +7208,10 @@ void WashRobot::follower_imu_level_(const std::string& move_group) {
         constexpr int GAP_MS  = 50;   // ~300ms window
         double sum = 0.0; int n = 0;
         for (int k = 0; k < SAMPLES; ++k) {
-            if (!imu_.read_error.load()) { sum += imu_.x; ++n; }
+            if (!imu_.read_error.load()) { sum += imu_.z; ++n; }
             if (k < SAMPLES - 1) sleep_ms_(GAP_MS);
         }
-        return (n > 0 ? sum / n : imu_.x) - imu_roll0_;
+        return (n > 0 ? sum / n : imu_.z) - imu_roll0_;
     };
 
     for (int pass = 0; pass < FOLLOWER_IMU_MAX_PASSES; ++pass) {
@@ -7116,7 +7260,7 @@ void WashRobot::follower_imu_level_(const std::string& move_group) {
         }
         sleep_ms_(FOLLOWER_IMU_SETTLE_MS);   // settle before re-reading roll
     }
-    const double end_roll = imu_.read_error.load() ? 0.0 : (imu_.x - imu_roll0_);
+    const double end_roll = imu_.read_error.load() ? 0.0 : (imu_.z - imu_roll0_);
     std::cout << "[imu_level] " << move_group << " NOT converged in " << FOLLOWER_IMU_MAX_PASSES
               << " passes — roll=" << end_roll << "° — proceed on coarse (non-fatal)\n";
     evt_("imu_level_no_converge " + move_group + " roll=" + std::to_string(end_roll));
@@ -7150,10 +7294,10 @@ void WashRobot::do_sync_imu_roll_correct_() {
         constexpr int GAP_MS  = 50;   // ~300ms window, same as follower_imu_level_
         double sum = 0.0; int n = 0;
         for (int k = 0; k < SAMPLES; ++k) {
-            if (!imu_.read_error.load()) { sum += imu_.x; ++n; }
+            if (!imu_.read_error.load()) { sum += imu_.z; ++n; }
             if (k < SAMPLES - 1) sleep_ms_(GAP_MS);
         }
-        return (n > 0 ? sum / n : imu_.x) - imu_roll0_;
+        return (n > 0 ? sum / n : imu_.z) - imu_roll0_;
     };
 
     for (int pass = 0; pass < FOLLOWER_IMU_MAX_PASSES; ++pass) {
@@ -7191,7 +7335,7 @@ void WashRobot::do_sync_imu_roll_correct_() {
         }
         sleep_ms_(FOLLOWER_IMU_SETTLE_MS);
     }
-    const double end_roll = imu_.read_error.load() ? 0.0 : (imu_.x - imu_roll0_);
+    const double end_roll = imu_.read_error.load() ? 0.0 : (imu_.z - imu_roll0_);
     std::cout << "[step_sync_imu] NOT converged in " << FOLLOWER_IMU_MAX_PASSES
               << " passes — roll=" << end_roll << "° — proceed anyway (non-fatal)\n";
     evt_("step_sync_imu_no_converge roll=" + std::to_string(end_roll));
@@ -8509,7 +8653,17 @@ std::string WashRobot::do_cross_obstacle_(bool up) {
 // Non-fatal throughout: arm_sweep_fire_nowait_ itself never reports failure
 // (fire-and-forget, retries cover a dropped Modbus write) — a rail issue
 // here was never going to block the step even before this rewrite.
-void WashRobot::do_step_sync_rail_sweep_(const char* tag, bool init_ok) {
+void WashRobot::do_step_sync_rail_sweep_(const char* tag, bool init_ok, bool force_enable) {
+    // [2026-08-27 per user] 上滑台未裝好 → 整段清潔跳過（見 WASH_ROBOT.h 的
+    // STEP_SYNC_ARM_CLEAN_ENABLED 說明）。這裡 early-return 而不是讓它跑下去，
+    // 是因為 DM2J:14 沒回應時 arm_sweep_fire_nowait_ 會白等 EST_MS、每步多噴一
+    // 串 writeMulti no response。force_enable 讓 bench 乾掃測試指令仍能跑。
+    if (!STEP_SYNC_ARM_CLEAN_ENABLED && !force_enable) {
+        std::cout << "[" << tag << "] arm clean DISABLED (上滑台未裝, "
+                     "STEP_SYNC_ARM_CLEAN_ENABLED=false) — 跳過 rail sweep + DEPLOY + brush\n";
+        return;
+    }
+
     // [2026-07-24 per user] DEPLOY 前每次都真的重新 arm_cmd_("INIT")（M1/M2 全
     // 校正），不是 ensure_arm_ready_()。這覆蓋掉 2026-05-28 那次「INIT 只在系統
     // init 做一次、sweep 只用 ensure_arm_ready_() 重新 ENABLE」的設計——per user
@@ -8641,12 +8795,19 @@ std::string WashRobot::do_step_sync_(bool up) {
     // right before do_step_sync_rail_sweep_ is launched at step 5; RAII guard
     // below still waits it out on any earlier abort/fail return so INIT is
     // never left running unjoined in the background.
-    std::future<bool> fut_arm_init = std::async(std::launch::async, [this, tag]() -> bool {
-        const bool ok = (arm_cmd_("INIT", 60).rfind("OK", 0) == 0);
-        arm_calibrated_.store(ok);
-        if (!ok) std::cerr << "[" << tag << "] arm INIT failed (ran parallel w/ crane move)\n";
-        return ok;
-    });
+    // [2026-08-27 per user] 上滑台未裝 → 連 INIT 都不做（見 WASH_ROBOT.h 的
+    // STEP_SYNC_ARM_CLEAN_ENABLED）。只關掃動不關 INIT 的話，每步仍會花 ~10s 讓
+    // M1/M2 全校正、手臂實際動作，卻完全不清洗——所以兩處一起 gate。
+    // 仍然建立一個 ready future 回傳 false，讓下面 fut_arm_init.get() /
+    // ArmInitJoin 的結構完全不用改。
+    std::future<bool> fut_arm_init = STEP_SYNC_ARM_CLEAN_ENABLED
+        ? std::async(std::launch::async, [this, tag]() -> bool {
+              const bool ok = (arm_cmd_("INIT", 60).rfind("OK", 0) == 0);
+              arm_calibrated_.store(ok);
+              if (!ok) std::cerr << "[" << tag << "] arm INIT failed (ran parallel w/ crane move)\n";
+              return ok;
+          })
+        : std::async(std::launch::deferred, []() -> bool { return false; });
     struct ArmInitJoin {
         std::future<bool>& f;
         ~ArmInitJoin() { if (f.valid()) f.wait(); }
@@ -9592,7 +9753,8 @@ std::string WashRobot::_retired_do_feet_realign_v1_(bool force, bool in_window) 
         const int last   = last_seal_pulse_[s - 1].load();   // refreshed in phase 0
         deltas[s - 1] = last - preset;
         const double drift_pulses = (double)(last - preset);
-        const double drift_cm = (s >= 1 && s <= 4)
+        // [2026-08-27] slave 1-4 → CUP_SLAVE_FIRST..LAST（同 cm_to_pulses_for_slave_ 的理由）
+        const double drift_cm = (s >= CUP_SLAVE_FIRST && s <= CUP_SLAVE_LAST)
                               ? drift_pulses / (20000.0 / 7.0)
                               : drift_pulses / (30000.0 / 10.0);
         const double abs_drift_cm = std::fabs(drift_cm);
@@ -11653,6 +11815,47 @@ bool WashRobot::save_saved_scripts_to_disk_(const std::string& path) {
     return false;
 }
 
+// [2026-08-27 per user] IMU 傾斜保護開關（見 WASH_ROBOT.h imu_guard_enabled_）。
+// 不做 state 檢查：關閉保護的時機正好是「已經被誤報打進 Error」的時候。
+std::string WashRobot::cmd_imu_guard(bool on) {
+    imu_guard_enabled_.store(on);
+    std::cout << "[imu_guard] tilt protection " << (on ? "ENABLED" : "DISABLED")
+              << (on ? "" : "  ⚠ 沒有傾斜保護，僅限機器在地面、未吊掛時使用")
+              << "\n";
+    return on ? "OK imu_guard=on\n"
+              : "OK imu_guard=off WARNING_no_tilt_protection\n";
+}
+
+// [2026-08-27 per user] 單獨重取 IMU 水平基準（見 WASH_ROBOT.h 的說明）。
+std::string WashRobot::cmd_imu_zero() {
+    // 刻意不檢查 state：基準沒校好時 imu_monitor_loop_ 會把機器判成 45°+ 傾斜
+    // 並 set_state_(Error)，若這裡再要求 state 正常就永遠校正不了。
+    if (imu_.read_error.load()) return "ERR imu_read_error\n";
+
+    // [2026-08-27] IMU 改回水平安裝 → before/after 用尤拉角，與基準定義一致。
+    const double before_roll  = imu_.x - imu_roll0_;
+    const double before_pitch = imu_.y - imu_pitch0_;
+
+    std::cout << "[imu_zero] taking baseline for " << IMU_BASELINE_SEC
+              << "s — 機器必須靜止，且保持在你要當作「水平」的姿態\n";
+    if (imu_take_baseline_()) return "ERR imu_baseline_fail\n";
+
+    const double after_roll  = imu_.x - imu_roll0_;
+    const double after_pitch = imu_.y - imu_pitch0_;
+
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2)
+        << "OK imu_zero roll0=" << imu_roll0_ << " pitch0=" << imu_pitch0_
+        << " before(roll=" << before_roll << " pitch=" << before_pitch << ")"
+        << " after(roll="  << after_roll  << " pitch=" << after_pitch  << ")";
+    // 不自動清 Error：Error 也可能是別的原因造成的，這裡自作主張清掉會掩蓋問題。
+    if (state_.load() == State::Error)
+        oss << " NOTE:state_still_Error_press_reset";
+    oss << "\n";
+    std::cout << "[imu_zero] " << oss.str();
+    return oss.str();
+}
+
 #if 0  // [v2 2026-07-07] retired v1 cmd_tilt_mode — kept for reference
 std::string WashRobot::cmd_tilt_mode(bool on) {
     State cur = state_.load();
@@ -11675,7 +11878,7 @@ std::string WashRobot::cmd_emergency_stop() {
     abort_flag    = true;
     pause_flag    = false;
     motion_active_ = false;
-    for (int s = 1; s <= 4; ++s) Z_(s).emergency_stop(false);
+    for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) Z_(s).emergency_stop(false);
     crane_cmd_("stop", 2);   // Crane_control_PI uses 'stop' (no 'emergency_stop' alias)
     // [2026-05-28] Invalidate arm calibration: emergency_stop may have left arm
     // in an unknown state (mid-motion abort). Next cmd_init must re-INIT.
@@ -11697,7 +11900,7 @@ std::string WashRobot::cmd_shutdown() {
     abort_flag    = true;
     pause_flag    = false;
     motion_active_ = false;
-    for (int s = 1; s <= 4; ++s) Z_(s).emergency_stop(false);
+    for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) Z_(s).emergency_stop(false);
     pqw_.controlRelay(CH_BRUSH,        false);
     pqw_.controlRelay(CH_WATER_PUMP,   false);
     set_water_inlet_(false);   // [2026-06-05] → crane PQW (.34 slave 12 CH4)
@@ -11751,7 +11954,7 @@ std::string WashRobot::cmd_status() {
             // JC100 timeouts cascade across slaves). 9 × 30ms = 270ms total gap
             // is well under 1Hz rate-limit budget.
             bool first = true;
-            for (int s = 1; s <= 4; ++s) {
+            for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) {
                 if (disabled_zdt_slaves_.count(s)) continue;
                 if (!first) sleep_ms_(30);
                 first = false;
@@ -11769,13 +11972,31 @@ std::string WashRobot::cmd_status() {
     oss << " follower_mode="  << (follower_use_imu_.load() ? "imu" : "meter");
     oss << " first_step="     << (first_step_right_.load() ? "right" : "left");
     oss << std::fixed << std::setprecision(1);
-    for (int s = 1; s <= 4; ++s)
+    for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s)
         oss << " p" << s << "=" << cached_pressure_[s - 1].load();
     if (!imu_.read_error.load()) {
+        // [2026-08-27 per user] IMU 改回水平安裝 → roll/pitch 用內建尤拉角
+        // （同 imu_monitor_loop_ / imu_take_baseline_，三者定義必須一致）。
         oss << std::setprecision(2)
             << " roll=" << (imu_.x - imu_roll0_)
             << " pitch=" << (imu_.y - imu_pitch0_);
+        // [2026-08-27 per user] IMU 改成立起來安裝（左側朝下）之後，尤拉角在
+        // 垂直姿態下會撞 gimbal lock，而目前拿來當 roll 的 imu_.z 是 yaw——靠
+        // 磁力計算出來的，會被馬達/鐵件磁場帶著漂（bench 觀察到同一姿態下
+        // 7.83 → -71.43）。加速度三軸直接反映重力方向，不吃磁力計，是判斷
+        // 實際安裝方位與重寫傾斜公式的可靠依據，所以一併輸出。
+        // raw_* 是未扣基準的原始尤拉角，用來對照 gimbal lock 發生在哪一軸。
+        oss << " ax=" << imu_.ax << " ay=" << imu_.ay << " az=" << imu_.az
+            << " raw_x=" << imu_.x << " raw_y=" << imu_.y << " raw_z=" << imu_.z
+            // [2026-08-27] 收到的封包類型計數——用來確認 IMU 到底有沒有送加速度
+            // (0x51)。bench 觀察到 ax/ay/az 恆為 0 而角度有值，推測只送 0x53；
+            // 這兩個計數可以直接證實，不必開 debug 看 hex dump。
+            << " n_accel=" << imu_.n_accel_pkt.load()
+            << " n_angle=" << imu_.n_angle_pkt.load();
     }
+    // [2026-08-27] 傾斜保護狀態一定要出現在 status——關閉狀態若不可見，
+    // 操作者可能在毫無保護的情況下把機器吊起來。
+    oss << " imu_guard=" << (imu_guard_enabled_.load() ? "on" : "OFF_NO_PROTECTION");
     oss << "\n";
     return oss.str();
 }
@@ -11845,6 +12066,10 @@ std::string WashRobot::cmd_water_pump(bool on) {
 std::string WashRobot::cmd_pwm_set(int ch, int hz, int control, double duty_pct) {
     State cur = state_.load();
     if (cur == State::Error) return state_violation_(cur);
+    // [2026-08-27] PWM 停用中 —— slave 撞 JC100 slave 6，見 WASH_ROBOT.h
+    // PWM_ENABLED 註解。在這裡擋掉而不是只靠 init 不做，是因為 driver 的
+    // client 指標若被別的路徑設起來，寫入就會落到 JC100 的組態暫存器上。
+    if (!PWM_ENABLED) return "ERR pwm_disabled_slave_conflict_with_jc100\n";
     if (ch < 1 || ch > 4)                 return "ERR pwm_channel_must_be_1_to_4\n";
     if (control < 0 || control > 65535)   return "ERR pwm_control_out_of_range\n";
 
@@ -11869,6 +12094,10 @@ std::string WashRobot::cmd_pwm_set(int ch, int hz, int control, double duty_pct)
 std::string WashRobot::cmd_pwm_save() {
     State cur = state_.load();
     if (cur == State::Error) return state_violation_(cur);
+    // [2026-08-27] PWM 停用中 —— slave 撞 JC100 slave 6，見 WASH_ROBOT.h
+    // PWM_ENABLED 註解。在這裡擋掉而不是只靠 init 不做，是因為 driver 的
+    // client 指標若被別的路徑設起來，寫入就會落到 JC100 的組態暫存器上。
+    if (!PWM_ENABLED) return "ERR pwm_disabled_slave_conflict_with_jc100\n";
     if (!pwm_.saveOutputAsDefault()) return "ERR pwm_save_fail\n";
     return "OK\n";
 }
@@ -11877,6 +12106,10 @@ std::string WashRobot::cmd_pwm_save() {
 // locked value", which invalidates the 5~10% duty mapping — the module reverts
 // to 1000Hz on every power cycle, so this is the normal state after a reboot.
 std::string WashRobot::cmd_pwm_status() {
+    // [2026-08-27] PWM 停用中 —— slave 撞 JC100 slave 6，見 WASH_ROBOT.h
+    // PWM_ENABLED 註解。在這裡擋掉而不是只靠 init 不做，是因為 driver 的
+    // client 指標若被別的路徑設起來，寫入就會落到 JC100 的組態暫存器上。
+    if (!PWM_ENABLED) return "ERR pwm_disabled_slave_conflict_with_jc100\n";
     std::ostringstream oss;
     oss << "OK";
     for (int ch = 1; ch <= 4; ++ch) {
@@ -12057,7 +12290,9 @@ std::string WashRobot::cmd_pusher(const std::string& group, const std::string& p
 // body lower=9.3cm / center=10cm). Retract always goes to 0 with full RPM.
 // Acquires motion_mtx_; not allowed in Error / Running / Balancing states.
 std::string WashRobot::cmd_zdt_pusher(int slave, const std::string& action) {
-    if (slave < 1 || slave > 4) return "ERR invalid_slave\n";
+    // [2026-08-27] 吸盤 slave 改為 CUP_SLAVE_FIRST..LAST（5-8）；沿用舊的 1-4
+    // 驗證會讓 GUI 的單支推桿控制／停用全部回 ERR invalid_slave。
+    if (slave < CUP_SLAVE_FIRST || slave > CUP_SLAVE_LAST) return "ERR invalid_slave\n";
     if (disabled_zdt_slaves_.count(slave)) return "ERR slave_disabled\n";
 
     State cur = state_.load();
@@ -12107,14 +12342,18 @@ std::string WashRobot::cmd_zdt_pusher(int slave, const std::string& action) {
 // at retracted hard-stop, otherwise subsequent abs-0 moves won't return to the
 // real bottom. Group "all" hits feet+body+center (8+1=9 slaves).
 std::string WashRobot::cmd_zdt_disable(int slave) {
-    if (slave < 1 || slave > 4) return "ERR invalid_slave\n";
+    // [2026-08-27] 吸盤 slave 改為 CUP_SLAVE_FIRST..LAST（5-8）；沿用舊的 1-4
+    // 驗證會讓 GUI 的單支推桿控制／停用全部回 ERR invalid_slave。
+    if (slave < CUP_SLAVE_FIRST || slave > CUP_SLAVE_LAST) return "ERR invalid_slave\n";
     disabled_zdt_slaves_.insert(slave);
     std::cout << "[zdt_disable] slave " << slave << " excluded from group ops\n";
     return "OK\n";
 }
 
 std::string WashRobot::cmd_zdt_enable(int slave) {
-    if (slave < 1 || slave > 4) return "ERR invalid_slave\n";
+    // [2026-08-27] 吸盤 slave 改為 CUP_SLAVE_FIRST..LAST（5-8）；沿用舊的 1-4
+    // 驗證會讓 GUI 的單支推桿控制／停用全部回 ERR invalid_slave。
+    if (slave < CUP_SLAVE_FIRST || slave > CUP_SLAVE_LAST) return "ERR invalid_slave\n";
     disabled_zdt_slaves_.erase(slave);
     std::cout << "[zdt_enable] slave " << slave << " re-included in group ops\n";
     return "OK\n";
@@ -12126,7 +12365,7 @@ std::string WashRobot::cmd_zdt_enable(int slave) {
 // (operator can re-issue).
 std::string WashRobot::cmd_zdt_release_stall() {
     int ok = 0, fail = 0, skipped = 0;
-    for (int s = 1; s <= 4; ++s) {
+    for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) {
         if (disabled_zdt_slaves_.count(s)) { ++skipped; continue; }
         if (Z_(s).release_stall_flag()) ++fail; else ++ok;
     }
@@ -12530,7 +12769,8 @@ std::string WashRobot::_retired_cmd_realign_v1_() {
         const int preset = preset_extend_pulse_for_slave_(s);
         const int last   = last_seal_pulse_[s - 1].load();
         const double over_pulses = (double)(last - preset);
-        const double over_cm = (s >= 1 && s <= 4)
+        // [2026-08-27] slave 1-4 → CUP_SLAVE_FIRST..LAST（同 cm_to_pulses_for_slave_ 的理由）
+        const double over_cm = (s >= CUP_SLAVE_FIRST && s <= CUP_SLAVE_LAST)
                              ? over_pulses / (20000.0 / 7.0)
                              : over_pulses / (30000.0 / 10.0);
         if (over_cm > max_over_cm) max_over_cm = over_cm;

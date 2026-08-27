@@ -132,6 +132,7 @@ void WT901BC_TTL::parsePacket(uint8_t* buf) {
 		ax = (double)d1 / 32768.0 * 16.0;
 		ay = (double)d2 / 32768.0 * 16.0;
 		az = (double)d3 / 32768.0 * 16.0;
+		++n_accel_pkt;   // [2026-08-27] 診斷用，見 header 說明
 		break;
 	case 0x52:
 		gx = (double)d1 / 32768.0 * 2000.0;
@@ -142,6 +143,7 @@ void WT901BC_TTL::parsePacket(uint8_t* buf) {
 		x = (double)d1 / 32768.0 * 180.0;
 		y = (double)d2 / 32768.0 * 180.0;
 		z = (double)d3 / 32768.0 * 180.0;
+		++n_angle_pkt;   // [2026-08-27] 診斷用，見 header 說明
 		break;
 	case 0x56: // pressure packet
 	{

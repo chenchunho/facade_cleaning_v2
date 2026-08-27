@@ -110,6 +110,19 @@ static std::string dispatch(const std::string& line) {
     if (cmd == "reset")          return robot.cmd_reset();
     if (cmd == "recover")        return robot.cmd_recover();
     if (cmd == "realign")        return robot.cmd_realign();   // [v2 2026-07-08] feet-only sealed retract to preset
+    // [2026-08-27 per user] 單獨重取 IMU 水平基準（不跑完整 init）。刻意允許在
+    // state==Error 時執行——基準沒校好本身就會把系統打進 Error。
+    if (cmd == "imu_zero")       return robot.cmd_imu_zero();
+    // [2026-08-27 per user] IMU 傾斜保護開關。IMU 立起來後尤拉角卡 gimbal lock、
+    // 讀值會亂跳，誤報會把系統打進 Error 擋住所有操作；在改用加速度計算之前，
+    // 讓操作者能手動關掉誤報。⚠ 關閉等於沒有傾斜保護。
+    if (cmd == "imu_guard") {
+        std::string s; iss >> s;
+        if (iss.fail()) return "ERR usage:imu_guard_<on|off>\n";
+        if (s == "on")  return robot.cmd_imu_guard(true);
+        if (s == "off") return robot.cmd_imu_guard(false);
+        return "ERR expected_on_or_off\n";
+    }
     if (cmd == "ping")           return robot.cmd_ping();
     if (cmd == "pause")          return robot.cmd_pause();
     if (cmd == "resume")         return robot.cmd_resume();
@@ -143,6 +156,9 @@ static std::string dispatch(const std::string& line) {
         if (iss.fail() || wall_mm <= 0) return "ERR usage:arm_clean_sweep_<wall_mm>_<rounds>\n";
         return robot.cmd_arm_clean_sweep(wall_mm, rounds);
     }
+    // [2026-08-26 per user] 乾式清洗（bench 測試）— DEPLOY + 滾筒 + 上滑台 + PARK，
+    // 不噴水、不移動機器人。內部直接跑同步步伐的清洗段 do_step_sync_rail_sweep_。
+    if (cmd == "arm_clean_sweep_dry") return robot.cmd_arm_clean_sweep_dry();
     if (cmd == "arm_attached") {
         std::string s; iss >> s;
         if (iss.fail()) return "ERR usage:arm_attached_<on|off>\n";

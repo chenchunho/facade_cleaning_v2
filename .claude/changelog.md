@@ -13,6 +13,178 @@
 
 ---
 
+## [2026-08-27h] Claude Code
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — 新增 `PWM_ENABLED = false`
+- `user_lib/WASH_ROBOT.cpp` — `pwm_.init` 與 3 個 `cmd_pwm_*` 入口加 gate
+- `Linux_test/main.cpp` — 常數區塊 / gateway 預設 IP / 吸盤 slave / 繼電器 CH / menu 31,32 全面對齊 v2
+
+### 1. 🚨 QX-DO24 PWM 停用 —— slave 撞號（bench log 抓到）
+```
+[ERR] [QX:6] device rejected FC 0x10: err 0x7C (未定義錯誤碼)
+```
+`0x7C` 不是合法的 Modbus exception code（標準只到 `0x0B`）—— 那是**別人的回覆被
+PWM driver 撿走**後亂解出來的位元組。
+
+根因是 2026-08-27 把吸盤 slave 由 1-4 改成 5-8 的**連帶副作用**：
+`PWM_SLAVE = 6` 當初選 6 的前提寫在註解裡 ——「cli_22_ 上 JC100 只用 slave 1~4，
+6 是空的」。改號之後 JC100 佔 5,6,7,8，**slave 6 同時是右腳下吸盤的真空表和 PWM 模組**。
+
+**為什麼一定要停，而不是「反正模組沒接、通訊失敗而已」**：
+FC 0x10 是 write-multiple-registers，發給 slave 6 的寫入會真的落到 **JC100 slave 6**
+上，有機會改掉它的組態暫存器（含 slave ID / 波特率）。而 JC100 的壓力值正是步伐中
+「這一側還吸得夠牢、可以放另一側」的判準 —— 弄壞它是**掉落風險**，不只是通訊雜訊。
+（同樣的理由早就寫在 `QX_DO24.cpp` 的 `sendAndReceive` 註解裡，只是那邊假設的仍是
+JC100 1~4。）
+
+處置：`PWM_ENABLED = false`，gate 住 `pwm_.init` + `cmd_pwm_set/save/status`
+（三個入口都回 `ERR pwm_disabled_slave_conflict_with_jc100`）。連 init 都不做，
+確保任何漏掉 gate 的路徑也發不出東西到 slave 6。
+
+重新啟用的前提（三件都要做完）：
+1. USB-485 直連改模組 slave ID 到真正空的號（cli_22_ 已用 5-8/10,11/12/13/14 → 可用 1~4、9、15+），同步改 `PWM_SLAVE`
+2. USB-485 直連把波特率 115200 → 9600（寫 `0x21=3`）配合 bus；**必須在接上 bus 之前改完**，否則接上去就無法通訊也改不回來
+3. `PWM_ENABLED` 改 `true`
+
+### 2. Linux_test 對齊 v2（per user）
+`Linux_test/main.cpp` 的常數還是 v1 的，落差都是**實際會誤導測試**的，不只命名：
+
+| 項目 | 舊值（v1） | 新值（對齊 WASH_ROBOT.h） |
+|------|-----------|--------------------------|
+| **繼電器 CH1/CH2** | CH1=泵浦 / CH2=腳閥 | **CH1=閥 / CH2=泵浦（整個對調）** |
+| ZDT gateway | .21 | **.20** (`IP_ZDT`) |
+| PQW gateway | .22 | **.20** (`IP_PQW`) |
+| DM2J gateway | .20 | **.22** (`IP_DM2J`) |
+| JC-100 gateway | .22 | .22 (`IP_JC100`) ✔ 不變 |
+| 吸盤 slave | 1-4 | **5-8** (`CUP_SLAVE_FIRST/LAST`) |
+| 破真空 CH | 16 | **6** (`PQW_CH_BREAK_VACUUM`) |
+| 腳推桿伸出量 | 23000 (~8cm) | **36000 (12cm)** |
+| DM2J 上滑台 | 左1/右3 兩條滑軌 | **單一 slave 14** (`DM2J_ARM_SLAVE`) |
+
+⚠ **CH1/CH2 對調**是最容易咬人的一項：照舊值在 Linux_test 測「開泵浦」，實際上是在開閥。
+
+**menu 31/32（破真空 + 放腳）另有一個對齊後才會爆的問題**：舊版把 JC-100 掛在
+**PQW 的連線上**（`jc.init(cli_pqw, ...)`）—— v1 兩者同在 .22 才成立。v2 PQW 在
+.20、JC-100 在 .22，會完全讀不到壓力，而收尾的壓力回報正是判斷破真空有沒有生效的
+依據。已改成獨立的第三條連線 `cli_jc` + 自己的 gateway prompt。
+
+所有 gateway prompt 的**顯示值與按 Enter 的 fallback 現在共用同一個常數**（原本是
+兩處各自寫死的字面值，很容易改一邊漏一邊）。v1 遺留的 BODY / CENTER / LEFT_RAIL /
+RIGHT_RAIL 常數保留只為讓舊 menu 還能編譯，已標註 v2 硬體上不存在。
+
+驗證：括號平衡 0、無跨行字串、`jc_ip`/`cli_jc` 都在宣告的函式內使用。
+
+---
+
+## [2026-08-27g] Claude Code
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — `CH_BREAK_VACUUM` 14→**6**；新增 `STEP_SYNC_ARM_CLEAN_ENABLED = false`；`DM2J_ARM_STEP_SWEEP_CM` -8.0→**17.0**；`do_step_sync_rail_sweep_` 加 `force_enable` 預設參數
+- `user_lib/WASH_ROBOT.cpp` — rail sweep + 並行 arm INIT 兩處加 gate；清洗流程 2 處水泵 turn-ON 註解掉；乾掃指令傳 `force_enable=true`
+
+### 1. 破真空閥 → CH6（per user）
+`CH_BREAK_VACUUM` 14→6。前置條件是同一批把 `CH_WATER_PUMP` 6→14 讓位（見 2026-08-27f）——
+**這個讓位是強制的，不是整理**：清洗滾筒段會主動 `pqw_set_relay_verified_(CH_WATER_PUMP, true)`，
+若水泵仍指 CH6，清洗時就會打開破真空閥 → 4 顆吸盤同時失去真空 → 貼牆狀態脫落。
+
+最終 channel map（已確認無衝突）：
+
+| CH | 用途 |
+|----|------|
+| 1 | VT307 吸盤真空閥（全部 4 顆，單閥） |
+| 2 | dp0105 真空泵浦 |
+| **6** | **破真空閥** |
+| 14 | 水箱水泵（實體未接，且自動流程已不再開） |
+| 15 | 手臂滾筒刷馬達 |
+
+### 2. 水泵先拿掉（per user：「目前沒有」）
+`sweep_with_tool` 與 `do_arm_clean_sweep_continuous_` 兩處 `if (water_on)` 裡的
+**水泵 turn-ON 註解掉，刷子 turn-ON 保留**（`water_on` 原本同時控制兩者，直接把
+`water_on` 設 false 會連刷子一起關掉，不是使用者要的）。
+
+所有 `CH_WATER_PUMP, false`（關）全部保留 —— OFF 是安全狀態，即使 CH14 日後被
+別的裝置佔用，寫 OFF 也不會誤動作。`cmd_water_pump`（GUI 手動按鈕）保留，那是
+手動測試工具、不在自動流程內。裝回水泵時解註解 2 行即可。
+
+### 3. 上滑台掃動 -8 → 17（**修掉 08-26 的漏改**）
+Bench log 顯示 `step_up_sync` 實際仍走 `PR_move_cm_nowait -8.000`，跟 2026-08-26
+「-8→17」的紀錄不符。原因：**有兩個掃動距離常數**，那次只改到其中一個。
+
+| 常數 | 使用者 | 08-26 是否改到 |
+|------|--------|---------------|
+| `ARM_SWEEP_CM = 17` | `do_arm_sweep_` / `do_arm_clean_sweep_` / `_continuous_` | ✅ 改了 |
+| `DM2J_ARM_STEP_SWEEP_CM = -8.0` | `do_step_sync_rail_sweep_`（**同步步伐內建的清洗**） | ❌ 漏了 |
+
+本次補上 → 17.0，兩者現在同值同方向（0 → 17 → 0）。已在兩個常數上方加交叉註解，
+日後改行程要同時改兩處。
+
+### 4. 同步步伐的手臂清潔整段停用（per user：上滑台還沒裝好）
+Bench log 每次 step 都是一串 `[ERR] [DM2J:14] writeMulti no response` —— 上滑台
+（DM2J slave 14）實體未裝。新增 `STEP_SYNC_ARM_CLEAN_ENABLED = false` 一個開關，
+gate 住**兩處**：
+
+- `do_step_sync_rail_sweep_()` 開頭 early-return（不再白等 `EST_MS`、不再噴 no-response）
+- `do_step_sync_` 裡跟吊機放繩並行的 `fut_arm_init`（改成 ready-false future，
+  下游 `.get()` / RAII join 結構完全不用改）
+
+**為何用 gate 而不是註解掉呼叫**：清潔段散在兩處，分開註解容易只關一半——那會變成
+手臂每步花 ~10s 全校正、實際動作，卻完全不清洗。裝好上滑台時改 `true` 一行全部回來。
+
+步伐本身（放繩 / IMU 校平 / 吸盤伸縮）完全不受影響。`ensure_arm_parked_after_rope_`
+的 PARK hook 因為 `arm_stow_state_` 不再被 DEPLOY 改動，自然 no-op，無須另外處理。
+
+`cmd_arm_clean_sweep_dry()`（乾掃測試指令）改傳 `force_enable=true` **刻意繞過此
+gate** —— 那支指令的用途正是手動測上滑台/手臂裝好沒有，被 gate 攔掉就沒東西可測。
+獨立的手臂清洗按鈕（`do_arm_sweep_` / `do_arm_clean_sweep_` / `_continuous_`）同理
+不受 gate 管，都是手動觸發。
+
+---
+
+## 2026-08-27c Claude (Sadie) — Web GUI 攝影機介面整個移除（以後不用串接攝影機）
+
+### 需求
+user：「幫我把網頁上攝影機的介面整個拿掉」→ 追問後確認是「**以後不用串接攝影機**」，屬永久移除，不是暫時隱藏。所以連後端反向代理一起清掉，不只是藏 UI。
+
+### 修改檔案
+- `web_backend/public/index.html`：sidebar 的 **Camera 分頁按鈕**移除；`panel-camera` 整個 `<section>` 移除（CAM1/CAM2 的 MJPEG 串流格 + D435i 全彩/深度圖拍照格）
+- `web_backend/public/app.js`：`wireCamera()`（串流、離線重連、截圖下載）與 `wireDepthCamera()`（D435i 拍照）整段移除；`initPageNav` 的 `PAGES` 由 `['home','manual','camera','settings']` 改成 `['home','manual','settings']`
+- `web_backend/server.js`：`CAMERAS` 對照表（cam1/cam2/depth/depth_live/depth_before/depth_after/depth_live_depth）、`proxyToCam()`、`/snap/:cam_id`、`/mjpeg/:cam_id` 兩條路由全部移除
+- `web_backend/public/style.css`：`panel-camera` / `cam-*` 樣式整段移除（約 110 行）
+
+### 一個會讓 server 開不起來的地雷（已處理）
+刪掉 `CAMERAS` 之後，啟動 log 那行還在引用它：
+```js
+console.log(`[web_backend] cameras: ${Object.keys(CAMERAS)...}`);
+```
+`CAMERAS` 已不存在 → **web_backend 一啟動就 ReferenceError 掛掉**。已一併移除。這種「刪了定義但漏掉某個引用點」的疏漏不會在編輯當下報錯，只會在下次重啟服務時才炸。
+
+### 驗證
+寫腳本檢查四項：① `CAMERAS`/`proxyToCam`/`wireCamera`/`wireDepthCamera` 已無任何非註解引用；② app.js 沒有 `getElementById` 抓已刪除的 HTML id；③ sidebar 分頁、`PAGES` 陣列、panel 的 `data-page` 三者一致（都是 home/manual/settings，沒有孤兒 panel）；④ 三個檔案的 `mjpeg`/`cam1`/`cam2`/`panel-camera`/`/snap/` 非註解殘留為 0。全部通過。
+
+### 沒有動到的部分
+washrobot Pi 上的 `frame_capture.py` / `depth_cam_service.py` **本身沒刪**，只是前端不再連它們。後端的 `run_depth_avoid` 等指令也還在（GUI 入口早在 2026-08-26 就移除了）。真的要清乾淨的話那些是下一步，但那牽涉到 Pi 上的部署，不在網頁範圍內。
+
+---
+
+## 2026-08-27b Claude (Sadie) — GUI 推桿不再分左右，改成 4 支一起
+
+### 需求
+user：網頁上的左右 ZDT 都改成全部一起（slave 5,6,7,8），不分左右。
+
+### 修改檔案
+- `web_backend/public/index.html`：
+  - `manual — pusher` 的 `right:` / `left:` 兩列移除，原本的 `feet:` 改標為「全部 4 支 (slave 5,6,7,8)」，送的還是 `pusher feet`（`group_slaves_` 對到 4 支）
+  - zero 那列的 `right` / `left` 按鈕移除，只留「全部歸零」（`zdt_zero all`）
+- `user_lib/WASH_ROBOT.cpp` `group_slaves_()`：修掉過期註解——還寫著舊的 `{1,2}`/`{3,4}`/`{1,2,3,4}`，但常數在 2026-08-27 已改成 5~8，留著會誤導
+
+### 一個重要區別（跟真空閥的合併不一樣，不要混為一談）
+真空閥那次合併是因為**實體只剩一顆閥（CH1）**，left/right 指令打到同一個 channel，所以**分不開**。
+
+推桿不是這樣：**4 顆是實體獨立的 ZDT 馬達，分得開**，只是操作上不再分。所以後端 `pusher right|left`／`group_slaves_` 的 right/left 分支**完全保留且仍真的只動該側**——步態邏輯（`run_side` 等）本來就依賴它們分側動作，若當成 alias 砍掉會直接破壞交替步伐。需要單側時仍可用 raw command，single slave 那列也還能單支點動。
+
+已驗證：GUI 內已無 `pusher right|left` / `zdt_zero right|left`（只剩說明註解），`app.js` 沒有引用被移除的元素，不受影響。
+
+---
+
 ## 2026-08-26h Claude (Sadie) — ⚠ QX-DO24 改用 atomic transaction（運動中操作 PWM 的前提）
 
 ### 起因
@@ -332,6 +504,246 @@ public method，兩顆 class 已知是照這個介面設計成 drop-in 的，比
 測過就永久有效。所以下次換裝/重裝時，把這幾項當作標準複查清單即可，不代表之前測試不完整。
 
 ---
+
+## 2026-08-27f Claude (Sadie) — IMU 換新並改回水平安裝 → 傾斜計算改回內建尤拉角
+### 變更（user）
+換了另一顆 IMU 並**改回水平安裝**。這使 08-27e 的加速度方案不再必要——gimbal lock 是垂直安裝獨有的問題。
+
+### bench 讀值印證
+```
+ax=-0.01 ay=0.01 az=1.00      ← 重力全落在 Z 軸 = 水平安裝
+raw_x=0.74 raw_y=0.40         ← roll/pitch 都接近 0，遠離 ±90° 死角
+n_accel=655 n_angle=876       ← 加速度輸出已成功開啟
+```
+（同一份讀值下 08-27e 的公式算出 `roll=120.65` —— 因為它假設 X 朝上，而平放時 `ax`/`ay` 都是雜訊等級，`atan2` 拿兩個近零值算方向純粹是放大雜訊。這也說明了為何方位假設一旦不符，加速度公式會給出看似合理但完全錯誤的角度。）
+
+### 為什麼水平安裝下尤拉角才是最佳選擇
+1. **沒有 gimbal lock**（pitch 遠離 ±90°）——那是垂直安裝時唯一的致命問題
+2. WT901 的 roll/pitch 本身即相對重力算出，且**經過陀螺儀融合**，動態下比純加速度換算更穩（純加速度會被機器移動的加速度污染）
+3. 只有 yaw(`imu_.z`) 依賴磁力計會漂——而我們不用 yaw
+
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp`
+  - `imu_monitor_loop_`：改回 `roll=imu_.x-imu_roll0_` / `pitch=imu_.y-imu_pitch0_`；移除加速度 fallback 分支（先前一度寫成 `if (false)` 的 dead code，已清除）
+  - `imu_take_baseline_`：改回累加 `imu_.x` / `imu_.y`
+  - `cmd_status` / `cmd_imu_zero`：同步改回尤拉角
+- `user_lib/WASH_ROBOT.h`：`imu_tilt_from_accel_` 標記為「目前未被呼叫，保留備用」
+
+### 新增：安裝方位健全性檢查
+`imu_monitor_loop_` 加入 `|az| < 0.70` 檢查（加速度可用時才判斷），命中則警告一次：
+> IMU 疑似不是水平安裝：|az|=… (<0.70)，重力主分量不在 Z 軸
+
+**目的**：若日後 IMU 又被改成非水平安裝，尤拉角會悄悄回到 gimbal lock 的壞狀態而不自知（今天就是這樣繞了一大圈）。有了這個檢查，同樣的問題會在第一時間被指出，而不是靠反覆量測才發現。
+
+### 三處定義必須一致（今天踩過的坑）
+`imu_monitor_loop_` / `imu_take_baseline_` / `cmd_status` 三者必須用同一套角度定義。當日曾出現 baseline 存尤拉角平均、monitor 用加速度的狀態——兩者單位與零點都不同，相減毫無意義。任何要改角度來源的人請三處一起改。
+
+### 待驗證（未編譯）
+1. status 的 `roll`/`pitch` 應接近 0（水平靜止），且不再有 `NO_ACCEL`
+2. `[imu_monitor]` 不應出現安裝方位警告
+3. 按「IMU 水平校正」→ `after` 接近 0 → 按 `reset` 清 Error
+4. 刻意左右歪 → `roll` 隨之變化（確認 IMU 的 x 軸方向與機器左右一致；若相反，step 校平的符號需連帶檢查）
+
+### 仍未處理
+step 校平路徑的 5 處（`1446/1567/1656/7231/7306`）仍使用 `imu_.z - imu_roll0_`（**yaw**）。那是 08-26 為垂直安裝所改，現在水平安裝下應改回 `imu_.x`。**這些是 step 期間的 IMU 校平，未改前不要跑 step 自動校平。** 需要實機確認符號後再一併處理。
+
+## 2026-08-27e Claude (Sadie) — 📌 傾斜改由加速度推導（IMU 安裝方位：X 朝上、Y 朝左）
+### 前提（user 提供）
+IMU 無法改回平躺；實際安裝方位為 **X 軸朝上、Y 軸朝左**（Z 軸依右手座標朝後）。
+
+### 公式推導
+靜止水平時重力全部落在 X 軸 → `ax≈±1, ay≈0, az≈0`。機器左右傾斜時重力會分一部分到 Y 軸（朝左），故：
+```
+roll  = atan2(ay, ax)                        // 左右傾斜（主要，兩繩吊掛最在意的）
+pitch = atan2(az, sqrt(ax² + ay²))           // 前後傾斜（輔助）
+```
+這也反向印證了 gimbal lock：`raw_y ≈ -87.74` 正是「從平躺繞 Y 軸轉 −90° 立起來」的量，剛好落在尤拉角的死角。
+
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` / `.cpp`：新增 `imu_tilt_from_accel_(roll_deg, pitch_deg)`（回傳 true=失敗，依專案慣例）
+- `imu_monitor_loop_`：改用加速度推導，並扣 `imu_roll0_`/`imu_pitch0_`
+- `imu_take_baseline_`：基準也改存**加速度算出來的角度**（原本存尤拉角平均）
+- `cmd_status`：`roll`/`pitch` 改用加速度；不可用時顯示 `NO_ACCEL`
+- `cmd_imu_zero`：before/after 同步改用加速度；基準取不到時回傳可操作的錯誤訊息（指向 WitMotion 設定與 `n_accel`）
+
+### 關鍵安全決策：「沒資料」絕不等於「水平」
+`imu_tilt_from_accel_` 在加速度模長 < 0.5g 時**回傳失敗**，而不是讓 `atan2(0,0)=0` 通過。若讓它回 0：
+- monitor 會認為永遠水平 → **傾斜保護悄悄失效**（比誤報危險得多）
+- status 會顯示漂亮的 `roll=0.00` → 操作者以為量測正常
+- baseline 會存下一個假的 0 → 之後所有相減都無意義
+
+因此三處各自處理：monitor **跳過判斷並每 10s 警告一次**（不誤報也不假裝安全）、status 顯示 `NO_ACCEL`、baseline 回傳失敗。
+
+### 基準定義必須與監控端一致
+原本 `imu_take_baseline_` 存尤拉角平均、monitor 用加速度，兩者**單位與零點都不同**，相減毫無意義。已一併改成加速度定義。基準的用途也因此明確化：吸收 IMU 安裝的固定偏差（模組未完全對齊機身的常數 offset），而非修正 gimbal lock。
+
+### 尚未改的 5 處（step 校平路徑）
+`1446 / 1567 / 1656 / 7231 / 7306` 仍使用 `imu_.z - imu_roll0_`（step 期間的 IMU 校平、`follower_imu_level_` 等）。這些在目前姿態下同樣不可信，但：
+1. 現在還走不到那些流程（機器尚未上牆）
+2. 它們的語意是「校平方向的符號」，改動需要重新確認正負號與實機驗證
+
+待加速度輸出打開、monitor 這條路徑驗證無誤後再一併處理。**在那之前不要跑 step 的 IMU 校平。**
+（`4320 / 4341` 也還是尤拉角，但位於 `#if 0` 的 retired `do_phase5_roll_correct_` 內，不編譯。）
+
+### 待驗證（未編譯）
+1. 開啟 IMU 加速度輸出後，status 的 `n_accel` 應持續增加、`ax/ay/az` 其中一軸接近 ±1
+2. 機器水平靜止時 `roll` 應接近 0；刻意左右傾斜時 `roll` 應隨之單調變化（確認符號與方向）
+3. 確認方向無誤後再按 `imu_guard on` 恢復保護
+
+## 2026-08-27d Claude (Sadie) — 📌 IMU 立起來安裝導致 gimbal lock；加傾斜保護開關與封包診斷
+### 現象
+IMU 校正後仍持續誤報 45° 傾斜 → `set_state_(Error)` → 所有 relay/推桿按鈕被 `state_violation_` 擋住。
+
+### 根因：gimbal lock，不是磁場漂移
+bench status（機器靜止）：
+```
+roll=-71.29 pitch=57.44 ax=0.00 ay=0.00 az=0.00
+raw_x=57.44 raw_y=-87.74 raw_z=-71.29
+```
+`raw_y = -87.74` 幾乎等於 −90° —— **尤拉角在此進入 gimbal lock，roll 與 yaw 在數學上無法分離、會互相耦合亂跳**。同一靜止姿態下 `raw_z` 先後量到 `7.83` 與 `-71.29`（差 79°）就是這個現象。
+
+**更正 2026-08-26 的判斷**：當時把 roll 改讀 `imu_.z`(yaw) 並歸因於「yaw 靠磁力計會漂」。磁場確實是 yaw 的固有弱點，但**主因是 gimbal lock** —— 在 pitch≈−90° 的姿態下，無論選哪一個尤拉角、校正得多準，都不可能穩定。這是表示法的數學極限，調參救不了。
+
+user 確認 IMU **無法改回平躺**（機構限制），因此必須改用加速度計算傾斜。
+
+### 但加速度封包沒進來
+`ax/ay/az` 恆為 0 而角度有值。`WT901BC_TTL::parsePacket()` 的 `0x51`(加速度) / `0x53`(角度) 解析都是完整的，所以推測是模組只送 `0x53`。為了證實而非猜測，新增封包類型計數。
+
+### 修改檔案
+- `user_lib/WT901BC_TTL.h` / `.cpp`：新增 `n_accel_pkt` / `n_angle_pkt` 兩個 atomic 計數器（`0x51` / `0x53` 各自遞增）
+- `user_lib/WASH_ROBOT.h`：新增 `imu_guard_enabled_`（預設 true）、`cmd_imu_guard(bool)` 宣告
+- `user_lib/WASH_ROBOT.cpp`：建構子初始化；`imu_monitor_loop_` 在 guard 關閉時跳過判斷並歸零累積計時；`cmd_imu_guard()` 實作；`cmd_status` 加 `ax/ay/az`、`raw_x/y/z`、`n_accel`/`n_angle`、`imu_guard`
+- `facade_cleaning_v2/main.cpp`：dispatch `imu_guard <on|off>`
+- `web_backend/public/index.html`：IMU 那列新增「停用/恢復傾斜保護」兩顆按鈕
+
+### 設計要點
+- **guard 關閉時歸零 `over_ask_ms`/`over_stop_ms`** —— 否則關閉期間累積的計時會在重新開啟的瞬間立刻觸發 emergency。
+- **`cmd_imu_guard` 不檢查 state** —— 要關掉保護的時機正好是「已經被誤報打進 Error」的時候。
+- **`imu_guard` 狀態一定出現在 status**（關閉時顯示 `OFF_NO_PROTECTION`）—— 保護被關卻不可見，操作者可能在毫無防護下把機器吊起來。
+
+### 下一步（待 bench 數據）
+重編後看 status 的 `n_accel` / `n_angle`：
+- `n_accel=0` 而 `n_angle` 持續增加 → 模組沒送加速度，需用廠商軟體或設定指令開啟 `0x51` 輸出
+- 兩者都在增加但 `ax/ay/az` 仍為 0 → 解析或資料問題，另查
+
+拿到可用的 `ax/ay/az` 之後，把傾斜計算改成由重力分量推導（完全繞開尤拉角與 gimbal lock），再恢復傾斜保護。
+
+## 2026-08-27c Claude (Sadie) — 📌 新增 imu_zero：IMU 基準沒校好會讓全部按鈕失效
+### 現象（user）
+「init 全部顯示 OK，只有 IMU 顯示嚴重傾斜」，但「按了都沒反應」。機器實際是水平的。
+
+### 根因鏈
+`imu_monitor_loop_` 每 100ms 取樣，`avg ≥ IMU_EMERGENCY_DEG(45°)` 持續 500ms 就執行：
+```cpp
+abort_flag = true;  motion_active_ = false;
+crane_cmd_("stop", 2);
+set_state_(State::Error);      // ← 關鍵
+```
+而 `cmd_pump` / `cmd_vacuum` 等幾乎所有指令的第一行都是
+`if (cur == State::Error) return state_violation_(cur);` ——**根本沒碰到 relay 就被退回**。所以硬體、bus、slave 全都正常，卻「按了沒反應」。
+
+### 為什麼水平的機器會被判 45°
+user 回報的三軸原始值 `x=58.89 / y=-87.35 / z=7.83`。2026-08-26 IMU 改垂直安裝後軸對應已改為：
+```cpp
+roll  = imu_.z - imu_roll0_;    // 7.83  - 0
+pitch = imu_.x - imu_pitch0_;   // 58.89 - 0   ← 觸發門檻
+```
+（`imu_.y = -87.35` 就是那次註解說的 gimbal lock，已棄用。）
+
+**`imu_roll0_` / `imu_pitch0_` 都還是建構子的 0** —— 基準沒取過，於是靜止機器的 pitch 被直接讀成 58.89°，超過 45° 門檻。
+
+### 死結：要校正卻先被擋住
+`imu_take_baseline_()` 全專案**只有 `cmd_init_impl_()` 一個呼叫點**。想校正 IMU 就得跑完整 init（DM2J 歸零、手臂 INIT…），為了校個基準動整串硬體不合理；而系統已經卡在 Error。
+
+### 修改檔案
+- `user_lib/WASH_ROBOT.h`：宣告 `cmd_imu_zero()`
+- `user_lib/WASH_ROBOT.cpp`：實作（放在 `cmd_tilt_mode` 前）
+- `facade_cleaning_v2/main.cpp`：dispatch 新增 `imu_zero`
+- `web_backend/public/index.html`：reset 那一區新增「🧭 IMU 水平校正」按鈕
+
+### 兩個刻意的設計決定
+1. **不做 state 檢查** —— 這個指令存在的意義就是從「基準沒校好 → Error → 什麼都不能做」自救；若要求 state 正常才能校正就死鎖了。
+2. **不自動清 Error** —— Error 也可能是別的原因造成的，自作主張清掉會掩蓋問題。改為在回覆尾端附 `NOTE:state_still_Error_press_reset` 提示，由操作者按 reset。
+
+回覆會同時印出校正前後的 roll/pitch，方便確認基準真的抓到了（before 應該是大角度、after 應該接近 0）。
+
+### 待驗證（未編譯）
+需重編 washrobot 主程式。流程：機器保持水平靜止 → 按「IMU 水平校正」→ 看 after 是否接近 0 → 按 reset → 確認 relay 按鈕恢復作用。
+
+## 2026-08-27b Claude (Sadie) — 吸盤 slave ID 由 1-4 改為 5-8（ZDT 與 JC100 同步）
+### 需求（user）
+「把真空表和 ZDT ID 都改成 5,6,7,8」。兩者共用同一組編號（推桿 slave N 末端的吸盤 = 真空表 slave N），分屬 .20 / .22 兩條 bus，同號不衝突。
+
+### 做法：引入常數而非逐處改數字
+原本「1..4」散在 **12 處寫死的迴圈**加上多處範圍判斷。新增單一真實來源：
+```cpp
+static constexpr int CUP_SLAVE_FIRST = 5;
+static constexpr int CUP_SLAVE_LAST  = 8;
+static constexpr int ZDT_RF1 = 5, ZDT_RF2 = 6;   // was 1, 2
+static constexpr int ZDT_LF1 = 7, ZDT_LF2 = 8;   // was 3, 4
+```
+所有迴圈與範圍判斷改吃常數（`WASH_ROBOT.cpp` 內共 24 處引用），日後再調編號只改這兩行。
+
+### ⚠ 三處「靜默算錯」的地雷（本次最重要的發現）
+`cm_to_pulses_for_slave_()` 原本是 v1 的分組：
+```cpp
+if (slave >= 1 && slave <= 4) return cm * (20000.0/7.0);   // feet, 2857 pulses/cm
+if (slave >= 5 && slave <= 9) return cm * (30000.0/10.0);  // body, 3000 pulses/cm
+```
+**吸盤改成 5-8 之後會掉進 body 分支，拿到 3000 而非 2857 pulses/cm —— 差 5%，而且不會報錯。** v2 沒有 body 推桿，該分支已移除。
+
+同型態的還有兩處三元式（`do_feet_realign_` 的 `drift_cm`、`cmd_realign()` 的 `over_cm`），都是 `(s >= 1 && s <= 4) ? 2857 : 3000`，一併改用常數。
+
+### 三處會直接壞掉的驗證
+`cmd_zdt_pusher` / `cmd_zdt_disable` / `cmd_zdt_enable` 都有 `if (slave < 1 || slave > 4) return "ERR invalid_slave"`。不改的話 GUI 的單支推桿控制送 5-8 會全部被拒。
+
+### 陣列安全性已確認
+`zdt_[9]` / `meter_[9]` / `cached_pressure_[9]` / `last_seal_pulse_[9]` 都是 9 格、index = slave−1，5-8 對應 index 4-7，**不越界**。local 的 `deltas(9,0)` 同樣安全；`targets[]` 用的是 0-based 迴圈索引而非 slave−1，不受影響。
+
+### GUI 兩處必須同步（否則靜默失效）
+- **`vac-1..4` → `vac-5..8`**：C++ 的 status 用真實 slave 號輸出 `p5=…p8=`，而 `app.js` 的 `parseVacuumValues` 拿那個數字去找 `#vac-N`，找不到就 `if (!cell) continue` —— **壓力顯示會整片空白且不報錯**
+- **`zdt-slave-select` 選項 1-4 → 5-8**：否則送出的 slave 會被後端擋成 `ERR invalid_slave`
+
+其餘 GUI 的 1-4 選單（QX PWM 通道）與吸盤無關，未動。
+
+### 待驗證（未編譯）
+上機確認：(1) init log 印 `[OK] ZDT 5~8` / `[OK] JC-100 5~8`；(2) 壓力面板四格有數字；(3) 單支推桿 EXTEND/RETRACT 對得上實體位置；(4) **推桿行程的 cm 換算正確**（這是 5% 誤差那項的驗證重點，可用 realign 或 fine-tune 的 pulse 數對照）。
+
+## 2026-08-27 Claude (Sadie) — bench 硬體重配：crane IP、relay 搬 bus、單一真空閥
+### 三項變更（user 分次指示）
+1. **crane IP** `192.168.5.27` → **`192.168.5.17`**（`WASH_ROBOT.h` CRANE_IP）
+2. **PQW relay 從 .22 搬到 .20**（`pqw_.init(cli_22_ → cli_20_)`）
+3. **真空閥不再分左右**，實體只剩一顆閥在 CH1
+
+### 2. relay 搬 bus — 為什麼只搬 relay
+user 最初說「relay 放 .20、ZDT 放 .22」，但**那個組合會撞 slave ID**：ZDT 推桿是 slave 1-4，JC100 壓力也是 slave 1-4，兩者現在能共存純粹因為在不同 bus。ZDT 搬到 .22 而 JC100 留著，主站發 slave 1 時兩台都會回應。向 user 指出後，最終只搬 relay。
+
+現況（兩條 bus 的 slave ID 各自唯一，無衝突）：
+
+| bus | 裝置 | slave |
+|---|---|---|
+| **.20** (`cli_20_`) | ZDT 推桿 ×4 / **PQW relay** | 1-4 / **12** |
+| **.22** (`cli_22_`) | JC100 ×4 / QX PWM / DY500 ×2 / XKC / DM2J 上滑台 | 1-4 / 6 / 10-11 / 13 / 14 |
+
+IP 常數不必改（`cli_20_` 仍連 .20、`cli_22_` 仍連 .22），只換 `pqw_.init` 的 client 綁定。
+
+**副作用**：.20 現在多了 PQW 流量（閥/泵/刷的 relay 寫入），而 ZDT 在 step 期間是密集輪詢的——推桿動作與真空閥切換現在會在同一條 bus 上排隊。若出現以前沒看過的 ZDT timeout 或 relay 寫入失敗，這是第一個要懷疑的地方。另外檔案裡數十處「cli_22_ bus 有 JC100/PQW 競爭」之類的註解，關於 PQW 的部分已過時（JC100 部分仍成立），已在 `init()` 開頭加權威說明並標注。
+
+### 3. 單一真空閥 — ⚠ 安全性質變動
+`CH_VALVE_LEFT` 由 3 改為 **指向 `CH_VALVE_RIGHT`(1)**，而非直接刪除左右之分。理由：二十幾處既有呼叫點中絕大多數本來就是左右同時設同一個值，用別名可以不必全面改寫；若之後改回兩顆獨立閥，把常數改回 3 即可自動還原所有邏輯。
+
+`vacuum_valve_("all"/"feet")` 加了 `if (CH_VALVE_LEFT != CH_VALVE_RIGHT)` 判斷，避免對同一 channel 重複寫入（省一趟含 verify 讀回的 Modbus 來回），同樣保有改回雙閥時自動恢復的性質。
+
+**⚠「只放開單側」在硬體上已不可能。** `do_step_down_` / `do_step_up_` / `do_cross_obstacle_` 的核心前提是「一側解真空、另一側維持吸附當防墜錨點」（見 `run_side` 的 `CH_VALVE_RIGHT`/`CH_VALVE_LEFT` 參數，7464/8246/8491）——現在開 CH1 會讓 4 顆一起失去真空，該前提直接破掉。這些路徑的 GUI 入口已於 2026-08-26 移除，但**後端指令仍在，不可用 raw command 呼叫**。v2 正式走法 `do_step_sync_` 只呼叫 `vacuum_valve_("feet")`，不受影響。
+
+### GUI 同步
+- 修正過時標籤：原寫「pump (CH1)」是錯的——CH1 是電磁閥，`CH_PUMP` 一直都是 2
+- 移除 right / left 兩列閥控制（現在都會打到同一個 CH1，留著會讓人誤以為能單側控制），改為單一「真空閥 valve (CH1 → 全部 4 顆)」並加警語
+- 移除重複的「all」列（`vacuum_valve_` 裡 "all" 與 "feet" 同分支，單閥化後完全等價）
+- 「manual — vacuum readings」的 right/left 分組**未動**——那是 JC100 各吸盤的壓力讀數，分左右仍然正確
+
+### 待驗證（未編譯）
+C++ 需重編（`WASH_ROBOT.h` 是 header 常數，所有 include 它的 TU 都要重建）。上機確認：(1) crane 連得上 .17；(2) relay 在 .20 動作正常、且 ZDT 沒出現新的 timeout；(3) 開關真空閥時 4 顆壓力同步變化。
 
 ## 2026-08-26g Claude (Sadie) — 新增「乾式清洗」測試指令 arm_clean_sweep_dry
 ### 需求（user）

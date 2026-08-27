@@ -36,6 +36,12 @@
 class WT901BC_TTL {
 public:
 	double ax, ay, az;
+
+	// [2026-08-27] 收到的封包類型計數。bench 上遇到 ax/ay/az 恆為 0 而角度有值，
+	// 需要區分「模組沒送加速度封包(0x51)」與「送了但解析錯」——這兩個計數可以
+	// 直接證實，不必開 debug_mode 看整片 hex dump。
+	std::atomic<uint32_t> n_accel_pkt{0};   // 0x51
+	std::atomic<uint32_t> n_angle_pkt{0};   // 0x53
 	double gx, gy, gz;
 	double x, y, z;
 	double pressure;

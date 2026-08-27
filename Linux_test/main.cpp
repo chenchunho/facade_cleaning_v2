@@ -111,27 +111,72 @@ static constexpr int PUSHER_BACKOFF_PULSE = 120000;
 // Values set by measurement on the actual robot (2026-04-23):
 //   feet pushers reach ~8cm at  23000 pulses (2026-04-28 從 7 cm 加長)
 //   body pushers reach ~10cm at 30000 pulses
-static constexpr int PUSHER_EXTEND_FEET_PULSE = 23000;   // feet: ~8 cm (was 20000=~7cm before 2026-04-28)
-static constexpr int PUSHER_EXTEND_BODY_PULSE = 30000;   // body: ~10 cm
+// [2026-08-27] 對齊 WASH_ROBOT.h PUSHER_EXTEND_FEET_PULSE = 36000 (12.0 cm)。
+// 舊值 23000 (~8cm) 是 v1 量測值；v2 per user 已改 8.1 → 14 → 12 cm。
+// ⚠ SMC LEYG25 行程只有 20cm，36000 pulses = 12cm 還在範圍內，但別再往上加太多。
+static constexpr int PUSHER_EXTEND_FEET_PULSE = 36000;   // feet: 12.0 cm (2026-08-27: 23000→36000 對齊生產)
+static constexpr int PUSHER_EXTEND_BODY_PULSE = 30000;   // ⚠ v1 遺留，v2 無身體吸盤
 
-// Slave mappings (matches WASH_ROBOT architecture)
-//   ZDT feet:   1, 2, 5, 6   (left-front, left-back, right-front, right-back)
-//   ZDT body:   3, 4, 7, 8
-//   ZDT center: 9
-//   DM2J rail:  1 (left foot), 3 (right foot)
-//   JC-100:     slaves 1..9 match ZDT 1..9 (vacuum sensor per cup)
-//   PQW slave:  12 (relay, 8CH)
-//     CH1 pump / CH2 feet valve / CH3 body valve / CH4 center valve
+// ============================================================
+//  [2026-08-27] 對齊 v2 生產程式（user_lib/WASH_ROBOT.{h,cpp}）
+//
+//  ⚠ 真實來源是 WASH_ROBOT.h，這裡是「複製」而非引用。改任何一邊都要對照另一邊。
+//  下面每項都標了 WASH_ROBOT.h 的對應常數名，方便核對。
+//
+//  【對齊前的落差 — 都是實際會誤導測試的，不只是命名】
+//   1. 繼電器 CH1/CH2 整個對調：舊 Linux_test 是 CH1=泵浦 / CH2=腳閥，
+//      生產程式是 CH1=閥 / CH2=泵浦。照舊值測「開泵浦」其實是在開閥。
+//   2. Bus 分配錯兩條：v2 只有 .20 / .22 兩條（沒有 .21）。
+//      ZDT 在 .20（舊值 .21）、PQW 在 .20（舊值 .22）、DM2J 在 .22（舊值 .20）。
+//   3. 吸盤 slave 1-4 → 5-8（2026-08-27 改號）。
+//   4. v2 沒有身體吸盤、沒有中心吸盤、沒有左右兩條 DM2J 滑軌
+//      —— 只有 4 顆腳吸盤 + 1 個上滑台（slave 14）。
+//      舊的 BODY / CENTER / LEFT_RAIL / RIGHT_RAIL 常數保留只為讓 v1 遺留的
+//      menu 還能編譯，v2 硬體上不存在，別拿它們測。
+//
+//  v2 實際拓樸（只有兩條 RS485 gateway，皆 port 4001）：
+//    192.168.1.20 (IP_485_1, cli_20_) — ZDT 推桿 5~8 / PQW 繼電器 12
+//    192.168.1.22 (IP_485_3, cli_22_) — JC-100 真空表 5~8 / XKC 水位 13 /
+//                                       DM2J 上滑台 14 / (QX-DO24 PWM 6 停用中)
+// ============================================================
+
+// --- Gateway 預設 IP（prompt 按 Enter 就用這些）---
+static constexpr const char* IP_ZDT   = "192.168.1.20";  // WASH_ROBOT.h IP_485_1
+static constexpr const char* IP_PQW   = "192.168.1.20";  // 同一條 bus
+static constexpr const char* IP_JC100 = "192.168.1.22";  // WASH_ROBOT.h IP_485_3
+static constexpr const char* IP_DM2J  = "192.168.1.22";  // 上滑台也在 .22
+
+// --- 吸盤 slave（ZDT 推桿與 JC-100 真空表同號，分別在 .20 / .22）---
+// WASH_ROBOT.h CUP_SLAVE_FIRST / CUP_SLAVE_LAST
+static constexpr int CUP_SLAVE_FIRST = 5;
+static constexpr int CUP_SLAVE_LAST  = 8;
+// WASH_ROBOT.h ZDT_RF1/RF2/LF1/LF2 — 右腳 5,6 / 左腳 7,8
+static constexpr int ZDT_RF1 = 5, ZDT_RF2 = 6;
+static constexpr int ZDT_LF1 = 7, ZDT_LF2 = 8;
+
+// --- DM2J 上滑台 ---
+// WASH_ROBOT.h DM2J_ARM = 14。v2 只有這一顆 DM2J。
+static constexpr int DM2J_ARM_SLAVE  = 14;
+// ⚠ v1 遺留：v2 沒有左右腳滑軌，保留僅為舊 menu 可編譯，勿用來測 v2 硬體。
 static constexpr int DM2J_LEFT_RAIL  = 1;
 static constexpr int DM2J_RIGHT_RAIL = 3;
 static constexpr int DM2J_RPM        = 200;
 static constexpr int DM2J_ACC        = 50;
 static constexpr int DM2J_DEC        = 100;
+
+// --- PQW 繼電器（slave 12 @ .20）---
+// WASH_ROBOT.h PQW_SLAVE / CH_VALVE_RIGHT / CH_PUMP / CH_BREAK_VACUUM /
+//              CH_WATER_PUMP / CH_BRUSH
 static constexpr int PQW_SLAVE       = 12;
-static constexpr int PQW_CH_PUMP         = 1;
-static constexpr int PQW_CH_VALVE_FEET   = 2;
+static constexpr int PQW_CH_VALVE_FEET   = 1;   // ⚠ 舊值 2 — CH_VALVE_RIGHT，v2 單一顆閥管全部 4 顆吸盤
+static constexpr int PQW_CH_PUMP         = 2;   // ⚠ 舊值 1 — CH_PUMP (dp0105 真空泵浦)
+static constexpr int PQW_CH_BREAK_VACUUM = 6;   // CH_BREAK_VACUUM (2026-08-27: 14→6)
+static constexpr int PQW_CH_WATER_PUMP   = 14;  // CH_WATER_PUMP — 實體未接，且生產流程已停用
+static constexpr int PQW_CH_BRUSH        = 15;  // CH_BRUSH — 手臂滾筒刷馬達
+// ⚠ v1 遺留：v2 沒有身體/中心吸盤，這兩個 CH 在 v2 沒接東西。
 static constexpr int PQW_CH_VALVE_BODY   = 3;
 static constexpr int PQW_CH_VALVE_CENTER = 4;
+
 static constexpr int VACUUM_SETTLE_MS    = 2000;
 static constexpr int VACUUM_RELEASE_MS   = 300;
 
@@ -228,9 +273,9 @@ static void test_imu() {
 static void test_dm2j() {
     cout << "\n--- DM2J_RS570 step motor ---\n";
     string ip;
-    cout << "Gateway IP [192.168.1.20]: ";
+    cout << "Gateway IP [" << IP_DM2J << "]: ";
     getline(cin, ip);
-    if (ip.empty()) ip = "192.168.1.20";
+    if (ip.empty()) ip = IP_DM2J;
 
     cout << "Slave ID [3]: ";
     string s; getline(cin, s);
@@ -284,7 +329,7 @@ static void test_dm2j() {
         cout << "  [OK] JOG stop sent\n";
     } else if (mode_c == 'r') {
         cout << "  → move " << cm << " cm (relative, mode=2)\n";
-        drv.PR_move_cm(0, 2, 500, cm, 50, 100);
+        drv.PR_move_cm(0, 2, 100, cm, 50, 2000);
         cout << "  [OK] move command sent\n";
     } else if (mode_c == 's') {
         // Split pattern: set PR block → 200ms → trigger → wait for RUN → wait for done.
@@ -293,7 +338,7 @@ static void test_dm2j() {
         double pos_pre = 0; drv.read_position_cm(pos_pre);
         cout << "  → move " << cm << " cm (absolute, split: set → 200ms → trigger)\n";
         cout << "  position (pre-trigger): " << pos_pre << " cm\n";
-        drv.PR_move_cm_set(0, 1, 500, cm, 50, 100);
+        drv.PR_move_cm_set(0, 1, 100, cm, 50, 2000);
         this_thread::sleep_for(chrono::milliseconds(200));
         drv.PR_trigger(0);
 
@@ -321,7 +366,7 @@ static void test_dm2j() {
         cout << "  position (post): " << pos_post << " cm (Δ=" << (pos_post - pos_pre) << ")\n";
     } else {
         cout << "  → move " << cm << " cm (absolute, mode=1)\n";
-        drv.PR_move_cm(0, 1, 500, cm, 50, 100);
+        drv.PR_move_cm(0, 1, 100, cm, 50, 2000);
         cout << "  [OK] move command sent\n";
     }
 
@@ -340,9 +385,9 @@ static void test_dm2j() {
 static void test_zdt() {
     cout << "\n--- ZDT SMC pusher ---\n";
     string ip;
-    cout << "Gateway IP [192.168.1.21]: ";
+    cout << "Gateway IP [" << IP_ZDT << "]: ";
     getline(cin, ip);
-    if (ip.empty()) ip = "192.168.1.21";
+    if (ip.empty()) ip = IP_ZDT;
 
     cout << "Slave ID [1]: ";
     string s; getline(cin, s);
@@ -466,9 +511,9 @@ static void test_zdt() {
 static void test_jc100() {
     cout << "\n--- JC-100 vacuum pressure ---\n";
     string ip;
-    cout << "Gateway IP [192.168.1.22]: ";
+    cout << "Gateway IP [" << IP_JC100 << "]: ";
     getline(cin, ip);
-    if (ip.empty()) ip = "192.168.1.22";
+    if (ip.empty()) ip = IP_JC100;
 
     cout << "Slave ID [1]: ";
     string s; getline(cin, s);
@@ -515,9 +560,9 @@ static void test_jc100() {
 static void test_pqw() {
     cout << "\n--- PQW 8CH relay ---\n";
     string ip;
-    cout << "Gateway IP [192.168.1.22]: ";
+    cout << "Gateway IP [" << IP_PQW << "]: ";
     getline(cin, ip);
-    if (ip.empty()) ip = "192.168.1.22";
+    if (ip.empty()) ip = IP_PQW;
 
     cout << "Slave ID [12]: ";
     string s; getline(cin, s);
@@ -626,9 +671,9 @@ static void test_pqw() {
 static void test_zdt_positions() {
     cout << "\n--- ZDT positions (read all 9 pushers) ---\n";
     string ip;
-    cout << "Gateway IP [192.168.1.21]: ";
+    cout << "Gateway IP [" << IP_ZDT << "]: ";
     getline(cin, ip);
-    if (ip.empty()) ip = "192.168.1.21";
+    if (ip.empty()) ip = IP_ZDT;
 
     if (!quick_tcp_probe(ip, 4001)) {
         cerr << "[ERR] " << ip << ":4001 unreachable (2s timeout)\n"; return;
@@ -701,9 +746,9 @@ static void test_zdt_positions() {
 static void test_zdt_release_stall() {
     cout << "\n--- ZDT release stall (all 9 slaves) ---\n";
     string ip;
-    cout << "Gateway IP [192.168.1.21]: ";
+    cout << "Gateway IP [" << IP_ZDT << "]: ";
     getline(cin, ip);
-    if (ip.empty()) ip = "192.168.1.21";
+    if (ip.empty()) ip = IP_ZDT;
 
     if (!quick_tcp_probe(ip, 4001)) {
         cerr << "[ERR] " << ip << ":4001 unreachable (2s timeout)\n"; return;
@@ -748,9 +793,9 @@ static void test_zdt_release_stall() {
 static void test_zdt_driver_enable() {
     cout << "\n--- ZDT driver enable / disable ---\n";
     string ip;
-    cout << "Gateway IP [192.168.1.21]: ";
+    cout << "Gateway IP [" << IP_ZDT << "]: ";
     getline(cin, ip);
-    if (ip.empty()) ip = "192.168.1.21";
+    if (ip.empty()) ip = IP_ZDT;
 
     if (!quick_tcp_probe(ip, 4001)) {
         cerr << "[ERR] " << ip << ":4001 unreachable (2s timeout)\n"; return;
@@ -824,10 +869,10 @@ static void test_vacuum_seal_fix() {
     cout << "\n--- ZDT vacuum-seal auto fine-tune ---\n";
 
     string ip21, ip22;
-    cout << "ZDT gateway IP[192.168.1.21]: ";    getline(cin, ip21);
-    if (ip21.empty()) ip21 = "192.168.1.21";
-    cout << "JC-100 gateway IP[192.168.1.22]: "; getline(cin, ip22);
-    if (ip22.empty()) ip22 = "192.168.1.22";
+    cout << "ZDT gateway IP[" << IP_ZDT << "]: ";    getline(cin, ip21);
+    if (ip21.empty()) ip21 = IP_ZDT;
+    cout << "JC-100 gateway IP[" << IP_JC100 << "]: "; getline(cin, ip22);
+    if (ip22.empty()) ip22 = IP_JC100;
 
     cout << "Group [feet / body]: ";
     string group; getline(cin, group);
@@ -950,9 +995,9 @@ static void test_zdt_group() {
     cout << "\n--- ZDT multi-pusher group ---\n";
 
     string ip;
-    cout << "Gateway IP [192.168.1.21]: ";
+    cout << "Gateway IP [" << IP_ZDT << "]: ";
     getline(cin, ip);
-    if (ip.empty()) ip = "192.168.1.21";
+    if (ip.empty()) ip = IP_ZDT;
 
     cout << "Skip slaves (comma, empty=none) [9]: ";
     string skip_in; getline(cin, skip_in);
@@ -1530,9 +1575,9 @@ static void test_full_step() {
     cout << "\n--- Full step sequence (8 pushers staged 7/10cm + rail + vacuum + retry) ---\n";
 
     string ip20, ip21, ip22;
-    cout << "DM2J gateway IP  [192.168.1.20]: ";  getline(cin, ip20);  if (ip20.empty()) ip20 = "192.168.1.20";
-    cout << "ZDT gateway IP   [192.168.1.21]: ";  getline(cin, ip21);  if (ip21.empty()) ip21 = "192.168.1.21";
-    cout << "JC/PQW gateway IP[192.168.1.22]: ";  getline(cin, ip22);  if (ip22.empty()) ip22 = "192.168.1.22";
+    cout << "DM2J gateway IP  [" << IP_DM2J << "]: ";  getline(cin, ip20);  if (ip20.empty()) ip20 = IP_DM2J;
+    cout << "ZDT gateway IP   [" << IP_ZDT << "]: ";  getline(cin, ip21);  if (ip21.empty()) ip21 = IP_ZDT;
+    cout << "JC-100 gateway IP[" << IP_JC100 << "]: ";  getline(cin, ip22);  if (ip22.empty()) ip22 = IP_JC100;
 
     int step_cm = 10, num_steps = 1, threshold = -300, retry_cnt = 3;
     double rail_backup_cm = 5.0;
@@ -1870,8 +1915,8 @@ static void test_full_step_no_rail() {
     cout << "\n--- Full step sequence WITHOUT rail (pusher + vacuum only) ---\n";
 
     string ip21, ip22;
-    cout << "ZDT gateway IP   [192.168.1.21]: ";  getline(cin, ip21);  if (ip21.empty()) ip21 = "192.168.1.21";
-    cout << "JC/PQW gateway IP[192.168.1.22]: ";  getline(cin, ip22);  if (ip22.empty()) ip22 = "192.168.1.22";
+    cout << "ZDT gateway IP   [" << IP_ZDT << "]: ";  getline(cin, ip21);  if (ip21.empty()) ip21 = IP_ZDT;
+    cout << "JC-100 gateway IP[" << IP_JC100 << "]: ";  getline(cin, ip22);  if (ip22.empty()) ip22 = IP_JC100;
 
     int num_steps = 1, threshold = -300, retry_cnt = 3;
     string s;
@@ -2303,8 +2348,8 @@ static void test_full_step_no_rail_verify() {
     cout << "\n--- Full step WITHOUT rail + vacuum verify + retry ---\n";
 
     string ip21, ip22;
-    cout << "ZDT gateway IP   [192.168.1.21]: ";  getline(cin, ip21);  if (ip21.empty()) ip21 = "192.168.1.21";
-    cout << "JC/PQW gateway IP[192.168.1.22]: ";  getline(cin, ip22);  if (ip22.empty()) ip22 = "192.168.1.22";
+    cout << "ZDT gateway IP   [" << IP_ZDT << "]: ";  getline(cin, ip21);  if (ip21.empty()) ip21 = IP_ZDT;
+    cout << "JC-100 gateway IP[" << IP_JC100 << "]: ";  getline(cin, ip22);  if (ip22.empty()) ip22 = IP_JC100;
 
     int num_steps = 1, threshold = -300, retry_cnt = 3;
     string s;
@@ -2521,9 +2566,9 @@ static void test_full_step_report() {
     cout << "\n--- Full step WITH rail, report only ---\n";
 
     string ip20, ip21, ip22;
-    cout << "DM2J gateway IP  [192.168.1.20]: ";  getline(cin, ip20);  if (ip20.empty()) ip20 = "192.168.1.20";
-    cout << "ZDT gateway IP   [192.168.1.21]: ";  getline(cin, ip21);  if (ip21.empty()) ip21 = "192.168.1.21";
-    cout << "JC/PQW gateway IP[192.168.1.22]: ";  getline(cin, ip22);  if (ip22.empty()) ip22 = "192.168.1.22";
+    cout << "DM2J gateway IP  [" << IP_DM2J << "]: ";  getline(cin, ip20);  if (ip20.empty()) ip20 = IP_DM2J;
+    cout << "ZDT gateway IP   [" << IP_ZDT << "]: ";  getline(cin, ip21);  if (ip21.empty()) ip21 = IP_ZDT;
+    cout << "JC-100 gateway IP[" << IP_JC100 << "]: ";  getline(cin, ip22);  if (ip22.empty()) ip22 = IP_JC100;
 
     int step_cm = 10, num_steps = 1;
     string s;
@@ -2730,9 +2775,9 @@ static bool water_wait_or_abort(int seconds) {
 static void test_water_tank() {
     cout << "\n--- Water tank test (PQW CH5/6/7) ---\n";
     string ip;
-    cout << "Gateway IP [192.168.1.22]: ";
+    cout << "Gateway IP [" << IP_JC100 << "]: ";
     getline(cin, ip);
-    if (ip.empty()) ip = "192.168.1.22";
+    if (ip.empty()) ip = IP_JC100;
 
     cout << "Slave ID [12]: ";
     string s; getline(cin, s);
@@ -2978,9 +3023,9 @@ static void test_water_tank() {
 static void test_dm2j_monitor() {
     cout << "\n--- DM2J live position + status monitor ---\n";
     string ip;
-    cout << "Gateway IP [192.168.1.20]: ";
+    cout << "Gateway IP [" << IP_DM2J << "]: ";
     getline(cin, ip);
-    if (ip.empty()) ip = "192.168.1.20";
+    if (ip.empty()) ip = IP_DM2J;
 
     cout << "Slave ID [2]: ";
     string s; getline(cin, s);
@@ -3051,9 +3096,9 @@ static void test_dm2j_monitor() {
 static void test_dm2j_zero() {
     cout << "\n--- DM2J set current position as zero ---\n";
     string ip;
-    cout << "Gateway IP [192.168.1.20]: ";
+    cout << "Gateway IP [" << IP_DM2J << "]: ";
     getline(cin, ip);
-    if (ip.empty()) ip = "192.168.1.20";
+    if (ip.empty()) ip = IP_DM2J;
 
     cout << "Slave ID [1]: ";
     string s; getline(cin, s);
@@ -3118,9 +3163,9 @@ static void test_dm2j_zero() {
 static void test_dm2j_group_sync() {
     cout << "\n--- DM2J group sync move (feet 1,3 / wheels 2,4) ---\n";
     string ip;
-    cout << "Gateway IP [192.168.1.20]: ";
+    cout << "Gateway IP [" << IP_DM2J << "]: ";
     getline(cin, ip);
-    if (ip.empty()) ip = "192.168.1.20";
+    if (ip.empty()) ip = IP_DM2J;
 
     if (!quick_tcp_probe(ip, 4001)) {
         cerr << "[ERR] " << ip << ":4001 unreachable (2s timeout)\n"; return;
@@ -3258,9 +3303,9 @@ static void test_dm2j_group_sync() {
 static void test_cleanup() {
     cout << "\n--- Emergency cleanup (all relays OFF / pushers retract / rails home) ---\n";
     string ip20, ip21, ip22;
-    cout << "DM2J gateway IP  [192.168.1.20]: ";  getline(cin, ip20);  if (ip20.empty()) ip20 = "192.168.1.20";
-    cout << "ZDT gateway IP   [192.168.1.21]: ";  getline(cin, ip21);  if (ip21.empty()) ip21 = "192.168.1.21";
-    cout << "JC/PQW gateway IP[192.168.1.22]: ";  getline(cin, ip22);  if (ip22.empty()) ip22 = "192.168.1.22";
+    cout << "DM2J gateway IP  [" << IP_DM2J << "]: ";  getline(cin, ip20);  if (ip20.empty()) ip20 = IP_DM2J;
+    cout << "ZDT gateway IP   [" << IP_ZDT << "]: ";  getline(cin, ip21);  if (ip21.empty()) ip21 = IP_ZDT;
+    cout << "JC-100 gateway IP[" << IP_JC100 << "]: ";  getline(cin, ip22);  if (ip22.empty()) ip22 = IP_JC100;
 
     bool reach20 = quick_tcp_probe(ip20, 4001);
     bool reach21 = quick_tcp_probe(ip21, 4001);
@@ -5004,25 +5049,25 @@ static void test_se3_inspect() {
 // -> done. Own-leg valve channel is derived from the ZDT slave id, matching
 // WASH_ROBOT.h's CH_VALVE_RIGHT(1)=slave{1,2} / CH_VALVE_LEFT(3)=slave{3,4}.
 static void test_break_vacuum_leg() {
-    cout << "\n--- Break-vacuum valve (CH16) + ZDT leg release ---\n";
+    cout << "\n--- Break-vacuum valve (CH" << PQW_CH_BREAK_VACUUM << ") + ZDT leg release ---\n";
 
     string zdt_ip;
-    // [!] project topology has ZDT pushers on .21 (RS485_2) — .20 is DM2J's bus
-    // (RS485_1). Using the default you asked for; override at the prompt if
-    // that was a typo.
-    cout << "ZDT gateway IP [192.168.1.20]: ";
+    // [2026-08-27] 對齊 v2 拓樸：ZDT 推桿與 PQW 繼電器同在 .20，JC-100 真空表在 .22。
+    // 舊版把 JC-100 掛在 PQW 的連線上（v1 兩者同在 .22 才成立），v2 會完全讀不到
+    // 壓力 —— 收尾的壓力回報正是判斷破真空有沒有生效的依據。改用獨立第三條連線。
+    cout << "ZDT gateway IP [" << IP_ZDT << "]: ";
     getline(cin, zdt_ip);
-    if (zdt_ip.empty()) zdt_ip = "192.168.1.20";
+    if (zdt_ip.empty()) zdt_ip = IP_ZDT;
 
-    cout << "ZDT slave ID [3]: ";
+    cout << "ZDT slave ID [" << ZDT_RF1 << "]: ";
     string s; getline(cin, s);
-    int zdt_slave = s.empty() ? 3 : stoi(s);
+    int zdt_slave = s.empty() ? ZDT_RF1 : stoi(s);
 
     int own_valve_ch;
-    if      (zdt_slave == 1 || zdt_slave == 2) own_valve_ch = 1;   // CH_VALVE_RIGHT
-    else if (zdt_slave == 3 || zdt_slave == 4) own_valve_ch = 3;   // CH_VALVE_LEFT
+    // v2 只有一顆真空閥（PQW_CH_VALVE_FEET）管全部 4 顆吸盤，不再分左右腳。
+    if (zdt_slave >= CUP_SLAVE_FIRST && zdt_slave <= CUP_SLAVE_LAST) own_valve_ch = PQW_CH_VALVE_FEET;
     else {
-        cout << "  slave " << zdt_slave << " not in the usual 1-4 feet range"
+        cout << "  slave " << zdt_slave << " not in the v2 cup range (" << CUP_SLAVE_FIRST << "-" << CUP_SLAVE_LAST << ")"
              << " — enter its vacuum valve channel manually: ";
         string vch; getline(cin, vch);
         try { own_valve_ch = stoi(vch); }
@@ -5030,29 +5075,38 @@ static void test_break_vacuum_leg() {
     }
 
     string pqw_ip;
-    cout << "PQW gateway IP [192.168.1.22]: ";
+    cout << "PQW gateway IP [" << IP_PQW << "]: ";
     getline(cin, pqw_ip);
-    if (pqw_ip.empty()) pqw_ip = "192.168.1.22";
+    if (pqw_ip.empty()) pqw_ip = IP_PQW;
 
     cout << "PQW slave ID [12]: ";
     string ps; getline(cin, ps);
     int pqw_slave = ps.empty() ? 12 : stoi(ps);
 
-    constexpr int BREAK_VACUUM_CH              = 16;   // 2026-07-23 新設備
+    string jc_ip;
+    cout << "JC-100 gateway IP [" << IP_JC100 << "]: ";
+    getline(cin, jc_ip);
+    if (jc_ip.empty()) jc_ip = IP_JC100;
+
+    // [2026-08-27] 16 -> PQW_CH_BREAK_VACUUM(6)，對齊 WASH_ROBOT.h CH_BREAK_VACUUM。
+    // 16 是 bench 期的歷史編號，production 先到 14、2026-08-27 per user 改 6。
+    constexpr int BREAK_VACUUM_CH              = PQW_CH_BREAK_VACUUM;
 
     if (!quick_tcp_probe(zdt_ip, 4001)) { cerr << "[ERR] " << zdt_ip << ":4001 unreachable\n"; return; }
     if (!quick_tcp_probe(pqw_ip, 4001)) { cerr << "[ERR] " << pqw_ip << ":4001 unreachable\n"; return; }
+    if (!quick_tcp_probe(jc_ip,  4001)) { cerr << "[ERR] " << jc_ip  << ":4001 unreachable\n"; return; }
 
-    TCP_client cli_zdt, cli_pqw;
+    TCP_client cli_zdt, cli_pqw, cli_jc;
     if (!cli_zdt.connectToServer(zdt_ip, 4001, false)) { cerr << "[ERR] " << zdt_ip << " connect fail\n"; return; }
     if (!cli_pqw.connectToServer(pqw_ip, 4001, false)) { cerr << "[ERR] " << pqw_ip << " connect fail\n"; cli_zdt.close(); return; }
+    if (!cli_jc .connectToServer(jc_ip,  4001, false)) { cerr << "[ERR] " << jc_ip  << " connect fail\n"; cli_zdt.close(); cli_pqw.close(); return; }
 
     ZDT_motor_control zdt;
     PQW_IO_16O_RLY    pqw;
     JC_100_METER      jc;
     if (zdt.init(cli_zdt, zdt_slave, true))    { cerr << "[ERR] ZDT slave "    << zdt_slave << " init fail\n"; cli_zdt.close(); cli_pqw.close(); return; }
     if (pqw.init(cli_pqw, pqw_slave, 16, true)){ cerr << "[ERR] PQW slave "    << pqw_slave << " init fail\n"; cli_zdt.close(); cli_pqw.close(); return; }
-    if (jc.init(cli_pqw, zdt_slave, true))     { cerr << "[ERR] JC-100 slave " << zdt_slave << " init fail\n"; cli_zdt.close(); cli_pqw.close(); return; }
+    if (jc.init(cli_jc,  zdt_slave, true))     { cerr << "[ERR] JC-100 slave " << zdt_slave << " init fail\n"; cli_zdt.close(); cli_pqw.close(); cli_jc.close(); return; }
 
     cout << "\n  ZDT slave " << zdt_slave << " @ " << zdt_ip
          << " | own vacuum valve CH" << own_valve_ch
@@ -5222,6 +5276,7 @@ static void test_break_vacuum_leg() {
 
     cli_zdt.close();
     cli_pqw.close();
+    cli_jc.close();
 }
 
 //=========== 32. Leg release WITHOUT break-vacuum (no CH16) ===========
@@ -5235,9 +5290,9 @@ static void test_leg_release_no_break_vacuum() {
     cout << "\n--- Leg release, no break-vacuum (no CH16) ---\n";
 
     string zdt_ip;
-    cout << "ZDT gateway IP [192.168.1.20]: ";
+    cout << "ZDT gateway IP [" << IP_ZDT << "]: ";
     getline(cin, zdt_ip);
-    if (zdt_ip.empty()) zdt_ip = "192.168.1.20";
+    if (zdt_ip.empty()) zdt_ip = IP_ZDT;
 
     cout << "ZDT slave ID [3]: ";
     string s; getline(cin, s);
@@ -5255,9 +5310,14 @@ static void test_leg_release_no_break_vacuum() {
     }
 
     string pqw_ip;
-    cout << "PQW gateway IP [192.168.1.22]: ";
+    cout << "PQW gateway IP [" << IP_PQW << "]: ";
     getline(cin, pqw_ip);
-    if (pqw_ip.empty()) pqw_ip = "192.168.1.22";
+    if (pqw_ip.empty()) pqw_ip = IP_PQW;
+
+    string jc_ip;
+    cout << "JC-100 gateway IP [" << IP_JC100 << "]: ";
+    getline(cin, jc_ip);
+    if (jc_ip.empty()) jc_ip = IP_JC100;
 
     cout << "PQW slave ID [12]: ";
     string ps; getline(cin, ps);
@@ -5266,16 +5326,17 @@ static void test_leg_release_no_break_vacuum() {
     if (!quick_tcp_probe(zdt_ip, 4001)) { cerr << "[ERR] " << zdt_ip << ":4001 unreachable\n"; return; }
     if (!quick_tcp_probe(pqw_ip, 4001)) { cerr << "[ERR] " << pqw_ip << ":4001 unreachable\n"; return; }
 
-    TCP_client cli_zdt, cli_pqw;
+    TCP_client cli_zdt, cli_pqw, cli_jc;
     if (!cli_zdt.connectToServer(zdt_ip, 4001, false)) { cerr << "[ERR] " << zdt_ip << " connect fail\n"; return; }
     if (!cli_pqw.connectToServer(pqw_ip, 4001, false)) { cerr << "[ERR] " << pqw_ip << " connect fail\n"; cli_zdt.close(); return; }
+    if (!cli_jc .connectToServer(jc_ip,  4001, false)) { cerr << "[ERR] " << jc_ip  << " connect fail\n"; cli_zdt.close(); cli_pqw.close(); return; }
 
     ZDT_motor_control zdt;
     PQW_IO_16O_RLY    pqw;
     JC_100_METER      jc;
     if (zdt.init(cli_zdt, zdt_slave, true))    { cerr << "[ERR] ZDT slave "    << zdt_slave << " init fail\n"; cli_zdt.close(); cli_pqw.close(); return; }
     if (pqw.init(cli_pqw, pqw_slave, 16, true)){ cerr << "[ERR] PQW slave "    << pqw_slave << " init fail\n"; cli_zdt.close(); cli_pqw.close(); return; }
-    if (jc.init(cli_pqw, zdt_slave, true))     { cerr << "[ERR] JC-100 slave " << zdt_slave << " init fail\n"; cli_zdt.close(); cli_pqw.close(); return; }
+    if (jc.init(cli_jc,  zdt_slave, true))     { cerr << "[ERR] JC-100 slave " << zdt_slave << " init fail\n"; cli_zdt.close(); cli_pqw.close(); cli_jc.close(); return; }
 
     cout << "\n  ZDT slave " << zdt_slave << " @ " << zdt_ip
          << " | own vacuum valve CH" << own_valve_ch
@@ -5385,41 +5446,52 @@ static void test_leg_release_no_break_vacuum() {
 // exercises ONE leg at a time; this is the 4-leg group version matching
 // what a real step/detach actually does.
 static void test_break_vacuum_all_legs() {
-    cout << "\n--- Break-vacuum ALL 4 legs (CH14) simultaneously ---\n";
+    cout << "\n--- Break-vacuum ALL 4 legs (CH" << PQW_CH_BREAK_VACUUM << ") simultaneously ---\n";
 
     string zdt_ip;
-    cout << "ZDT gateway IP [192.168.1.20]: ";
+    cout << "ZDT gateway IP [" << IP_ZDT << "]: ";
     getline(cin, zdt_ip);
-    if (zdt_ip.empty()) zdt_ip = "192.168.1.20";
+    if (zdt_ip.empty()) zdt_ip = IP_ZDT;
 
     string pqw_ip;
-    cout << "PQW gateway IP [192.168.1.22]: ";
+    cout << "PQW gateway IP [" << IP_PQW << "]: ";
     getline(cin, pqw_ip);
-    if (pqw_ip.empty()) pqw_ip = "192.168.1.22";
+    if (pqw_ip.empty()) pqw_ip = IP_PQW;
+
+    string jc_ip;
+    cout << "JC-100 gateway IP [" << IP_JC100 << "]: ";
+    getline(cin, jc_ip);
+    if (jc_ip.empty()) jc_ip = IP_JC100;
 
     cout << "PQW slave ID [12]: ";
     string ps; getline(cin, ps);
     int pqw_slave = ps.empty() ? 12 : stoi(ps);
 
-    constexpr int BREAK_VACUUM_CH = 14;   // production CH_BREAK_VACUUM
-    constexpr int CH_VALVE_RIGHT  = 1;    // slave 1,2
-    constexpr int CH_VALVE_LEFT   = 3;    // slave 3,4
+    // [2026-08-27] 對齊 WASH_ROBOT.h：破真空 14→6；v2 只有一顆真空閥管全部 4 顆吸盤，
+    // 不再分左右腳（原本 CH1=right / CH3=left）。兩個名字都指向同一個 CH，保留兩個是
+    // 為了讓下面「兩側各關一次」的序列與 log 不必改寫 —— 實際上是同一顆閥寫兩次。
+    constexpr int BREAK_VACUUM_CH = PQW_CH_BREAK_VACUUM;
+    constexpr int CH_VALVE_RIGHT  = PQW_CH_VALVE_FEET;
+    constexpr int CH_VALVE_LEFT   = PQW_CH_VALVE_FEET;
 
     if (!quick_tcp_probe(zdt_ip, 4001)) { cerr << "[ERR] " << zdt_ip << ":4001 unreachable\n"; return; }
     if (!quick_tcp_probe(pqw_ip, 4001)) { cerr << "[ERR] " << pqw_ip << ":4001 unreachable\n"; return; }
+    if (!quick_tcp_probe(jc_ip,  4001)) { cerr << "[ERR] " << jc_ip  << ":4001 unreachable\n"; return; }
 
-    TCP_client cli_zdt, cli_pqw;
+    TCP_client cli_zdt, cli_pqw, cli_jc;
     if (!cli_zdt.connectToServer(zdt_ip, 4001, false)) { cerr << "[ERR] " << zdt_ip << " connect fail\n"; return; }
     if (!cli_pqw.connectToServer(pqw_ip, 4001, false)) { cerr << "[ERR] " << pqw_ip << " connect fail\n"; cli_zdt.close(); return; }
+    if (!cli_jc .connectToServer(jc_ip,  4001, false)) { cerr << "[ERR] " << jc_ip  << " connect fail\n"; cli_zdt.close(); cli_pqw.close(); return; }
 
-    ZDT_motor_control zdt[5];       // index 1..4 in use; [0] unused
-    JC_100_METER      jc[5];        // index 1..4, reference pressure only
+    // [2026-08-27] 陣列大小改吃 CUP_SLAVE_LAST（吸盤 slave 5-8，index 直接當 slave 用）
+    ZDT_motor_control zdt[CUP_SLAVE_LAST + 1];   // index CUP_SLAVE_FIRST..LAST in use
+    JC_100_METER      jc[CUP_SLAVE_LAST + 1];    // same indexing, reference pressure only
     PQW_IO_16O_RLY    pqw;
-    for (int s = 1; s <= 4; ++s) {
+    for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) {
         if (zdt[s].init(cli_zdt, s, false)) {
             cerr << "[ERR] ZDT slave " << s << " init fail\n"; cli_zdt.close(); cli_pqw.close(); return;
         }
-        if (jc[s].init(cli_pqw, s, false)) {
+        if (jc[s].init(cli_jc,  s, false)) {
             cerr << "[ERR] JC-100 slave " << s << " init fail\n"; cli_zdt.close(); cli_pqw.close(); return;
         }
     }
@@ -5427,12 +5499,12 @@ static void test_break_vacuum_all_legs() {
         cerr << "[ERR] PQW slave " << pqw_slave << " init fail\n"; cli_zdt.close(); cli_pqw.close(); return;
     }
 
-    cout << "\n  ZDT slaves 1,2,3,4 @ " << zdt_ip
+    cout << "\n  ZDT slaves " << CUP_SLAVE_FIRST << "-" << CUP_SLAVE_LAST << " @ " << zdt_ip
          << " | valves CH" << CH_VALVE_RIGHT << "(right)/CH" << CH_VALVE_LEFT << "(left)"
          << " | break-vacuum CH" << BREAK_VACUUM_CH
          << " | PQW/JC-100 @ " << pqw_ip << "\n"
          << "  pre-check pressure (raw units, expect sealed/negative):";
-    for (int s = 1; s <= 4; ++s) cout << "  p" << s << "=" << jc[s].read_pressure();
+    for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) cout << "  p" << s << "=" << jc[s].read_pressure();
     cout << "\n  Sequence: CH" << CH_VALVE_RIGHT << "+CH" << CH_VALVE_LEFT << " OFF (release both sides)  ->  "
          << "CH" << BREAK_VACUUM_CH << " ON  ->  80ms  ->  direct retract ALL 4 together  ->  "
          << "CH" << BREAK_VACUUM_CH << " OFF at 500ms total (fixed schedule, no pressure gating)\n";
@@ -5452,7 +5524,7 @@ static void test_break_vacuum_all_legs() {
     if (pqw.controlRelay(CH_VALVE_LEFT, false))
         cerr << "  [WARN] CH" << CH_VALVE_LEFT << " OFF readback mismatch — check LED physically\n";
 
-    for (int s = 1; s <= 4; ++s) zdt[s].release_stall_flag();
+    for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) zdt[s].release_stall_flag();
 
     // [2026-07-31 per user] Missing on the first pass — CH14 never actually
     // fired. Root cause: this is the SAME bus-timing quirk menu 31 hit and
@@ -5490,13 +5562,13 @@ static void test_break_vacuum_all_legs() {
     this_thread::sleep_for(chrono::milliseconds(PRE_RETRACT_MS));
 
     cout << "  -> direct retract ALL 4 to " << RETRACT_TARGET_PULSE << " pulses (~0.1cm) @ " << RPM_RETRACT_FULL << "rpm\n";
-    for (int s = 1; s <= 4; ++s) {
+    for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) {
         if (zdt[s].motion_control_pos_mode_nowait(0, ACC_RETRACT, RPM_RETRACT_FULL, RETRACT_TARGET_PULSE, 1, 1, 1)) {
             cerr << "  [ERR] slave " << s << " pos_mode_nowait FAIL\n";
             cli_zdt.close(); cli_pqw.close(); return;
         }
     }
-    zdt[1].trigger_sync_move();   // single broadcast fires all 4 together
+    zdt[CUP_SLAVE_FIRST].trigger_sync_move();   // single broadcast fires all 4 together
 
     {
         const auto held_ms = chrono::duration_cast<chrono::milliseconds>(
@@ -5514,19 +5586,21 @@ static void test_break_vacuum_all_legs() {
     constexpr int MAX_STALL_RETRIES      = 3;
     constexpr int POLL_INTERVAL_MS       = 50;
     constexpr int PER_ATTEMPT_TIMEOUT_MS = 10000;
-    bool pos_reached[5] = {};
-    int  retries[5]     = {};
-    bool done[5]        = {};
+    // [2026-08-27] 陣列由 [5] 放大到 [CUP_SLAVE_LAST + 1]：吸盤改號 1-4 → 5-8 後
+    // index 5..8 會越界寫壞相鄰變數。用常數推導大小，日後再改號不必回頭調這裡。
+    bool pos_reached[CUP_SLAVE_LAST + 1] = {};
+    int  retries[CUP_SLAVE_LAST + 1]     = {};
+    bool done[CUP_SLAVE_LAST + 1]        = {};
     auto t0 = chrono::steady_clock::now();
 
     while (true) {
         bool all_done = true;
-        for (int s = 1; s <= 4; ++s) if (!done[s]) { all_done = false; break; }
+        for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) if (!done[s]) { all_done = false; break; }
         if (all_done) break;
 
         this_thread::sleep_for(chrono::milliseconds(POLL_INTERVAL_MS));
 
-        for (int s = 1; s <= 4; ++s) {
+        for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) {
             if (done[s]) continue;
             if (zdt[s].get_system_status()) { cerr << "  [ERR] slave " << s << " get_system_status failed\n"; done[s] = true; continue; }
             if (zdt[s].status.pos_reached) { pos_reached[s] = true; done[s] = true; continue; }
@@ -5555,12 +5629,12 @@ static void test_break_vacuum_all_legs() {
         auto elapsed_ms = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - t0).count();
         if (elapsed_ms > PER_ATTEMPT_TIMEOUT_MS) {
             cerr << "  [WARN] overall timeout (" << elapsed_ms << " ms) — marking remaining slaves done\n";
-            for (int s = 1; s <= 4; ++s) done[s] = true;
+            for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) done[s] = true;
         }
     }
 
     cout << "\n  final:\n";
-    for (int s = 1; s <= 4; ++s) {
+    for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) {
         zdt[s].get_system_status();
         cout << "    slave " << s << ": pos_reached=" << pos_reached[s]
              << " real_pos=" << zdt[s].status.real_pos << "°"
@@ -5570,6 +5644,7 @@ static void test_break_vacuum_all_legs() {
 
     cli_zdt.close();
     cli_pqw.close();
+    cli_jc.close();
 }
 
 //=========== 34. QX-DO24 4-channel PWM output (Modbus-RTU) ===========

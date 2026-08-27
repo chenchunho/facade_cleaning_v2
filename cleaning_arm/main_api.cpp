@@ -2553,8 +2553,38 @@ std::string DamiaoAPI::cmd_park_sequence()
 	// s.enabled/hold_en on exit, so feedback_loop() is now servicing the slot
 	// and its continuous passive watchdog can still try to recover it — which
 	// is strictly better than handing the arm to gravity.
+	// [2026-08-26 per user: 「park沒反應」] PARK used to be gated on
+	// `if (m1_.enabled)`. Since a successful PARK ends with disable_slot(),
+	// EVERY SUBSEQUENT PARK silently did nothing and still returned "OK" — no
+	// go_home_slot() call, so not even a [M1 go_home] line in the log. That is
+	// exactly the reported symptom.
+	//
+	// Doing nothing is only correct if the arm is actually home. A disabled M1
+	// has NO holding torque, so it can drift or be pushed away from home while
+	// parked — and that is precisely the case where the operator presses PARK
+	// again and most needs it to work. So: if the arm is disabled but not near
+	// home, re-enable it, home it properly, then release it again.
 	bool m1_home_ok = true;
-	if (m1_.enabled) m1_home_ok = go_home_slot(m1_);
+	if (!m1_.enabled) {
+		float pos_now = 0.0f;
+		{
+			std::lock_guard<std::mutex> lk(motor_mutex_);
+			pos_now = m1_.motor->Get_Position();
+		}
+		// PARK_STOP_MARGIN-sized band around home; outside it the arm is
+		// meaningfully off-target and worth re-homing.
+		if (std::abs(pos_now) > 0.15f) {
+			std::cerr << "[PARK] M1 disabled but pos=" << pos_now
+			          << " is away from home — re-enabling to home it\n";
+			enable_slot(m1_);
+			m1_home_ok = go_home_slot(m1_);
+		} else {
+			std::cerr << "[PARK] M1 already disabled and near home (pos="
+			          << pos_now << ") — nothing to do\n";
+		}
+	} else {
+		m1_home_ok = go_home_slot(m1_);
+	}
 	if (m1_home_ok) {
 		disable_slot(m1_);
 	} else {

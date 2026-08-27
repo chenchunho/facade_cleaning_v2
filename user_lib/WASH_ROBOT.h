@@ -109,6 +109,18 @@ public:
 
     std::string cmd_arm_sweep();  // public: acquires motion_mtx_
     std::string cmd_tilt_mode(bool on);
+
+    // [2026-08-27 per user] 單獨重取 IMU 水平基準，不跑完整 init。
+    // 背景：imu_take_baseline_() 原本只有 cmd_init_impl_() 一個呼叫點，想校正
+    // IMU 就得連帶做推桿歸零 / 手臂 INIT 等一整串硬體動作。而基準沒校好時
+    // imu_monitor_loop_ 會把靜止的機器判成 45°+ 傾斜 → set_state_(Error) →
+    // 幾乎所有指令被 state_violation_ 擋掉，形成「要校正卻先被擋住」的死結。
+    // 本指令刻意**不做 state 檢查**，就是為了能從那個狀態自救。
+    std::string cmd_imu_zero();
+
+    // [2026-08-27 per user] 開關 IMU 傾斜保護（見 imu_guard_enabled_ 的說明）。
+    // 同樣不檢查 state——要關掉保護的時機，正好就是已經被誤報打進 Error 的時候。
+    std::string cmd_imu_guard(bool on);
     std::string cmd_emergency_stop();
     std::string cmd_shutdown();
     std::string cmd_status();
@@ -166,6 +178,16 @@ public:
     // → 上滑台 left → M2 LR_SLOT LEFT → 上滑台 center → M2 LR_SLOT CENTER.
     // RAII guarantees water/brush OFF + arm PARK on every exit path.
     std::string cmd_arm_clean_sweep(int wall_mm, int rounds);
+
+    // [2026-08-26 per user] 乾式清洗 — bench 測試用：完整的 DEPLOY + 滾筒 + 上滑台
+    // + PARK 動作，但**不噴水、也不移動機器人**。
+    // 直接復用 do_step_sync_rail_sweep_()——那正是同步步伐內建的清洗段，本來就沒有
+    // 任何水路動作（水閥/水泵尚未接管路）。刻意不另寫一份邏輯：測到的就是實際會跑
+    // 的那段，不會出現「測試版跟正式版行為不同」的問題。
+    // 對照其他入口：cmd_arm_clean_sweep 會噴水；cmd_arm_sweep 不 DEPLOY（手臂不貼牆、
+    // 滾筒空轉）；步伐的 ⇅ 同步 會真的走一步。
+    // 牆距沿用 DM2J_ARM_STEP_SWEEP_WALL_MM（與步伐內建清洗完全一致），不開放參數。
+    std::string cmd_arm_clean_sweep_dry();   // public: acquires motion_mtx_
 
     //=========== camera obstacle detection ===========
 
@@ -388,7 +410,8 @@ private:
     // via crane_cmd_("tension"). Restore to 192.168.1.101 for production deploy.
     // [2026-08-03 per user] crane Pi 實際在 .27，不是 .26 — 這很可能就是那次
     // "reconnect failed + crane 端完全沒收到任何連線" 的真正原因（一直敲錯 IP 的門）。
-    static constexpr const char* CRANE_IP   = "192.168.5.27";   // [v2 2026-07-08] bench crane RPi (was 192.168.1.10); 2026-08-03: .26→.27
+    // [2026-08-26 per user] bench crane Pi 換到 .17。
+    static constexpr const char* CRANE_IP   = "192.168.5.17";   // [v2 2026-07-08] bench crane RPi (was 192.168.1.10); 2026-08-03: .26→.27; 2026-08-26: .27→.17
     static constexpr int         CRANE_PORT = 5002;
 
     // Cleaning arm — standalone damiao motor service on the same Pi.
@@ -410,16 +433,39 @@ private:
     //   CH2 = vacuum pump dp0105 (was CH1 in v1)   ← moved
     //   CH3 = left-foot valve  (cups slave 3,4)
     // v1's 3-zone feet/body/center scheme is retired (no body cups, no center cup).
-    static constexpr int CH_VALVE_RIGHT  = 1;  // VT307 right-foot cups (slave 1,2)
+    // [2026-08-27 per user] 真空閥不再分左右——實體只剩一顆閥接在 CH1，同時控制
+    // 全部 4 顆吸盤。CH_VALVE_LEFT 改為指向同一個 channel（保留這個名字，讓
+    // 二十幾處既有呼叫點不必全部改寫；其中絕大多數本來就是左右同時設同一個值）。
+    // 若之後又改回兩顆獨立閥，只要把 CH_VALVE_LEFT 改回 3，所有邏輯自動還原。
+    //
+    // ⚠ 安全影響：「只放開單側」在硬體上已經不可能。
+    // do_step_down_ / do_step_up_ / do_cross_obstacle_ 的核心前提是「一側解真空、
+    // 另一側維持吸附當防墜錨點」（見 run_side 的 CH_VALVE_RIGHT / CH_VALVE_LEFT
+    // 參數）——現在開 CH1 會讓 4 顆一起失去真空，那個前提直接破掉。
+    // 這些路徑的 GUI 入口已於 2026-08-26 移除，但後端指令仍在，
+    // **不要用 raw command 呼叫 step_down / step_up / cross_obstacle_***。
+    // v2 正式走法 do_step_sync_ 本來就是 4 顆同放同吸（只呼叫 vacuum_valve_("feet")），
+    // 不受這個變更影響。
+    static constexpr int CH_VALVE_RIGHT  = 1;  // VT307 全部吸盤（原右腳專用，現為唯一一顆閥）
     static constexpr int CH_PUMP         = 2;  // dp0105 vacuum pump (always ON while running)
-    static constexpr int CH_VALVE_LEFT   = 3;  // VT307 left-foot cups (slave 3,4)
+    static constexpr int CH_VALVE_LEFT   = CH_VALVE_RIGHT;  // 2026-08-27: 3 → 同 CH1（單閥）
     static constexpr int CH_BRUSH        = 15; // arm roller brush motor (2026-07-24 per user: 5→15, arm now physically installed)
-    static constexpr int CH_WATER_PUMP   = 6;  // water tank pump (spray)
+    // [2026-08-27 per user] 水泵 CH6 → CH14，讓位給破真空閥（user 指定破真空接 CH6）。
+    // ⚠ 這個讓位是強制的，不是整理：清洗流程的滾筒段會主動
+    // pqw_set_relay_verified_(CH_WATER_PUMP, true)（見 sweep_with_tool 的 water_on
+    // 分支）。若水泵仍指向 CH6，清洗時就會打開破真空閥 → 4 顆吸盤同時失去真空
+    // → 機器在貼牆狀態下脫落。CH14 是破真空原本用的號，剛好空出。
+    // 水泵實體尚未接管路（見 do_arm_sweep_ 內被註解掉的 CH_WATER_PUMP 呼叫），
+    // 因此改號目前不影響實際動作；接管路時務必接到 CH14。
+    static constexpr int CH_WATER_PUMP   = 14; // water tank pump (spray) (2026-08-27: 6→14)
     // [2026-07-31 per user] Break-vacuum valve — air-charge into the cups to
     // actively force the seal open, replacing the old two-stage slow-peel
     // retract. ON = charge air, OFF = closed. Mirrors Linux_test menu 31
-    // (test_break_vacuum_leg) exactly, CH16 (bench-only) -> CH14 (production).
-    static constexpr int CH_BREAK_VACUUM = 14;
+    // (test_break_vacuum_leg) exactly.
+    // Channel 沿革：CH16（bench 期）→ CH14（production）→ CH6（2026-08-27 per user）。
+    // 搬到 CH6 時水泵已從 CH6 讓位到 CH14（見上方 CH_WATER_PUMP 的說明）——兩者
+    // 絕不可同號，否則清洗時開水泵等於開破真空。
+    static constexpr int CH_BREAK_VACUUM = 6;   // 2026-08-27: 14→6 per user
     // [2026-06-05] CH_WATER_INLET 移除 — 進水球閥控制權搬到 crane 端 PQW
     // (192.168.1.34 slave 12 CH4)，washrobot 不再直接控制。所有原本走
     // pqw_.controlRelay(CH_WATER_INLET, x) / pqw_set_relay_verified_(CH_WATER_INLET, x)
@@ -436,18 +482,50 @@ private:
     static constexpr int WATER_POLL_INTERVAL_MS = 200;     // poll output reg every 200 ms while filling
 
     // QX-DO24 四路 PWM 輸出模組（2026-08-26 新增，共用 cli_22_）
-    // cli_22_ 上已用的 slave：JC100 1~4 / DY500 10,11 / PQW 12 / XKC 13 /
-    // DM2J 上滑台 14 —— slave 6 是空的，不撞號。
-    // ⚠ 模組波特率已被改成 115200（非出廠 9600），USR-TCP232 .22 的串口設定
-    //   必須一致，否則整條 bus 上的其他裝置也會通訊不良。
-    static constexpr int PWM_SLAVE = 6;
+    //
+    // 🚫 [2026-08-27] 整個 PWM 功能停用中（PWM_ENABLED=false）。原因是 slave 撞號：
+    //   PWM_SLAVE=6 當初選 6 的前提是「cli_22_ 上 JC100 只用 slave 1~4，6 是空的」
+    //   （見下方 CUP_SLAVE_FIRST 註解：2026-08-27 把吸盤編號 1-4 改成 5-8）。
+    //   改號之後 cli_22_ 的 JC100 佔用 5,6,7,8 —— **slave 6 同時是右腳下吸盤的
+    //   真空表和這顆 PWM 模組**。bench log 的
+    //       [ERR] [QX:6] device rejected FC 0x10: err 0x7C (未定義錯誤碼)
+    //   就是這個撞號：0x7C 不是合法的 Modbus exception code（標準只到 0x0B），
+    //   那是 JC100 的回覆被 PWM driver 撿走後亂解出來的位元組。
+    //
+    //   為什麼一定要停而不只是「反正模組沒接、通訊失敗而已」：
+    //   FC 0x10 是 write-multiple-registers。發給 slave 6 的寫入會真的落到
+    //   **JC100 slave 6** 上，有機會改掉它的組態暫存器（含 slave ID / 波特率）。
+    //   而 JC100 的壓力值正是步伐中「這一側還吸得夠牢、可以放另一側」的判準
+    //   —— 弄壞它是掉落風險，不只是通訊雜訊（同一個理由已寫在 QX_DO24.cpp 的
+    //   sendAndReceive 註解裡，那邊假設的仍是 JC100 1~4）。
+    //
+    //   重新啟用的前提（三件都要做完，缺一件就會再撞或再吵）：
+    //     1. 用 USB-485 直連把模組的 slave ID 改到 cli_22_ 上真正空的號
+    //        （目前已用：5,6,7,8 JC100 / 10,11 DY500 / 12 PQW / 13 XKC / 14 DM2J
+    //         → 可用例如 1~4、9、15+），並同步改下面的 PWM_SLAVE
+    //     2. 同樣用 USB-485 直連把波特率從 115200 改回 9600（寫 0x21=3）配合
+    //        bus 上其他裝置；**必須在接上 bus 之前改完**，否則接上去就無法通訊、
+    //        也改不回來
+    //     3. 把 PWM_ENABLED 改成 true
+    static constexpr bool PWM_ENABLED = false;
+    static constexpr int  PWM_SLAVE   = 6;   // ⚠ 撞 JC100 slave 6，見上方
 
     // ZDT pusher slave IDs — [v2] 4 cups only: right{1,2} / left{3,4}
     //   right foot: upper = slave 1, lower = slave 2   (valve CH1)
     //   left  foot: upper = slave 3, lower = slave 4   (valve CH3)
     // v1 body{5,6,7,8} + center{9} cups retired (2026-07-07).
-    static constexpr int ZDT_RF1 = 1, ZDT_RF2 = 2;  // right foot upper/lower
-    static constexpr int ZDT_LF1 = 3, ZDT_LF2 = 4;  // left foot upper/lower
+    // [2026-08-27 per user] 4 顆吸盤的 slave ID 由 1-4 改為 5-8。
+    // ZDT 推桿與 JC100 真空表共用同一組編號（推桿 slave N 末端的吸盤 = 真空表
+    // slave N），兩者分別掛在 .20 / .22 兩條 bus 上，所以同號不衝突。
+    // 這兩個常數是唯一的真實來源——所有遍歷吸盤的迴圈都改吃它們，日後再調整
+    // 編號只要改這裡，不必再全檔搜 "1..4"（原本散在 11 處寫死的迴圈裡）。
+    // 相關陣列（zdt_[9] / meter_[9] / cached_pressure_[9] / last_seal_pulse_[9]）
+    // 都是 9 格、index = slave-1，5-8 對應 index 4-7，仍在範圍內。
+    static constexpr int CUP_SLAVE_FIRST = 5;
+    static constexpr int CUP_SLAVE_LAST  = 8;
+
+    static constexpr int ZDT_RF1 = 5, ZDT_RF2 = 6;  // right foot upper/lower (2026-08-27: 1,2 → 5,6)
+    static constexpr int ZDT_LF1 = 7, ZDT_LF2 = 8;  // left foot upper/lower  (2026-08-27: 3,4 → 7,8)
 
     // DM2J rail/arm slave IDs
     // 2026-05-26: 上滑台從 cli_20_ slave 5 搬到 cli_22_ slave 14，目的是讓
@@ -460,8 +538,29 @@ private:
 
     // Pusher motion
     static constexpr int PUSHER_EXTEND_PULSE       = 30000;    // center / fallback ~10 cm (對齊 body，2026-04-24)
-    static constexpr int PUSHER_EXTEND_FEET_PULSE       = 24300;  // feet upper (slave 1,3) 8.1 cm (2026-07-27: 統一兩顆都 8.1cm per user；2026-07-24: 23400→24300 per user，跟 slave 2,4 分開；慣例 3000 pulse=1cm)
-    static constexpr int PUSHER_EXTEND_FEET_PULSE_LOWER = 24300;  // feet lower (slave 2,4) 8.1 cm (2026-07-27: 23400→24300 per user，統一成跟 slave 1,3 一樣)
+    // [2026-08-27 per user] 8.1 cm → 12.0 cm（24300 → 36000 pulse）。
+    // （同日先訂 14.0 cm，隨即改為 12.0 cm；下方行程計算已依 12.0 更新。）
+    //
+    // ⚠ 行程餘裕縮小，改動前務必理解：
+    //   SMC LEYG25 行程            20.0 cm
+    //   preset                     12.0 cm
+    //   disable_seal 有效補伸       +5.0 cm  ← 見 DISABLE_RETRY_MAX_ITERS 註解：
+    //                                        5 iters × INCR 3000 先 binding，
+    //                                        cap DISABLE_RETRY_MAX_OVEREXTEND
+    //                                        (24000/+8cm) 迴圈吃不到
+    //   最大總伸長                 17.0 cm
+    //   剩餘餘裕                    3.0 cm   （preset 8.1cm 時是 6.9 cm）
+    //
+    // 吸不住而走完重試迴圈時，推桿會停在距機械底 3 cm 處。若之後要再加大 preset，
+    // 必須同時降低 DISABLE_RETRY_MAX_ITERS（每少一次 iter 就多 1 cm 餘裕）——
+    // preset 15 cm 就會把餘裕吃到 0。
+    // FEET_TARGET_OVER_CAP_CM(5.0) 允許 target 到 preset+5=17cm，與上述上限一致，
+    // 不需另外調整。
+    // ⚠ 另注意：do_cross_obstacle_ 的 2×preset = 24 cm **已超出 20 cm 行程**。
+    // 該功能的 GUI 入口已於 2026-08-26 移除，後端仍在——不要用 raw command 呼叫
+    // cross_obstacle_*，否則推桿會直接撞底。
+    static constexpr int PUSHER_EXTEND_FEET_PULSE       = 36000;  // feet upper (slave 5,7) 12.0 cm (2026-08-27: 24300→36000 per user；2026-07-27: 統一兩顆都 8.1cm；慣例 3000 pulse=1cm)
+    static constexpr int PUSHER_EXTEND_FEET_PULSE_LOWER = 36000;  // feet lower (slave 6,8) 12.0 cm (2026-08-27: 24300→36000 per user，與 upper 保持一致)
     static constexpr int PUSHER_EXTEND_BODY_PULSE       = 34000;  // body upper (slave 5,6) ~11.3 cm (2026-05-28: 30000→36000 +6000=+2cm; 2026-05-28i: 36000→33000 -3000=-1cm，bench 顯示 36000+over 害 Phase 1 fast 700rpm 撞 wall peakI 1500mA+；2026-05-29: 33000→34000 +1000=+0.8cm，邊際提速 iter loop 收斂)
     static constexpr int PUSHER_EXTEND_BODY_PULSE_SHORT = 35400;  // body lower (slave 7,8) ~11.8 cm (2026-05-28: 29400→32400 +3000=+1cm；2026-05-28h: 32400→35400 +3000=+1cm，bench log body lower wall at 42798、SHORT 仍不夠導致 iter 0 plateau,加深一輪)
     static constexpr int PUSHER_RETRACT_PULSE      = 300;   // 收腳目標 (2026-07-14: 0→300 ≈0.1cm)。高速收到 0=機械原點會撞 hardstop「叩」一聲；停在原點前 0.1cm 避免撞擊。<FAKE-DONE 容差 50°(500pulse)、300pulse=30° 仍算收好
@@ -552,7 +651,7 @@ private:
 
     // Arm sweep (上滑台 / DM2J slave 14 @ cli_22_ since 2026-05-26)
     // NOTE: DM2J ACC/DEC unit is ms/1000rpm (Leadshine convention) — LOWER = faster ramp.
-    static constexpr int ARM_SWEEP_CM  = -8;   // sweep cm (2026-07-27 per user: -6→-8; 2026-07-24 per user: -10→-6; 2026-05-21: 30→40→45→50→55; 2026-05-25: 55→60→100→80; 2026-05-26: 80→100; 2026-05-28: 100→80; 2026-06-06: 80→90→100→90→85; 2026-06-11: 85→60→55; 2026-07-23 per user: 55→-10 — 手臂還沒裝，「所有上滑台移動」統一改小行程+同一方向，涵蓋 do_arm_sweep_ / do_arm_clean_sweep_ / do_arm_clean_sweep_continuous_ 共用此常數)
+    static constexpr int ARM_SWEEP_CM  = 17;   // sweep cm (2026-08-26 per user: -8→17; 2026-07-27 per user: -6→-8; 2026-07-24 per user: -10→-6; 2026-05-21: 30→40→45→50→55; 2026-05-25: 55→60→100→80; 2026-05-26: 80→100; 2026-05-28: 100→80; 2026-06-06: 80→90→100→90→85; 2026-06-11: 85→60→55; 2026-07-23 per user: 55→-10 — 手臂還沒裝，「所有上滑台移動」統一改小行程+同一方向，涵蓋 do_arm_sweep_ / do_arm_clean_sweep_ / do_arm_clean_sweep_continuous_ 共用此常數)
     static constexpr int ARM_SWEEP_RPM = 1000;   // top speed (2026-05-26 bench menu28: 2300 + ACC/DEC 200/200 穩定; 2026-05-27: 2300→2000→1000 per user 因仍觀察失步)
     static constexpr int ARM_SWEEP_ACC = 100;    // start ramp (ms/1000rpm) — 2026-05-26: 100→200; 2026-05-27: 200→100 配合 RPM 1000
     static constexpr int ARM_SWEEP_DEC = 100;    // stop ramp (ms/1000rpm) — 2026-05-26: 100→200; 2026-05-27: 200→100 配合 RPM 1000
@@ -561,7 +660,23 @@ private:
     // — 跟上面 ARM_SWEEP_* 是完全不同的動作/參數組，行程短很多（10cm vs 55cm）所以
     // 另外設一組。手臂本身（damiao M1/M2）跟刷滾筒（CH5）都不碰，純粹只動 DM2J:14。
     // ⚠ RPM/ACC/DEC 是初次上機前的保守猜測值，還沒實機驗證，上機後依實際手感調整。
-    static constexpr double DM2J_ARM_STEP_SWEEP_CM  = -8.0;  // 0 → 此值 → 0，一次來回 (2026-07-27 per user: -6→-8; 2026-07-24 per user: -10→-6→-4→-6)
+    // [2026-08-27 per user] 上滑台（DM2J:14）還沒裝好——bench log 每次 step 都是
+    // 一連串 `[ERR] [DM2J:14] writeMulti no response`。整段「手臂清潔」先停掉：
+    //   false → do_step_sync_ 不再並行跑 arm INIT，do_step_sync_rail_sweep_ 直接
+    //           early-return，步伐本身（放繩 / IMU / 吸盤）完全不受影響。
+    //   true  → 恢復原本流程，不需要改其它地方。
+    // 用一個 gate 而不是註解掉呼叫，是因為清潔段散在兩處（INIT 在 do_step_sync_、
+    // 掃動在 do_step_sync_rail_sweep_），分開註解容易只關一半——那會變成手臂每步
+    // 花 10s 校正卻不清洗。cmd_arm_clean_sweep_dry()（乾掃測試指令）刻意不受此
+    // gate 管，因為那支就是拿來測上滑台裝好沒有的工具。
+    static constexpr bool STEP_SYNC_ARM_CLEAN_ENABLED = false;
+
+    // ⚠ 這個常數只給 do_step_sync_rail_sweep_（同步步伐內建的上滑台掃動）用；
+    //   do_arm_sweep_ / do_arm_clean_sweep_ / continuous 用的是上面的 ARM_SWEEP_CM。
+    //   2026-08-26 把 -8→17 時漏改這裡，導致 step_up_sync 實際還在走 -8（log
+    //   顯示 PR_move_cm_nowait -8.000）。2026-08-27 per user 補上，兩個常數現在
+    //   都是 17，方向同為正 → 0 → 17 → 0。日後改行程請同時改這兩處。
+    static constexpr double DM2J_ARM_STEP_SWEEP_CM  = 17.0;  // 0 → 此值 → 0，一次來回 (2026-08-27 per user: -8→17，補上 08-26 漏改; 2026-07-27 per user: -6→-8; 2026-07-24 per user: -10→-6→-4→-6)
     static constexpr int    DM2J_ARM_STEP_SWEEP_RPM = 250;    // 2026-07-27 per user: 300→250 稍微放慢；300→600→500→400→300 (2026-07-24 per user)
     static constexpr int    DM2J_ARM_STEP_SWEEP_ACC = 100;
     static constexpr int    DM2J_ARM_STEP_SWEEP_DEC = 100;
@@ -1155,6 +1270,16 @@ private:
     // Use case: bench testing without crane present, or when crane is in
     // manual-only mode.
     std::atomic<bool>    crane_attached_;
+
+    // [2026-08-27 per user] IMU 傾斜保護開關（預設 on）。
+    // 背景：IMU 改成立起來安裝後，pitch 卡在 -90° 附近進入 gimbal lock，此時
+    // roll/yaw 在數學上無法分離、會任意跳動（bench 實測同一靜止姿態下 roll 從
+    // 7.83 跳到 -71.29）。拿這種資料做 45° 緊急停判斷只會不斷誤觸發，把系統
+    // 打進 Error 而讓所有指令被 state_violation_ 擋住——保護反而成了阻礙。
+    // 這個旗標讓操作者在 IMU 修好前先關掉誤報，繼續測試其他子系統。
+    // ⚠ 關閉 = 完全沒有傾斜保護。只適合機器在地面上、未吊掛的 bench 情境。
+    // 根治要等 IMU 改用加速度計算傾斜（見 cmd_imu_guard 的說明）。
+    std::atomic<bool>    imu_guard_enabled_;
     // Toggle for cleaning-arm service (defaults true at construction). When off,
     // arm_cmd_ becomes a no-op returning "OK skipped" — bench-mode safe.
     std::atomic<bool>    arm_attached_;
@@ -1414,7 +1539,10 @@ private:
     // OK — rail sweep isn't safety-critical the way vacuum/crane moves are.
     // init_ok: result of arm_cmd_("INIT") already run in parallel with the
     // crane rope move by the caller (do_step_sync_) — see fut_arm_init there.
-    void do_step_sync_rail_sweep_(const char* tag, bool init_ok);
+    // force_enable=true 繞過 STEP_SYNC_ARM_CLEAN_ENABLED gate。只有
+    // cmd_arm_clean_sweep_dry()（bench 乾掃測試）該傳 true——那支指令的用途就是
+    // 手動測上滑台/手臂，被 gate 攔掉就沒東西可測了。正式步伐流程一律用預設 false。
+    void do_step_sync_rail_sweep_(const char* tag, bool init_ok, bool force_enable = false);
 
     // [v2] Feet-only realign: retract all 4 feet cups back to preset while they
     // stay SEALED (valves ON → vacuum pulls the machine toward the wall; cups
@@ -1640,6 +1768,26 @@ private:
     //=========== IMU ===========
 
     bool        imu_take_baseline_();
+
+    // [2026-08-27] ⚠ 目前未被呼叫，保留備用。
+    // 當日 IMU 一度改成立起來安裝（X 軸朝上）而尤拉角卡 gimbal lock，曾用這個
+    // 函式取代尤拉角；後來 user 換了另一顆並改回水平安裝，monitor / baseline /
+    // status 三處都已改回內建尤拉角（水平安裝下尤拉角無死角、且有陀螺儀融合，
+    // 動態表現優於純加速度換算）。
+    // 保留原因：若日後 IMU 又必須非水平安裝，這裡的推導與安全處理可直接沿用，
+    // 只需依實際方位改軸並接回 imu_monitor_loop_。imu_monitor_loop_ 內已有
+    // |az| < 0.70 的安裝方位檢查會主動警告該情況。
+    //
+    // 由加速度計算傾斜角（以下推導對應「X 軸朝上、Y 軸朝左」的方位）。
+    // IMU 安裝方位（user 提供）：X 軸朝上、Y 軸朝左（Z 軸依右手座標朝後）。
+    // 靜止水平時重力全部落在 X 軸 → ax≈±1、ay≈0、az≈0；機器左右傾斜時重力
+    // 會分一部分到 Y 軸，故 roll = atan2(ay, ax)。
+    // 為什麼不用尤拉角：IMU 立起來後 raw_y ≈ -90°（從平躺繞 Y 軸轉 90°），
+    // 尤拉角在此進入 gimbal lock，roll 與 yaw 數學上無法分離、會互相耦合亂跳
+    // （bench 實測同一靜止姿態 raw_z 從 7.83 跳到 -71.29）。重力方向不受此
+    // 影響，也不依賴磁力計，是這個安裝方位下唯一可靠的傾斜來源。
+    // 回傳 true = 失敗（沒有可用的加速度資料），false = 成功（專案慣例）。
+    bool        imu_tilt_from_accel_(double& roll_deg, double& pitch_deg) const;
     std::string do_phase5_roll_correct_();
     void        imu_monitor_loop_();
 

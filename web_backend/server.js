@@ -34,42 +34,12 @@ const CRANE_PORT      = 5002;
 const ARM_IP          = process.env.ARM_IP       || WASHROBOT_IP;
 const ARM_PORT        = 9527;
 
-// Camera streaming. frame_capture.py runs on washrobot Pi (.100) and exposes
-// /mjpeg/<cam_id> + /snap/<cam_id> on its own HTTP server (default port 5004).
-// We reverse-proxy here so the browser only ever talks to web_backend (single
-// origin, no CORS, IP changes hidden from frontend). Add cam2/3/4 entries
-// when 4-camera array is wired up.
-// Cameras default to WASHROBOT_IP (since frame_capture.py runs on washrobot Pi).
-// This makes WROBOT_IP=192.168.5.20 (bench WiFi) automatically work without
-// having to also set CAM1_URL / CAM2_URL. Individual override still possible.
-const CAMERAS = {
-    cam1: process.env.CAM1_URL || `http://${WASHROBOT_IP}:5004`,  // RTSP src 192.168.1.110
-    cam2: process.env.CAM2_URL || `http://${WASHROBOT_IP}:5005`,  // RTSP src 192.168.1.111
-    // [2026-07-20] D435i depth-camera obstacle detection — depth_cam_service.py
-    // exposes /snap/depth on its own HTTP server (port 5006, same washrobot Pi).
-    // Only /snap is used (no live /mjpeg — result photo only updates once per
-    // step's AFTER capture, not worth a continuous stream).
-    depth: process.env.DEPTH_CAM_URL || `http://${WASHROBOT_IP}:5008`,
-    // [2026-07-21] raw current frame, no BEFORE/AFTER analysis — backs the
-    // standalone camera panel's manual snapshot button (depth-snap in
-    // app.js). depth_cam_service.py serves it at /snap/depth_live on the
-    // same HTTP server; reuses the generic /snap/:cam_id proxy route below.
-    depth_live: process.env.DEPTH_CAM_LIVE_URL || `http://${WASHROBOT_IP}:5008`,
-    // [2026-07-21] raw (un-annotated) color frame from THIS step's BEFORE /
-    // AFTER capture — distinct from depth_live (ignores BEFORE/AFTER state
-    // entirely, always "right now") and from `depth` (annotated RESULT,
-    // only meaningful for the very latest AFTER call). Lets the
-    // run_depth_avoid modal show what the camera actually saw every step,
-    // not just when big_obstacle=yes — needed to debug candidates=0 (nothing
-    // detected) steps, where the annotated result photo has nothing to draw.
-    depth_before: process.env.DEPTH_CAM_URL || `http://${WASHROBOT_IP}:5008`,
-    depth_after:  process.env.DEPTH_CAM_URL || `http://${WASHROBOT_IP}:5008`,
-    // [2026-07-21] colorized depth map (heatmap) of the CURRENT frame — pairs
-    // with depth_live so the manual "拍照" button can show color + depth side
-    // by side. Same host/port, depth_cam_service.py just serves a different
-    // path (/snap/depth_live_depth).
-    depth_live_depth: process.env.DEPTH_CAM_LIVE_URL || `http://${WASHROBOT_IP}:5008`,
-};
+// [2026-08-27 per user] 攝影機反向代理整個移除 —— 「以後不用串接攝影機」。
+// 原本這裡有 CAMERAS 對照表（cam1/cam2/depth/depth_live/depth_before/
+// depth_after/depth_live_depth → washrobot Pi 的 5004/5005/5008），下面還有
+// proxyToCam() 與 /snap/:cam_id、/mjpeg/:cam_id 兩條路由。前端的 Camera
+// 分頁與 app.js 的 wireCamera/wireDepthCamera 也一併刪除。
+// washrobot Pi 上的 frame_capture.py / depth_cam_service.py 本身沒動。
 
 const RECONNECT_MS = 1000;   // 2026-04-29: 3000 → 1000 配合前端 panel-disabled 3s debounce，瞬斷情境總計約 1s 即恢復、UI 不會 flicker
 
@@ -98,46 +68,6 @@ const WS_PING_INTERVAL_MS = 30000;
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/health', (_req, res) => res.json({ ok: true }));
-
-//=========== camera endpoints (reverse proxy → washrobot Pi frame_capture) ===========
-
-// Generic streaming proxy: pipe upstream response to client. Works for both
-// single JPEG (/snap) and long-lived multipart MJPEG (/mjpeg) since http.get's
-// response is a Node Readable that we just .pipe() onto the express res.
-//
-// `upstream_base` is e.g. 'http://192.168.1.100:5004'. The downstream path is
-// appended verbatim (e.g. '/mjpeg/cam1' or '/snap/cam1').
-function proxyToCam(upstream_base, path_suffix, res, downstream_req) {
-    const upstream_url = upstream_base + path_suffix;
-    const upstream_req = http.get(upstream_url, (upstream_res) => {
-        // Mirror upstream status + content headers
-        res.writeHead(upstream_res.statusCode || 502, upstream_res.headers);
-        upstream_res.pipe(res);
-        upstream_res.on('error', () => { try { res.end(); } catch (_) {} });
-    });
-    upstream_req.on('error', (e) => {
-        console.log(`[cam] proxy ${upstream_url} fail: ${e.message}`);
-        if (!res.headersSent) res.status(502).end('upstream_unreachable');
-        else try { res.end(); } catch (_) {}
-    });
-    // If client disconnects (browser closes tab / nav away), abort upstream
-    // so we don't keep decoding into a dead socket.
-    downstream_req.on('close', () => { upstream_req.destroy(); });
-}
-
-// GET /snap/:cam_id — single JPEG snapshot. Frontend 截圖 button + fallback.
-app.get('/snap/:cam_id', (req, res) => {
-    const upstream = CAMERAS[req.params.cam_id];
-    if (!upstream) return res.status(404).end('unknown_cam');
-    proxyToCam(upstream, `/snap/${req.params.cam_id}`, res, req);
-});
-
-// GET /mjpeg/:cam_id — multipart/x-mixed-replace live stream.
-app.get('/mjpeg/:cam_id', (req, res) => {
-    const upstream = CAMERAS[req.params.cam_id];
-    if (!upstream) return res.status(404).end('unknown_cam');
-    proxyToCam(upstream, `/mjpeg/${req.params.cam_id}`, res, req);
-});
 
 const server = http.createServer(app);
 
@@ -326,5 +256,4 @@ server.listen(HTTP_PORT, () => {
     console.log(`[web_backend] listening http://0.0.0.0:${HTTP_PORT}`);
     console.log(`[web_backend] washrobot  target = ${WASHROBOT_IP}:${WASHROBOT_PORT}`);
     console.log(`[web_backend] crane      target = ${CRANE_IP}:${CRANE_PORT} (main + intr connection for stop/status bypass)`);
-    console.log(`[web_backend] cameras: ${Object.keys(CAMERAS).map(k => `${k}→${CAMERAS[k]}`).join(', ')}`);
 });

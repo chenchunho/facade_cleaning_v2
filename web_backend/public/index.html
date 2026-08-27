@@ -14,7 +14,6 @@
 <nav id="sidebar">
   <button class="nav-btn" data-page="home"   title="Home"><span class="nav-dot"></span><span class="nav-lbl">Home</span></button>
   <button class="nav-btn" data-page="manual" title="Control"><span class="nav-dot"></span><span class="nav-lbl">Control</span></button>
-  <button class="nav-btn" data-page="camera" title="Camera"><span class="nav-dot"></span><span class="nav-lbl">Camera</span></button>
   <button class="nav-btn" data-page="settings" title="Settings"><span class="nav-dot"></span><span class="nav-lbl">Settings</span></button>
 </nav>
 
@@ -88,6 +87,20 @@
       <button data-tgt="washrobot" data-cmd="zdt_release_stall">解除 ZDT 堵轉</button>
       <button data-tgt="washrobot" data-cmd="realign">手動 Realign</button>
     </div>
+    <!-- [2026-08-27 per user] IMU 水平校正。放在 reset 旁邊是刻意的：基準沒校好
+         時系統會被判 45°+ 傾斜而卡在 Error，這兩顆是當下少數還能按的。 -->
+    <div class="row">
+      <span class="label">🧭 IMU：</span>
+      <button data-tgt="washrobot" data-cmd="imu_zero" class="primary">水平校正（取 3 秒基準）</button>
+      <button data-tgt="washrobot" data-cmd="imu_guard off" class="danger">停用傾斜保護</button>
+      <button data-tgt="washrobot" data-cmd="imu_guard on">恢復傾斜保護</button>
+      <ul class="hint">
+        <li>把目前姿態記成「水平」基準，取樣 3 秒 — <b>期間機器必須完全靜止</b></li>
+        <li>基準沒校好時，靜止的機器也可能被判成 45°+ 傾斜 → 自動進 Error → 幾乎所有按鈕失效</li>
+        <li>校正完若狀態仍是 Error，再按一次 reset 才會解除</li>
+        <li>⚠ <b>停用傾斜保護</b>：IMU 目前立起來安裝，尤拉角卡在死角（gimbal lock）會亂跳，校正也壓不住誤報。停用後可正常操作其他子系統，但<b>完全沒有傾斜偵測</b> — 只在機器落地、未吊掛時使用。狀態會顯示在 status 的 imu_guard= 欄位</li>
+      </ul>
+    </div>
     <div class="row">
       <button id="btn-return-home" class="primary">↩ 召回回地面 (Phase 6)</button>
     </div>
@@ -148,30 +161,25 @@
   <section class="panel panel-washrobot" data-page="manual">
     <h2>manual — vacuum</h2>
     <div class="row">
-      <span class="label">pump (CH1):</span>
+      <!-- [2026-08-27] 標籤對齊 WASH_ROBOT.h 的實際 channel 定義。
+           原本寫「pump (CH1)」是錯的——CH1 是右腳電磁閥，真空泵一直都是 CH2。 -->
+      <span class="label">真空泵 pump (CH2):</span>
       <button data-tgt="washrobot" data-cmd="pump on">ON</button>
       <button data-tgt="washrobot" data-cmd="pump off">OFF</button>
     </div>
+    <!-- [2026-08-27 per user] 真空閥不再分左右：實體只剩一顆閥在 CH1，控制全部 4 顆
+         吸盤。原本的 right / left 兩列已移除——它們現在都會打到同一個 CH1，留著只會
+         讓人誤以為可以單側控制。後端 vacuum right|left 指令仍在，效果等同 feet。 -->
     <div class="row">
-      <span class="label">feet:</span>
+      <span class="label">真空閥 valve (CH1 → 全部 4 顆):</span>
       <button data-tgt="washrobot" data-cmd="vacuum feet on">ON</button>
       <button data-tgt="washrobot" data-cmd="vacuum feet off">OFF</button>
+      <ul class="hint">
+        <li>⚠ 單閥架構，無法只放開一側 — 開了就是 4 顆同時失去真空</li>
+      </ul>
     </div>
-    <div class="row">
-      <span class="label">right (slave 1,2):</span>
-      <button data-tgt="washrobot" data-cmd="vacuum right on">ON</button>
-      <button data-tgt="washrobot" data-cmd="vacuum right off">OFF</button>
-    </div>
-    <div class="row">
-      <span class="label">left (slave 3,4):</span>
-      <button data-tgt="washrobot" data-cmd="vacuum left on">ON</button>
-      <button data-tgt="washrobot" data-cmd="vacuum left off">OFF</button>
-    </div>
-    <div class="row">
-      <span class="label">all:</span>
-      <button data-tgt="washrobot" data-cmd="vacuum all on">ON</button>
-      <button data-tgt="washrobot" data-cmd="vacuum all off">OFF</button>
-    </div>
+    <!-- [2026-08-27] 原本的「all」那一列移除：vacuum_valve_() 裡 "all" 與 "feet"
+         走同一個分支，單閥化之後兩者完全等價，留兩顆按鈕只是重複。 -->
   </section>
 
   <section class="panel panel-washrobot" data-page="manual">
@@ -212,7 +220,9 @@
       <button data-tgt="washrobot" data-cmd="water_pump off">OFF</button>
     </div>
     <div class="row">
-      <span class="label">刷洗滾筒 (CH5):</span>
+      <!-- [2026-08-27] CH5 → CH15：CH_BRUSH 在 2026-07-24 手臂實裝時就改成 15 了
+           （見 WASH_ROBOT.h「5→15, arm now physically installed」），GUI 標籤漏改。 -->
+      <span class="label">刷洗滾筒 (CH15):</span>
       <button data-tgt="washrobot" data-cmd="brush on">ON</button>
       <button data-tgt="washrobot" data-cmd="brush off">OFF</button>
     </div>
@@ -265,15 +275,19 @@
 
   <section class="panel panel-washrobot" data-page="home">
     <h2>manual — vacuum readings <button id="btn-refresh-vacuum">refresh</button></h2>
+    <!-- [2026-08-27 per user] 吸盤 slave 由 1-4 改為 5-8。C++ 的 status 是用真實
+         slave 號輸出 "p5=... p8="（WASH_ROBOT.cpp: oss << " p" << s），而 app.js
+         的 parseVacuumValues 是拿那個數字去找 #vac-N，所以這裡的 id 必須一起改成
+         5-8，否則 `if (!cell) continue` 會靜默跳過、壓力顯示整片空白。 -->
     <div class="row">
       <span class="label">right:</span>
-      <span class="vac-cell" id="vac-1">p1 (右上) = ?</span>
-      <span class="vac-cell" id="vac-2">p2 (右下) = ?</span>
+      <span class="vac-cell" id="vac-5">p5 (右上) = ?</span>
+      <span class="vac-cell" id="vac-6">p6 (右下) = ?</span>
     </div>
     <div class="row">
       <span class="label">left:</span>
-      <span class="vac-cell" id="vac-3">p3 (左上) = ?</span>
-      <span class="vac-cell" id="vac-4">p4 (左下) = ?</span>
+      <span class="vac-cell" id="vac-7">p7 (左上) = ?</span>
+      <span class="vac-cell" id="vac-8">p8 (左下) = ?</span>
     </div>
     <ul class="hint">
       <li>單位 kPa：≤ -50 綠（吸住）/ -50~-10 黃（弱）/ ≥ -10 紅（脫離）</li>
@@ -483,37 +497,35 @@
 
   <section class="panel panel-washrobot" data-page="manual">
     <h2>manual — pusher</h2>
+    <!-- [2026-08-27 per user] 推桿不再分左右操作：原本的 right (slave 5,6) /
+         left (slave 7,8) 兩列已移除，改成一次動全部 4 支。
+         ⚠ 跟真空閥的情況不同 —— 真空是實體只剩一顆閥所以「無法」分開；推桿是
+         4 顆實體獨立的 ZDT 馬達，分得開，只是操作上不再分。後端
+         `pusher right|left` 指令仍然有效且真的只動該側，需要時可用 raw command
+         發送，下面的 single slave 也仍可單支點動。 -->
     <div class="row">
-      <span class="label">feet:</span>
+      <span class="label">全部 4 支 (slave 5,6,7,8):</span>
       <button data-tgt="washrobot" data-cmd="pusher feet extend">EXTEND</button>
       <button data-tgt="washrobot" data-cmd="pusher feet retract">RETRACT</button>
     </div>
     <div class="row">
-      <span class="label">right:</span>
-      <button data-tgt="washrobot" data-cmd="pusher right extend">EXTEND</button>
-      <button data-tgt="washrobot" data-cmd="pusher right retract">RETRACT</button>
-    </div>
-    <div class="row">
-      <span class="label">left:</span>
-      <button data-tgt="washrobot" data-cmd="pusher left extend">EXTEND</button>
-      <button data-tgt="washrobot" data-cmd="pusher left retract">RETRACT</button>
-    </div>
-    <div class="row">
       <span class="label">single slave:</span>
+      <!-- [2026-08-27 per user] slave 1-4 → 5-8（對應 WASH_ROBOT.h 的 ZDT_RF1/RF2/
+           LF1/LF2）。後端 cmd_zdt_pusher 現在驗證的是 CUP_SLAVE_FIRST..LAST，
+           送舊的 1-4 會直接回 ERR invalid_slave。 -->
       <select id="zdt-slave-select">
-        <option value="1">1 (右上 / RF1)</option>
-        <option value="2">2 (右下 / RF2)</option>
-        <option value="3">3 (左上 / LF1)</option>
-        <option value="4">4 (左下 / LF2)</option>
+        <option value="5">5 (右上 / RF1)</option>
+        <option value="6">6 (右下 / RF2)</option>
+        <option value="7">7 (左上 / LF1)</option>
+        <option value="8">8 (左下 / LF2)</option>
       </select>
       <button id="btn-zdt-extend">EXTEND</button>
       <button id="btn-zdt-retract">RETRACT</button>
     </div>
+    <!-- [2026-08-27 per user] zero 同樣不再分左右，只留 all（4 支一起歸零）。 -->
     <div class="row">
-      <span class="label">zero（當前位置 = 0）:</span>
-      <button data-tgt="washrobot" data-cmd="zdt_zero right">right</button>
-      <button data-tgt="washrobot" data-cmd="zdt_zero left">left</button>
-      <button data-tgt="washrobot" data-cmd="zdt_zero all">all</button>
+      <span class="label">zero（當前位置 = 0，全部 4 支）:</span>
+      <button data-tgt="washrobot" data-cmd="zdt_zero all">全部歸零</button>
     </div>
     <ul class="hint">
       <li>set_zero 必須在 pusher 完全縮回時按，否則後續 abs 0 不會回真實底</li>
@@ -587,8 +599,18 @@
       <input type="number" id="arm-clean-rounds" value="1" min="1" max="20" step="1">
       <button id="btn-arm-clean-sweep" class="danger arm-action">CLEAN SWEEP（補水→INIT→滾筒+刮刀）</button>
     </div>
+    <!-- [2026-08-26 per user] 乾式清洗 — bench 測試用，不噴水、不移動機器人。 -->
+    <div class="row">
+      <span class="label">🧪 乾式測試：</span>
+      <button data-tgt="washrobot" data-cmd="arm_clean_sweep_dry" class="arm-action">乾式清洗（INIT→滾筒+刮刀，不噴水）</button>
+      <ul class="hint">
+        <li>跑的就是「同步步伐」內建的那段清洗，所以測到的行為跟實際走路時完全一致</li>
+        <li>牆距固定 380mm（與步伐內建清洗相同），不吃上面的牆距欄位</li>
+        <li>不噴水、<b>不移動機器人</b>；INIT 失敗會自動退化成只掃上滑台、不開刷</li>
+      </ul>
+    </div>
     <ul class="hint">
-      <li>流程：A 補水 → B arm INIT → C × N rounds（LEFT 滾筒+水 → RIGHT 刮刀乾）→ D cleanup</li>
+      <li>流程：A 補水 → B arm INIT → C × N rounds（RIGHT 滾筒+水 → LEFT 刮刀乾）→ D cleanup</li>
       <li>任何 abort / fail 都會跑 cleanup (PARK + 刷/泵/球閥 OFF)</li>
     </ul>
   </section>
@@ -675,65 +697,12 @@
     <pre id="log"></pre>
   </section>
 
-  <section class="panel panel-camera" data-page="camera">
-    <h2>📹 攝影機</h2>
-    <div class="cam-grid">
-      <div class="cam-cell" data-cam-id="cam1">
-        <div class="cam-cell-head">CAM 1 — 192.168.1.110</div>
-        <div class="cam-stage">
-          <img id="cam1-stream" class="cam-video" src="/mjpeg/cam1" alt="camera 1 stream">
-          <div class="cam-overlay-offline" id="cam1-offline">
-            <span>相機離線</span>
-            <small>3 秒後自動重試…</small>
-          </div>
-        </div>
-        <div class="cam-controls">
-          <button id="cam1-snap"    class="cam-btn">📸 截圖</button>
-          <button id="cam1-reload"  class="cam-btn" title="重新載入串流">↻ 重連</button>
-          <span id="cam1-status" class="cam-status">streaming</span>
-        </div>
-      </div>
-      <div class="cam-cell" data-cam-id="cam2">
-        <div class="cam-cell-head">CAM 2 — 192.168.1.111</div>
-        <div class="cam-stage">
-          <img id="cam2-stream" class="cam-video" src="/mjpeg/cam2" alt="camera 2 stream">
-          <div class="cam-overlay-offline" id="cam2-offline">
-            <span>相機離線</span>
-            <small>3 秒後自動重試…</small>
-          </div>
-        </div>
-        <div class="cam-controls">
-          <button id="cam2-snap"    class="cam-btn">📸 截圖</button>
-          <button id="cam2-reload"  class="cam-btn" title="重新載入串流">↻ 重連</button>
-          <span id="cam2-status" class="cam-status">streaming</span>
-        </div>
-      </div>
-      <!-- D435i 深度攝影機（辨識避障用）— 不常駐拉流，按「拍照」才取一張目前畫面 -->
-      <div class="cam-cell" data-cam-id="depth">
-        <div class="cam-cell-head">深度攝影機 D435i — 辨識避障用</div>
-        <div class="cam-stage-label">全彩</div>
-        <div class="cam-stage">
-          <img id="depth-stream" class="cam-video" alt="depth camera color snapshot" style="display:none;">
-          <div class="cam-overlay-offline placeholder visible" id="depth-placeholder">
-            <span>尚未拍照</span>
-            <small>按下方「📸 拍照」取得目前畫面</small>
-          </div>
-        </div>
-        <div class="cam-stage-label">深度圖（近-遠著色）</div>
-        <div class="cam-stage">
-          <img id="depth-stream-map" class="cam-video" alt="depth map snapshot" style="display:none;">
-          <div class="cam-overlay-offline placeholder visible" id="depth-placeholder-map">
-            <span>尚未拍照</span>
-            <small>按下方「📸 拍照」取得目前畫面</small>
-          </div>
-        </div>
-        <div class="cam-controls">
-          <button id="depth-snap" class="cam-btn">📸 拍照</button>
-          <span id="depth-status" class="cam-status">idle</span>
-        </div>
-      </div>
-    </div>
-  </section>
+  <!-- [2026-08-27 per user] 攝影機介面整個移除 —— 「以後不用串接攝影機」。
+       原本這裡是 Camera 分頁的 panel（CAM1/CAM2 的 MJPEG 串流 + D435i 深度
+       相機拍照）。連同 sidebar 的 Camera 分頁按鈕、app.js 的 wireCamera /
+       depth snapshot 區塊、server.js 的 CAMERAS 對照表與 /snap /mjpeg 反向
+       代理路由一併刪除。washrobot Pi 上的 frame_capture.py /
+       depth_cam_service.py 本身不受影響（沒人再連它們而已）。 -->
 
   <section class="panel panel-settings" data-page="settings">
     <h2>⚙️ Wall-tune Settings</h2>

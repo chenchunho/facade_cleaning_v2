@@ -1805,172 +1805,21 @@ function wireScaleInput(inputId, side) {
 wireScaleInput('crane-dsz-left-scale-input',  'left');
 wireScaleInput('crane-dsz-right-scale-input', 'right');
 
-//=========== camera streaming ===========
-//
-// MJPEG stream attached via <img src="/mjpeg/cam1"> in HTML. Browser keeps the
-// connection open and renders each multipart JPEG part. We wire two extra
-// behaviours here:
-//   1) onerror → show offline overlay, schedule reconnect (cache-busted URL)
-//   2) snapshot button → fetch /snap/:id and trigger a file download
-//
-// Reconnect strategy: 3s delay + Date.now() suffix to force a fresh request
-// (browser caches MJPEG connections aggressively otherwise).
-
-function wireCamera(camId) {
-    const dock    = document.querySelector(`.cam-cell[data-cam-id="${camId}"]`);
-    if (!dock) return;
-    const img     = document.getElementById(`${camId}-stream`);
-    const offline = document.getElementById(`${camId}-offline`);
-    const status  = document.getElementById(`${camId}-status`);
-    const snapBtn = document.getElementById(`${camId}-snap`);
-    const reload  = document.getElementById(`${camId}-reload`);
-    if (!img) return;
-
-    let reconnectTimer = null;
-
-    function setStatus(text, cls) {
-        if (!status) return;
-        status.textContent = text;
-        status.classList.remove('live', 'offline');
-        if (cls) status.classList.add(cls);
-    }
-
-    function reloadStream() {
-        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-        offline.classList.remove('visible');
-        setStatus('streaming', 'live');
-        img.src = `/mjpeg/${camId}?t=${Date.now()}`;
-    }
-
-    img.addEventListener('load',  () => {
-        offline.classList.remove('visible');
-        setStatus('streaming', 'live');
-    });
-    img.addEventListener('error', () => {
-        offline.classList.add('visible');
-        setStatus('offline', 'offline');
-        if (reconnectTimer) return;
-        reconnectTimer = setTimeout(() => {
-            reconnectTimer = null;
-            reloadStream();
-        }, 3000);
-    });
-
-    if (reload) reload.addEventListener('click', reloadStream);
-
-    if (snapBtn) snapBtn.addEventListener('click', async () => {
-        const orig = snapBtn.textContent;
-        snapBtn.disabled = true;
-        snapBtn.textContent = '📸 取得中…';
-        try {
-            const r = await fetch(`/snap/${camId}?t=${Date.now()}`);
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-            const blob = await r.blob();
-            const url  = URL.createObjectURL(blob);
-            const ts   = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-            const a    = document.createElement('a');
-            a.href = url;
-            a.download = `${camId}_${ts}.jpg`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-            snapBtn.textContent = '✓ 已下載';
-            setTimeout(() => { snapBtn.textContent = orig; }, 1500);
-        } catch (e) {
-            console.error(`[${camId}] snapshot failed:`, e);
-            snapBtn.textContent = '✗ 失敗';
-            setTimeout(() => { snapBtn.textContent = orig; }, 1500);
-        } finally {
-            snapBtn.disabled = false;
-        }
-    });
-
-    setStatus('streaming', 'live');
-}
-wireCamera('cam1');
-wireCamera('cam2');
-// To add more: wireCamera('cam3'); wireCamera('cam4');
-
-//=========== depth camera (snapshot-only, 辨識避障用) ===========
-//
-// D435i has no /mjpeg endpoint (depth_cam_service.py only serves /snap/depth,
-// see CAMERAS.depth comment in server.js) — not worth a continuous stream for
-// an obstacle-detection still. Button just fetches one JPEG and shows it
-// inline; no reconnect/offline-retry logic since there's no persistent
-// connection to lose.
-
-function wireDepthCamera() {
-    const img         = document.getElementById('depth-stream');
-    const placeholder = document.getElementById('depth-placeholder');
-    const imgDepth         = document.getElementById('depth-stream-map');
-    const placeholderDepth = document.getElementById('depth-placeholder-map');
-    const status      = document.getElementById('depth-status');
-    const snapBtn     = document.getElementById('depth-snap');
-    if (!img || !snapBtn) return;
-
-    // { url } wrapper so fetchInto can update the caller's "last blob URL"
-    // by reference (plain vars can't be passed by reference in JS).
-    const lastUrl      = { url: null };
-    const lastUrlDepth = { url: null };
-
-    function setStatus(text, cls) {
-        if (!status) return;
-        status.textContent = text;
-        status.classList.remove('live', 'offline');
-        if (cls) status.classList.add(cls);
-    }
-
-    async function fetchInto(url, imgEl, placeholderEl, lastUrlRef) {
-        const r = await fetch(`${url}?t=${Date.now()}`);
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const blob = await r.blob();
-        if (lastUrlRef.url) URL.revokeObjectURL(lastUrlRef.url);
-        lastUrlRef.url = URL.createObjectURL(blob);
-        imgEl.src = lastUrlRef.url;
-        imgEl.style.display = '';
-        if (placeholderEl) placeholderEl.classList.remove('visible');
-    }
-
-    snapBtn.addEventListener('click', async () => {
-        const orig = snapBtn.textContent;
-        snapBtn.disabled = true;
-        snapBtn.textContent = '📸 拍照中…';
-        // depth_live/depth_live_depth = raw color + colorized depth map of
-        // THIS instant (no BEFORE/AFTER analysis needed first). Plain
-        // /snap/depth is the last run_depth_avoid AFTER result — used by the
-        // modal, not this manual button. allSettled so one endpoint being
-        // down (e.g. depth map encode fail) doesn't blank out the other.
-        const results = await Promise.allSettled([
-            fetchInto('/snap/depth_live', img, placeholder, lastUrl),
-            fetchInto('/snap/depth_live_depth', imgDepth, placeholderDepth, lastUrlDepth),
-        ]);
-        const okCount = results.filter(r => r.status === 'fulfilled').length;
-        if (okCount === results.length) {
-            setStatus('已更新 ' + new Date().toLocaleTimeString(), 'live');
-            snapBtn.textContent = '✓ 完成';
-        } else if (okCount > 0) {
-            console.error('[depth] one snapshot failed:', results);
-            setStatus('部分失敗 ' + new Date().toLocaleTimeString(), 'live');
-            snapBtn.textContent = '△ 部分失敗';
-        } else {
-            console.error('[depth] snapshot failed:', results);
-            setStatus('offline', 'offline');
-            snapBtn.textContent = '✗ 失敗';
-        }
-        setTimeout(() => { snapBtn.textContent = orig; }, 1500);
-        snapBtn.disabled = false;
-    });
-}
-wireDepthCamera();
+// [2026-08-27 per user] 攝影機相關前端程式全部移除 —— 「以後不用串接攝影機」。
+// 原本這裡是 wireCamera()（CAM1/CAM2 的 MJPEG 串流、離線重連、截圖下載）與
+// wireDepthCamera()（D435i 拍照顯示全彩+深度圖）。對應的 HTML panel、
+// sidebar 的 Camera 分頁、server.js 的 /snap 與 /mjpeg 反向代理路由一併刪除。
+// washrobot Pi 上的 frame_capture.py / depth_cam_service.py 本身沒動，只是
+// 前端不再連它們。
 
 //=========== page navigation (left sidebar) ===========
 //
-// Panels carry data-page="home|manual|camera"; CSS hides the ones not on the
+// Panels carry data-page="home|manual|settings"; CSS hides the ones not on the
 // active page (driven by <body data-page>). Buttons just switch that attribute.
 // Last-selected page is remembered in localStorage.
 (function initPageNav() {
-    const PAGES   = ['home', 'manual', 'camera', 'settings'];
+    // [2026-08-27] 'camera' removed along with the camera UI.
+    const PAGES   = ['home', 'manual', 'settings'];
     const buttons = document.querySelectorAll('#sidebar .nav-btn');
 
     function setPage(page) {
