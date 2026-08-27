@@ -92,9 +92,10 @@ msbuild washrobot_new_PI.sln /p:Configuration=Debug /p:Platform=ARM
 web_backend/         # ── 操作層：Node.js server + 前端 GUI
 app/                 # ── 應用層：機器人編排（步態、狀態機、真空重試、校正）
                      #    WASH_ROBOT.{h,cpp}
-user_lib/            # ── 裝置層：單一硬體的驅動 + 傳輸
+user_lib/            # ── 裝置層：單一硬體的驅動
                      #    ZDT / JC100 / SD76 / MH300 / SE3 / DSZL / PQW / QX_DO24 …
-                     #    TCP_client / TCP_server / Serial_port（傳輸，日後可再拆 transport/）
+transport/           # ── 傳輸層：裝置層之下，與硬體種類無關
+                     #    TCP_client / TCP_server / Serial_port
 facade_cleaning_v2/  # 洗窗本體主控 binary（main.cpp，薄；邏輯在 app/）
 Crane_control_PI/    # 吊機主控 binary
                      #    ⚠️ 應用層尚未抽出，編排邏輯仍寫在 main.cpp（4,400+ 行）
@@ -106,7 +107,13 @@ scripts/             # tmux launcher：wr.sh / crane.sh / cams.sh
 tmp/                 # 暫存工作區（已 gitignore，不進版控）
 ```
 
-> 🔴 **`user_lib/` 只放裝置與傳輸。** 2026-08-27 之前 `WASH_ROBOT.{h,cpp}`（15,321 行，
+> 🐛 **`user_lib/SerialPort.h` 與 `transport/Serial_port.h` 是兩個不同的檔，卻共用同一個
+> include guard `SERIAL_PORT_H`**。前者是 `cleaning_arm` 的 damiao 那一套（經 `user_lib/damiao.h`），
+> 後者是本專案的序列埠。目前不爆是因為使用者不重疊 —— 但**只要哪天同一個編譯單元碰到兩者，
+> 第二個會被 guard 靜默吃掉**，症狀是「某個 class 莫名找不到」，沒有任何錯誤訊息指向真因。
+> 因此 `SerialPort.h` **刻意留在 `user_lib/`、不併入 `transport/`**，避免兩套並存的假象。
+>
+> 🔴 **`user_lib/` 只放裝置驅動。** 2026-08-27 之前 `WASH_ROBOT.{h,cpp}`（15,321 行，
 > 佔全專案 37%）也放在這裡，但它是**編排層不是驅動**——放著會讓「`user_lib` 是裝置驅動」
 > 這句話（下方「模組邊界」節的前提）當場失效。已移到 `app/`。
 >

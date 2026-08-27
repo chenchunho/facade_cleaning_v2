@@ -81,9 +81,9 @@
     <ClCompile Include="..\user_lib\JC_100_METER.cpp" />
     <ClCompile Include="..\user_lib\PQW_IO_16O_RLY.cpp" />
     <ClCompile Include="..\user_lib\QX_DO24.cpp" />
-    <ClCompile Include="..\user_lib\Serial_port.cpp" />
-    <ClCompile Include="..\user_lib\TCP_client.cpp" />
-    <ClCompile Include="..\user_lib\TCP_server.cpp" />
+    <ClCompile Include="..\transport\Serial_port.cpp" />
+    <ClCompile Include="..\transport\TCP_client.cpp" />
+    <ClCompile Include="..\transport\TCP_server.cpp" />
     <ClCompile Include="..\app\WASH_ROBOT.cpp" />
     <ClCompile Include="..\user_lib\WT901BC_TTL.cpp" />
     <ClCompile Include="..\user_lib\XKC_Y25_RS485.cpp" />
@@ -97,9 +97,9 @@
     <ClInclude Include="..\user_lib\JC_100_METER.h" />
     <ClInclude Include="..\user_lib\PQW_IO_16O_RLY.h" />
     <ClInclude Include="..\user_lib\QX_DO24.h" />
-    <ClInclude Include="..\user_lib\Serial_port.h" />
-    <ClInclude Include="..\user_lib\TCP_client.h" />
-    <ClInclude Include="..\user_lib\TCP_server.h" />
+    <ClInclude Include="..\transport\Serial_port.h" />
+    <ClInclude Include="..\transport\TCP_client.h" />
+    <ClInclude Include="..\transport\TCP_server.h" />
     <ClInclude Include="..\app\WASH_ROBOT.h" />
     <ClInclude Include="..\user_lib\WT901BC_TTL.h" />
     <ClInclude Include="..\user_lib\XKC_Y25_RS485.h" />
@@ -108,7 +108,7 @@
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\app;..\user_lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\app;..\transport;..\user_lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
   </ItemDefinitionGroup>
   <!-- Unconditional: std::thread requires pthread at link time. Applies to all configs. -->

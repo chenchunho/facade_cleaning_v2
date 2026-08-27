@@ -83,8 +83,8 @@
     <ClCompile Include="..\user_lib\MH300_inverter.cpp" />
     <ClCompile Include="..\user_lib\SD76_length_meters.cpp" />
     <ClCompile Include="..\user_lib\SE3_inverter.cpp" />
-    <ClCompile Include="..\user_lib\TCP_client.cpp" />
-    <ClCompile Include="..\user_lib\TCP_server.cpp" />
+    <ClCompile Include="..\transport\TCP_client.cpp" />
+    <ClCompile Include="..\transport\TCP_server.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -95,13 +95,13 @@
     <ClInclude Include="..\user_lib\MH300_inverter.h" />
     <ClInclude Include="..\user_lib\SD76_length_meters.h" />
     <ClInclude Include="..\user_lib\SE3_inverter.h" />
-    <ClInclude Include="..\user_lib\TCP_client.h" />
-    <ClInclude Include="..\user_lib\TCP_server.h" />
+    <ClInclude Include="..\transport\TCP_client.h" />
+    <ClInclude Include="..\transport\TCP_server.h" />
     <ClInclude Include="..\user_lib\log_utils.h" />
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\user_lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\transport;..\user_lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>-I$(RemoteRootDir)/../user_lib %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
