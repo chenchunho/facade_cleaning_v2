@@ -100,6 +100,10 @@
 | 🔴 | SE3 `P.79` 切換程序與「`P.5` 必為 0」**是唯一副本**，而且 bench 目前**仍在跑 SE3**（`Crane_control_PI/main.cpp:116` `#define CRANE_VFD_IS_SE3 1`），不是已作廢的舊文件：改 `P.79` 前須先停馬達、解除 OPT，再 `P.79=3 → 2 → 6`（防 latch 卡住）；`P.5`（multi-speed）必須保持 0，否則多段速會覆蓋 H1002 頻率命令 | `.claude/se3_mode6_migration_plan.md` §1.1、`Crane_control_PI/main.cpp:116` | **有效** ✔ | `se3_mode6_migration_plan.md` §1.1 |
 | 🔴 | QX-DO24 PWM（螺旋槳 ESC 控制）目前停用，`PWM_SLAVE=6` 撞 JC100 真空計。停用註解的理由是「nothing in the automatic gait depends on it (web panel only)」——這對舊架構成立，**對新架構不成立**：新架構設計文件寫明貼附序列的第一步就是「先讓螺旋槳把機體壓穩」。同 bus 的 slave 1-8 已被吸盤佔滿（`Linux_test/main.cpp:891` feet `{1,2,3,4}` / body `{5,6,7,8}`）、10/11 為 DY-500（未安裝），需挑一個空號並對照 `cli_22_` 上所有裝置確認不撞號 | `user_lib/WASH_ROBOT.cpp:175-192`（`PWM_ENABLED`） | **未修（阻塞新架構）** ✔ | changelog 2026-08-27h ＋ 新架構設計 2026-08-27 |
 | 🟡 | **`SERIAL_PORT_H` guard 衝突：兩個不同的序列埠實作共用同一個 guard** | `user_lib/SerialPort.h`（322 行，cleaning_arm/damiao 用）與 `transport/Serial_port.h`（本專案用，WASH_ROBOT.h / WT901BC_TTL.h / Linux_test）。目前不爆只因使用者不重疊；**一旦同一編譯單元同時碰到兩者，第二個被 guard 靜默吃掉**，症狀是「class 莫名找不到」、錯誤訊息不指向真因。修正方向：guard 改唯一名稱或 `#pragma once`，動前先確認無別處拿此 guard 名做條件編譯。兩檔開頭皆已標註 | 未修 | 分層重構 2026-08-27 |
+| 🔴 | **部署的程式沒有進版控 —— `web_ver2` 與 repo 分岔 589 行** | Pi `~/projects/web_ver2/server.js` 330 行（**2026-08-27 15:31 改過**）+ `public/app.js` 2,087 行，repo `web_backend/` 對應為 259 / 1,936 行。不是增量是另一個程式。另有 `~/projects/web/`（Jul 3）。**這讓「repo 是權威」當場失效**，也代表 repo 的前端改動可能從未上線、Pi 上的改動從未回流 | 未修 | 實機盤查 2026-08-27 |
+| 🔴 | **張力刻度仍是 placeholder，kg 讀值無意義** | 實機 `status` 讀到 `dsz_left_scale=-0.01 dsz_right_scale=-0.01`，即待辦既有的 DSZL placeholder。當下讀值 `tension_left=27.35 / right=14.98` 是用佔位刻度算出來的。**這是 `crane_balance_hold_plan` 重啟前提「張力可信」仍未達成的實證** | 未修 | 實機讀取 2026-08-27 |
+| 🔴 | **左右張力差 12.4 kg，且左側已越過收繩停止門檻** | `retract_tension_stop_kg=25`，左側讀值 27.35 已高於它 → 若刻度正確，收繩指令會立刻觸發張力停止。⚠️ 但因上一列（刻度是佔位值），也可能是假象 —— **兩種可能都不可接受**，要先解決刻度才能判斷 | 未修 | 實機讀取 2026-08-27 |
+| 🔴 | **VFD 故障碼顯示是壞的：一邊報假警、一邊讀不到** | `vfd_fault left` → `f1~f4 = 160/OPT`（四格全故障）；`vfd_fault right` → `ERR read_fail`。根因是 `mh300_migration_plan` Phase 3-3 未完成：`format_vfd_fault_codes`（`Crane_control_PI/main.cpp:1529`）仍讀 SE3 的 H1007/H1008、`vfd_fault_name()` 仍是 SE3 代號表。**故障診斷目前不可用** | 未修 | 實機讀取 2026-08-27 |
 
 ---
 
@@ -281,6 +285,43 @@ threshold 再實作」：① `cmd_hold` 與 motion 互斥（避免 hold 跟 moti
 | 🟢 | 空壓機與電動缸電流重疊 | 空壓機啟動與電動缸同動時的電流重疊 | **暫緩**；症狀為電動缸偶發失步或抱閘異響，實機測試時可能浮現 | 設計彙整 §6 暫緩項目 |
 | 🟢 | 空壓機振動干擾姿態 | 空壓機振動對陀螺儀姿態判斷的干擾 | **暫緩**，實機測試時可能浮現 | 設計彙整 §6 暫緩項目 |
 | 🟢 | 儲氣筒壓力未讀 | Pi 未讀取儲氣筒壓力，假設氣壓恆定可用 | **暫緩**，實機測試時可能浮現 | 設計彙整 §6 暫緩項目 |
+
+---
+
+## 2026-08-27（晚）— 吊機唯讀盤查（未讓機器動）
+
+> **規範權威：** 連線資訊見 `.claude/runbook.md`；分層見 `CLAUDE.md` Repository Structure。
+
+### 連線資訊（實測，與文件不同）
+| 機器 | hostname | 有線 | WiFi | 帳號 |
+|---|---|---|---|---|
+| 洗窗本體 | `washrobot` | `192.168.1.100` | `192.168.5.26` | `nexuni` |
+| 吊機 | `raspberry-cran` | **`192.168.1.10`**（文件寫 `.101`，錯） | `192.168.5.17` | `user` |
+
+- 兩台皆 aarch64 / Debian 13 (trixie) / g++ 14.2；**測試環境實體在倉庫（新國街）**
+- `app/WASH_ROBOT.h` 的 `CRANE_IP = "192.168.5.17"` → 現行程式本來就走 WiFi 跟吊機講話
+- 工程師留的啟動說明路徑少了 `projects/`（實際 `~/projects/crane_control_PI/`、`~/projects/web_ver2/`），
+  且 `WROBOT_IP` 寫 `192.168.5.19`，洗窗機實際在 `.26`
+
+### 已完成
+- **五個網關全部可達**：`.30`/`.31`（SE3 左右）、`.34`（SD76 計米）、`.32`/`.33`（X518 張力）
+- 啟動 `crane_control_PI.out` 讀取後**已停止並清乾淨**，回到進場前狀態（原本沒有任何程式在跑）
+- 只送唯讀指令（`ping`/`status`/`tension`/`home_status`/`vfd_fault`），
+  **未碰任何會讓機器動的指令**（`up`/`down`/`pay_out`/`retract`/`align_lengths`/`roll_correct`/`zero_*`）
+- 讀到：`length_left=-18 length_right=-21`、`tension_left=27.35 right=14.98`、所有 `dev_* = 1`
+- 四項發現已進待辦總表（見上方）
+
+### 🐛 本次踩到的兩個坑
+- **`pkill -f crane_control_PI.out` 比中了執行它的那條 SSH 指令自己**，把遠端 shell 殺掉 →
+  後面的 `rm` 沒跑到，看起來像「清理失敗」。**這正是本檔既有那條 `pgrep -f` 自我比中的同型坑**，
+  當時記的是 SSH 轉發，這次換成遠端程式。**判斷程式在不在，用 `ss -ltn` 看埠、或 `ps -eo comm` 比對執行檔名**
+- 🔴 **我一度誤報「SD76 讀到 CRC 不符、重現了驅動未驗 CRC 的缺陷」——那是我的探測程式沒排空網關緩衝造成的。**
+  重讀 12 次（左右各 6 次）CRC 全部正確、回覆位元組完全一致。
+  📌 **驅動沒驗 CRC 仍是真缺陷，但今天沒有重現它**；一次觀察就下結論，跟本專案 OCR 那次是同型錯誤
+
+### 待完成
+- 🔴 上述四項（部署分岔／張力刻度／張力差／故障碼），詳見待辦總表
+- 🟡 吊機二進位是 7/23 版，比 repo 舊；repo HEAD 的改動未部署過
 
 ---
 
