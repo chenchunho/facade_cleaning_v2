@@ -13,3 +13,6 @@ cleaning_arm/motor_api
 frame_capture/test/
 frame_capture/depth_test_out/
 frame_capture/__pycache__/
+
+# 暫存工作區（設計草稿、PDF 圖面等，不進版控）
+tmp/

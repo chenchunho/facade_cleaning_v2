@@ -1,3 +1,20 @@
+> ⚰️ **已歸檔 2026-08-27 — 判定：已完成**（且實作超出原規劃）。
+> 六個指令與 GUI 全數落地：`WASH_ROBOT.h:102-108`、parser `WASH_ROBOT.cpp:11265`、
+> dispatch `facade_cleaning_v2/main.cpp:223-274`、GUI `web_backend/public/index.html:118-157`。
+> ⚠️ **計畫裡有兩處決策已被推翻，照著這份做會做錯**：
+> - 計畫寫「方向固定往下、不支援 up」→ 現行簽名是 `cmd_run_script(csv, up=false, gait="alt")`
+> - 計畫寫 CSV 範圍 `5..50` → 現行 `STEP_CM_MAX = 80`（`WASH_ROBOT.h:609`）
+> - changelog `2026-08-26d`：C++ 端 `parse_script_csv_` **仍認得 `x`**，前後端 parser 已不再是 mirror
+>
+> 🔴 **不刪的理由**：§「為什麼 default = sweep」與「不能用 `cmd_step_down(cm)`，因為它預設會跑 Phase C」
+> 這兩段設計理由是唯一記載。另有一段 **retired pipeline 死碼仍在**
+> （`WASH_ROBOT.cpp:11468` `#if 0` 包住的 `_retired_cmd_run_script_v1_sweep_`，約 100 行），
+> 與待辦總表那條「v1 舊 body `#if 0` 待硬刪」**不是同一段**。
+>
+> 以下為原文，不再維護。
+
+---
+
 # Scripted Run（自訂步驟序列）規劃
 
 > **狀態：** 規劃完成、待實作

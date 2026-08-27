@@ -12,41 +12,28 @@
 
 ## ⚠️ 尚未解決 / 待處理事項
 
-這一節是**目前已知、還沒修好或還沒有明確結論**的問題，優先讀這裡——接手後如果剛好撞到類似症狀，可以直接跳到對應細節，不用重新從頭排查。
+📌 **這一節的內容已於 2026-08-27 併入 `.claude/work_log.md` 最上方的「🔴 待辦總表」，
+請直接去那裡看，不要在這裡維護第二份清單。**
 
-### 1. Crane `cmd_side_measured` 沒有重置 `abort_flag`，stop 後步態永久卡死
-- **現象**：washrobot 跑 script 到一半按 stop，之後不管做什麼功能都變成「無法連線吊機」，必須重開 `Crane_control_PI` 整個程式才會恢復。
-- **根因（已找到，尚未套用修復）**：`Crane_control_PI/main.cpp` 的 `cmd_side_measured`（v2 step 專用，`retract_left/right`/`pay_out_left/right`，約在 line 2733）進入時**沒有**把全域 `static std::atomic<bool> abort_flag` 重置成 `false`——它的三個兄弟函式 `motion_rope`(2233)/`cmd_roll_correct`(2535)/另一個 MotionScope 函式(2661) 都有 `abort_flag = false;` 這行，唯獨這個漏掉。`abort_flag` 一旦被 `cmd_stop()` 或 watchdog timeout 設成 `true`，因為 v2 幾乎所有跟吊機的互動都經過 `cmd_side_measured`，迴圈第一行 `if (abort_flag.load()) { ...; break; }` 會讓馬達剛啟動就立刻中止、回 `ERR aborted`，永久性直到重開程式（重開讓 static 變數重新初始化為 false）。
-- **修法**：在 `cmd_side_measured` 拿到 `motion_mtx`/`MotionScope` 之後補一行 `abort_flag = false;`，跟其他三個函式一致。因為 crane 通訊 hardening（見下方章節）已經幫這個函式加了 `motion_mtx` try_lock 保護，補這行不會有並發風險。
-- **待辦**：確認是否要套用這個修復，套用後更新這條記錄狀態。
+原因：專案改為單人開發，退休了 `.claude/mailbox.md` 的協作信箱機制。原本散在
+mailbox（16 條）、本節（6 條）、`work_log.md` 各日期條目的待辦段（44 條）三個地方的
+未結案項目，全部合併成一張帶優先度、涉及檔案、現況（未修／已修／待查）與**原始日期**
+的表，讓每一筆技術債放了多久看得見。
 
-### 2. Follower 側 IMU 校平疑似被切到 meter 模式，某次結束後機體歪斜
-- **現象**：某次 `run_script` 跑 step_down，follower 側（後動、走 IMU 對平的一側）移動吊機時完全沒做 IMU 校平，該步結束後機體歪斜。
-- **機制**：`follower_imu_level_`（`WASH_ROBOT.cpp` 約 6366 行）在 `run_side` 的 `pre_cycle`、crane 移動完之後才被呼叫（`if (imu_level) follower_imu_level_(move_group);`）。裡面好幾種跳過路徑都會印對應 log，**唯獨 `follower_use_imu_.load() == false`（meter 模式）會完全靜默 return，一行 log 都不印**。`follower_use_imu_` 預設值是 `true`（`WASH_ROBOT.h:881`），只有手動呼叫 `cmd_set_follower_mode("meter")` 才會關掉。
-- **判斷方法**：如果那次完整 log 裡 follower 移動附近連一行 `[imu_level]` 都沒出現，就是 `follower_mode` 當時被切到 `meter`。
-- **待辦**：跑 `status` 確認 `follower_mode=` 欄位（在 `WASH_ROBOT.cpp` 約 10424 行）是 `imu` 還是 `meter`；若是 `meter`，查是誰/什麼流程把它切掉的，評估要不要把預設行為鎖回 `imu`；若已經是 `imu` 但真的沒印 log，要往 `run_side`/`cycle_group_` 的呼叫鏈往下查 `imu_level` 參數是否有在某條路徑沒被正確設成 `true`。
+本節原本的 6 條都在那張表裡，來源欄標成 `ONBOARDING §1` ~ `§6`，並且在併入時逐條打開
+原始碼查證過現況，細節（現象、根因、修法、判斷方法）也一併搬過去，沒有刪減：
 
-### 3. Crane 端偶發 `ERR meter_left_read_fail`，根因未知（已排除兩個假設）
-- **現象**：`step_down_sync` 執行中，`crane_cmd_("pay_out 30")` 偶發回 `ERR meter_left_read_fail`，接著進 PAUSE-ON-ERROR，同時觀察到 washrobot→crane 的 TCP 連線每 500ms 一直 reconnecting。**Workaround：重開 `Crane_control_PI` 整個程式就好。**
-- **已排除的假設**：(a) `TCP_client.cpp` 的「Linux 殭屍連線偵測失效」bug——`Crane_control_PI` 已用最新版重新編譯部署，問題仍在，代表不是（或不只是）這個。(b) 2026-05-08 的「Modbus-TCP gateway stale buffer」問題——那次已用 `sendAndReceive` atomic API 徹底修過，`SD76_length_meters` 在修復清單內，理論上不該是同一根因（除非修法後來被動過）。
-- **還沒查的方向**：`meter_read_robust()`（`Crane_control_PI/main.cpp:1367`）在 `readUpperInteger` 真的硬失敗時才會設 `g_length_left_valid=false`，但沒查為什麼設下去之後不會自己恢復（理論上 `meter_loop` 持續在跑，下次讀成功就該恢復）。需要 crane 程式自己的 console/log（不只是 washrobot 端收到的回覆）才能繼續縮小範圍。
-- **待辦**：下次遇到，優先收集 crane 程式自己的 log，而不是只看 washrobot 端。
+| 原編號 | 項目 | 現況（2026-08-27 查證） |
+|---|---|---|
+| §1 | Crane `cmd_side_measured` 沒重置 `abort_flag`，stop 後步態永久卡死 | 🔴 未修 |
+| §2 | Follower 側 IMU 校平疑似被切到 meter 模式 | 🟡 待查 |
+| §3 | Crane 端偶發 `ERR meter_left_read_fail`，根因未知 | 🟡 待查 |
+| §4 | D435i 深度相機戶外強光風險 | 🟢 已作廢（攝影機路線 2026-08-26/27 整個移除） |
+| §5 | 規範文件（CLAUDE.md / motion_flow.md §2）硬體架構圖已跟程式碼脫節 | 🟡 未修 |
+| §6 | **緊急收繩按鈕實際上沒有張力保護，跟安全性文件描述相反** | 🔴 未修（安全性） |
 
-### 4. D435i 深度相機戶外強光風險——換相機決策的最大未知數，還沒測
-- **背景**：`facade_cleaning_v2` 是戶外機器人，但 RealSense D435i 是 active IR stereo 相機，強日光下環境紅外線可能蓋過相機自己投影的 IR 圖案，讓 depth 品質大幅下降——這是 D400 系列公開已知的限制，不是本專案獨有。目前所有測試都在室內做，完全沒驗證過戶外表現。
-- **判斷**：在正式決定要不要拿 D435i 取代原本 RGB 相機方案之前，**戶外強光測試比繼續調室內演算法參數更關鍵**——如果戶外測試失敗，整條深度相機路線可能走不通，不管室內數學多準都沒用。
-- **已規劃但沒執行的測試方法**：(1) 陰影對照組（相機+目標物都在陰影，當基準）；(2) **最關鍵**：目標物直曬、相機在陰影（風險是目標物表面被陽光直射蓋過投影圖案，不是相機本身過熱）；(3) 正午前後陽光最強時段測。理想目標物是真的會被陽光曬到的玻璃窗+窗檻（反光+強光同時出現最貼近實際情況）。工具已現成：`frame_capture/depth_reflection_bench.py`，b→a→s 存檔流程不用改程式。存檔時記得手動標記光線條件（程式不會自動記）。
-- **待辦**：問是否有機會做戶外測試、結果如何，再決定深度相機這條路要不要繼續投入。
-
-### 5. 規範文件（CLAUDE.md / motion_flow.md）硬體架構圖已跟程式碼脫節
-- **現象**：2026-08-06 因為要列出目前硬體連線/IP 架構，逐一對照程式碼常數後發現，CLAUDE.md 跟 `motion_flow.md` §2 描述的都還是 v1 的架構（DM2J 5顆滑軌+ZDT 9顆推桿+3區真空腳組/身體組/中心），跟 v2 實際的「無 DM2J 滑軌、ZDT 只有 4 顆腳推桿（slave 1~4）、PQW CH1=右腳閥/CH2=泵浦/CH3=左腳閥（無身體組無中心組）、PQW 從 8CH 變 16CH」完全不符。CLAUDE.md 自己在文件開頭聲明「以 motion_flow.md §2 為準」，但 §2 查證後也一樣過時。
-- **Crane 端也有落差**：motion_flow.md §2 寫「USR_A 控制 bus 同時掛左右兩顆變頻器、USR_B 感測 bus 掛兩顆 SD76」，但 `Crane_control_PI/main.cpp` 目前實際是 **USR_A(.30)=左變頻器獨佔一條 bus、USR_B(.31)=右變頻器獨佔一條 bus**，兩顆 SD76 都在 USR_M(.34)——拓樸又重排過一次，文件沒跟上。Crane bench IP 目前是 `192.168.5.27`（`WASH_ROBOT.h` `CRANE_IP`，2026-08-03 從 `.26` 改的，程式註解有記但文件沒有）。
-- **待辦**：如果要更新文件，直接對照目前程式碼常數重寫 CLAUDE.md 硬體圖 + motion_flow.md §2。
-
-### 6. 緊急收繩按鈕實際上沒有張力保護，跟安全性文件描述相反（優先度較高）
-- **現象**：`motion_flow.md` §8「緊急收繩按鈕」寫「張力保護仍在：Crane C++ 端的 tension_alarm safety monitor 不受 GUI 模式影響，超張力照樣強制停」——但查 `Crane_control_PI/main.cpp` 實際碼，🆘 緊急收繩按鈕送的是 `retract_left/right on`，走 `cmd_manual()`，這個函式的**原始碼註解自己就寫「manual = bypass tension safety」**，完全沒呼叫 `tension_safety_check_values`。真正有背景張力監控（`hold_loop()`，超標時 `hold_all_off()`）保護的是吊機區域一般的「↑/↓ 拉繩」按鈕（`cmd_hold()`），不是緊急收繩按鈕。
-- **意義**：緊急收繩目前實際上沒有張力保護，跟文件講的相反。這可能是 (a) 故意的設計——緊急狀況不要被軟體張力門檻卡住——但文件寫錯方向，或 (b) 真的是需要補上保護的安全缺口。
-- **狀態**：已口頭跟 user 提過，還沒得到明確答覆要選哪個方向。**下次接續可以直接問要修文件描述還是補張力保護到 `cmd_manual`，不用重新查一次程式碼。**
+⚠️ 這份 ONBOARDING 其餘章節（1. 專案總覽 / 2. 硬體驅動 Firmware 踩坑知識 / 3. 工程方法）
+是硬體與工程知識，**不隨協作流程退休，繼續有效**。
 
 ---
 

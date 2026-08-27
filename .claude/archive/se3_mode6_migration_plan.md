@@ -1,3 +1,22 @@
+> ⚰️ **已歸檔 2026-08-27 — 判定：已作廢。**
+> 從未開工（全 repo 無 `gpiod`／`GPIO_relay`／`gpiochip`），且路線已被 MH300 取代——
+> `mh300_migration_plan.md` §Phase 6 自己就寫著要把本檔標 deprecated。計畫 §4.2 要刪的 H1001
+> workaround 全數健在（`Crane_control_PI/main.cpp:762`／`:849-853`／`:1852`／`:1933`／`:2313`）。
+>
+> 🔴 **但檔案不刪，而且內容現在仍然有效**——bench 現場跑的還是 SE3
+> （`Crane_control_PI/main.cpp:116` `#define CRANE_VFD_IS_SE3 1`）：
+> - **§1.1 是唯一一張「SE3 故障模式 ↔ workaround」因果對照表**（六列：stop ramp／DC brake 期間拒收
+>   H1001、reversal lockout、CU mode latch glitch、watchdog deadlock、keepalive 與 critical write 撞、
+>   RS485 bus contention）
+> - **兩條硬體設定風險**（已另抄進待辦總表）：`P.79` 必須 `3 → 2 → 6` 逐步切換防 latch 卡住；
+>   `P.5 (multi-speed)` 必須保持 0，否則多段速會覆蓋 H1002 頻率命令
+> - **§7 四個已被否決的方向**（留檔以免重複提出）：換 EtherCAT/CANopen drives（成本）、
+>   per-SE3 專屬 RS485 gateway（只解一半、不解 firmware 病根）、換鋼索吊車、RPi 改 PLC
+>
+> 以下為原文，不再維護。
+
+---
+
 # SE3 Mode 6 (Hybrid Modbus + GPIO Relay) Migration Plan
 
 **Status:** 提案 / 未開工
