@@ -1,3 +1,19 @@
+> ⚰️ **已歸檔 2026-08-27 — 判定：已作廢。**
+> 相機路線整條移除：`obstacle_detect`／`obstacle_check`／`run_avoid`／`obstacle_response` 四個入口已封成
+> `ERR removed_in_v2`（`facade_cleaning_v2/main.cpp:171-174`），GUI 於 changelog `2026-08-26c`／`2026-08-26e`
+> 移除，`2026-08-27c` 更明訂「以後不用串接攝影機」。計畫 Phase 3~6 一項未做。
+>
+> 🔴 **但檔案不刪，因為以下是唯一副本**——真要再接相機就得整個重量：
+> `CAM_TO_WALL_CM = 18`（feet cup 9.7cm ＋ offset 8.5cm，2026-06-01 量測）、
+> `CAM_TO_FEET_OFFSET_CM` 6.5 → 13.5（2026-06-04，原值漏算 cup 伸出 body 那段）、鏡頭俯角 54°、
+> cam3/cam4 各自六點的 `image_y → distance_cm` LUT 校正表、相機真實 IP `.110/.111/.112/.113`。
+> ⚠️ **一條踩坑**：必須用**主碼流 `stream=0`**——子碼流被 camera 內部 ROI 裁切，不能用（2026-06-01 發現）。
+>
+> 📌 相關的**未結案項目已移入** `.claude/work_log.md` 的待辦總表（`run_depth_avoid` 後端仍活著、
+> `scripts/wr.sh` 仍啟動 `depth_cam_service.py`）。以下為原文，不再維護。
+
+---
+
 # 攝影機窗框避障 — 規劃與參數記錄
 
 > **狀態：** 規劃階段，程式碼未實作

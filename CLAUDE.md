@@ -6,53 +6,65 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 新 session 接手此專案時，**務必先做以下動作再開始工作**：
 
-1. 讀 **`.claude/work_log.md`** — 最新進度 + 待完成項目（最新紀錄在最上方）；每個決策條目上方會標示「**規範權威：** xxx」告訴你該決策落在哪份規範文件
+1. 讀 **`.claude/work_log.md`** — 最新進度 + 待完成項目（最新紀錄在最上方）；每個決策條目上方會標示「**規範權威：** xxx」，指向該決策落在哪份規範文件（CLAUDE.md 某節 / motion_flow.md §X），要確認完整規範就跳過去讀
 2. 讀 **`.claude/motion_flow.md`** — 完整運動流程規格（硬體表、phase、狀態機、指令協定、參數常數）
 3. 讀 **`.claude/runbook.md`** — 啟動順序、Web GUI 按鈕對應、raw command 指令集、典型流程、緊急處置（知道「怎麼用」系統）
-4. 本 CLAUDE.md 的硬體架構圖可能**落後於 motion_flow.md**，以 motion_flow.md §2 為準
+4. ⚠️ 本 CLAUDE.md 的硬體架構圖可能**落後於 motion_flow.md**，以 **motion_flow.md §2 為準**
 
 待完成工作、已討論但尚未實作的設計決策，都在上述 `.claude/` 文件中。
 
-## 多人協作紀律（重要）
+### 文件架構（2026-08-27 定義）
 
-本專案多人協作，每位協作者用自己的 Claude Code。協作者之間**只能透過 git 裡的文件同步資訊** — 任何 Claude 的本機 auto memory 都不會共享。因此：
+📌 **每份文件回答一個問題。寫東西之前先想「這是在回答哪一個」，避免同一件事寫進三個地方。**
 
-- **決策 / 規範 / 架構變動一律寫進 git 追蹤的 .md 檔**（CLAUDE.md / motion_flow.md / work_log.md），不要只留在對話或個人 Claude memory
-- **規範文件與程式改動放在同一個 PR**（不要只 commit 程式、.md 留到下次）；reviewer 會在 PR 看到規範 diff，討論後才合併
-- **work_log 每筆重要決策要標「規範權威」指標**，指向該決策落在哪個權威文件（CLAUDE.md 某節 / motion_flow.md §X），方便協作者跳去確認完整規範
+| 文件 | 角色 | 回答的問題 | 讀法 | 變動頻率 |
+|---|---|---|---|---|
+| **`CLAUDE.md`**（本檔） | 架構規範 | 這系統長什麼樣（建置、程式結構、匯流排拓樸、編碼慣例） | 接手時全讀一次 | 低 |
+| **`.claude/<世代>` 規格** | 運動 / 應用層規格 | 它**應該**怎麼動 | 全讀 | 中 |
+| **`.claude/runbook.md`** | 操作手冊 | 我怎麼**用**它（啟動順序、按鈕、raw command、緊急處置） | 查用 | 中 |
+| **`.claude/work_log.md`** | 現況 | 我接手要先知道什麼（**待辦總表** + 踩過的坑） | **只讀最上面** | 高 |
+| **`.claude/changelog.md`** | 變更帳本 | 這行程式碼為什麼長這樣 | 只在追溯時往回查 | 每次改動 |
 
-### 開 session 須知（所有協作者必看）
+**寫入規則**：改了程式 → 寫 `changelog`；改變了「現況或待辦」→ 才動 `work_log`；改變了「應該怎樣」→ 動規格文件或本檔。**三者不重複寫同一件事。**
 
-1. **告訴 Claude 你的角色**：「我是 Jim」/「我是協作者A」等，Claude 會根據角色自動遵守分工邊界
-2. **若角色表中你的欄位還是 `_（待填）_`**，請填上姓名後 commit + push，讓其他協作者也看到
-3. **掃一眼 `.claude/mailbox.md`** — 看有沒有給你的訊息或待處理需求
-4. **讀 `.claude/work_log.md`** — 了解最新進度
+- **唯一一份彙整 TODO 表放在 `.claude/work_log.md` 最上方**，其他地方不要再開第二份待辦清單
+- 決策 / 規範 / 架構變動一律寫進 **git 追蹤的 .md 檔**，不要只留在對話或 Claude 的本機 auto memory
+  —— memory 不跟著 repo 走，換台機器就沒了
 
-### 協作者角色定義
+#### 🔴 規格文件有三個世代，不要拿錯
 
-| 角色 | 負責人 | 負責範圍 | 不碰的範圍 |
-|------|--------|---------|-----------|
-| **規範 + 裝置驅動** | Jim | `CLAUDE.md` / `motion_flow.md` / `.claude/` 文件 + `user_lib/` 硬體驅動 class（DM2J / ZDT / JC100 / WT901 / TCP_client / TCP_server / CLV900 / ZS_DIO / SD76 / PQW / DY500 等）| 應用層 `main.cpp` 實作、`WASH_ROBOT.{h,cpp}` |
-| **應用層實作** | Sadie | `user_lib/WASH_ROBOT.{h,cpp}`（機器人編排層）、`washrobot_new_PI/main.cpp`、`Crane_control_PI/main.cpp` | `user_lib/` 裝置驅動、規範文件 |
-| **前端** | Sadie | `web_backend/`、GUI 頁面 | `user_lib/`、`main.cpp` |
-| **測試 / 工具** | Sadie | `Linux_test/`、`windows_test/` | 生產程式碼 |
+| 世代 | 文件 | 狀態 |
+|---|---|---|
+| v1 | `.claude/motion_flow.md` | **已凍結**。§2 硬體表仍是 `DM2J×5`／`ZDT×9`，與現行程式碼不符；保留作為狀態機與指令協定的原始推導 |
+| v2 | `.claude/v2_app_redesign_plan.md` | ✅ **現行程式碼的權威**（4 吸盤／2 區真空／吊機繩位移／無 DM2J） |
+| v3 | `.claude/洗窗機器人設計彙整.md` | 🆕 新架構方向：四輪滾動＋兩具 22 吋螺旋槳貼牆＋橫向滑台＋雙主控，**沿用既有硬體改寫** |
 
-> **備註：** 一人可兼多個角色。新協作者加入時自行填上姓名與負責範圍，commit 進 git。
-> 動工前請確認要改的檔屬於誰的範圍，**跨界改動要先開 PR 討論**。
+> ⚠️ 因為是「舊硬體改寫」，`user_lib/` 的驅動層大致沿用 —— **既有的驅動層技術債不會隨應用層重寫而消失，它跟著硬體走**。
 
-### 介面契約（user_lib 邊界）
+#### plan 檔的生命週期
 
-**原則：** `user_lib/*.h` 的 public API 簽名是跨模組契約。
+**plan 只在「進行中」存在。** 完成或作廢就移進 `.claude/archive/`，並在檔案開頭加一段抬頭寫清楚：為什麼退場、**裡面哪些知識仍然有效**（唯一副本的量測值、被否決的方向、踩坑結論）。
 
-- **誰能改 user_lib/？** 原則上只有架構方（Jim）
-- **協作者發現 bug？** 在 `.claude/mailbox.md` 提報，描述重現步驟。
-  嚴重到阻塞工作的 bug → 可以先在自己的 branch 熱修，
-  但必須開 PR 標 `[跨界: user_lib]`，等架構方 review 後才合併
-- **協作者需要新功能？** 在 mailbox 提需求，描述「我需要什麼行為」，
-  不要描述「幫我加什麼 method」— 讓架構方決定 API 設計
-- **新增 class（新硬體驅動）？** 架構方負責，協作者提供硬體文件即可
-- **不改 public API 簽名的內部改動**（private method、實作邏輯 bug fix）
-  → 協作者可以修，但 PR 必須標 `[跨界: user_lib]`
+- 🔴 **歸檔不是刪除**：一份計畫可以「作為計畫已死」但仍是某個硬體量測值或某條踩坑的唯一記載
+- 🔴 **退場前先把未結案項目搬進待辦總表**，否則債會跟著檔案一起消失
+- **不要在 plan 檔裡維護待辦清單** —— 待辦只有一份，就在 `work_log.md` 最上方
+
+#### `work_log.md` 的壓縮規則
+
+`work_log` 會持續長大，需定期壓縮；**`changelog` 不壓**（append-only，價值就在完整，平常也沒人需要讀它）。
+
+判準：**「裝了、沒問題，就不用再保留紀錄。」** 例行維護與流水帳做完即丟，只留四種：
+**待辦／決策（尤其被否決的）／伏筆／踩坑**。🔴 **待辦項目絕不可壓掉。**
+
+### 模組邊界：user_lib 的介面契約
+
+**原則：** `user_lib/*.h` 的 public API 簽名是**跨模組契約** — 應用層（`WASH_ROBOT.{h,cpp}`、各 `main.cpp`）與測試程式（`Linux_test/`、`windows_test/`）全都綁在上面。**改簽名的爆炸半徑遠大於改實作。**
+
+- 🔴 **改 public API 簽名**（參數、回傳型別、method 名稱）＝架構層級改動：所有呼叫端都得跟著改，動手前先掃過全 repo 的呼叫點
+- **優先用累加式改動**：加新 method / 新 overload，而不是改既有簽名，讓既有呼叫端維持可編譯
+- 🟡 **不動 public API 的內部改動**（private method、實作邏輯 bug fix）風險低，可以直接改
+- **新增 class（新硬體驅動）＝架構變動**：牽涉拓樸、slave ID 配置、初始化流程，要一併更新本檔的架構圖與裝置驅動表
+- **設計 API 之前，先把「我需要的行為是什麼」寫清楚**（要達成什麼動作、時序與錯誤條件），再回頭決定介面長什麼樣 — 不要從「加一個 method」開始想
 
 ## Project Overview
 
