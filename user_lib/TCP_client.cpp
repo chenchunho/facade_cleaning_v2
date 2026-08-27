@@ -35,6 +35,23 @@ inline void apply_keepalive(int sock_fd) {
     setsockopt(sock_fd, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,   sizeof(cnt));
 #endif
 }
+
+// Writing to a socket whose peer has already closed raises SIGPIPE on Linux, and
+// SIGPIPE's default disposition TERMINATES THE PROCESS — no error return, no
+// exception, just a dead program and a "Broken pipe" line in the shell. This was
+// hit in the field (washrobot died mid-run when the peer dropped).
+// MSG_NOSIGNAL turns that into an ordinary -1/EPIPE return, which the existing
+// `<= 0` checks below already treat as a dead socket. Windows has neither SIGPIPE
+// nor the flag, so it stays 0 there.
+// [2026-08-27] Moved down here from the callers: signal(SIGPIPE, SIG_IGN) only
+// protects a main.cpp that remembers to call it, and 1 of the binaries linking
+// this driver did not (Linux_test). Per-send is the defence that cannot be
+// forgotten by a future caller.
+#ifdef _WIN32
+constexpr int SEND_FLAGS = 0;
+#else
+constexpr int SEND_FLAGS = MSG_NOSIGNAL;
+#endif
 } // namespace
 
 //=========== init ===========
@@ -275,7 +292,7 @@ bool TCP_client::sendData(const char* buf, int len, int timeout_ms) {
 	setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 #endif
 
-	int result = send(sock, buf, len, 0);
+	int result = send(sock, buf, len, SEND_FLAGS);
 	if (result > 0) {
 		LOG_HEX(_log_tag, "TX", buf, len);
 	} else {
@@ -366,7 +383,7 @@ int TCP_client::sendAndReceive(const char* tx_buf, int tx_len,
 	tv.tv_usec = (send_timeout_ms % 1000) * 1000;
 	setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 #endif
-	int sent = send(sock, tx_buf, tx_len, 0);
+	int sent = send(sock, tx_buf, tx_len, SEND_FLAGS);
 	if (sent <= 0) {
 		connected = false;   // dead socket, not just slow — see sendData()'s comment
 		return 0;

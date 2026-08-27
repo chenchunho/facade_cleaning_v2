@@ -7,6 +7,28 @@
 
 ## A. 啟動順序
 
+### 連線資訊（2026-08-27 實測）
+
+兩台 Pi 各有**兩條路**：有線是 bench 正式配置，WiFi 是備援／驗證用。**帳號兩台不一樣。**
+
+| 機器 | hostname | 有線（正式） | WiFi（備援） | 帳號 |
+|---|---|---|---|---|
+| 洗窗本體 | `washrobot` | `192.168.1.100` | `192.168.5.26` | **`nexuni`** |
+| 吊機 | `raspberry-cran` | `192.168.1.101` | `192.168.5.17` | **`user`** |
+
+- 兩台皆 **aarch64 / Debian 13 (trixie) / g++ 14.2**
+- 🔴 **帳號不是 `pi`**（本檔以下區塊的 `ssh pi@…` 是舊寫法，尚未全數更新）
+- 📌 `192.168.5.26` 在 changelog／work_log 裡以 `[TEST MODE]` 出現過（`CRANE_IP` 曾被暫時改成它），
+  **那不是筆誤，就是這台的 WiFi 位址**
+- ⚠️ **測試環境實體位於倉庫（新國街）**，與 `192.168.5.0/24` 的其他設備同網段。
+  這兩台是專案測試機，不納入 `remote_hosts/` 管理
+- 金鑰登入：Windows 端與 WSL 端用同一把 `id_ed25519`，已裝上兩台的 `authorized_keys`
+
+> 🔴 **C++ 改動只能在 Pi 上驗證。** Visual Studio 的 "Visual C++ for Linux Development" 是把原始碼
+> 送到 Pi、用 **Pi 上的 g++** 編譯——建置不發生在 Windows。沒有 Pi 就無法驗證任何 C++ 改動。
+> 快速語法檢查（不產生檔案）：
+> `ssh nexuni@192.168.5.26 "cd ~/projects/<專案>/user_lib && g++ -fsyntax-only -std=c++17 -I. <檔案>.cpp"`
+
 ### 0. 一鍵啟動（tmux launcher，bench / 測試用）
 
 每台 Pi 上都有對應的 launcher script，會用 tmux 把該機所有程式各開一個 window：
