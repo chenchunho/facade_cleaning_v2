@@ -86,15 +86,34 @@ msbuild washrobot_new_PI.sln /p:Configuration=Debug /p:Platform=ARM
 
 ## Repository Structure
 
+📌 **2026-08-27 起分層**：操作層 → 應用層 → 裝置層。上層呼叫下層，**下層不認識上層**。
+
 ```
-washrobot_new_PI/    # 洗窗機器人主程式
-Crane_control_PI/    # 吊車升降控制
-Linux_test/          # Linux 環境下測試硬體工具
-windows_test/        # Windows 環境下測試硬體工具
-user_lib/            # 共用裝置驅動庫（所有硬體抽象層）
-doc/                 # 各裝置技術文件（PDF、規格書）
-x64/                 # 編譯輸出目錄
+web_backend/         # ── 操作層：Node.js server + 前端 GUI
+app/                 # ── 應用層：機器人編排（步態、狀態機、真空重試、校正）
+                     #    WASH_ROBOT.{h,cpp}
+user_lib/            # ── 裝置層：單一硬體的驅動 + 傳輸
+                     #    ZDT / JC100 / SD76 / MH300 / SE3 / DSZL / PQW / QX_DO24 …
+                     #    TCP_client / TCP_server / Serial_port（傳輸，日後可再拆 transport/）
+facade_cleaning_v2/  # 洗窗本體主控 binary（main.cpp，薄；邏輯在 app/）
+Crane_control_PI/    # 吊機主控 binary
+                     #    ⚠️ 應用層尚未抽出，編排邏輯仍寫在 main.cpp（4,400+ 行）
+cleaning_arm/        # 手臂控制 binary
+                     #    ⚠️ 自成一格：不使用 user_lib，自建 socket 層（main_api.{h,cpp}）
+Linux_test/          # bench 互動式硬體測試工具
+frame_capture/       # Python 影像工具（相機路線已作廢，見 .claude/archive/）
+scripts/             # tmux launcher：wr.sh / crane.sh / cams.sh
+tmp/                 # 暫存工作區（已 gitignore，不進版控）
 ```
+
+> 🔴 **`user_lib/` 只放裝置與傳輸。** 2026-08-27 之前 `WASH_ROBOT.{h,cpp}`（15,321 行，
+> 佔全專案 37%）也放在這裡，但它是**編排層不是驅動**——放著會讓「`user_lib` 是裝置驅動」
+> 這句話（下方「模組邊界」節的前提）當場失效。已移到 `app/`。
+>
+> ⚠️ **建置設定**：8 個組態裡**只有 `Debug|ARM64` 設了 `AdditionalIncludeDirectories`**
+> （`..\app;..\user_lib`），其餘 7 個原本就沒有、也編不起來。實際使用的就是這一個
+> （Pi 是 aarch64，部署到 `bin/ARM64/Debug/`）。**移動檔案時要記得同步這一行，
+> 只改 `ClCompile`/`ClInclude` 不夠——標頭會找不到。**
 
 ## Architecture
 

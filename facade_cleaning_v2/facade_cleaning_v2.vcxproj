@@ -84,7 +84,7 @@
     <ClCompile Include="..\user_lib\Serial_port.cpp" />
     <ClCompile Include="..\user_lib\TCP_client.cpp" />
     <ClCompile Include="..\user_lib\TCP_server.cpp" />
-    <ClCompile Include="..\user_lib\WASH_ROBOT.cpp" />
+    <ClCompile Include="..\app\WASH_ROBOT.cpp" />
     <ClCompile Include="..\user_lib\WT901BC_TTL.cpp" />
     <ClCompile Include="..\user_lib\XKC_Y25_RS485.cpp" />
     <ClCompile Include="..\user_lib\ZDT_motor_control.cpp" />
@@ -100,7 +100,7 @@
     <ClInclude Include="..\user_lib\Serial_port.h" />
     <ClInclude Include="..\user_lib\TCP_client.h" />
     <ClInclude Include="..\user_lib\TCP_server.h" />
-    <ClInclude Include="..\user_lib\WASH_ROBOT.h" />
+    <ClInclude Include="..\app\WASH_ROBOT.h" />
     <ClInclude Include="..\user_lib\WT901BC_TTL.h" />
     <ClInclude Include="..\user_lib\XKC_Y25_RS485.h" />
     <ClInclude Include="..\user_lib\ZDT_motor_control.h" />
@@ -108,7 +108,7 @@
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\user_lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\app;..\user_lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
   </ItemDefinitionGroup>
   <!-- Unconditional: std::thread requires pthread at link time. Applies to all configs. -->
