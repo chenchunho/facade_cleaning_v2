@@ -50,7 +50,7 @@
 | 🔴 | `web_backend/server.js` 的 **`CRANE_IP` 預設值寫錯**：`192.168.1.101`，吊機實際是 `192.168.1.10`（`.101` 沒有任何機器回應）。⚠️ 同一行的 `WROBOT_IP = 192.168.1.100` **是對的、不要動**（見上一列：eth 尚未串接而已）。照預設啟動 GUI 連不到吊機，**畫面不會說是 IP 錯** | `web_backend/server.js:25` | **未修** ✔（08-28 啟動時實測，以環境變數繞過） | work_log 2026-08-28 |
 | 🟡 | 兩台 Pi 都沒有 `tmux`／`screen` → runbook §A「一鍵啟動」`scripts/crane.sh`／`wr.sh` **在這兩台跑不起來**。替代方案 `~/bringup/run_bg.sh`（FIFO 背景啟動）已放兩台 | `scripts/*.sh`、`.claude/runbook.md` §A | **未修** ✔ | work_log 2026-08-28 |
 | 🔴 | 緊急收繩按鈕實際上**沒有張力保護**，跟 `motion_flow.md` §8 的安全性描述相反 | `Crane_control_PI/main.cpp` `cmd_manual()` | **未修** ✔ | ONBOARDING §6 |
-| 🔴 | `cmd_side_measured()` 進場沒重置 `abort_flag` → 被 stop 過一次後所有 v2 step 指令永久回 `ERR aborted`，只能重開程式 | `Crane_control_PI/main.cpp:2800` | **未修** ✔ | ONBOARDING §1 ＋ work_log 2026-07-15 |
+| ✅ | ~~`cmd_side_measured()` 進場沒重置 `abort_flag` → 被 stop 過一次後所有 v2 step 指令永久回 `ERR aborted`~~ | `Crane_control_PI/main.cpp` | **已修（`[2026-08-28s]`）**：補上 `abort_flag = false;`，位置與姊妹函式一致（`try_lock` 之後，避免被拒絕的重疊指令清掉他人的 abort）。⚠️ 尚未編譯 | ONBOARDING §1 ＋ work_log 2026-07-15 |
 | 🔴 | DSZL-107 scale factor 仍是 placeholder（driver `-0.01` / 廠商說 `0.02`），張力門檻等於沒有基準；#1 只有 bench 手拉估值、#2 完全沒校 | `user_lib/DSZL_107.cpp`、`Crane_control_PI/main.cpp` | **未修** ✔ | work_log 2026-05-07 ＋ 2026-06-02 |
 | 🔴 | 安全盤點高優先兩項未做：`cmd_hold` 與 motion 互斥、左右繩長差超標 abort | `Crane_control_PI/main.cpp` | **未修** ✔（原始碼註解仍留 TODO） | work_log 2026-05-08 |
 | 🟡 | `trigger_sync_move()` 是 Modbus 廣播（slave 0x00）不會有回應，卻以 `return resp.empty();` 收尾 → 廣播成功也永遠回報失敗 | `user_lib/ZDT_motor_control.cpp:506` | **未修** ✔ | mailbox 2026-04-30 |

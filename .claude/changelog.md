@@ -14,6 +14,40 @@
 ---
 
 ## [2026-08-28-drv5 ＝ 2026-08-28k] Claude Code — 🔴🔴 上滑台每個 cm 指令都走 7.7 倍（實機量測）
+## [2026-08-28s] Claude Code — 吊機掃描：`cmd_side_measured` 一被 abort 就永久壞掉
+### 修改檔案
+- `Crane_control_PI/main.cpp` — `cmd_side_measured()` 進場補上 `abort_flag = false;`
+
+### 🎯 這是 ONBOARDING §1 記過、一直沒修的那條
+`cmd_side_measured()` 的迴圈會檢查 `abort_flag`，但**進場不重置**，
+而它的兩個姊妹 `cmd_roll_correct` / `cmd_align_lengths` 本來就有重置。
+
+後果：abort 被觸發過一次之後（stop／watchdog／使用者中止），
+**之後每一個 `pay_out_left/right`、`retract_left/right` 都永遠回 `ERR aborted`**，
+只能重開吊機程式才能恢復。而這四個指令正是**同步步伐每一步都要用的**
+（本體在放繩/收繩時下給吊機），等於**步伐永久壞掉**。
+
+📌 **位置刻意放在 `try_lock` 之後**（與姊妹函式一致）：放在前面的話，
+一個被拒絕的重疊指令（`ERR motion_busy`）會清掉另一條執行緒正在進行的 abort。
+
+### 順帶：吊機端掃描的其餘結果（**沒有 DM2J 那種等級的問題**）
+掃「bool 回傳值被丟掉」在 4438 行裡只命中三處，而且都不是同一類：
+
+| 位置 | 實況 | 判定 |
+|---|---|---|
+| `cmd_hold` 的 `stopDecel()` ×2 | **主要停止有檢查、有上報 `err`**，這兩發是失敗後升級的最後手段 | 🟡 只差「升級成不成功沒人知道」 |
+| `setFreqHz` 重設 base（balance trim 結束） | 失敗 → 下次啟動沿用上次的微調頻率，左右可能不同速 | 🟡 |
+| 中間絞盤 `stopDecel()` | 失敗仍標 `middle_done = true` | ⚪ 潛伏（硬體未安裝） |
+
+📌 **結論與直覺相反：吊機的程式比本體的 driver 層防禦性更好。**
+本體那邊今天抓到 16 個 void 函式吞掉寫入結果、含兩個「停止」；
+吊機這邊主要路徑都有檢查與上報。**掃描的價值一半在於證明哪裡沒問題。**
+
+### ⚠️ 尚未編譯
+與同批的 DM2J 改動一樣，寫的當下兩台 Pi 已交還。
+
+---
+
 ## [2026-08-28r] Claude Code — 系統性掃描：DM2J 有 16 個 void 函式吞掉寫入結果（含「停止」）
 ### 修改檔案
 - `user_lib/DM2J_RS570.h` / `.cpp` — 16 個 `void` → `bool`，函式本體改為真的傳遞結果

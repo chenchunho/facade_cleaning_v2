@@ -2847,6 +2847,16 @@ static std::string cmd_side_measured(const std::string& cmd, int cm) {
     if (!lock.owns_lock()) return "ERR motion_busy\n";
     MotionScope ms;
 
+    // 🔴 [2026-08-28] 這一行原本不存在，而下面的迴圈會檢查 abort_flag。
+    //    後果：abort 被觸發過一次之後（stop / watchdog / 使用者中止），
+    //    **之後每一個 pay_out_* / retract_* 都永遠回 "ERR aborted"**，
+    //    只能重開吊機程式才能恢復 —— 而這四個指令正是同步步伐每一步都要用的，
+    //    等於步伐永久壞掉。（ONBOARDING §1 記過，一直沒修。）
+    //    姊妹函式 cmd_roll_correct / cmd_align_lengths 本來就有這一行。
+    // 📌 位置刻意放在 try_lock 之後：放在前面的話，一個被拒絕的重疊指令
+    //    （ERR motion_busy）會清掉另一條執行緒正在進行的 abort。
+    abort_flag = false;
+
     const int32_t base    = len.load();
     const bool    pay_out = !is_retract;
 
