@@ -14,10 +14,11 @@
 | 機器 | hostname | 有線（正式） | WiFi（備援） | 帳號 |
 |---|---|---|---|---|
 | 洗窗本體 | `washrobot` | `192.168.1.100` | `192.168.5.26` | **`nexuni`** |
-| 吊機 | `raspberry-cran` | `192.168.1.101` | `192.168.5.17` | **`user`** |
+| 吊機 | `raspberry-cran` | `192.168.1.10` | `192.168.5.17` | **`user`** |
 
 - 兩台皆 **aarch64 / Debian 13 (trixie) / g++ 14.2**
-- 🔴 **帳號不是 `pi`**（本檔以下區塊的 `ssh pi@…` 是舊寫法，尚未全數更新）
+- 🔴 **帳號不是 `pi`**（2026-08-28 已全檔更正為 `nexuni@` / `user@`）
+- 🔴 **吊機有線是 `192.168.1.10` 不是 `.101`**（2026-08-28 全檔更正）。⚠️ `web_backend/server.js` 的 `CRANE_IP` 預設值**仍是 `.101`**（過期），現行程式實際走 `app/WASH_ROBOT.h` 的 `CRANE_IP = "192.168.5.17"`（WiFi）
 - 📌 `192.168.5.26` 在 changelog／work_log 裡以 `[TEST MODE]` 出現過（`CRANE_IP` 曾被暫時改成它），
   **那不是筆誤，就是這台的 WiFi 位址**
 - ⚠️ **測試環境實體位於倉庫（新國街）**，與 `192.168.5.0/24` 的其他設備同網段。
@@ -34,15 +35,15 @@
 每台 Pi 上都有對應的 launcher script，會用 tmux 把該機所有程式各開一個 window：
 
 ```bash
-# crane Pi (192.168.1.101)
-ssh pi@192.168.1.101
+# crane Pi (192.168.1.10)
+ssh user@192.168.1.10
 cd ~/facade_cleaning_v2       # repo
 chmod +x scripts/*.sh       # 第一次用要給執行權限
 ./scripts/crane.sh start    # 開 Crane_control_PI + web_backend + 一個空 shell
 ./scripts/crane.sh attach   # 進去看 log
 
 # washrobot Pi (192.168.1.100)
-ssh pi@192.168.1.100
+ssh nexuni@192.168.1.100
 cd ~/facade_cleaning_v2
 chmod +x scripts/*.sh
 ./scripts/wr.sh start       # 開 facade_cleaning_v2 + frame_capture + 一個空 shell
@@ -76,11 +77,11 @@ CRANE_BIN="python3 $HOME/facade_cleaning_v2/crane_shim/crane_shim.py" \
 
 下面 1~3 是**手動逐項啟動**的對照版本（看 log 直接、能控制每個程式分開重啟）。launcher 內部就是把這些指令各塞進一個 tmux window。
 
-### 1. Crane RPi (192.168.1.101) — 先啟動
+### 1. Crane RPi (192.168.1.10) — 先啟動
 
 ```bash
 # SSH 進 crane Pi
-ssh pi@192.168.1.101
+ssh user@192.168.1.10
 
 # Terminal 1: 吊機主程式（C++）
 cd ~/Crane_control_PI/bin/ARM/Release
@@ -97,7 +98,7 @@ node server.js
 ### 2. Washrobot RPi (192.168.1.100)
 
 ```bash
-ssh pi@192.168.1.100
+ssh nexuni@192.168.1.100
 cd ~/facade_cleaning_v2/bin/ARM/Release
 ./facade_cleaning_v2
 # → 印出 "[OK] command server :5001"
@@ -107,7 +108,7 @@ cd ~/facade_cleaning_v2/bin/ARM/Release
 ### 3. 瀏覽器
 
 ```
-http://192.168.1.101:8080
+http://192.168.1.10:8080
 ```
 
 頂部 dot 應變綠（washrobot / crane / arm）；banner 隱藏表示主系統正常模式。
