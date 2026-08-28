@@ -142,7 +142,9 @@ JC-100 fast-fail、PWM 改 slave 9 啟用、上滑台搬 `.20`）**不是搬家�
 |---|---|---|
 | 檔案搬家 | `WASH_ROBOT.{h,cpp}` → `app/`；`TCP_client`／`TCP_server`／`Serial_port` → `transport/` | 無 |
 | 刪除 | `windows_test/`（不在 Pi 建置目標裡） | 無 |
-| 唯一實質改動 | `send(..., 0)` → `send(..., MSG_NOSIGNAL)`（TCP_client ×2、TCP_server ×1） | **無**——兩支 `main.cpp` 本來就有 `signal(SIGPIPE, SIG_IGN)`，`send` 兩種寫法都回 `-1/EPIPE`；差別只在不再依賴全域訊號設定 |
+| 唯一實質改動 | `send(..., 0)` → `send(..., MSG_NOSIGNAL)`（TCP_client ×3、TCP_server ×2） | **無**——兩支 `main.cpp` 本來就有 `signal(SIGPIPE, SIG_IGN)`，`send` 兩種寫法都回 `-1/EPIPE`；差別只在不再依賴全域訊號設定 |
+| 🔴 log 字串（2026-08-28 加） | 吊機 `init()` 的 VFD 型號改為跟著 `CRANE_VFD_IS_SE3` 巨集走（原本寫死 `MH300` 在 `#if` 外） | **行為無**，但 **`init()` 輸出會變**——見下方 §4 的但書 |
+| 非二進位 | `web_backend/server.js` 的 `CRANE_IP` 常數 `.1.101` → `.1.10` | **不影響上機的兩支二進位**（web backend 是另一支行程） |
 
 ### 0. 進場前確認（🔴 不要跳過）
 
@@ -214,8 +216,17 @@ ssh nexuni@192.168.5.26 'cd ~/bringup && mkdir -p obj && printf "%s\n" facade_cl
 
 **正確做法**：比對對象是**同一份原始碼樹的兩個建置**——
 `0d5f6bc`（純 main）與本分支，兩者都在 `~/bringup/` 之外的隔離目錄建起來，
-`init()` 輸出、`status`／`ping`／`tension` 讀值應**逐字一致**。
+`init()` 輸出、`status`／`ping`／`tension` 讀值應逐字一致。
 只有這樣「不一致」才唯一地指向搬家。
+
+🔴 **2026-08-28 起有一個已知且刻意的例外**：吊機的 VFD 兩行
+```
+[OK]   VFD left (SE3)  USR_A slave 1        ← 本分支
+[OK]   VFD left (MH300)  USR_A slave 1      ← baseline（寫死，說謊）
+```
+right 同理，另加兩行 `[WARN] ... init failed` 路徑（正常不會出現）。
+**這是唯一預期會不同的地方，其餘仍應逐字一致。**
+（2026-08-28 首次比對時吊機是 28 行完全一致、本體只差 IMU 即時讀值。）
 
 （📌 這與本專案「政策反轉時舊斷言會把正確報成故障」是同型：**改了基準線就要連判準一起翻面**。）
 
