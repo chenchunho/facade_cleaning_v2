@@ -479,6 +479,20 @@ static std::atomic<double> g_tension_left  {0.0};
 static std::atomic<double> g_tension_right {0.0};
 static std::atomic<bool>   g_tension_valid {false};
 
+// [2026-08-28] 緊急收繩（cmd_manual）進行中的旗標。
+// 🔴 為什麼需要它：cmd_manual 走 vfdStartRopeHold()，**不會**設 hold_up_*/hold_down_*
+//    那四個 flag，而 hold_loop 的張力保護整段包在 `if (any_hold_active())` 裡 ——
+//    緊急收繩期間張力檢查完全不執行。
+//    這是**刻意的設計**（motion_flow.md §8：「緊急模式下不信任自動邏輯，完全由
+//    操作員眼睛判定何時放開」），所以這裡**不加自動停止**。
+//    但原本的狀態是「既不停、也不說」：操作員被要求用眼睛判斷，卻沒有數字可看。
+//    有了這個旗標，hold_loop 可以在緊急收繩期間**只警示、不介入**。
+static std::atomic<bool>   g_manual_motion_left  {false};
+static std::atomic<bool>   g_manual_motion_right {false};
+static inline bool any_manual_motion() {
+    return g_manual_motion_left.load() || g_manual_motion_right.load();
+}
+
 // SD76 length cache (updated by meter_loop, read by cmd_status / cmd_home_status).
 // Without this, every cmd_status hit 3 Modbus FC03 reads (3 × ~150ms via USR
 // gateway) = ~450ms per status. GUI auto-polls status at 200ms so processing
@@ -1733,6 +1747,8 @@ static void hold_loop() {
     int32_t balance_base_right  = 0;
     bool    was_trimmed         = false;
     auto    last_balance_tick   = std::chrono::steady_clock::now();
+    std::string last_manual_alarm;                                  // 緊急收繩張力警示節流用
+    auto    last_manual_alarm_at = std::chrono::steady_clock::now();
 
     while (!hold_loop_stop.load()) {
         const bool active = any_hold_active();
@@ -1765,6 +1781,38 @@ static void hold_loop() {
                     broadcast_tension_alarm(alarm, l, r);
                     std::this_thread::sleep_for(std::chrono::milliseconds(HOLD_LOOP_ACTIVE_MS));
                     continue;
+                }
+            }
+            // ---- 緊急收繩（cmd_manual）：只警示、不介入 ----------------------
+            // [2026-08-28] 這條路徑以前完全不存在：緊急收繩期間 any_hold_active()
+            // 是 false，上面整段被跳過，**張力既不檢查也不回報**。
+            // 🔴 刻意**不呼叫 hold_all_off()** —— motion_flow.md §8 明訂
+            //    「緊急模式下不信任自動邏輯，完全由操作員眼睛判定何時放開」，
+            //    機器卡住時自動停止會擋住救援。這裡只補上「眼睛需要的數字」。
+            else if (any_manual_motion()) {
+                const std::string alarm = tension_safety_check_values(l, r);
+                if (!alarm.empty()) {
+                    // 節流：警示狀態改變時立刻發，之後每秒一次。
+                    // 不節流的話 50ms 一發會把 GUI log 灌爆，反而看不到。
+                    const auto now = std::chrono::steady_clock::now();
+                    const bool changed = (alarm != last_manual_alarm);
+                    const auto since   = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             now - last_manual_alarm_at).count();
+                    if (changed || since >= 1000) {
+                        std::ostringstream oss;
+                        oss << "EVT manual_tension_warn kind=" << alarm
+                            << " left=" << l << " right=" << r
+                            << " note=not_stopping_operator_decides\n";
+                        broadcast_evt(oss.str());
+                        std::cout << "[manual] ⚠ 張力警示 " << alarm
+                                  << " L=" << l << " R=" << r
+                                  << "（緊急收繩中，依設計不自動停）\n";
+                        last_manual_alarm    = alarm;
+                        last_manual_alarm_at = now;
+                    }
+                } else if (!last_manual_alarm.empty()) {
+                    broadcast_evt("EVT manual_tension_clear\n");
+                    last_manual_alarm.clear();
                 }
             }
         } else {
@@ -2799,11 +2847,22 @@ static std::string cmd_manual(const std::string& dir, const std::string& onoff) 
     if ( side_left && !g_dev_vfd_left.load())  return "ERR vfd_left_unavailable\n";
     if (!side_left && !g_dev_vfd_right.load()) return "ERR vfd_right_unavailable\n";
 
+    std::atomic<bool>& manual_flag = side_left ? g_manual_motion_left : g_manual_motion_right;
+
     if (!on) {
         if (reliable_stop_one(*inv)) return "ERR vfd_stop_fail\n";
+        // ⚠ 只有停止**確定成功**才清旗標。停不下來時馬達可能還在轉，
+        //   這時清掉旗標等於讓張力警示跟著消失 —— 正好在最需要它的時候。
+        manual_flag.store(false);
         return "OK\n";
     }
-    if (vfdStartRopeHold(*inv, pay_out)) return "ERR vfd_start_fail\n";
+    // 先設旗標再啟動：啟動指令送出到馬達真的動起來之間有空窗，
+    // 那段時間張力已經可能開始上升。
+    manual_flag.store(true);
+    if (vfdStartRopeHold(*inv, pay_out)) {
+        manual_flag.store(false);
+        return "ERR vfd_start_fail\n";
+    }
     return "OK\n";
 }
 

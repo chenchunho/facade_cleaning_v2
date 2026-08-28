@@ -14,6 +14,53 @@
 ---
 
 ## [2026-08-28-drv5 ＝ 2026-08-28k] Claude Code — 🔴🔴 上滑台每個 cm 指令都走 7.7 倍（實機量測）
+## [2026-08-28t] Claude Code — 緊急收繩：補上「說」，刻意不補「停」
+### 修改檔案
+- `Crane_control_PI/main.cpp` — 新增 `g_manual_motion_left/right` 旗標；
+  `cmd_manual()` 維護它；`hold_loop()` 新增「只警示、不介入」路徑
+- `.claude/motion_flow.md` — §8 失效模式表加上緊急收繩除外註（**破例改凍結文件**）
+- `CLAUDE.md` — 索引註明上述破例
+
+### 🎯 規格文件自己前後矛盾
+同一份 `motion_flow.md` §8：
+
+| 位置 | 說法 |
+|---|---|
+| 失效模式表 | 鋼索張力過高 → **立即 crane stop** |
+| 「緊急收繩」段 | `any_hold_active()` 四個 flag 全 false → **張力檢查完全不會執行，超張力也不會自動停** |
+
+**兩段講同一件事、結論相反。下一個人讀到哪一段就決定他相信什麼。**
+
+逐行驗過程式碼（不靠文件）：
+`cmd_manual` → `vfdStartRopeHold()` → `reliable_start_one()`，**不設任何 hold flag**；
+`any_hold_active()` 只讀那四個 flag；`hold_loop` 的張力檢查整段包在 `if (active)` 裡。
+→ **下方那段才是對的。** 已在表上加除外註。
+📌 順帶確認 `cmd_manual` 與 `origin/main` **逐字相同** —— main 那邊也一樣沒有。
+
+### 🔴 補「說」不補「停」
+不加自動停止是**尊重明文的設計意圖**（§8：「緊急模式下不信任自動邏輯，
+完全由操作員眼睛判定何時放開」）—— 機器卡住時自動停會擋住救援。
+
+但原本的狀態是**「既不停、也不說」**：操作員被要求用眼睛判定，卻沒有數字可看。
+現在緊急收繩期間：
+- 張力持續讀取（本來就有，`read_tensions` 是無條件呼叫的，只是結果沒被用）
+- 超標 → 廣播 `EVT manual_tension_warn ... note=not_stopping_operator_decides` + console 印出
+- 恢復 → 廣播 `EVT manual_tension_clear`
+- **不呼叫 `hold_all_off()`**（程式碼裡只有註解提到它，用來說明刻意不呼叫）
+
+節流：警示狀態改變時立刻發，之後每秒一次。不節流的話 50ms 一發會把 GUI log
+灌爆，**反而看不到**。
+
+### ⚠️ 一個容易寫錯的細節
+`cmd_manual("off")` **只有在停止確定成功時才清旗標**。停不下來時馬達可能還在轉，
+這時清掉旗標等於**讓張力警示在最需要它的時候消失**。
+啟動則是**先設旗標再啟動** —— 指令送出到馬達真的動起來之間有空窗，那段時間張力已可能上升。
+
+### ⚠️ 尚未編譯
+與同批的 DM2J / abort_flag 改動一樣，寫的當下兩台 Pi 已交還。
+
+---
+
 ## [2026-08-28s] Claude Code — 吊機掃描：`cmd_side_measured` 一被 abort 就永久壞掉
 ### 修改檔案
 - `Crane_control_PI/main.cpp` — `cmd_side_measured()` 進場補上 `abort_flag = false;`

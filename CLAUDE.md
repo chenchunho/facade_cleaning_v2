@@ -45,7 +45,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `runbook.md` | 操作手冊：啟動順序、按鈕、raw command、緊急處置 | 🟢 活的 |
 | `per_program_cautions.md` | 各程式「最容易踩、後果最嚴重」的交接摘要（2026-08-28 由 main 帶入） | 🟢 活的，但 §0.2 的 bus 表已隨同批程式改動過期，見檔內 2026-08-28 更正 |
 | `summaries/` | 8 份硬體手冊摘要（原始 PDF 不在 repo） | 🟢 活的，見上一節 |
-| `motion_flow.md` | **v1 規格**（已凍結） | 🟡 §2 硬體表已過期，保留作狀態機與指令協定的原始推導 |
+| `motion_flow.md` | **v1 規格**（已凍結） | 🟡 §2 硬體表已過期，保留作狀態機與指令協定的原始推導。📌 **2026-08-28 破例加過一次註記**（非規格變更）：§8 失效模式表說「張力過高→立即 crane stop」，同章「緊急收繩」段說「不會停」，**兩段互相矛盾**；逐行驗過程式碼後在表上加了除外註。凍結的意思是不再演進，不是「明知有誤導也不標」 |
 | `v2_app_redesign_plan.md` | **v2 規格 = 現行程式碼的權威** | 🟢 活的 |
 | `洗窗機器人設計彙整.md` | **v3 新架構設計**（沿用舊硬體改寫） | 🟢 活的，27 項待辦在 `work_log.md` |
 | `mh300_migration_plan.md` | SE3 → Delta MH300 變頻器遷移 | 🟡 **進行中且未完成**。🔴 Phase 0 的 keypad 參數表是**唯一副本** |

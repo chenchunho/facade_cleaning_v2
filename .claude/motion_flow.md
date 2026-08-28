@@ -519,9 +519,25 @@ paused ── (resume) ──▶ prev_state（若 prev=running 繼續剩餘步�
 | Ping 超時 閒置中 | log EVT，不動作 |
 | Modbus-TCP 斷線（USR-TCP232-304）| TCP_client 自動重連（監控執行緒）|
 | 人工緊急停止 | 完成當前 ZDT/DM2J 動作後停於安全姿態 |
-| 鋼索張力過低（< TENSION_MIN_KG）| 疑似鬆弛 / 斷裂 → 立即 crane stop + washrobot pause |
-| 鋼索張力過高（> TENSION_MAX_KG）| 疑似卡住 / 超載 → 立即 crane stop + 回報人工 |
-| 左右張力差 > TENSION_DIFF_MAX_PCT | 不平衡 → pause + warning |
+| 鋼索張力過低（< TENSION_MIN_KG）| 疑似鬆弛 / 斷裂 → 立即 crane stop + washrobot pause 　🔴 **緊急收繩除外，見下方註** |
+| 鋼索張力過高（> TENSION_MAX_KG）| 疑似卡住 / 超載 → 立即 crane stop + 回報人工 　🔴 **緊急收繩除外，見下方註** |
+| 左右張力差 > TENSION_DIFF_MAX_PCT | 不平衡 → pause + warning 　🔴 **緊急收繩除外，見下方註** |
+
+> 🔴 **註（2026-08-28 補）：上面三列不適用於 GUI 的「🆘 按住收繩」緊急收繩。**
+> 本文件下方「緊急收繩」段（見 `不受張力感測門檻限制`）描述得完全正確：
+> 該路徑走 `cmd_manual()`，不會設 `hold_up_*/hold_down_*` 四個 flag，而
+> `hold_loop()` 的張力保護整段包在 `if (any_hold_active())` 內 ——
+> **緊急收繩期間不會自動停。**
+>
+> ⚠️ **這兩段原本互相矛盾**：本表說「立即 crane stop」，下方段落說「不會停」。
+> 兩段講的是同一件事、結論相反，**下一個人讀到哪一段就決定他相信什麼**。
+> 2026-08-28 逐行驗過程式碼，**下方那段才是對的**，本表已加上除外註記。
+>
+> 📌 **不停是刻意的設計**（見下方「不走 SD76 自動停」）：機器卡住時自動停止會擋住救援。
+> **2026-08-28 補上的是「說」而不是「停」**：緊急收繩期間張力仍持續讀取，超標會廣播
+> `EVT manual_tension_warn`（附 `note=not_stopping_operator_decides`）並在 console 印出，
+> 恢復正常時廣播 `EVT manual_tension_clear`。原本的狀態是「既不停、也不說」——
+> 操作員被要求用眼睛判定，卻沒有數字可看。
 | DSZL-107（crane 端）vs DY-500（washrobot 端）同側差 > `TENSION_CROSS_DIFF_KG` | 疑似鋼索中段卡住 / 感測異常 → pause + warning，持續超標 → stop **（暫不啟用，`ENABLE_CROSS_TENSION_CHECK=false`）** |
 | 姿態平衡偏移 `balance_deg > IMU_ASK_DEG` (15°) | **當前 step 完成後暫停** → EVT 推播詢問「是否執行平衡校正」→ 使用者 yes 進 Phase 5 / no 忽略繼續 |
 | 姿態平衡偏移 `balance_deg > IMU_EMERGENCY_DEG` (45°) | 不詢問，立即停機 + crane emergency_stop + 回報人工 |
