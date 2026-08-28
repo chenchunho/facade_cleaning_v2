@@ -151,7 +151,11 @@ bool SE3_inverter::writeParam(uint16_t reg, uint16_t value)
         return true;
     }
     // Echo: 8-byte same as request (slave + 0x06 + reg + val + crc)
-    if (respLen < 8 || resp[0] != deviceID || resp[1] != 0x06) {
+    // [2026-08-28] CRC added by the driver audit. slave/FC were already checked;
+    // without CRC a bit-flipped echo that kept those two bytes intact was
+    // accepted as a successful write. Echo frame = slave+fc+addr(2)+val(2)+crc(2).
+    if (respLen < 8 || resp[0] != deviceID || resp[1] != 0x06
+        || crc16(resp, 6) != (uint16_t)(resp[6] | (resp[7] << 8))) {
         LOG_ERR(_log_tag, "writeParam reg=0x%04X bad reply len=%d", reg, respLen);
         return true;
     }
@@ -180,7 +184,10 @@ bool SE3_inverter::readParam(uint16_t reg, uint16_t& value)
         return true;
     }
     // Reply: slave + 0x03 + bytecount(2) + hi + lo + crc(2) = 7 bytes
-    if (respLen < 7 || resp[0] != deviceID || resp[1] != 0x03 || resp[2] != 0x02) {
+    // [2026-08-28] CRC added by the driver audit — see writeParam above.
+    // Read frame = slave+fc+bc(=2)+data(2)+crc(2).
+    if (respLen < 7 || resp[0] != deviceID || resp[1] != 0x03 || resp[2] != 0x02
+        || crc16(resp, 5) != (uint16_t)(resp[5] | (resp[6] << 8))) {
         LOG_ERR(_log_tag, "readParam reg=0x%04X bad reply len=%d", reg, respLen);
         return true;
     }

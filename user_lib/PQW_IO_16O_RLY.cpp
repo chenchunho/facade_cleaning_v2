@@ -150,15 +150,54 @@ std::vector<uint8_t> PQW_IO_16O_RLY::readEcho()
 
 std::vector<bool> PQW_IO_16O_RLY::parseReadResponse(const std::vector<uint8_t>& resp)
 {
+	// [2026-08-28] Validate the FC01 reply before believing it.
+	//
+	// An EMPTY vector is the "could not read" signal, and both callers already
+	// handle it that way (WASH_ROBOT.cpp pqw_set_relay_verified_ and
+	// Crane_control_PI water-inlet verify both treat st.empty() as "can't
+	// verify, accept as best-effort"). That is why validation failures return
+	// {} rather than a default-constructed state.
+	//
+	// 🐛 The old code returned a FULL vector of `false` for a short frame,
+	// which callers could not distinguish from a genuine "all relays off" —
+	// a garbled reply could therefore confirm an OFF command that never
+	// physically happened.
+	//
+	// ⚠️ Deliberately NOT applied to controlRelay()'s echo path: PQW firmware
+	// echoes writes in a non-standard format and the old read-back-and-compare
+	// there caused intermittent false failures that trapped the robot
+	// mid-sequence with no recoverable path (work_log 2026-04-23 / 04-27).
+	// That decision stands; this only hardens the FC01 *read*.
+	if (resp.size() < 5) return {};
+
+	if (resp[0] != slave_id) {
+		LOG_ERR(_log_tag, "status reply slave %d != %d", (int)resp[0], (int)slave_id);
+		return {};
+	}
+	if (resp[1] != 0x01) {          // 0x81 = Modbus exception reply
+		LOG_ERR(_log_tag, "status reply FC 0x%02X (expected 0x01)", (int)resp[1]);
+		return {};
+	}
+
+	const size_t bc = resp[2];
+	if (resp.size() < 3 + bc + 2) {
+		LOG_ERR(_log_tag, "status frame truncated: %d < %d",
+		        (int)resp.size(), (int)(3 + bc + 2));
+		return {};
+	}
+
+	const uint16_t rx_crc = (uint16_t)resp[3 + bc] | ((uint16_t)resp[4 + bc] << 8);
+	if (modbusCRC(resp.data(), (int)(3 + bc)) != rx_crc) {
+		LOG_ERR(_log_tag, "status CRC mismatch");
+		return {};
+	}
+
 	std::vector<bool> out(relay_count, false);
-
-	if (resp.size() < 5) return out;
-
 	for (int i = 0; i < relay_count; i++) {
 		size_t byte_i = i / 8 + 3;
 		int bit_i = i % 8;
 
-		if (byte_i < resp.size())
+		if (byte_i < 3 + bc)
 			out[i] = (resp[byte_i] >> bit_i) & 1;
 	}
 	return out;

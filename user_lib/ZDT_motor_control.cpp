@@ -650,5 +650,22 @@ std::vector<uint8_t> ZDT_motor_control::readEcho(int timeout_ms) {
 	uint8_t buf[128];
 	int n = client->receiveData((char*)buf, sizeof(buf), timeout_ms);
 	if (n <= 0) return {};
+
+	// [2026-08-28] CRC check added by the driver audit. Every ZDT reply reaches
+	// the call sites through here, so one check covers all of them; the call
+	// sites already verify slave id / function code / payload length themselves,
+	// and every one of them treats an empty vector as failure — so returning {}
+	// on a bad CRC needs no call-site changes.
+	//
+	// Only the CRC is checked here, not the slave id: trigger_sync_move()
+	// broadcasts to slave 0x00, and a per-slave check at this level would be
+	// wrong for that path.
+	if (n >= 4) {
+		const uint16_t rx_crc = (uint16_t)buf[n - 2] | ((uint16_t)buf[n - 1] << 8);
+		if (modbusCRC(buf, n - 2) != rx_crc) {
+			LOG_ERR(_log_tag, "reply CRC mismatch (%d bytes) — frame dropped", n);
+			return {};
+		}
+	}
 	return std::vector<uint8_t>(buf, buf + n);
 }

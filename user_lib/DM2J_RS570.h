@@ -83,6 +83,12 @@ private:
 	std::string _log_tag;
 
 	uint16_t crc16(const uint8_t* buf, int len);
+
+	// [2026-08-28] Single receive path for all six read sites: reads into a
+	// 32-byte frame, enforces a minimum length and verifies the RTU CRC.
+	// Returns the frame length, or -1 if nothing usable arrived. Private —
+	// no public API change (see CLAUDE.md "模組邊界").
+	int recv_frame_(uint8_t* rx, int min_len);
 	bool sendRecv(const std::vector<uint8_t>& tx, std::vector<uint8_t>& rx);
 
 	bool writeSingle(uint16_t reg, uint16_t value);

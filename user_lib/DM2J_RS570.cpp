@@ -24,6 +24,49 @@ DM2J_RS570::~DM2J_RS570()
 	}
 }
 
+//=========== utility: receive + validate one RTU frame ===========
+//
+// [2026-08-28] Added by the driver audit. Every read site previously did
+// `receiveData(rx, 32, 200)` followed by nothing but a length check — a
+// bit-flipped frame was parsed as if it were valid, and the wrong position /
+// status / error code went straight to the caller with no indication.
+//
+// Verifies the RTU CRC and the slave id. Safe for every call site that uses
+// it — the one broadcast path (writeSingle_sync, slave 0x00) goes through
+// sendRecv() instead, so it is unaffected by the address check.
+int DM2J_RS570::recv_frame_(uint8_t* rx, int min_len)
+{
+	int len = client->receiveData((char*)rx, 32, 200);
+	if (len < min_len) return -1;
+
+	const uint16_t rx_crc = (uint16_t)rx[len - 2] | ((uint16_t)rx[len - 1] << 8);
+	if (crc16(rx, len - 2) != rx_crc) {
+		LOG_ERR(_log_tag, "reply CRC mismatch (%d bytes) — frame dropped", len);
+		return -1;
+	}
+
+	// A reply addressed to a different slave carries a perfectly valid CRC, so
+	// the check above cannot catch it. This matters here: the arm rail is
+	// slave 14 on cli_22_, sharing the bus with JC100 5-8 / XKC 13 / DY500
+	// 10-11, and bus contention on that gateway is a known, logged symptom.
+	// Safe to check at this level — the broadcast path (writeSingle_sync,
+	// slave 0x00) goes through sendRecv(), not here.
+	if (rx[0] != (uint8_t)slaveID) {
+		LOG_ERR(_log_tag, "reply slave %d != %d — frame dropped",
+		        (int)rx[0], (int)slaveID);
+		return -1;
+	}
+
+	// All six read sites that use this helper issue FC 0x03; without this check
+	// an exception reply (0x83) is parsed as if bytes 3-4 held register data,
+	// so a refused read is reported to the caller as a value.
+	if (rx[1] != 0x03) {
+		LOG_ERR(_log_tag, "reply FC 0x%02X (expected 0x03) — frame dropped", (int)rx[1]);
+		return -1;
+	}
+	return len;
+}
+
 bool DM2J_RS570::init(const std::string& ip, int port, int ID, bool debug)
 {
 	debug_mode = debug;
@@ -423,8 +466,8 @@ bool DM2J_RS570::read_version(uint16_t& ver1, uint16_t& ver2)
 	client->sendData((char*)tx, 8, 200);
 
 	uint8_t rx[32];
-	int len = client->receiveData((char*)rx, 32, 200);
-	if (len < 9) return true;
+	int len = recv_frame_(rx, 9);
+	if (len < 0) return true;
 
 	ver1 = (rx[3] << 8) | rx[4];
 	ver2 = (rx[5] << 8) | rx[6];
@@ -460,9 +503,8 @@ bool DM2J_RS570::read_status(uint32_t& status)
 	client->sendData((char*)tx, 8, 200);
 
 	uint8_t rx[32] = { 0 };
-	int len = client->receiveData((char*)rx, 32, 200);
-
-	if (len < 7) return true;  // 7 bytes for 1 register: slave+fn+bc+2data+2crc
+	int len = recv_frame_(rx, 7);   // slave+fn+bc+2data+2crc
+	if (len < 0) return true;
 
 	LOG_HEX(_log_tag, "RX read_status", rx, len);
 
@@ -503,8 +545,8 @@ bool DM2J_RS570::read_error_code(uint16_t& errCode)
 	client->sendData((char*)tx, 8, 200);
 
 	uint8_t rx[32] = { 0 };
-	int len = client->receiveData((char*)rx, 32, 200);
-	if (len < 7) return true;
+	int len = recv_frame_(rx, 7);
+	if (len < 0) return true;
 
 	errCode = (rx[3] << 8) | rx[4];
 	return false;
@@ -528,8 +570,8 @@ bool DM2J_RS570::read_save_status(uint16_t& saveStatus)
 	client->sendData((char*)tx, 8, 200);
 
 	uint8_t rx[32] = { 0 };
-	int len = client->receiveData((char*)rx, 32, 200);
-	if (len < 7) return true;
+	int len = recv_frame_(rx, 7);
+	if (len < 0) return true;
 
 	saveStatus = (rx[3] << 8) | rx[4];
 	return false;
@@ -587,8 +629,8 @@ bool DM2J_RS570::read_motor_position(int32_t& pos)
 	client->sendData((char*)tx, 8, 200);
 
 	uint8_t rx[32];
-	int len = client->receiveData((char*)rx, 32, 200);
-	if (len < 9) return true;
+	int len = recv_frame_(rx, 9);
+	if (len < 0) return true;
 
 	LOG_HEX(_log_tag, "RX read_pos", rx, len);
 
@@ -619,8 +661,8 @@ bool DM2J_RS570::read_pulse_per_rev(uint16_t& ppr)
 	client->sendData((char*)tx, 8, 200);
 	std::this_thread::sleep_for(std::chrono::milliseconds(200));
 	uint8_t rx[32];
-	int len = client->receiveData((char*)rx, 32, 200);
-	if (len < 7) return true;
+	int len = recv_frame_(rx, 7);
+	if (len < 0) return true;
 
 	LOG_HEX(_log_tag, "RX read_ppr", rx, len);
 
@@ -734,6 +776,18 @@ bool DM2J_RS570::sendRecv(const std::vector<uint8_t>& tx, std::vector<uint8_t>& 
 	uint8_t buf[256] = { 0 };
 	int r = client->receiveData((char*)buf, sizeof(buf), 50);
 	if (r <= 0) return true;
+
+	// [2026-08-28] CRC check added by the driver audit. This path had no
+	// validation at all — callers received whatever bytes turned up.
+	// Slave id is deliberately NOT checked here: writeSingle_sync() broadcasts
+	// to slave 0x00, so a reply (when one appears at all) will not carry our id.
+	if (r >= 4) {
+		const uint16_t rx_crc = (uint16_t)buf[r - 2] | ((uint16_t)buf[r - 1] << 8);
+		if (crc16(buf, r - 2) != rx_crc) {
+			LOG_ERR(_log_tag, "sendRecv CRC mismatch (%d bytes) — frame dropped", r);
+			return true;
+		}
+	}
 
 	rx.assign(buf, buf + r);
 	return false;
