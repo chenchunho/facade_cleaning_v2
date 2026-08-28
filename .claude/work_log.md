@@ -34,6 +34,8 @@
 
 | 優先度 | 項目 | 涉及檔案 | 現況 | 來源與原始日期 |
 |---|---|---|---|---|
+| 🔴 | **`connectToServer` 的非阻塞 connect 少了 `getsockopt(SO_ERROR)`** → 連到沒人聽的埠也判定成功、印 `reconnect success`、`connected=true`。失敗的 connect 同樣會讓 socket 可寫，`select()>0` 不足以判定成功 | `transport/TCP_client.cpp:180-220` | **未修** ✔（08-28 實機證據：吊機 5002 無人在聽，本體印了 20 次 reconnect success） | work_log 2026-08-28（實機驗證） |
+| 🟡 | `init()` 印 `VFD left/right (MH300)` 是**寫死字串**，在 `#if CRANE_VFD_IS_SE3` 之外 → 旗標是 1（實際跑 SE3）卻印 MH300，會把人導去查錯的 driver | `Crane_control_PI/main.cpp:4215,4234` | **未修** ✔ | work_log 2026-08-28（實機驗證） |
 | 🔴 | `readRegister()` 不驗 reply CRC、不驗 byteCount → 壞掉的 Modbus reply 被當有效值往上傳（bench 已造成實體損害，詳見下方） | `user_lib/SD76_length_meters.cpp` | **未修** ✔ | mailbox 2026-05-14 |
 | 🔴 | 緊急收繩按鈕實際上**沒有張力保護**，跟 `motion_flow.md` §8 的安全性描述相反 | `Crane_control_PI/main.cpp` `cmd_manual()` | **未修** ✔ | ONBOARDING §6 |
 | 🔴 | `cmd_side_measured()` 進場沒重置 `abort_flag` → 被 stop 過一次後所有 v2 step 指令永久回 `ERR aborted`，只能重開程式 | `Crane_control_PI/main.cpp:2800` | **未修** ✔ | ONBOARDING §1 ＋ work_log 2026-07-15 |
@@ -285,6 +287,58 @@ threshold 再實作」：① `cmd_hold` 與 motion 互斥（避免 hold 跟 moti
 | 🟢 | 空壓機與電動缸電流重疊 | 空壓機啟動與電動缸同動時的電流重疊 | **暫緩**；症狀為電動缸偶發失步或抱閘異響，實機測試時可能浮現 | 設計彙整 §6 暫緩項目 |
 | 🟢 | 空壓機振動干擾姿態 | 空壓機振動對陀螺儀姿態判斷的干擾 | **暫緩**，實機測試時可能浮現 | 設計彙整 §6 暫緩項目 |
 | 🟢 | 儲氣筒壓力未讀 | Pi 未讀取儲氣筒壓力，假設氣壓恆定可用 | **暫緩**，實機測試時可能浮現 | 設計彙整 §6 暫緩項目 |
+
+---
+
+## 2026-08-28（下午）— 🎉 `init()` 檢查表兩台都跑完，四件未驗改動全數通過
+
+### 已完成 —— 這條待辦掛了很久：「唯一未驗的是 `init()`」現在清掉了
+依 runbook §A2 跑完，**baseline（純 `0d5f6bc`）與整理分支各建一份、兩支輪流跑、逐字比對**。
+
+**吊機**：兩份輸出**逐字完全一致**（28 行）。五個網關全 OK（`.30`/`.31`/`.34`/`.32`/`.33`）、
+VFD 左右、SD76 左右、PQW water、DSZL 左右，`init complete — accepting commands`。
+
+**本體**：兩份輸出**只差 IMU 的即時讀值**（`roll=-152.424` vs `-150.804`＝感測器讀數，非程式），
+其餘 64 行完全相同。🔴 **四件從沒在實機驗過的改動全部通過**：
+
+| runbook §3 預期 | 實機輸出 | 判定 |
+|---|---|---|
+| `[OK] DM2J arm rail (slave 14 @ cli_20_)` | 一致 | ✅ **08-28 搬 bus 首次實機驗證通過** |
+| `[OK] ZDT 5~8` | 一致 | ✅ 08-27 吸盤改號通過 |
+| `[OK] PQW slave 12 @ cli_20_ (.20)` | 一致 | ✅ 08-27 PQW 搬 bus 通過 |
+| `[OK] QX-DO24 PWM slave 9 (presence not probed)` | 一致 | ✅ 改號通過（⚠️ 見下） |
+
+⚠️ **`presence not probed` 不等於模組真的接上**：init 不發包，模組若還插在 USB-485 轉換器上
+也照樣印 `[OK]`，要到第一個 `pwm set` 才會 timeout。**PWM 的實體接線仍未驗證。**
+
+📌 **搬家等價性其實有兩份獨立證據**：(a) 源碼比對——`WASH_ROBOT.cpp/.h` 相對 `0d5f6bc`
+**逐位元相同**，全樹唯一可執行差異是 5 處 `send(..., 0)` → `SEND_FLAGS`，其餘 73 行全是註解；
+(b) 本次實機執行輸出一致。
+
+### 🔴 抓到兩個「訊息說謊」（都是 main 既有的，不是合併造成——baseline 輸出一模一樣）
+
+**1. `connectToServer` 把失敗的 connect 判成成功**（已進待辦總表）
+實機證據：吊機 `:5002` **確認無人在聽**（`ss -ltn` 查過），本體卻印了 **20 次**
+`[INF] [TCP 192.168.5.17:5002] reconnect success`，每 500ms 一次 flapping。
+
+根因在 `transport/TCP_client.cpp:180-220`：非阻塞 connect → `EINPROGRESS` →
+`select()` 等可寫 → `if (res > 0) success = true`。
+🔴 **失敗的 connect 同樣會讓 socket 變成可寫**，POSIX 要求這裡必須再
+`getsockopt(SO_ERROR)` 分辨，那一步沒有 → `connected = true`。
+
+影響：任何以 `connected` 判斷「吊機連線還在」的地方都會被騙。
+（指令層本身有抓到：`crane_cmd 'water_inlet off' attempt 1 failed`。）
+
+**2. `init()` 印的 VFD 型號是寫死的**（已進待辦總表）
+`CRANE_VFD_IS_SE3 = 1`（實際跑 SE3），但 `main.cpp:4215/4234` 的
+`[OK] VFD left (MH300)` 字串在 `#if` **外面**，不管旗標是什麼都印 MH300。
+
+### ⚠️ 這次測試沒有涵蓋到的
+- **兩台沒有同時跑**（吊機 server 已關才測本體）→ 本體印
+  `[WARN] crane not yet reachable`，且 `[SHUTDOWN]` 時 `water_inlet off` 三次全失敗、
+  **收尾訊息是 `valve state UNKNOWN`**。兩台同時跑的整合行為仍未驗
+- `arm 127.0.0.1:9527`（motor_api）與 depth_cam 都沒跑
+- **只驗 `init()`，沒有讓任何馬達動過**
 
 ---
 
