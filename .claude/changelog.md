@@ -13,6 +13,49 @@
 
 ---
 
+## [2026-08-28m] Claude Code — `zdt_pusher` / `zdt_disable` / `zdt_enable` 三個指令自 08-27 起就不可能成功
+### 修改檔案
+- `app/WASH_ROBOT.h` — `CUP_SLAVE_FIRST` / `CUP_SLAVE_LAST` 由 private 移到 public
+- `facade_cleaning_v2/main.cpp` — 三處分派器的範圍檢查改吃那兩個常數
+
+### 🎯 兩個範圍沒有交集
+```cpp
+// main.cpp 分派器      → 只收 1..4
+if (iss.fail() || s < 1 || s > 4) return "ERR usage:zdt_pusher_<1..4>...";
+// WASH_ROBOT.cpp 應用層 → 只收 5..8
+if (slave < CUP_SLAVE_FIRST || slave > CUP_SLAVE_LAST) return "ERR invalid_slave";
+```
+**沒有任何值能通過兩道檢查。** 實測四個值全滅：
+`1`/`4` → `ERR invalid_slave`；`5`/`8` → `ERR usage:...<1..4>`。
+
+### 🔴 最值得記的是「作者知道，但沒找完」
+應用層那三處的註解**明確預言了這個後果**：
+
+> 沿用舊的 1-4 驗證會讓 GUI 的單支推桿控制／停用全部回 ERR invalid_slave
+
+作者 2026-08-27 改吸盤編號時想到了、修好了自己那一側，
+**卻沒發現分派器有一模一樣的檢查**。而 `CUP_SLAVE_FIRST/LAST` 的註解寫著
+「編號只要改這裡，不必再全檔搜 1..4」——**那個意圖對 `main.cpp` 失效，
+因為常數是 private，分派器拿不到，只好自己寫死。**
+
+📌 **通則：同一個範圍寫在兩個地方，遲早分岔。** 修法不是把 `1..4` 改成 `5..8`
+（那只是把下一次分岔往後推），而是**讓兩邊吃同一個常數**。
+
+### 影響
+- `zdt_pusher` — GUI 的單支推桿伸縮：**完全不可用**
+- `zdt_disable` / `zdt_enable` — 🔴 **執行中某支推桿故障時無法把它停用**，這是操作面的損失，不只是介面壞掉
+
+### 驗證（雙向，且不需要動硬體）
+| 測試 | 結果 |
+|---|---|
+| `zdt_pusher 9` / `zdt_pusher 1` | ✅ `ERR usage:zdt_pusher_<5..8>_...`（訊息自己說出正確範圍） |
+| `zdt_disable 5` → `zdt_enable 5` | ✅ 皆回 `OK` —— 這條路徑自 08-27 起首次成功 |
+
+📌 用 `zdt_disable/enable` 做正向驗證是刻意的：它只改軟體狀態、不動馬達，
+**不必為了驗證一個介面 bug 而去推動推桿**。
+
+---
+
 ## [2026-08-28k] Claude Code — 🔴🔴 上滑台每個 cm 指令都走 7.7 倍（實機量測）
 
 > 📌 **本筆與 `fix/driver-crc` 的 `[2026-08-28-drv5]` 是同一個改動**（cherry-pick 過來）。
