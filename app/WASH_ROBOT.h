@@ -393,6 +393,20 @@ public:
     State get_state() const { return state_.load(); }
     static const char* state_name(State s);
 
+    // ---- 吸盤/推桿 slave 編號（public：指令分派器也要用）--------------------
+    // [2026-08-27 per user] 4 顆吸盤的 slave ID 由 1-4 改為 5-8。
+    // ZDT 推桿與 JC100 真空表共用同一組編號（推桿 slave N 末端的吸盤 = 真空表
+    // slave N），兩者分別掛在 .20 / .22 兩條 bus 上，所以同號不衝突。
+    // 這兩個常數是唯一的真實來源 —— 所有遍歷吸盤的迴圈都吃它們。
+    // 🔴 [2026-08-28] 從 private 移到 public：`facade_cleaning_v2/main.cpp` 的
+    //    分派器拿不到它們，只好自己寫死 `1..4`，於是 08-27 改號之後
+    //    `zdt_pusher` / `zdt_disable` / `zdt_enable` **三個指令全部不可能成功**
+    //    （分派器只收 1-4、應用層只收 5-8，兩個範圍沒有交集）。
+    //    應用層那三處的註解甚至預言了這個後果，卻沒發現分派器有同一個檢查。
+    //    **同一個範圍寫在兩個地方 = 遲早分岔；改成共用常數才是修法。**
+    static constexpr int CUP_SLAVE_FIRST = 5;
+    static constexpr int CUP_SLAVE_LAST  = 8;
+
 private:
     //=========== constants ===========
 
@@ -521,8 +535,10 @@ private:
     // 編號只要改這裡，不必再全檔搜 "1..4"（原本散在 11 處寫死的迴圈裡）。
     // 相關陣列（zdt_[9] / meter_[9] / cached_pressure_[9] / last_seal_pulse_[9]）
     // 都是 9 格、index = slave-1，5-8 對應 index 4-7，仍在範圍內。
-    static constexpr int CUP_SLAVE_FIRST = 5;
-    static constexpr int CUP_SLAVE_LAST  = 8;
+    // 📌 [2026-08-28] 這兩個常數已移到 public 區（本檔上方）—— 指令分派器
+    //    （facade_cleaning_v2/main.cpp）也要用它們驗證 slave 範圍，放在 private
+    //    會逼它自己寫死 1..4，而那正是 zdt_pusher / zdt_disable / zdt_enable
+    //    在 08-27 改號後全部失效的原因。
 
     // ⚠⚠ 這組左右歸屬跟實體不符（2026-08-28 user 指出）⚠⚠
     //   程式碼假設：右={5,6}、左={7,8}
