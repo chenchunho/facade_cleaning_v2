@@ -519,8 +519,8 @@ paused ── (resume) ──▶ prev_state（若 prev=running 繼續剩餘步�
 | Ping 超時 閒置中 | log EVT，不動作 |
 | Modbus-TCP 斷線（USR-TCP232-304）| TCP_client 自動重連（監控執行緒）|
 | 人工緊急停止 | 完成當前 ZDT/DM2J 動作後停於安全姿態 |
-| 鋼索張力過低（< TENSION_MIN_KG）| 疑似鬆弛 / 斷裂 → 立即 crane stop + washrobot pause 　🔴 **緊急收繩除外，見下方註** |
-| 鋼索張力過高（> TENSION_MAX_KG）| 疑似卡住 / 超載 → 立即 crane stop + 回報人工 　🔴 **緊急收繩除外，見下方註** |
+| ~~鋼索張力過低（< TENSION_MIN_KG）~~ | 🔴 **此檢查已於 2026-05-08 整個移除**（`tension_safety_check_values` 的註解：bench／空載狀態本來就接近零張力，會一直誤報）。**不是「緊急收繩例外」，是根本不存在。** 原始碼那條註解寫著「motion_flow.md §6.5 needs corresponding spec update (mailbox to Jim)」—— ⚰️ 而 mailbox 已於 2026-08-27 退休成墓碑檔，那個待辦丟進了沒人再看的信箱 |
+| 鋼索張力過高（> TENSION_MAX_KG）| 疑似卡住 / 超載 → 立即 crane stop + 回報人工 　🔴 **緊急收繩除外，見下方註**　⚠️ **且此判斷建立在未校正的刻度上**，見下方「刻度」註 |
 | 左右張力差 > TENSION_DIFF_MAX_PCT | 不平衡 → pause + warning 　🔴 **緊急收繩除外，見下方註** |
 
 > 🔴 **註（2026-08-28 補）：上面三列不適用於 GUI 的「🆘 按住收繩」緊急收繩。**
@@ -538,6 +538,24 @@ paused ── (resume) ──▶ prev_state（若 prev=running 繼續剩餘步�
 > `EVT manual_tension_warn`（附 `note=not_stopping_operator_decides`）並在 console 印出，
 > 恢復正常時廣播 `EVT manual_tension_clear`。原本的狀態是「既不停、也不說」——
 > 操作員被要求用眼睛判定，卻沒有數字可看。
+>
+> ---
+>
+> 🔴 **刻度註（2026-08-28）：上表所有 kg 門檻都建立在一個從未校正過的刻度上。**
+> `DSZL_SCALE_DEFAULT = -0.01`，其**量值**只是「driver 的預設值」，
+> 原始碼註解自己寫著「once a known weight has been hung on each cell,
+> recompute as `kg / (loaded_raw - zero_raw)`」—— **那件事從來沒做過**。
+> `UP_STOP_TOTAL_KG_DEFAULT` 的註解也直接寫著
+> 「Placeholder — tune on site after DSZL-107 scale factor validated」。
+>
+> ⚠️ **更要緊的是「正負號」**：註解寫「bench observation 2026-05-08:
+> force ↑ → raw ↓ on **left** cell (**right untested but assumed same wiring**)」。
+> 而 `tension_safety_check_values` **只檢查「過高」**（過低已移除）。
+> **若右側實際接線相反，右側超載會讀成大負值 → `r_kg > max_kg` 永遠不成立
+> → 右側超載完全偵測不到。** 這不是精度問題，是整條保護在那一側失效。
+>
+> 📌 掛一個已知重量到**兩側**各量一次就能同時解決量值與正負號，
+> 而且不需要讓機器動。
 | DSZL-107（crane 端）vs DY-500（washrobot 端）同側差 > `TENSION_CROSS_DIFF_KG` | 疑似鋼索中段卡住 / 感測異常 → pause + warning，持續超標 → stop **（暫不啟用，`ENABLE_CROSS_TENSION_CHECK=false`）** |
 | 姿態平衡偏移 `balance_deg > IMU_ASK_DEG` (15°) | **當前 step 完成後暫停** → EVT 推播詢問「是否執行平衡校正」→ 使用者 yes 進 Phase 5 / no 忽略繼續 |
 | 姿態平衡偏移 `balance_deg > IMU_EMERGENCY_DEG` (45°) | 不詢問，立即停機 + crane emergency_stop + 回報人工 |

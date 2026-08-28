@@ -1790,6 +1790,13 @@ static void hold_loop() {
             //    「緊急模式下不信任自動邏輯，完全由操作員眼睛判定何時放開」，
             //    機器卡住時自動停止會擋住救援。這裡只補上「眼睛需要的數字」。
             else if (any_manual_motion()) {
+                // ⚠️ [2026-08-28] 這個警示的可信度受限於 DSZL 的刻度，而該刻度
+                //    **從未用已知重量校正過**（DSZL_SCALE_DEFAULT 只是 driver 預設值）。
+                //    🔴 而且正負號只在**左側**量過，右側是「assumed same wiring」——
+                //    若右側實際相反，右側超載會讀成大負值，而
+                //    tension_safety_check_values 只檢查「過高」（過低已於 2026-05-08 移除），
+                //    → **右側超載偵測不到**。掛已知重量到兩側各量一次即可同時解決。
+                //    在那之前：這個警示「有出現」值得信，「沒出現」不代表安全。
                 const std::string alarm = tension_safety_check_values(l, r);
                 if (!alarm.empty()) {
                     // 節流：警示狀態改變時立刻發，之後每秒一次。
