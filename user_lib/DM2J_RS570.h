@@ -27,8 +27,15 @@ public:
 	bool init(TCP_client& extClient, int ID = 1, bool debug = false);
 
 	// Speed Move：寫入 PR block 並啟動
-	void speed_move(int pr_num, int mode, int rpm, int pos);
-	void speed_move_stop();
+	// 🔴 [2026-08-28] 這一族原本全是 void，把 writeSingle/writeMulti 的結果整個丟掉。
+	//    也就是**連「停止」都不知道有沒有送成功** —— speed_move_stop() 有 4 個呼叫點，
+	//    其中 app 的 signal_obstacle() 註解自己寫著 "Critical to stop the slide
+	//    IMMEDIATELY"，而它的回傳值被丟在地上。
+	//    與同日修的 PR_move_set / PR_trigger 完全同型（見 changelog -drv3）：
+	//    **通訊失敗時馬達不會停，會保持前一個動作。**
+	//    改成 bool（false = OK，依 CLAUDE.md 慣例）。忽略回傳值的既有呼叫端不受影響。
+	bool speed_move(int pr_num, int mode, int rpm, int pos);
+	bool speed_move_stop();
 
 	// PR Move 兩步驟: 1.設定移動長度cm 2.觸發移動
 	// ---- 機構標定（2026-08-28 實機量測後加入）----------------------------
@@ -60,22 +67,22 @@ public:
 	bool PR_move_cm_trigger_all(int pr_num); 
 
 	// JOG 目前不需要用
-	void jog_forward();
-	void jog_reverse();
-	void jog_stop();
-	void set_jog_speed(int rpm);     // Reg 0x01E1
-	void set_jog_acc(int acc_ms);    // Reg 0x01E7
-	void set_jog_dec(int dec_ms);    // Reg 0x01E7 (shared with acc, Pr6.03)
+	bool jog_forward();
+	bool jog_reverse();
+	bool jog_stop();
+	bool set_jog_speed(int rpm);     // Reg 0x01E1
+	bool set_jog_acc(int acc_ms);    // Reg 0x01E7
+	bool set_jog_dec(int dec_ms);    // Reg 0x01E7 (shared with acc, Pr6.03)
 
 	// Homing
-	void home_set_mode(uint16_t mode_bits);
-	void home_set_high_speed(uint16_t rpm);
-	void home_set_low_speed(uint16_t rpm);
-	void home_set_acc_time(uint16_t v);
-	void home_set_dec_time(uint16_t v);
-	void home_set_overrun(uint16_t v);
-	void home_start();
-	void home_set_current_pos_zero();
+	bool home_set_mode(uint16_t mode_bits);
+	bool home_set_high_speed(uint16_t rpm);
+	bool home_set_low_speed(uint16_t rpm);
+	bool home_set_acc_time(uint16_t v);
+	bool home_set_dec_time(uint16_t v);
+	bool home_set_overrun(uint16_t v);
+	bool home_start();
+	bool home_set_current_pos_zero();
 
 	// 使能 / 儲存 / 清警報（真實指令以手冊 §5.3.2/5.3.3 為準，舊版註解有誤）
 	bool motor_enable();                   // 0x000F (Pr0.07) = 1: 軟體強制使能

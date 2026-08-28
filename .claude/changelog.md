@@ -14,6 +14,49 @@
 ---
 
 ## [2026-08-28-drv5 ＝ 2026-08-28k] Claude Code — 🔴🔴 上滑台每個 cm 指令都走 7.7 倍（實機量測）
+## [2026-08-28r] Claude Code — 系統性掃描：DM2J 有 16 個 void 函式吞掉寫入結果（含「停止」）
+### 修改檔案
+- `user_lib/DM2J_RS570.h` / `.cpp` — 16 個 `void` → `bool`，函式本體改為真的傳遞結果
+- `app/WASH_ROBOT.cpp` — `signal_obstacle()` 的停止、`cmd_init()` 的設零點改為檢查回傳值
+- `app/WASH_ROBOT.h` — 更正 `ARM_RAIL_TRAVEL_MAX_CM` 註解裡說得太滿的部分
+
+### 🎯 掃描樣式「void 函式吞掉 bool 回傳值」的結果
+與同日 `[-drv3]` 修的 `PR_move_set`/`PR_trigger` **完全同型**，只是當時只修了兩個。
+系統掃過之後發現整族都是：
+
+| 函式 | 呼叫點 | 性質 |
+|---|---|---|
+| `speed_move_stop()` | **4** | 🔴 **停止**——其中 `signal_obstacle()` 的註解自己寫著 "Critical to stop the slide IMMEDIATELY"，而回傳值被丟在地上 |
+| `jog_stop()` | 1 | 🔴 停止 |
+| `speed_move` / `jog_forward` / `jog_reverse` | 1 | 啟動運動 |
+| `set_jog_*` / `home_set_*` / `home_start` | 多處 | 組態寫入 |
+
+📌 **通訊失敗時馬達不會停，會保持前一個動作** —— 與同日 PWM 那件事（寫入失敗
+→ 螺旋槳保持轉速）是同一個物理性質，只是換一個裝置。
+
+⚠️ **`speed_move` 有兩個寫入，只回最後一個的結果比原本的 `void` 更誤導**
+（呼叫端會以為 `false` 代表整件事成功），已改為 `err |=` 合併。
+
+### 🔴 順帶推翻了我同日說過的一句話
+我先前寫「應用層從未對上滑台做過 homing 或設零點」——**那是錯的**。
+`cmd_init()` 有呼叫 `home_set_current_pos_zero()`（`WASH_ROBOT.cpp:6912`），
+我當時 grep 的是 `set_zero|home()` 而漏掉它。
+
+但真正重要的是它的**語意**：那是 `0x0021`「把**當前位置**設為零點」，
+**不是 homing**（`0x0020` 才是去找原點感測器）。
+
+🔴 **後果：座標原點 = `init` 執行當下滑台碰巧所在的位置。**
+所以同日新增的 `ARM_RAIL_TRAVEL_MAX_CM` **守的是指令座標、不是物理位置** ——
+若 init 時滑台停在外面，整個座標系偏移，**守衛擋不住實際超程**。
+我在那個常數的註解裡把它說得太滿，已更正。真解是啟用 homing（已進待辦）。
+
+### ⚠️ 尚未編譯
+16 個簽章改動 + 2 個呼叫端改動，**寫的當下兩台 Pi 已交還**，本專案 C++ 只能在 Pi 上編。
+`void → bool` 對忽略回傳值的既有呼叫端是相容改變（`Linux_test` 全部以獨立敘述呼叫），
+但**這批仍未經編譯驗證**。
+
+---
+
 ## [2026-08-28p] Claude Code — 🔴 左右歸屬修正：解除交替步伐的封鎖
 ### 修改檔案
 - `app/WASH_ROBOT.h` — `ZDT_RF1/RF2/LF1/LF2` 四個值 + 三處互相矛盾的註解

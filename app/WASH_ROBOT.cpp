@@ -2448,7 +2448,16 @@ void WashRobot::arm_monitor_during_sweep_(int est_ms) {
         // (~3-4s more), pause UI fires AFTER slide stops → user sees pause at
         // wrong position.
         auto signal_obstacle = [this](const std::string& detail) {
-            D_(DM2J_ARM).speed_move_stop();   // 0x6002 = 0x0040 (PR motion halt)
+            // 🔴 [2026-08-28] 這一發的回傳值原本被丟掉，而上面那段註解自己寫著
+            //    "Critical to stop the slide IMMEDIATELY" —— 一個關鍵停止指令
+            //    失敗時完全靜默。DM2J 的 void 一族已改為回傳 bool（false = OK），
+            //    這裡是第一個真的去看它的呼叫端。
+            //    ⚠ 停不下來時**不能只是記錄**：滑台會繼續跑到目標位置（~3-4s），
+            //    而障礙就在路徑上。發 EVT 讓上層與 GUI 知道「停止沒送成功」。
+            if (D_(DM2J_ARM).speed_move_stop()) {   // 0x6002 = 0x0040 (PR motion halt)
+                std::cerr << "[arm_sweep] 🔴 speed_move_stop 送出失敗 — 滑台可能仍在移動\n";
+                evt_("arm_sweep_stop_failed");
+            }
             {
                 std::lock_guard<std::mutex> lk(arm_sweep_obstacle_mtx_);
                 arm_sweep_obstacle_detail_ = detail;
@@ -6908,8 +6917,16 @@ std::string WashRobot::cmd_init_impl_() {
     for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s)
         if (!disabled_zdt_slaves_.count(s)) Z_(s).release_stall_flag();
 
-    std::cout << "[init] DM2J arm (slave " << DM2J_ARM << ") → set current as zero\n";
-    D_(DM2J_ARM).home_set_current_pos_zero();
+    // 🔴 [2026-08-28] 注意這寫的是 0x0021「把當前位置設為零點」，**不是 homing**
+    //    （homing 是 0x0020，會去找原點感測器）。也就是說 **零點 = init 執行當下
+    //    滑台碰巧所在的位置**，不是機械原點。
+    //    ⚠ 後果：`ARM_RAIL_TRAVEL_MAX_CM` 那個行程守衛守的是**指令座標**，
+    //    如果 init 時滑台停在外面，座標原點就跟著偏移，守衛擋不住實際超程。
+    //    → 開機前應確認滑台已收到最左端；真正的解法是啟用 homing（見待辦）。
+    std::cout << "[init] DM2J arm (slave " << DM2J_ARM << ") → set current as zero"
+              << "（⚠ 零點=當前位置，非機械原點）\n";
+    if (D_(DM2J_ARM).home_set_current_pos_zero())
+        std::cerr << "[init] ⚠ DM2J arm set-zero 送出失敗 — 之後的絕對位置指令基準不可信\n";
 
     std::cout << "[init] IMU → take baseline\n";
     if (imu_take_baseline_()) return "ERR imu_baseline_fail\n";

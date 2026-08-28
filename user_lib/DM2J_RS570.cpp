@@ -96,7 +96,7 @@ bool DM2J_RS570::init(TCP_client& extClient, int ID, bool debug)
 
 //=========== control: Speed Move ===========
 
-void DM2J_RS570::speed_move(int pr_num, int mode, int rpm, int pos)
+bool DM2J_RS570::speed_move(int pr_num, int mode, int rpm, int pos)
 {
 	uint16_t pos_hi = (pos >> 16) & 0xFFFF;
 	uint16_t pos_lo = pos & 0xFFFF;
@@ -113,14 +113,17 @@ void DM2J_RS570::speed_move(int pr_num, int mode, int rpm, int pos)
 		(uint16_t)0           // PRx.07 special (path linking)
 	};
 
-	writeMulti(0x6200 + pr_num * 8, block);
+	// [2026-08-28] 兩個寫入都要算進回傳值。只回最後一個的結果，比原本的 void
+	// 更誤導 —— 呼叫端會以為 false 代表「整件事成功」，其實 block 寫入失敗被吞了。
+	bool err = writeMulti(0x6200 + pr_num * 8, block);
 	uint16_t trig = 0x10 | (pr_num & 0x0F);
-	writeSingle(0x6002, trig);
+	err |= writeSingle(0x6002, trig);
+	return err;
 }
 
-void DM2J_RS570::speed_move_stop()
+bool DM2J_RS570::speed_move_stop()
 {
-	writeSingle(0x6002, 0x0040);
+	return writeSingle(0x6002, 0x0040);
 }
 
 //=========== control: PR Move ===========
@@ -432,76 +435,76 @@ bool DM2J_RS570::PR_move_cm_trigger_all(int pr_num)
 
 //=========== control: JOG ===========
 
-void DM2J_RS570::jog_forward()
+bool DM2J_RS570::jog_forward()
 {
-	writeSingle(0x1801, 0x4001);
+	return writeSingle(0x1801, 0x4001);
 }
 
-void DM2J_RS570::jog_reverse()
+bool DM2J_RS570::jog_reverse()
 {
-	writeSingle(0x1801, 0x4002);
+	return writeSingle(0x1801, 0x4002);
 }
 
-void DM2J_RS570::jog_stop()
+bool DM2J_RS570::jog_stop()
 {
-	writeSingle(0x6002, 0x0040);
+	return writeSingle(0x6002, 0x0040);
 }
 
-void DM2J_RS570::set_jog_speed(int rpm)
+bool DM2J_RS570::set_jog_speed(int rpm)
 {
-	writeSingle(0x01E1, (uint16_t)rpm);
+	return writeSingle(0x01E1, (uint16_t)rpm);
 }
 
-void DM2J_RS570::set_jog_acc(int acc_ms)
+bool DM2J_RS570::set_jog_acc(int acc_ms)
 {
-	writeSingle(0x01E7, (uint16_t)acc_ms);
+	return writeSingle(0x01E7, (uint16_t)acc_ms);
 }
 
-void DM2J_RS570::set_jog_dec(int dec_ms)
+bool DM2J_RS570::set_jog_dec(int dec_ms)
 {
-	writeSingle(0x01E7, (uint16_t)dec_ms);   // RS485 JOG shares acc/dec register (Pr6.03, 0x01E7)
+	return writeSingle(0x01E7, (uint16_t)dec_ms);   // RS485 JOG shares acc/dec register (Pr6.03, 0x01E7)
 }
 
 //=========== control: Homing ===========
 
-void DM2J_RS570::home_set_mode(uint16_t mode_bits)
+bool DM2J_RS570::home_set_mode(uint16_t mode_bits)
 {
-	writeSingle(0x600A, mode_bits);
+	return writeSingle(0x600A, mode_bits);
 }
 
-void DM2J_RS570::home_set_high_speed(uint16_t rpm)
+bool DM2J_RS570::home_set_high_speed(uint16_t rpm)
 {
-	writeSingle(0x600F, rpm);
+	return writeSingle(0x600F, rpm);
 }
 
-void DM2J_RS570::home_set_low_speed(uint16_t rpm)
+bool DM2J_RS570::home_set_low_speed(uint16_t rpm)
 {
-	writeSingle(0x6010, rpm);
+	return writeSingle(0x6010, rpm);
 }
 
-void DM2J_RS570::home_set_acc_time(uint16_t v)
+bool DM2J_RS570::home_set_acc_time(uint16_t v)
 {
-	writeSingle(0x6011, v);
+	return writeSingle(0x6011, v);
 }
 
-void DM2J_RS570::home_set_dec_time(uint16_t v)
+bool DM2J_RS570::home_set_dec_time(uint16_t v)
 {
-	writeSingle(0x6012, v);
+	return writeSingle(0x6012, v);
 }
 
-void DM2J_RS570::home_set_overrun(uint16_t v)
+bool DM2J_RS570::home_set_overrun(uint16_t v)
 {
-	writeSingle(0x6015, v);
+	return writeSingle(0x6015, v);
 }
 
-void DM2J_RS570::home_start()
+bool DM2J_RS570::home_start()
 {
-	writeSingle(0x6002, 0x0020);
+	return writeSingle(0x6002, 0x0020);
 }
 
-void DM2J_RS570::home_set_current_pos_zero()
+bool DM2J_RS570::home_set_current_pos_zero()
 {
-	writeSingle(0x6002, 0x0021);
+	return writeSingle(0x6002, 0x0021);
 }
 
 //=========== read ===========
