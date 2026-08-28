@@ -885,6 +885,24 @@ private:
     // [2026-05-28] 末段 mask：slide 減速時機構慣性會對 M1 產生 ~0.5 Nm spike
     // （比真擋的 spike 還大）。跳過 sweep 末段最後 1 秒避免 false positive。
     // Trade-off：末段 slide 剩約 ~1000ms × cruise_speed = ~16 cm 範圍內的真擋抓不到。
+    // 🔴🔴 [2026-08-28] **這個遮罩從來沒有生效過。**
+    //    它錨定在 est_ms 的結尾：`in_decel_mask = (elapsed > est_ms - MASK)`。
+    //    而用實測導程（7.731 cm/圈）重算，17cm @ 250rpm 的真實運動只有 **553 ms**，
+    //    est_ms 卻是 4500 —— 遮罩窗口在 3500~4500ms，真正的減速在 528~553ms，
+    //    **兩者完全沒有交集**。減速尖峰一直是在監看全開的情況下發生的。
+    //    ⚠️ 而 changelog 顯示他們為假警報吃過不少苦（ARM_SWEEP_M2_* 最後被「實質
+    //    disable」，註解寫「無論怎麼調 threshold 都會跟 light block 訊號重疊」）——
+    //    **其中一道保護一直是壞的，而沒有人知道。**
+    //    📌 下方註解的「~1000ms × cruise_speed = ~16 cm」也是用錯誤的 1cm/rev
+    //    前提算的；用實測導程 1000ms 是 **32 cm**，而整個行程只有 17cm。
+    //
+    // 🔴 **調整 est_ms 之前必讀**：兩者是耦合的。
+    //    est_ms ≤ MASK 時 `est_ms - MASK ≤ 0` → `elapsed > 負數` 恆為真
+    //    → **整趟障礙偵測全程關閉，而且不會有任何訊息。**
+    //    | est_ms | 遮罩起點 | 監看窗口（運動 553ms） |
+    //    | 4500（現值） | 3500ms | 完整覆蓋 |
+    //    | 1500 | 500ms  | 最後 53ms 未監看 |
+    //    | ≤1000 | ≤0    | 🔴 全程關閉 |
     static constexpr int   ARM_SWEEP_DECEL_MASK_MS           = 1000;
     // M2 (工具頭) — 2026-05-28ai 改為「實質 disable」：
     // 實機觀察 M2 drift 在 step+sweep 並行模式下可達 0.7 Nm + rate 0.18，無論怎麼調
