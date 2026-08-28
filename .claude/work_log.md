@@ -367,6 +367,45 @@ git-bash 的 `bash.exe.stackdump`），而移除攝影機的 commit `e3c8820` �
 
 ---
 
+### 🚀 上機準備完成（等機器空出來）
+
+**🔴 上機的是 `refactor/app-layer`（整理分支），不是 `fix/driver-crc`。**
+使用者要求「功能上要跟原本的程式一樣，因為我們只是做整理」——這跟 driver 那批**有衝突**：
+
+| 分支 | vs `main` 的程式碼差異 | 功能等價？ |
+|---|---|---|
+| `refactor/app-layer` | 檔案搬家（`app/`＋`transport/`）、移除 `windows_test`、`send()` 加 `MSG_NOSIGNAL`（3 處） | ✅ **是**。兩支 `main.cpp` 本來就有 `signal(SIGPIPE, SIG_IGN)`，`send` 兩種寫法都回 `-1/EPIPE`，可觀察行為相同 |
+| `fix/driver-crc` | 上面全部 ＋ **9 支 driver 的回覆驗證** | ❌ **否**，是刻意的行為改變 |
+
+📌 **實測確認整理分支的 `user_lib/` 九支 driver 一行都沒動。**
+分開上機的理由：第一次上機若行為和現在不同，才分得清是「搬家搬壞」還是「driver 改的」。
+
+**🐛 修掉的實際錯誤：部署路徑五處全錯**
+`scripts/crane.sh`／`wr.sh` 與 runbook 寫的 deploy 路徑，今天跑會直接報錯：
+
+```
+實際  ~/projects/crane_control_PI/bin/ARM64/Debug/crane_control_PI.out
+舊值  ~/Crane_control_PI/bin/ARM/Release/Crane_control_PI
+```
+少 `projects/`／`ARM` 應為 `ARM64`／`Release` 應為 `Debug`／檔名少 `.out`／
+web 目錄寫 `washrobot_web_backend`（**兩台上都不存在**，實際是 `web_ver2`）。
+這佈局是 VS 遠端建置產生的（`bin/<Platform>/<Configuration>/<name>.out`），註解已寫明。
+
+**已備妥**：`runbook.md` 新增 **A2 上機檢查表**，兩條建置指令**已在兩台上逐字實跑驗證**
+（吊機 10 個編譯單元、本體 14 個平行編），二進位就放在兩台的 `~/bringup/`。
+🔴 **`~/bringup/` 刻意與 `~/projects/` 分開**——後者是 VS 遠端建置的落點，
+另一位開發者在 `main` 上迭代時會重建覆蓋它（今天 11:29 就重建過一次）。
+
+**🔴 實機盤查到的關鍵事實**：兩台的部署樹只有 `<project>/` 與 `user_lib/`，
+**沒有 `transport/`、沒有 `app/`** → **對方是從 `main` 建的，不是我們這條分支**。
+所以正式部署等於把另一個世代的程式碼換上去，不只是佔用機器而已。
+
+**唯一真正的未知數**：`init()` 從來沒跑過（那 3 秒的 `--help` 意外不算），
+所以本體那張逐項 `[OK]` 硬體檢查表一項都沒驗過。且 `init()` 第一個失敗就 `return`，
+而 08-27 才改過吸盤改號（1-4→5-8）與 PQW 搬 bus（.22→.20）兩件事。
+
+---
+
 ### ✅ driver 回覆驗證稽核全部收尾（16 支，4 個 commit）
 
 mailbox 2026-05-14 開出、擱置 3.5 個月的行動項，2026-08-28 結案。
