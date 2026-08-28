@@ -351,7 +351,11 @@ static std::string dispatch(const std::string& line) {
     if (cmd == "zdt_pusher") {
         int s = 0; std::string a;
         iss >> s >> a;
-        if (iss.fail() || s < 1 || s > 4) return "ERR usage:zdt_pusher_<1..4>_<extend|retract>\n";
+        // [2026-08-28] 原本寫死 1..4，與應用層的 CUP_SLAVE_FIRST..LAST（5-8）
+        // 沒有交集 → 這個指令在 08-27 改號後**不可能成功**。改吃同一組常數。
+        if (iss.fail() || s < WashRobot::CUP_SLAVE_FIRST || s > WashRobot::CUP_SLAVE_LAST)
+            return "ERR usage:zdt_pusher_<" + std::to_string(WashRobot::CUP_SLAVE_FIRST)
+                 + ".." + std::to_string(WashRobot::CUP_SLAVE_LAST) + ">_<extend|retract>\n";
         return robot.cmd_zdt_pusher(s, a);
     }
     if (cmd == "zdt_zero") {
@@ -368,12 +372,16 @@ static std::string dispatch(const std::string& line) {
     if (cmd == "confirm_balance") return "ERR removed_in_v2\n";
     if (cmd == "zdt_disable") {
         int s = 0; iss >> s;
-        if (iss.fail() || s < 1 || s > 4) return "ERR usage:zdt_disable_<1..4>\n";
+        if (iss.fail() || s < WashRobot::CUP_SLAVE_FIRST || s > WashRobot::CUP_SLAVE_LAST)
+            return "ERR usage:zdt_disable_<" + std::to_string(WashRobot::CUP_SLAVE_FIRST)
+                 + ".." + std::to_string(WashRobot::CUP_SLAVE_LAST) + ">\n";
         return robot.cmd_zdt_disable(s);
     }
     if (cmd == "zdt_enable") {
         int s = 0; iss >> s;
-        if (iss.fail() || s < 1 || s > 4) return "ERR usage:zdt_enable_<1..4>\n";
+        if (iss.fail() || s < WashRobot::CUP_SLAVE_FIRST || s > WashRobot::CUP_SLAVE_LAST)
+            return "ERR usage:zdt_enable_<" + std::to_string(WashRobot::CUP_SLAVE_FIRST)
+                 + ".." + std::to_string(WashRobot::CUP_SLAVE_LAST) + ">\n";
         return robot.cmd_zdt_enable(s);
     }
     if (cmd == "zdt_release_stall") return robot.cmd_zdt_release_stall();

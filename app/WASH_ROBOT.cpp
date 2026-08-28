@@ -6297,15 +6297,17 @@ int WashRobot::preset_extend_pulse_for_slave_(int slave) const {
     return PUSHER_EXTEND_PULSE;   // fallback
 }
 
-// Convert cm overextension to ZDT pulses based on slave's group ratio
-//   feet (CUP_SLAVE_FIRST..LAST): 20000 pulses = 7 cm → 2857 pulses/cm
-// [2026-08-27] ⚠ 這裡原本是「feet=1-4 / body=5-9」的 v1 分組。吸盤 slave 由 1-4
-// 改為 5-8 之後，若保留那個 body 分支，feet 會掉進去拿到 3000 pulses/cm，比正確
-// 的 2857 多 5%——而且不會報錯，是靜默算錯。v2 沒有 body 推桿，該分支直接移除。
+// Convert cm overextension to ZDT pulses.
+// 🔴 [2026-08-28] 這裡原本對 feet 用 `20000/7 = 2857`，並在註解宣告 3000 是
+//    「多 5%、靜默算錯」。**實機拿尺量的結果相反：3000 才對**（47994 脈衝 = 16cm，
+//    另有四條獨立證據，見 WASH_ROBOT.h 的 CUP_PULSE_PER_CM）。
+//    `20000 = 7cm` 很可能是量在 v1 的 body 推桿上，08-27 重構時被錯誤套用到 feet。
+//    📌 **「更正」本身也需要被驗證。**
+// v2 只剩 4 顆吸盤推桿，兩個分支同值，保留 fallback 只為語意明確。
 int WashRobot::cm_to_pulses_for_slave_(int slave, double cm) {
     if (slave >= CUP_SLAVE_FIRST && slave <= CUP_SLAVE_LAST)
-        return (int)(cm * (20000.0 / 7.0));
-    return (int)(cm * 3000.0);   // fallback（v2 已無 body 推桿，正常不會走到）
+        return (int)(cm * CUP_PULSE_PER_CM);
+    return (int)(cm * CUP_PULSE_PER_CM);   // v2 已無 body 推桿，正常不會走到
 }
 
 // Record successful seal pulse — used by fine_tune & cycle_group_
@@ -9568,7 +9570,7 @@ std::string WashRobot::do_feet_realign_(bool apply_threshold, bool caller_holds_
     const std::vector<int> feet = {ZDT_RF1, ZDT_RF2, ZDT_LF1, ZDT_LF2};
     constexpr double REAL_POS_MIN_DEG = -10.0;    // tolerate small negatives at zero
     constexpr double REAL_POS_MAX_DEG = 6000.0;   // SMC LEYG25 20cm = 6000° = corrupt-frame guard
-    constexpr double FEET_PULSE_PER_CM = 20000.0 / 7.0;   // ZDT pulse ↔ cm (feet slaves 1-4)
+    constexpr double FEET_PULSE_PER_CM = CUP_PULSE_PER_CM;   // [2026-08-28] 原為 20000/7=2857，實測應為 3000（見 WASH_ROBOT.h）
     auto feet_skip = [this](int s) -> bool { return disabled_zdt_slaves_.count(s) > 0; };
 
     // caller_holds_lock (end-of-step auto-call): do_step_*_ already holds motion_mtx_
@@ -12240,18 +12242,63 @@ std::string WashRobot::cmd_pwm_set(int ch, int hz, int control, double duty_pct)
     // 三個寫入各自留痕。driver 自己的 LOG_ERR 只在 debug_mode 開時才印，而且
     // 「沒回應」那條路徑以前完全靜默（2026-08-28b 才補上）——這裡無條件印，
     // 確保 console 一定看得到是卡在哪一步。
+    // [2026-08-28] 錯誤訊息要分辨「參數超出安全範圍」與「通訊失敗」。
+    // 先前三個分支都只有一句寫死的訊息，實測送**合法的 hz=50** 也會收到
+    // 「頻率被鎖在 50Hz」—— 真因其實是模組沒回話。呼叫端只拿得到一個 bool，
+    // 所以現在改讀 driver 的 last_fail()。
+    // （同型問題 2026-08-28b 在 Linux_test menu 34 修過，當時漏了主程式這一處。）
+    auto fail_reason = [this]() -> std::string {
+        return std::string(pwm_.last_fail_str());
+    };
     if (!pwm_.setPWM_Freq(dch, hz)) {
-        std::cout << "[pwm_set] setPWM_Freq FAILED (slave " << PWM_SLAVE << " 無回應或拒絕)\n";
-        return "ERR pwm_freq_rejected_locked_" + std::to_string(pwm_.freqMinHz()) + "hz\n";
+        std::cout << "[pwm_set] setPWM_Freq FAILED — " << fail_reason() << "\n";
+        if (pwm_.last_fail() == QX_DO24::Fail::OutOfRange)
+            return "ERR pwm_freq_rejected_locked_" + std::to_string(pwm_.freqMinHz()) + "hz\n";
+        return "ERR pwm_freq_write_failed_" + fail_reason() + "\n";
     }
     if (!pwm_.setPWM_Duty(dch, duty_pct)) {
-        std::cout << "[pwm_set] setPWM_Duty FAILED\n";
-        return "ERR pwm_duty_rejected_must_be_" + std::to_string((int)pwm_.dutyMinPct())
-             + "_to_" + std::to_string((int)pwm_.dutyMaxPct() ) + "_pct\n";
+        std::cout << "[pwm_set] setPWM_Duty FAILED — " << fail_reason() << "\n";
+        if (pwm_.last_fail() == QX_DO24::Fail::OutOfRange)
+            return "ERR pwm_duty_rejected_must_be_" + std::to_string((int)pwm_.dutyMinPct())
+                 + "_to_" + std::to_string((int)pwm_.dutyMaxPct() ) + "_pct\n";
+        return "ERR pwm_duty_write_failed_" + fail_reason() + "\n";
     }
     if (!pwm_.setPWM_Control(dch, (uint16_t)control)) {
-        std::cout << "[pwm_set] setPWM_Control FAILED\n";
-        return "ERR pwm_control_write_fail\n";
+        std::cout << "[pwm_set] setPWM_Control FAILED — " << fail_reason() << "\n";
+        return "ERR pwm_control_write_failed_" + fail_reason() + "\n";
+    }
+
+    // 🔴 回讀驗證。寫入回 true 只代表「模組收下了這一幀」，不代表暫存器真的是那個值。
+    // 而這個裝置的失敗模式特別惡劣：**寫入失敗時輸出不會歸零，模組保持前一個值繼續輸出**
+    // —— 也就是通訊斷掉時螺旋槳不會停，會維持轉速（左右螺旋槳共用 CH1）。
+    // 所以「有沒有真的生效」必須用讀的確認，不能相信寫入的回傳值。
+    {
+        double   rb_duty = 0;
+        uint32_t rb_freq = 0;
+        uint16_t rb_ctrl = 0;
+        const bool rb_ok = pwm_.getPWM_Duty(dch, rb_duty)
+                        && pwm_.getPWM_Freq(dch, rb_freq)
+                        && pwm_.getPWM_Control(dch, rb_ctrl);
+        if (rb_ok) {
+            // duty 容差 0.6%：模組存的是整數百分比，而呼叫端可以傳小數（例如 5.9）。
+            const bool match = ((int)rb_freq == hz)
+                            && (std::fabs(rb_duty - duty_pct) <= 0.6)
+                            && ((int)rb_ctrl == control);
+            if (!match) {
+                std::cout << "[pwm_set] ⚠ 回讀不符：要求 hz=" << hz << " duty=" << duty_pct
+                          << " ctrl=" << control << "，讀回 hz=" << rb_freq
+                          << " duty=" << rb_duty << " ctrl=" << rb_ctrl << "\n";
+                evt_("pwm_readback_mismatch ch=" + std::to_string(ch));
+                return "ERR pwm_readback_mismatch\n";
+            }
+            std::cout << "[pwm_set] 回讀確認 ch" << ch << " duty=" << rb_duty
+                      << " hz=" << rb_freq << " ctrl=" << rb_ctrl << "\n";
+        } else {
+            // 讀不到就不能宣稱成功 —— 這正是「寫入回 OK 但實際沒生效」會走的路徑。
+            std::cout << "[pwm_set] ⚠ 回讀失敗（" << fail_reason() << "）— 無法確認是否生效\n";
+            evt_("pwm_readback_unavailable ch=" + std::to_string(ch));
+            return "ERR pwm_readback_failed_" + fail_reason() + "\n";
+        }
     }
     std::cout << "[pwm_set] OK — 三個寫入都成功\n";
 

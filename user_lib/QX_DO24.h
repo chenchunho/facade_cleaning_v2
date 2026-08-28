@@ -117,7 +117,26 @@ private:
 	int freq_max_hz = 50;
 
 	// 通訊核心
+	// [2026-08-28] 交易層重試 + 失敗原因外露。
+	// 實測（bench，本模組 slave 9 @ 115200）：寫入 10 次有 2 次 `no reply (timeout)`，
+	// 讀取則 10/10 成功 —— 而且**失敗剛好發生在「停止螺旋槳」那一發**。
+	// 🔴 關鍵性質：寫入失敗不會讓輸出歸零，模組會**保持前一個值繼續輸出**。
+	//    也就是通訊斷掉時螺旋槳不會停，會維持轉速。因此重試必須放在這一層，
+	//    而不是指望每個呼叫端都記得重試（左右螺旋槳共用 CH1）。
+	// ⚠ 只重試「傳輸層」失敗（無回應／回覆過短／CRC 錯）。
+	//   `device rejected` 是模組明確拒絕，重試沒有意義，也可能是真的參數不對。
 	bool sendAndReceive(const std::vector<uint8_t>& request, std::vector<uint8_t>& response);
+	bool sendAndReceiveOnce_(const std::vector<uint8_t>& request, std::vector<uint8_t>& response);
+
+public:
+	// 最近一次失敗的原因。讓呼叫端能把「通訊失敗」和「參數超出安全範圍」分開講 ——
+	// 2026-08-28 實測送合法的 hz=50 卻收到「頻率被鎖」的錯誤訊息，就是因為
+	// 呼叫端只拿得到一個 bool。（同型問題 2026-08-28b 在 Linux_test 修過，漏了主程式）
+	enum class Fail { None, NoReply, TooShort, CrcMismatch, DeviceRejected, OutOfRange, NotReady };
+	Fail        last_fail() const { return last_fail_; }
+	const char* last_fail_str() const;
+private:
+	Fail last_fail_ = Fail::None;
 	bool readRegs(uint16_t addr, uint16_t count, std::vector<uint16_t>& out);
 	uint16_t modbusCRC(const uint8_t* data, int len);
 };
