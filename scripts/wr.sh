@@ -26,7 +26,9 @@ set -u
 
 SESSION="wr"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-WR_BIN="${WR_BIN:-$HOME/facade_cleaning_v2/bin/ARM/Release/facade_cleaning_v2}"
+# [2026-08-28] 預設值改為 Pi 上的實際部署位置（實機確認）——
+# 同 scripts/crane.sh 的說明：ARM64/Debug、檔名帶 .out、父目錄是 projects/。
+WR_BIN="${WR_BIN:-$HOME/projects/facade_cleaning_v2/bin/ARM64/Debug/facade_cleaning_v2.out}"
 WR_CAM="${WR_CAM:-$ROOT/frame_capture/frame_capture.py}"
 WR_DEPTH_CAM="${WR_DEPTH_CAM:-$ROOT/frame_capture/depth_cam_service.py}"
 CAM1_IP="${CAM1_IP:-192.168.1.110}"

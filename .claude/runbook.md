@@ -7,6 +7,12 @@
 
 ## A. 啟動順序
 
+> 🔴 **2026-08-28 路徑全面更正。** 本檔原本寫的 deploy 路徑
+> （`~/<project>/bin/ARM/Release/<name>`）**五個地方都錯**：少了 `projects/`、
+> 平台寫 `ARM`（實際 `ARM64`）、組態寫 `Release`（實際 `Debug`）、檔名少了 `.out`、
+> web 目錄寫 `washrobot_web_backend`（實際 `web_ver2`，前者根本不存在）。
+> 照舊寫法跑 `scripts/*.sh` 會直接報錯。`scripts/crane.sh`／`wr.sh` 的預設值已同步更正。
+
 ### 連線資訊（2026-08-27 實測）
 
 兩台 Pi 各有**兩條路**：有線是 bench 正式配置，WiFi 是備援／驗證用。**帳號兩台不一樣。**
@@ -37,7 +43,7 @@
 ```bash
 # crane Pi (192.168.1.10)
 ssh user@192.168.1.10
-cd ~/facade_cleaning_v2       # repo
+cd ~/facade_cleaning_v2       # repo（scripts/ 所在處，與部署路徑不同）
 chmod +x scripts/*.sh       # 第一次用要給執行權限
 ./scripts/crane.sh start    # 開 Crane_control_PI + web_backend + 一個空 shell
 ./scripts/crane.sh attach   # 進去看 log
@@ -61,7 +67,7 @@ chmod +x scripts/*.sh
 | 重開剛剛關的程式 | `↑` 然後 `Enter` |
 | 全關 | `./scripts/{wr,crane}.sh stop` |
 
-**路徑覆蓋**：預設用本節下面手動段落寫的 deploy 路徑（`~/<project>/bin/ARM/Release/...`）。若路徑不一樣：
+**路徑覆蓋**：預設值就是下面手動段落那組實際部署路徑（`~/projects/<project>/bin/ARM64/Debug/<name>.out`）。若路徑不一樣：
 
 ```bash
 WR_BIN=/path/to/facade_cleaning_v2 ./scripts/wr.sh start
@@ -84,12 +90,12 @@ CRANE_BIN="python3 $HOME/facade_cleaning_v2/crane_shim/crane_shim.py" \
 ssh user@192.168.1.10
 
 # Terminal 1: 吊機主程式（C++）
-cd ~/Crane_control_PI/bin/ARM/Release
-./Crane_control_PI
+cd ~/projects/crane_control_PI/bin/ARM64/Debug
+./crane_control_PI.out
 # → 印出 "[OK] command server :5002"
 
 # Terminal 2: Web Backend（Node.js）
-cd ~/washrobot_web_backend
+cd ~/projects/web_ver2
 node server.js
 # → 印出 "[web_backend] listening http://0.0.0.0:8080"
 # 或用 systemd unit 背景跑
@@ -99,8 +105,8 @@ node server.js
 
 ```bash
 ssh nexuni@192.168.1.100
-cd ~/facade_cleaning_v2/bin/ARM/Release
-./facade_cleaning_v2
+cd ~/projects/facade_cleaning_v2/bin/ARM64/Debug
+./facade_cleaning_v2.out
 # → 印出 "[OK] command server :5001"
 # 會自動 lazy connect crane :5002（連不到會 WARN 但不擋 boot）
 ```
@@ -112,6 +118,101 @@ http://192.168.1.10:8080
 ```
 
 頂部 dot 應變綠（washrobot / crane / arm）；banner 隱藏表示主系統正常模式。
+
+---
+
+## A2. 上機檢查表 —— `refactor/app-layer`（整理分支）
+
+> 📌 **2026-08-28 準備，等測試機空出來就照這張跑。**
+> 目標是**驗證「只是搬家」沒有改變任何行為**，所以上的是 `refactor/app-layer`，
+> 🔴 **不是** `fix/driver-crc`。後者含 9 支 driver 的回覆驗證，那是刻意的行為改變，
+> 混在一起上機就分不清「行為變了」是搬家搬壞還是 driver 改的。
+
+### 為什麼整理分支是功能等價的
+
+`main` → `refactor/app-layer` 的程式碼差異只有三類：
+
+| 類別 | 內容 | 行為影響 |
+|---|---|---|
+| 檔案搬家 | `WASH_ROBOT.{h,cpp}` → `app/`；`TCP_client`／`TCP_server`／`Serial_port` → `transport/` | 無 |
+| 刪除 | `windows_test/`（不在 Pi 建置目標裡） | 無 |
+| 唯一實質改動 | `send(..., 0)` → `send(..., MSG_NOSIGNAL)`（TCP_client ×2、TCP_server ×1） | **無**——兩支 `main.cpp` 本來就有 `signal(SIGPIPE, SIG_IGN)`，`send` 兩種寫法都回 `-1/EPIPE`；差別只在不再依賴全域訊號設定 |
+
+### 0. 進場前確認（🔴 不要跳過）
+
+```
+ssh user@192.168.5.17 'who; ss -ltn | grep -E ":(5002|8080)"; ps -eo pid,etime,comm | grep -E "crane|node"'
+```
+
+本體同理（`nexuni@192.168.5.26`、埠 `5001`）。
+🔴 **判斷程式在不在用 `ss -ltn` 看埠或 `ps -eo comm` 比執行檔名，絕不用 `pkill -f`／`pgrep -f`**
+——它會比中執行它的那條 SSH 指令自己（2026-08-27 踩過）。
+
+### 1. 建置（在 Pi 上，另開目錄，不碰現有部署）
+
+```
+rsync -a --delete <repo>/{transport,user_lib,Crane_control_PI} user@192.168.5.17:~/bringup/
+```
+```
+ssh user@192.168.5.17 'cd ~/bringup && g++ -std=c++17 -O2 -Itransport -Iuser_lib -o crane_control_PI.out Crane_control_PI/main.cpp transport/TCP_client.cpp transport/TCP_server.cpp user_lib/{CLV900_inverter,DSZL_107,DY_500_weight_sensor,PQW_IO_16O_RLY,MH300_inverter,SD76_length_meters,SE3_inverter}.cpp -lpthread'
+```
+
+本體（多一個 `app/`，14 個編譯單元、平行編約 25 秒）：
+```
+rsync -a --delete <repo>/{app,transport,user_lib,facade_cleaning_v2} nexuni@192.168.5.26:~/bringup/
+```
+```
+ssh nexuni@192.168.5.26 'cd ~/bringup && mkdir -p obj && printf "%s\n" facade_cleaning_v2/main.cpp app/WASH_ROBOT.cpp transport/{Serial_port,TCP_client,TCP_server}.cpp user_lib/{DM2J_RS570,DY_500_weight_sensor,FrameAnalyzer,JC_100_METER,PQW_IO_16O_RLY,QX_DO24,WT901BC_TTL,XKC_Y25_RS485,ZDT_motor_control}.cpp | xargs -P4 -I{} sh -c "g++ -std=c++17 -O2 -Iapp -Itransport -Iuser_lib -c {} -o obj/\$(basename {} .cpp).o" && g++ -o facade_cleaning_v2.out obj/*.o -lpthread'
+```
+
+⚠️ **`~/bringup/` 是刻意跟 `~/projects/` 分開的**：`~/projects/` 是 Visual Studio 遠端建置的落點，
+另一位開發者在 `main` 上迭代時會重建並覆蓋它。
+
+### 2. 先跑起來，但不要覆蓋現有部署
+
+🔴 **不要用 `--help` 之類的旗標試用法——這兩支 `main()` 一開頭就連硬體，等於直接啟動**
+（2026-08-28 踩過，連上了運轉中的 485 匯流排）。
+
+直接執行 `~/bringup/` 底下那支即可（它會佔用 5002 / 5001，所以必須先確認沒有別的實例在跑）。
+
+### 3. 驗收：`init()` 的逐項輸出
+
+**吊機**應出現五個網關：`.30`／`.31`（SE3 左右）、`.34`（SD76 計米）、`.32`／`.33`（X518 張力）。
+
+**本體**逐項對照：
+
+| 預期輸出 | 對應 |
+|---|---|
+| `[OK] USR .20 (ZDT) / .22 (sensors+PQW) connected` | 兩個 485 網關 |
+| `[OK] DM2J arm rail (slave 14 @ cli_22_)` | 手臂滑台 |
+| `[OK] ZDT 5~8` | 4 支吸盤推桿（08-27 才改號） |
+| `[OK] JC-100 5~8` | 4 顆真空壓力計 |
+| `[OK] PQW slave 12 @ cli_20_ (.20)` | 繼電器（08-27 才搬 bus） |
+| `[OK] XKC water level slave 13` | 水位（不探測） |
+| `[--] QX-DO24 PWM DISABLED` | 預期就是停用 |
+| `[--] DY-500 slaves 10/11 not installed` | 預期就是未安裝 |
+
+🔴 **`init()` 任何一項失敗就直接 `return`（本專案慣例 `true`＝失敗），一次只會看到最前面那一個問題。**
+08-27 才改過吸盤改號與 PQW 搬 bus 兩件事，可能要跑好幾輪才挖得完。
+
+跑的時候帶 `WR_DRIVER_DEBUG=0`，否則 25 個裝置的 hex dump 會把輸出淹掉。
+
+### 4. 驗收判準：跟現行版本比對，不是「有沒有錯誤」
+
+這輪的目的是**證明行為沒變**。所以要比的是「跟現行部署的 binary 跑起來一不一樣」，
+不是「有沒有報錯」。`init()` 輸出、`status`／`ping`／`tension` 的讀值都應該一致。
+
+### 5. 退場
+
+`~/bringup/` 整個刪掉即可——**全程沒有動過 `~/projects/`**，所以沒有還原步驟。
+要正式部署（覆蓋 `~/projects/.../bin/ARM64/Debug/*.out`）是另一個決定，
+🔴 **覆蓋前先備份原檔**，否則另一位開發者的建置成果就沒了。
+
+### 尚未決定的一項
+
+`scripts/wr.sh` 仍會開一個 window 跑 `depth_cam_service.py`（深度相機）。攝影機路線
+2026-08-27 已永久移除，那個 window 只會失敗，不影響主程式。**要不要註解掉待使用者決定**
+（待辦總表已有此條）。
 
 ---
 

@@ -20,8 +20,13 @@
 set -u
 
 SESSION="crane"
-CRANE_BIN="${CRANE_BIN:-$HOME/Crane_control_PI/bin/ARM/Release/Crane_control_PI}"
-WEB_DIR="${WEB_DIR:-$HOME/washrobot_web_backend}"
+# [2026-08-28] 預設值改為 Pi 上的實際部署位置（實機確認）。舊值五處都錯：
+# 少了 projects/、平台寫 ARM（實際 ARM64，也是唯一設了 include 路徑的組態）、
+# 組態寫 Release（實際 Debug）、檔名少了 .out、web 目錄名根本不存在。
+# 這個佈局是 Visual Studio 遠端建置產生的：MSBuild 把原始碼送上 Pi、
+# 用 Pi 的 g++ 編譯，輸出落在 bin/<Platform>/<Configuration>/<name>.out。
+CRANE_BIN="${CRANE_BIN:-$HOME/projects/crane_control_PI/bin/ARM64/Debug/crane_control_PI.out}"
+WEB_DIR="${WEB_DIR:-$HOME/projects/web_ver2}"
 
 case "${1:-attach}" in
     start)
