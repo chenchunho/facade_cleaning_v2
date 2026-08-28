@@ -31,6 +31,21 @@ public:
 	void speed_move_stop();
 
 	// PR Move 兩步驟: 1.設定移動長度cm 2.觸發移動
+	// ---- 機構標定（2026-08-28 實機量測後加入）----------------------------
+	// 這顆驅動器只認脈衝；「一個脈衝走多遠」完全取決於它後面接什麼機構。
+	// 本檔所有 *_cm 介面原本寫死「1 圈 = 1 cm」，那是把某一台機器的機構參數
+	// 埋進通用驅動層 —— 上滑台實測是 7.731 cm/圈（皮帶軸），於是每一個 cm
+	// 指令都走了 7.7 倍，而驅動器照樣回報漂亮的整數，從 log 完全看不出來。
+	//
+	// 預設 1.0 = 維持舊行為，未呼叫 set_lead_cm_per_rev() 的既有使用者不受影響。
+	void set_lead_cm_per_rev(double cm_per_rev);
+
+	// 軟性行程上限（預設關閉）。超出範圍的 cm 指令會被「明確拒絕並記錄」，
+	// 而不是安靜地把機構推到底 —— 2026-08-28 實測：下一個超出行程兩倍的
+	// 指令，驅動器、應用層、log 三邊都沒有任何抗議。
+	// lo == hi 表示停用。
+	void set_travel_limit_cm(double lo_cm, double hi_cm);
+
 	// [2026-08-28] void → bool (false = OK, per CLAUDE.md). These three swallowed
 	// the writeMulti/writeSingle result, which made every layer above them blind:
 	// PR_move_cm_nowait returned a hardcoded "success", and the rail-sweep
@@ -88,6 +103,16 @@ private:
 	std::string _log_tag;
 
 	uint16_t crc16(const uint8_t* buf, int len);
+
+	// 機構標定（見 set_lead_cm_per_rev）。所有 cm↔pulse 換算一律走這兩個 helper，
+	// 不要在各函式裡各自乘除 —— 這個檔案已經因為「同一個換算散在多處」出過事。
+	double  lead_cm_per_rev_ = 1.0;
+	double  travel_lo_cm_    = 0.0;
+	double  travel_hi_cm_    = 0.0;   // lo == hi → 停用
+
+	int     cm_to_pulse_(double cm, uint16_t ppr) const;
+	double  pulse_to_cm_(int32_t pulse, uint16_t ppr) const;
+	bool    travel_reject_(double cm, const char* what);   // true = 超出範圍（已記錄）
 
 	// [2026-08-28] Single receive path for all six read sites: reads into a
 	// 32-byte frame, enforces a minimum length and verifies the RTU CRC.
