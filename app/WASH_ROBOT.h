@@ -711,7 +711,12 @@ private:
     // Arm sweep (上滑台 / DM2J slave 14 @ cli_22_ since 2026-05-26)
     // NOTE: DM2J ACC/DEC unit is ms/1000rpm (Leadshine convention) — LOWER = faster ramp.
     static constexpr int ARM_SWEEP_CM  = 17;   // sweep cm (2026-08-26 per user: -8→17; 2026-07-27 per user: -6→-8; 2026-07-24 per user: -10→-6; 2026-05-21: 30→40→45→50→55; 2026-05-25: 55→60→100→80; 2026-05-26: 80→100; 2026-05-28: 100→80; 2026-06-06: 80→90→100→90→85; 2026-06-11: 85→60→55; 2026-07-23 per user: 55→-10 — 手臂還沒裝，「所有上滑台移動」統一改小行程+同一方向，涵蓋 do_arm_sweep_ / do_arm_clean_sweep_ / do_arm_clean_sweep_continuous_ 共用此常數)
-    static constexpr int ARM_SWEEP_RPM = 1000;   // top speed (2026-05-26 bench menu28: 2300 + ACC/DEC 200/200 穩定; 2026-05-27: 2300→2000→1000 per user 因仍觀察失步)
+    // 🔴 [2026-08-28 傍晚 per user] 1000 → 250，與 DM2J_ARM_STEP_SWEEP_RPM 統一。
+    //    原本的 1000 是 2026-05-27 為 55cm 行程挑的，而且是在「1cm/rev」的錯誤認知下挑的
+    //    —— 當時以為 1000rpm = 16.7 cm/s，用實測導程 7.731 換算實際是 **128.8 cm/s**。
+    //    2026-08-28 實機已發生失步（使用者回報並手動調回）。
+    //    250 rpm 實際線速度 = 32.2 cm/s；若仍失步，這裡還要再往下調。
+    static constexpr int ARM_SWEEP_RPM = 250;   // [2026-08-28 per user] 1000→250，與步伐用值統一（原註解沿革：2026-05-26 bench menu28: 2300; 2026-05-27: 2300→2000→1000 因仍觀察失步）
     static constexpr int ARM_SWEEP_ACC = 100;    // start ramp (ms/1000rpm) — 2026-05-26: 100→200; 2026-05-27: 200→100 配合 RPM 1000
     static constexpr int ARM_SWEEP_DEC = 100;    // stop ramp (ms/1000rpm) — 2026-05-26: 100→200; 2026-05-27: 200→100 配合 RPM 1000
 

@@ -145,6 +145,7 @@ JC-100 fast-fail、PWM 改 slave 9 啟用、上滑台搬 `.20`）**不是搬家�
 | 唯一實質改動 | `send(..., 0)` → `send(..., MSG_NOSIGNAL)`（TCP_client ×3、TCP_server ×2） | **無**——兩支 `main.cpp` 本來就有 `signal(SIGPIPE, SIG_IGN)`，`send` 兩種寫法都回 `-1/EPIPE`；差別只在不再依賴全域訊號設定 |
 | 🔴 log 字串（2026-08-28 加） | 吊機 `init()` 的 VFD 型號改為跟著 `CRANE_VFD_IS_SE3` 巨集走（原本寫死 `MH300` 在 `#if` 外） | **行為無**，但 **`init()` 輸出會變**——見下方 §4 的但書 |
 | 非二進位 | `web_backend/server.js` 的 `CRANE_IP` 常數 `.1.101` → `.1.10` | **不影響上機的兩支二進位**（web backend 是另一支行程） |
+| 🔴🔴 **行為改變**（2026-08-28 傍晚 cherry-pick） | 上滑台 cm↔pulse 換算修正（實測皮帶軸 **7.731 cm/圈**，程式原本假設 1）＋ 行程守衛 48cm ＋ `ARM_SWEEP_RPM` 1000→250 | **有，而且是刻意的**——修正前 `ARM_SWEEP_CM=17` 實際下 **131 cm** 指令而滑台只有 50cm，**每次掃動都一路撞到底**。詳見 `changelog.md` `[2026-08-28k]` |
 
 ### 0. 進場前確認（🔴 不要跳過）
 
@@ -219,7 +220,12 @@ ssh nexuni@192.168.5.26 'cd ~/bringup && mkdir -p obj && printf "%s\n" facade_cl
 `init()` 輸出、`status`／`ping`／`tension` 讀值應逐字一致。
 只有這樣「不一致」才唯一地指向搬家。
 
-🔴 **2026-08-28 起有一個已知且刻意的例外**：吊機的 VFD 兩行
+🔴 **2026-08-28 起「與 baseline 逐字一致」已不再成立於本體**：上滑台換算修正
+（`[2026-08-28k]`）是刻意的行為改變 —— 本體 `init()` 會多出
+`lead=7.731 cm/rev travel<=48 cm`，且所有上滑台移動距離都會變成真正的公分（約為修正前的 1/7.7）。
+**本體要比對等價性，只能拿 `9fa4fe1` 之前的 commit 建。**
+
+🔴 **吊機的例外**：VFD 兩行
 ```
 [OK]   VFD left (SE3)  USR_A slave 1        ← 本分支
 [OK]   VFD left (MH300)  USR_A slave 1      ← baseline（寫死，說謊）
