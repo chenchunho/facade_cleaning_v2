@@ -230,7 +230,12 @@ if (slave < CUP_SLAVE_FIRST || slave > CUP_SLAVE_LAST) return "ERR invalid_slave
 
 ---
 
-## [2026-08-28-drv4] Claude Code — 重連把失敗的 connect 判成成功
+## [2026-08-28q] Claude Code — 重連把失敗的 connect 判成成功（＝ driver 分支 `-drv4`）
+
+> 📌 **本筆與 `fix/driver-crc` 的 `[2026-08-28-drv4]` 是同一個改動**（cherry-pick 過來）。
+> 🔴 **為什麼補進「功能等價」分支**：2026-08-28 傍晚的系統性掃描（樣式「用了 `select()`
+> 卻沒查 `SO_ERROR`」）抓到**上機分支缺這個修補**——也就是上機版本仍會把失敗的重連
+> 判成成功、`connected` 掛在死掉的對端上。這與同日的換算修正同屬安全相關，比照辦理。
 ### 修改檔案
 - `transport/TCP_client.cpp` — 監控執行緒的重連路徑補上 `getsockopt(SO_ERROR)`
 
