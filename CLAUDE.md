@@ -156,7 +156,7 @@ Crane_control_PI/    # 吊機主控 binary
                      #    ⚠️ 應用層尚未抽出，編排邏輯仍寫在 main.cpp（4,400+ 行）
 cleaning_arm/        # 手臂控制 binary
                      #    ⚠️ 自成一格：不使用 user_lib，自建 socket 層（main_api.{h,cpp}）
-Linux_test/          # bench 互動式硬體測試工具
+Linux_test/          # bench 互動式硬體測試工具（含 probe_dm2j.cpp：上滑台機構標定/行程量測）
 frame_capture/       # Python 影像工具（相機路線已作廢，見 .claude/archive/）
 scripts/             # tmux launcher：wr.sh / crane.sh / cams.sh
 tmp/                 # 暫存工作區（已 gitignore，不進版控）
@@ -408,7 +408,7 @@ Socket timeouts: 100-500ms per device. TCP monitor thread: 500ms reconnect polli
 | `DSZL_107` | 張力感測器 × 2（X518 採集板） | Modbus-TCP (獨佔 gateway) | 左 (USR_C.32 slave 1) / 右 (USR_D.33 slave 1)，各獨佔一條 RS485 bus；scale factor 預設 0.01（待實機校正）。Washrobot 透過 `crane_cmd_("tension")` 跨 PI 拿 kg。 |
 | `CLV900_inverter` | 變頻器 × 1 | Modbus-TCP (USR_A.30 slave 3) | 中間絞盤變頻器，控制 bus 上（未安裝） |
 | `SE3_inverter` | 士林變頻器 × 2 | Modbus-TCP (USR_A 控制 bus) | 左 (USR_A.30 slave 1) / 右 (USR_A.30 slave 2)；2026-05-07 取代原 ZS_DIO_R_RLY 繼電器；2026-05-15 re-layout 右 SE3 從 USR_B 移到 USR_A、slave 1→2；hold 預設 20Hz / 自動運動 30Hz；reg 0x1101 控制位元、0x1002 頻率（RAM）、0x100A 輸出頻率 |
-| `QX_DO24` | 4 路 PWM 輸出模組 × 1（新硬體，2026-08） | Modbus-TCP (RS485_3 .22 **slave 9**) | 四川旗芯 QX-DO24，4 通道獨立占空比/頻率/控制（0=關/65535=持續輸出/1~65534=脈衝數）。**安全限制（driver 強制）**：占空比鎖 5~10%（5%=停止/10%=全速）、頻率鎖 50Hz——兩者連動，只鎖一個等於沒鎖。`Linux_test` menu 34 + Web GUI「PWM 控制」panel 已接（`pwm set/save/status`）。**bench 用廠商工具 USB-485 直連驗證過**：通道1 @ 50Hz / 占空比 5~10% 驅動馬達成功。<br>**slave 沿革（2026-08-28 per user 已改為 9）**：原本選 6 的前提是「v2 的 JC100 只用 1~4」，但 2026-08-27 把吸盤編號改成 5-8 之後 **slave 6 就撞上右腳下吸盤的真空表**，bench 出現 `[ERR] [QX:6] device rejected FC 0x10: err 0x7C`（0x7C 不是合法 Modbus exception code，那是 JC100 的回覆被 PWM driver 撿走）。撞號不只是雜訊：FC 0x10 會把 write-multiple 打進 JC100 的組態暫存器，而 JC100 壓力值是步伐的放腳判準 → 掉落風險。user 已用 USB-485 直連把模組改成 **slave 9**（cli_22_ 上 5-8 JC100／10,11 DY500／13 XKC／14 DM2J，9 是空的）。<br>**波特率（2026-08-28 per user 更正）**：模組 115200，且 **.22 這條 bus 上所有裝置都是 115200** —— 先前記載的「其他裝置 9600、必須把模組改回 9600」**不正確**，已作廢。<br>⚠ 仍待確認：模組的 RS485 線是否已從 USB-485 轉換器移到 USR gateway 的 A/B 端子。沒接上去的話，`PWM_ENABLED=true` 也一樣每個指令 timeout（Mode B init 不發包，連線階段不會報錯） |
+| `QX_DO24` | 4 路 PWM 輸出模組 × 1（新硬體，2026-08） | Modbus-TCP (RS485_3 .22 **slave 9**) | 四川旗芯 QX-DO24，4 通道獨立占空比/頻率/控制（0=關/65535=持續輸出/1~65534=脈衝數）。**安全限制（driver 強制）**：占空比鎖 5~10%（5%=停止/10%=全速）、頻率鎖 50Hz——兩者連動，只鎖一個等於沒鎖。`Linux_test` menu 34 + Web GUI「PWM 控制」panel 已接（`pwm set/save/status`）。**bench 用廠商工具 USB-485 直連驗證過**：通道1 @ 50Hz / 占空比 5~10% 驅動馬達成功。<br>**slave 沿革（2026-08-28 per user 已改為 9）**：原本選 6 的前提是「v2 的 JC100 只用 1~4」，但 2026-08-27 把吸盤編號改成 5-8 之後 **slave 6 就撞上右腳下吸盤的真空表**，bench 出現 `[ERR] [QX:6] device rejected FC 0x10: err 0x7C`（0x7C 不是合法 Modbus exception code，那是 JC100 的回覆被 PWM driver 撿走）。撞號不只是雜訊：FC 0x10 會把 write-multiple 打進 JC100 的組態暫存器，而 JC100 壓力值是步伐的放腳判準 → 掉落風險。user 已用 USB-485 直連把模組改成 **slave 9**（cli_22_ 上 5-8 JC100／10,11 DY500／13 XKC／14 DM2J，9 是空的）。<br>**波特率（2026-08-28 per user 更正）**：模組 115200，且 **.22 這條 bus 上所有裝置都是 115200** —— 先前記載的「其他裝置 9600、必須把模組改回 9600」**不正確**，已作廢。<br>✅ **2026-08-28 已證實接在 gateway 上**：`pwm status` 有回應（`ch1=5,50,65535,1 ch2=... ch3=ERR ch4=50,1000,0,0 duty_min=5 duty_max=10 freq_lock=50`）。⚠️ 兩件待追：`ch3=ERR`（其餘三通道正常）；`ch4` 存著 `duty=50/freq=1000`，**在 driver 安全鎖（5~10% / 50Hz）之外**，那是模組殘留的廠商測試組態，啟用 ch4 前要先覆蓋。📌 `init()` 的 `presence not probed` 永遠證明不了這件事 —— 它不發包 |
 
 **未使用：**
 
