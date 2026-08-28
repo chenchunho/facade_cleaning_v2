@@ -13,6 +13,44 @@
 
 ---
 
+## [2026-08-28-drv3] Claude Code — DM2J 寫入結果一路被丟掉，main 的「掃動全滅偵測」接到的是常數
+### 修改檔案
+- `user_lib/DM2J_RS570.h` / `.cpp` — `PR_move_set` / `PR_trigger` / `PR_trigger_sync`
+  由 `void` 改為 `bool`；`PR_move_cm_nowait` / `PR_move_cm_set` 改為真的傳遞結果
+
+### 🎯 修了一個「修補本身沒生效」的修補
+main 在 `[2026-08-28f2]` 發現「上滑台三次寫入全滅、流程照印 rail sweep done」，
+於是把 `arm_sweep_fire_nowait_` 改成檢查回傳值：
+
+```cpp
+if (!D_(DM2J_ARM).PR_move_cm_nowait(...)) any_ok = true;
+```
+
+**但 `PR_move_cm_nowait` 寫死 `return false`（＝成功）**，而它呼叫的
+`PR_move_set` / `PR_trigger` 是 `void` —— `writeMulti` / `writeSingle` 的回傳值
+在那一層就死了。所以 `any_ok` **恆為 true**，`arm_sweep_rail_no_response`
+這個 EVT 與「⚠ rail sweep 沒有實際發生」那行訊息**在任何情況下都不會出現**。
+
+診斷完全正確、修法方向也對，**只是接到的訊號源不存在**。合併時如果只看
+「C++ 沒有衝突」就過了，這個會安靜地留著——而它的症狀跟原本那個 bug 一模一樣。
+
+📌 **與本專案既有的踩坑同型**：「印出來 ≠ 檢查過」「`status=success` 不保證生效」
+——這次是**「有在檢查 ≠ 檢查得到」**：判斷式寫對了，但被判斷的值是個常數。
+
+### 修法
+三個 `void` 改回傳 `bool`（`false` = 成功，依 `CLAUDE.md` 慣例），
+`PR_move_cm_nowait` 做 `err |= `、`PR_move_cm_set` 直接傳遞。
+**忽略回傳值的既有呼叫端不受影響**（void → bool 對它們是相容改變），
+所以阻塞版 `PR_move_cm` 的既有重試/回讀邏輯一行沒動。
+
+### ⚠ 行為改變（這條分支的性質）
+接上本分支的 DM2J 回覆驗證之後，上滑台**寫入失敗會第一次真的浮出來**：
+`arm_sweep_rail_no_response` 會發、`est_ms` 的等待會被跳過。
+在上滑台不通時這是**正確且省時**的；但先前那三天「看起來一切正常」的假象會消失，
+**步伐日誌上會多出以前不存在的失敗訊息**。這是把問題變可見，不是新故障。
+
+---
+
 ## [2026-08-28j] Claude Code — 合併 `origin/main` 0d5f6bc 進整理分支
 ### 修改檔案
 - （合併）`app/WASH_ROBOT.cpp` / `.h`、`transport/TCP_client.cpp` / `.h`、

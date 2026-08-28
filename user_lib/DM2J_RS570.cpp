@@ -125,7 +125,7 @@ void DM2J_RS570::speed_move_stop()
 
 //=========== control: PR Move ===========
 
-void DM2J_RS570::PR_move_set(int pr_num, int mode, int rpm, int pos, int acc, int dec)
+bool DM2J_RS570::PR_move_set(int pr_num, int mode, int rpm, int pos, int acc, int dec)
 {
 	uint16_t base = 0x6200 + (pr_num * 8);
 
@@ -144,17 +144,19 @@ void DM2J_RS570::PR_move_set(int pr_num, int mode, int rpm, int pos, int acc, in
 		(uint16_t)0       // PRx.07 special (path linking)
 	};
 
-	writeMulti(base, block);
+	// [2026-08-28] Was void: writeMulti's result died here, so no caller above
+	// could ever tell a write apart from a no-response. See the header comment.
+	return writeMulti(base, block);
 }
-void DM2J_RS570::PR_trigger(int pr_num)
+bool DM2J_RS570::PR_trigger(int pr_num)
 {
 	uint16_t trig = 0x10 | (pr_num & 0x0F);
-	writeSingle(0x6002, trig);
+	return writeSingle(0x6002, trig);
 }
-void DM2J_RS570::PR_trigger_sync(int pr_num)
+bool DM2J_RS570::PR_trigger_sync(int pr_num)
 {
 	uint16_t trig = 0x10 | (pr_num & 0x0F);
-	writeSingle_sync(0x6002, trig);
+	return writeSingle_sync(0x6002, trig);
 }
 
 //=========== control: PR Move (cm) ===========
@@ -311,9 +313,13 @@ bool DM2J_RS570::PR_move_cm_nowait(int pr_num, int mode, int rpm, double pos_cm,
 	int pos_pulse = (int)(pos_cm * ppr);
 	LOG_DBG(_log_tag, "PR_move_cm_nowait %.3f cm -> %d pulses (PPR=%u)", pos_cm, pos_pulse, ppr);
 
-	PR_move_set(pr_num, mode, rpm, pos_pulse, acc, dec);
-	PR_trigger(pr_num);
-	return false;
+	// [2026-08-28] Was an unconditional `return false` (= success). The caller
+	// added on main (arm_sweep_fire_nowait_) tests this value to decide whether
+	// the rail actually moved — against a constant, so "3 writes all failed"
+	// could never be detected. Propagate for real.
+	bool err = PR_move_set(pr_num, mode, rpm, pos_pulse, acc, dec);
+	err |= PR_trigger(pr_num);
+	return err;
 }
 
 bool DM2J_RS570::PR_move_cm_set(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec)
@@ -322,8 +328,7 @@ bool DM2J_RS570::PR_move_cm_set(int pr_num, int mode, int rpm, double pos_cm, in
 	int pos_pulse = (int)(pos_cm * ppr);
 	LOG_DBG(_log_tag, "PR_move_cm_set %.3f cm -> %d pulses (PPR=%u)", pos_cm, pos_pulse, ppr);
 
-	PR_move_set(pr_num, mode, rpm, pos_pulse, acc, dec);
-	return false;
+	return PR_move_set(pr_num, mode, rpm, pos_pulse, acc, dec);   // [2026-08-28] was unconditional false
 }
 
 bool DM2J_RS570::PR_move_cm_trigger_all(int pr_num)

@@ -31,9 +31,14 @@ public:
 	void speed_move_stop();
 
 	// PR Move 兩步驟: 1.設定移動長度cm 2.觸發移動
-	void PR_move_set(int pr_num, int mode, int rpm, int pos, int acc, int dec); // 只設定，要自己算移動一公分要轉起圈
-	void PR_trigger(int pr_num);
-	void PR_trigger_sync(int pr_num);
+	// [2026-08-28] void → bool (false = OK, per CLAUDE.md). These three swallowed
+	// the writeMulti/writeSingle result, which made every layer above them blind:
+	// PR_move_cm_nowait returned a hardcoded "success", and the rail-sweep
+	// failure detection added on main tested that constant. Existing callers that
+	// ignore the value keep compiling unchanged.
+	bool PR_move_set(int pr_num, int mode, int rpm, int pos, int acc, int dec); // 只設定，要自己算移動一公分要轉起圈
+	bool PR_trigger(int pr_num);
+	bool PR_trigger_sync(int pr_num);
 	bool PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec);        // 設定+觸發，單位公分，會等待執行完畢
 	bool PR_move_cm_nowait(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec); // 同上但不等待
 	bool PR_move_cm_set(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec);    // 只設定，單位公分
