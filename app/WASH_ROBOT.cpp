@@ -7061,7 +7061,13 @@ std::string WashRobot::cmd_attach() {
             for (int s : remaining) std::cout << " " << s;
             std::cout << " (proceeding to Attached anyway)\n";
             evt_("attach_partial_seal count=" + std::to_string((int)remaining.size()));
+            // [2026-08-28] 也記進回傳字串。原本部分密封只走 console + EVT，
+            // 而**回覆仍是乾淨的 "OK attached"** —— 只看回傳值的呼叫端
+            // （腳本、run 序列）看不出有幾顆沒吸住。
+            // 慣例照同檔的 cmd_zdt_release_stall（"OK released ok=3 fail=1"）。
+            attach_partial_seal_ = (int)remaining.size();
         } else {
+            attach_partial_seal_ = 0;
             std::cout << "[attach] all cups sealed after smart_extend\n";
         }
     } else {
@@ -7127,6 +7133,11 @@ std::string WashRobot::cmd_attach() {
 
     std::cout << "[attach] done → Attached (rope keeps bearing weight; no pay_out)\n";
     set_state_(State::Attached);
+    if (attach_partial_seal_ > 0) {
+        // 🔴 仍然回 OK：這個狀態是**安全的**（鋼索繼續承重，放繩有 SAFETY GATE
+        //    擋著），所以不該讓呼叫端當成錯誤而中止。但要讓它**看得見**。
+        return "OK attached partial_seal=" + std::to_string(attach_partial_seal_) + "\n";
+    }
     return "OK attached\n";
 }
 
@@ -12092,8 +12103,15 @@ void WashRobot::pressure_poll_loop_() {
 // background thread polling cli_22_ bus.
 int WashRobot::read_pressure_(int slave) {
     int p = M_(slave).read_pressure();
-    if (M_(slave).error_flag == 0)
+    // [2026-08-28] 這是運動路徑的更新點；cmd_status 的 fresh-read 是另一個。
+    // 🔴 **兩處都要維護 pressure_stale_**，只改一邊的話 `p_err` 欄位自己就會說謊
+    //    —— 那正好是它要解決的問題。（本專案「同一件事寫在兩處」已出過三次事。）
+    if (M_(slave).error_flag == 0) {
         cached_pressure_[slave - 1].store(p);
+        pressure_stale_[slave - 1].store(false);
+    } else {
+        pressure_stale_[slave - 1].store(true);
+    }
     return p;
 }
 
@@ -12127,8 +12145,13 @@ std::string WashRobot::cmd_status() {
                 if (!first) sleep_ms_(30);
                 first = false;
                 int p = M_(s).read_pressure();
-                if (M_(s).error_flag == 0)
+                if (M_(s).error_flag == 0) {
                     cached_pressure_[s - 1].store(p);
+                    pressure_stale_[s - 1].store(false);
+                } else {
+                    // 讀失敗 → 保留舊值（維持既有行為），但記下這個值不新鮮。
+                    pressure_stale_[s - 1].store(true);
+                }
             }
         }
     }
@@ -12142,6 +12165,20 @@ std::string WashRobot::cmd_status() {
     oss << std::fixed << std::setprecision(1);
     for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s)
         oss << " p" << s << "=" << cached_pressure_[s - 1].load();
+    // [2026-08-28] 附加欄位：哪幾顆的壓力值是「上次讀取失敗後沿用的舊值」。
+    // 🔴 沒有這個的話，`p5=0` 看起來就只是「沒吸住」，而它也可能是整條 .22 bus
+    //    不通時回傳的快取 —— 2026-08-28d 的 changelog 記過有人（我）就這樣誤判過。
+    //    刻意用獨立欄位而非改 p<N>= 的格式，避免打壞既有的解析。
+    //    ⚠️ 沒有 p_err 欄位 ≠ 數值正確，只代表「最後一次讀取有成功」。
+    {
+        std::string stale;
+        for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s)
+            if (pressure_stale_[s - 1].load()) {
+                if (!stale.empty()) stale += ",";
+                stale += std::to_string(s);
+            }
+        if (!stale.empty()) oss << " p_err=" << stale;
+    }
     if (!imu_.read_error.load()) {
         // [2026-08-27 per user] IMU 改回水平安裝 → roll/pitch 用內建尤拉角
         // （同 imu_monitor_loop_ / imu_take_baseline_，三者定義必須一致）。

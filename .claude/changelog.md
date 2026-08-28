@@ -14,6 +14,51 @@
 ---
 
 ## [2026-08-28-drv5 ＝ 2026-08-28k] Claude Code — 🔴🔴 上滑台每個 cm 指令都走 7.7 倍（實機量測）
+## [2026-08-28u] Claude Code — 掃描「整體回 OK 掩蓋個別失敗」：status 的壓力值 + attach 的部分密封
+### 修改檔案
+- `app/WASH_ROBOT.h` / `.cpp` — 新增 `pressure_stale_[9]`，`cmd_status` 附加 `p_err=` 欄位
+- `app/WASH_ROBOT.cpp` — `cmd_attach` 的回覆帶出 `partial_seal=N`
+
+### 掃描結果：9 個候選，**只有 2 個是真的**
+| 候選 | 判定 |
+|---|---|
+| `cmd_zdt_release_stall` | ✅ **寫得好**：回覆帶 `ok=3 fail=1 skipped=0`，而且「跳過」是獨立的第三種結果 |
+| `crane_cmd_` / `arm_cmd_` | ✅ 失敗回**空字串**，呼叫端的 `rfind("OK",0)` 會失敗，可分辨 |
+| `crane_retract_to_weight_` | ✅ 有正常的 ERR 分支 |
+| `cmd_attach` | 🟡 **真的**（見下，但不嚴重） |
+| `cmd_status` | 🔴 **真的**（見下） |
+
+📌 **吊機端 0 個候選** —— 與稍早「吊機防禦性較好」的觀察一致。
+
+### 🔴 `cmd_status`：壓力值看不出是新鮮值還是失敗後的快取
+`cmd_status` 只在 `error_flag == 0` 時更新 `cached_pressure_`，失敗就沿用舊值，
+而輸出的 `p5=..` **完全看不出差別**。
+
+`[2026-08-28d]` 的 changelog 記過同一件事：`p5=0 p6=1 p7=0 p8=1` 被讀成
+「沒吸所以是 0」，其實是 `comm error, return last pressure` —— 當時整條 `.22` bus
+已經不通。那筆結語寫著「**會被騙的只有看 status 的人**」。
+**現在讓 status 自己說出來**：附加 `p_err=5,7` 欄位。
+
+📌 刻意**用獨立欄位**而非改 `p<N>=` 的格式 —— GUI 在解析那個，改格式會打壞它。
+⚠️ 註解裡寫明：**沒有 `p_err` ≠ 數值正確**，只代表「最後一次讀取有成功」。
+
+🔴 **旗標有兩個維護點**（`cmd_status` 的 fresh-read 與運動路徑的 `read_pressure_`），
+**兩處都改了** —— 只改一邊的話 `p_err` 自己就會說謊，那正好是它要解決的問題。
+（本專案「同一件事寫在兩處」今天已經出過三次。）
+
+### 🟡 `cmd_attach`：部分密封只走 console + EVT，回覆仍是乾淨的 "OK attached"
+本體行為**是安全的**：未全密封時有 WARN、有 `EVT attach_partial_seal`，
+而危險的後續動作（放繩轉移重量）有明確的 SAFETY GATE 擋著，鋼索繼續承重。
+**所以不改成 ERR** —— 那會讓呼叫端把一個安全狀態當成錯誤而中止。
+
+但只看回傳值的呼叫端（腳本、`run` 序列）看不出有幾顆沒吸住。
+改為 `OK attached partial_seal=2`，慣例照同檔的 `cmd_zdt_release_stall`。
+
+### ⚠️ 尚未編譯
+與同批的 DM2J / abort_flag / 緊急收繩改動一樣。
+
+---
+
 ## [2026-08-28t] Claude Code — 緊急收繩：補上「說」，刻意不補「停」
 ### 修改檔案
 - `Crane_control_PI/main.cpp` — 新增 `g_manual_motion_left/right` 旗標；

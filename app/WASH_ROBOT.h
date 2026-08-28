@@ -1248,6 +1248,15 @@ private:
     //   2. cmd_status() — fresh read of all 9 when motion idle (refresh button)
     // [2026-05-29] Background poll thread REMOVED — was source of bus contention.
     std::atomic<int>     cached_pressure_[9];  // index s-1 = slave s
+
+    // [2026-08-28] 每顆壓力計「最後一次讀取是否失敗」。
+    // 🔴 為什麼需要：`cmd_status` 只在 `error_flag == 0` 時更新 cached_pressure_，
+    //    失敗就沿用舊值 —— 而輸出的 `p5=..` **看不出那是新鮮值還是 timeout 後的快取**。
+    //    2026-08-28d 的 changelog 記過同一件事：`p5=0 p6=1...` 被讀成「沒吸所以是 0」，
+    //    其實是 `comm error, return last pressure`，當時整條 .22 bus 已經不通。
+    //    「會被騙的只有看 status 的人」—— 現在讓 status 自己說出來。
+    // 📌 刻意不改 `p<N>=` 欄位的格式（GUI 在解析它），改為附加獨立欄位 `p_err=`。
+    std::atomic<bool>    pressure_stale_[9] {};   // index s-1；true = 最後一次讀取失敗
     // [2026-06-02] Rate-limit cmd_status() JC100 fresh-read to ≤1Hz regardless
     // of how fast GUI polls. GUI status poll is 500ms (2Hz) but each fresh-read
     // = 9 JC100 reads on cli_22_ (shared bus). 18 reads/sec saturates cli_22_
@@ -1491,6 +1500,10 @@ private:
     static constexpr bool ARM_ROPE_PROTECTION       = true;
     static constexpr int  ARM_ROPE_PROTECT_WALL_MM  = 400;   // 2026-08-28 per user: 380→400，跟 ARM_CLEAN_WALL_MM 統一；2026-07-27 per user: 360→380；2026-07-24: 250→360 per user；2026-05-22: 300→250 per user
     enum class ArmStowState { Unknown, Center, Parked };
+    // [2026-08-28] cmd_attach 的部分密封顆數，用來讓回傳字串帶出這個資訊
+    // （原本只走 console + EVT，回覆是乾淨的 "OK attached"）。
+    int attach_partial_seal_ = 0;
+
     std::atomic<ArmStowState> arm_stow_state_{ArmStowState::Unknown};
 
     // [arm rope protect TEMP 2026-05-21] — obstacle detection after DEPLOY.
