@@ -62,9 +62,17 @@ def normal_reply(req: bytes, slave: int, fill: int) -> bytes:
     raise SystemExit(f'fake_rtu: unsupported function code 0x{fc:02X}')
 
 
-def corrupt(reply: bytes, req: bytes, mode: str, slave: int, bc_override: int) -> bytes:
+def corrupt(reply: bytes, req: bytes, mode: str, slave: int, bc_override: int):
+    """Return the bytes to send, or None to send NOTHING (mode 'drop')."""
     if mode == 'normal':
         return reply
+    if mode == 'drop':
+        # [2026-08-28] Silence — the slave simply does not answer.
+        # 這是唯一能驗到「重試」與「逾時」路徑的模式：其他模式都會回一個
+        # 壞掉的東西，走的是「收到了但不合法」那條路，跟「根本沒收到」不同。
+        # 實機動機：QX-DO24 的 PWM 寫入約 20% 出現 `no reply (timeout)`，
+        # 而當天等不到失敗自然發生，重試救援路徑始終沒被觸發。
+        return None
     if mode == 'badcrc':                         # data intact, one CRC bit flipped
         return reply[:-2] + bytes([reply[-2] ^ 0x01, reply[-1]])
     if mode == 'wrongslave':                     # reply addressed to another slave
@@ -84,7 +92,8 @@ def corrupt(reply: bytes, req: bytes, mode: str, slave: int, bc_override: int) -
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument('--mode', required=True,
-                    help='normal | badcrc | wrongslave | badfc | shortframe | bigcount | overflow')
+                    help='normal | drop | badcrc | wrongslave | badfc | shortframe '
+                         '| bigcount | overflow')
     ap.add_argument('--slave', type=int, default=1)
     ap.add_argument('--port', type=int, default=14001)
     ap.add_argument('--fill', type=lambda s: int(s, 0), default=0x11,
@@ -93,6 +102,10 @@ def main() -> None:
                     help='byte count used by --mode overflow; pick a value INSIDE '
                          'the window (frame still fits the driver receive buffer, '
                          'payload exceeds the caller buffer)')
+    ap.add_argument('--drop-count', type=int, default=0, metavar='N',
+                    help='mode=drop 時只丟掉前 N 個該出錯的請求，之後恢復正常回覆。'
+                         '0 = 一直丟。用它驗「重試在第幾次救回來」：例如 driver 重試 '
+                         '3 次時，--drop-count 2 應該在第 3 次成功。')
     ap.add_argument('--fault-from', type=int, default=1, metavar='N',
                     help='request number at which the fault starts; use 2 when the '
                          'driver init() probes, so the probe is answered normally')
@@ -106,8 +119,9 @@ def main() -> None:
           f'fault-from=#{args.fault_from} listening 127.0.0.1:{args.port}', flush=True)
 
     conn, _ = srv.accept()
-    conn.settimeout(5)
+    conn.settimeout(15)   # drop 模式下 driver 每次重試要等滿逾時，5s 不夠
     n = 0
+    dropped = 0
     try:
         while True:
             req = conn.recv(256)
@@ -116,7 +130,14 @@ def main() -> None:
             n += 1
             healthy = normal_reply(req, args.slave, args.fill)
             mode = args.mode if n >= args.fault_from else 'normal'
+            if mode == 'drop' and args.drop_count > 0 and dropped >= args.drop_count:
+                mode = 'normal'          # 額度用完 → 恢復正常，驗證重試能救回來
             out = corrupt(healthy, req, mode, args.slave, args.overflow_bc)
+            if out is None:
+                dropped += 1
+                print(f'[fake_rtu] req#{n} fc=0x{req[1]:02X} mode=drop -> (無回覆 #{dropped})',
+                      flush=True)
+                continue
             conn.sendall(out)
             print(f'[fake_rtu] req#{n} fc=0x{req[1]:02X} mode={mode} -> {len(out)}B', flush=True)
     except socket.timeout:
