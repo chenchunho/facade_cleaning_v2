@@ -3,7 +3,7 @@
 //
 // Bridges browser WebSocket clients to C++ TCP command servers:
 //   washrobot  @ 192.168.1.100:5001
-//   crane      @ 192.168.1.101:5002
+//   crane      @ 192.168.1.10:5002
 //
 // Browser ↔ backend protocol (JSON over WebSocket):
 //   → {target: "washrobot"|"crane"|"arm", cmd: "<line>"}   send command
@@ -22,7 +22,14 @@ const { WebSocketServer } = require('ws');
 const HTTP_PORT       = process.env.HTTP_PORT    || 8080;
 const WASHROBOT_IP    = process.env.WROBOT_IP    || '192.168.1.100';
 const WASHROBOT_PORT  = 5001;
-const CRANE_IP        = process.env.CRANE_IP     || '192.168.1.101';
+// [2026-08-28] 192.168.1.101 → 192.168.1.10. The crane Pi's wired address is
+// .10; nothing has ever answered at .101 (verified: ping from the crane itself
+// gets no reply). This is wrong regardless of wired-vs-WiFi, so it would still
+// have failed after the two Pis are linked over eth.
+// NOTE: WASHROBOT_IP above (.1.100) is CORRECT and must stay — the two Pis are
+// simply not eth-linked yet on the bench, so override it with WROBOT_IP=<wifi>
+// until they are.
+const CRANE_IP        = process.env.CRANE_IP     || '192.168.1.10';
 const CRANE_PORT      = 5002;
 // cleaning_arm motor_api runs on washrobot Pi (same host as washrobot itself).
 // target='arm' supports BOTH paths:

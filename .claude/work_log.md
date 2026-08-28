@@ -40,6 +40,10 @@
 | 🟡 | `DM2J_ARM_STEP_SWEEP_EST_MS`(4500) 與 `ARM_SWEEP_EST_MS`(3900) 依「1cm/rev」錯誤前提算出，正確約 650ms／132ms。**刻意暫不調小**（估太長安全、估太短危險），等新換算跑過完整步伐流程再重調 | `app/WASH_ROBOT.h` | **待重調** ✔ | work_log 2026-08-28 |
 | 🟡 | 上滑台**從未做過 homing**，物理 0 點就是最左端硬限位。可考慮啟用驅動器 Homing（`0x6002` 寫 `0x0020`）取得可重複原點，而不是靠撞限位 | `user_lib/DM2J_RS570.cpp`（`home_start()` 已實作但無人呼叫） | **未修** ✔ | work_log 2026-08-28 |
 | 🔴 | `readRegister()` 不驗 reply CRC、不驗 byteCount → 壞掉的 Modbus reply 被當有效值往上傳（bench 已造成實體損害，詳見下方） | `user_lib/SD76_length_meters.cpp` | **未修** ✔ | mailbox 2026-05-14 |
+| 🔴 | 🔮 **eth 串接之後要回頭改 `WASH_ROBOT.h` 的 `CRANE_IP`**：目前是 bench 用的 WiFi `192.168.5.17`（註解顯示已改過三次）。串上 eth 之後**它仍然會走 WiFi**——有線路徑就在旁邊卻沒被用到，而且完全不會有訊息告訴你。機器吊在半空中時控制流量跑在 WiFi 上，是實質風險 | `app/WASH_ROBOT.h:414` | **待處理（等 eth 串接）** | work_log 2026-08-28 per user |
+| 🔴 | **所有上滑台 RPM 常數都是在錯誤的線速度認知下挑的**。以「1cm/rev」算時以為 250rpm=4.17cm/s、1000rpm=16.7cm/s；用實測導程 7.731 換算，實際是 **32.2 / 128.8 cm/s**。**2026-08-28 實機已發生失步**（使用者回報，手動調回）。→ `ARM_SWEEP_RPM=1000`（129cm/s）幾乎確定過快，`DM2J_ARM_STEP_SWEEP_RPM=250` 也要重新評估；ACC/DEC=100 同樣是在錯誤前提下挑的 | `app/WASH_ROBOT.h` | **未修** ✔ | work_log 2026-08-28（實機失步） |
+| 🔴 | `web_backend/server.js` 的 **`CRANE_IP` 預設值寫錯**：`192.168.1.101`，吊機實際是 `192.168.1.10`（`.101` 沒有任何機器回應）。⚠️ 同一行的 `WROBOT_IP = 192.168.1.100` **是對的、不要動**（見上一列：eth 尚未串接而已）。照預設啟動 GUI 連不到吊機，**畫面不會說是 IP 錯** | `web_backend/server.js:25` | **未修** ✔（08-28 啟動時實測，以環境變數繞過） | work_log 2026-08-28 |
+| 🟡 | 兩台 Pi 都沒有 `tmux`／`screen` → runbook §A「一鍵啟動」`scripts/crane.sh`／`wr.sh` **在這兩台跑不起來**。替代方案 `~/bringup/run_bg.sh`（FIFO 背景啟動）已放兩台 | `scripts/*.sh`、`.claude/runbook.md` §A | **未修** ✔ | work_log 2026-08-28 |
 | 🔴 | 緊急收繩按鈕實際上**沒有張力保護**，跟 `motion_flow.md` §8 的安全性描述相反 | `Crane_control_PI/main.cpp` `cmd_manual()` | **未修** ✔ | ONBOARDING §6 |
 | 🔴 | `cmd_side_measured()` 進場沒重置 `abort_flag` → 被 stop 過一次後所有 v2 step 指令永久回 `ERR aborted`，只能重開程式 | `Crane_control_PI/main.cpp:2800` | **未修** ✔ | ONBOARDING §1 ＋ work_log 2026-07-15 |
 | 🔴 | DSZL-107 scale factor 仍是 placeholder（driver `-0.01` / 廠商說 `0.02`），張力門檻等於沒有基準；#1 只有 bench 手拉估值、#2 完全沒校 | `user_lib/DSZL_107.cpp`、`Crane_control_PI/main.cpp` | **未修** ✔ | work_log 2026-05-07 ＋ 2026-06-02 |
@@ -340,6 +344,100 @@ threshold 再實作」：① `cmd_hold` 與 motion 互斥（避免 hold 跟 moti
 `probe_dm2j.cpp`（不經主程式、只動 DM2J）：`read`／`goto <cm> <rpm>`（原始無標定）／
 `calib <cm> <rpm>`（套用標定與守衛）。留在 `~/bringup/` 與 `~/merge_check_20260828/drv/`。
 🔴 **尚未進版控**，日後再標定機構時很有用。
+
+## 2026-08-28（傍晚·續）— 換算修正 cherry-pick 進整理分支；並實測到失步
+
+### 已完成
+- **換算修正 cherry-pick 進 `refactor/app-layer`**（`9fa4fe1`，= driver 分支的 `-drv5`）。
+  上機用的是這條分支，先前每一步都會把滑台推到底。
+  🔴 **破例讓「功能等價」分支多一項改動的理由**：等價性的目的是證明搬家沒搬壞，
+  那個證明已完成並留下兩份獨立證據（源碼逐位元 + 實機輸出逐字比對）。
+  **為了保住一個已達成目的的證明，而讓上機版本每一步把滑台推到底，取捨已經反過來了。**
+  衝突處理成「只取標定」：保留 `void` 簽章、不帶 `recv_frame_`（那兩項留在 driver 分支）。
+
+### 🔴 使用者實測到失步（2026-08-28 傍晚）
+使用者回報「應該是剛剛的指令太快、失步了」，並手動調回原點。
+
+**這修正了我先前的結論。** 我一度以為「5 趟記號沒漂 = 沒失步」，後來因為
+「零點是硬限位、回零沒有鑑別力」而收回；**現在有實據了**。
+
+📌 **更重要的是它揭露：先前以為的「慢速」根本不慢。**
+所有 RPM 常數都是在「1cm/rev」的錯誤認知下挑的：
+
+| 轉速 | 當時以為 | **實際（7.731 cm/rev）** |
+|---|---|---|
+| 250 rpm（步伐內建） | 4.17 cm/s | **32.2 cm/s** |
+| 1000 rpm（`arm_sweep`） | 16.7 cm/s | **128.8 cm/s** |
+
+`ACC/DEC = 100 ms/1000rpm` 同樣是在錯誤前提下挑的 → 已進待辦總表。
+
+### ⚠️ 因此本輪驗證刻意**不跑** `arm_sweep`
+重建 `~/bringup/` 之後只驗 `init()` 的標定輸出，**不觸發 1000 rpm（129 cm/s）的移動** ——
+在 RPM 重新評估之前再跑一次只是再失步一次。
+
+---
+
+## 2026-08-28（下午·續）— 整套跑起來供 Web GUI 操作（吊機＋本體＋手臂三支）
+
+### 已完成
+用 `~/bringup/`（**整理分支**）把整套起起來，`~/projects/` 全程未動：
+
+| 程式 | 機器 | 埠 |
+|---|---|---|
+| `crane_control_PI.out` | 吊機 `.5.17` | 5002 |
+| `node server.js` | 吊機 `.5.17` | 8080（GUI 入口 **http://192.168.5.17:8080**） |
+| `facade_cleaning_v2.out` | 本體 `.5.26` | 5001 |
+| `motor_api`（手臂） | 本體 `.5.26` | 9527 |
+
+驗證：`ping` → `OK pong`；`status` → `OK state=idle crane_attached=on **arm_attached=on**`；
+motor_api 直接問 `STATUS` → `[M1] pos=0.0051 ... [M2] pos=-0.1184 ...`（CAN 兩顆馬達都讀得到）。
+**馬達沒有動過。**
+
+### 🔴 啟動時才發現的三件事（都不是我們改壞的）
+
+**1. `web_backend/server.js` 兩個預設 IP 都連不上，必須用環境變數蓋掉**
+- `CRANE_IP` 預設 `192.168.1.101` —— **吊機實際是 `.1.10`**（這條 CLAUDE.md 早就記過，
+  但沒人改 `server.js`）→ 蓋成 `127.0.0.1`（web 與 crane 同機）
+- `WROBOT_IP` 預設 `192.168.1.100` —— ✅ **這個值是對的，不要改**。
+  本體 `eth0` 確實是 `.1.100`、`carrier=1`、`operstate=up`。
+  🔴 **08-28 per user：兩台目前「刻意」還沒用 eth 串接，之後實際使用時會串。**
+  所以雙向 ping 失敗與 `ip neigh ... FAILED` 是**預期結果、不是故障**，
+  不要去查 PoE switch 或線路。bench 期間以環境變數蓋成 WiFi `192.168.5.26` 是**暫時 workaround**。
+  📌 **兩個預設值性質完全不同**：`CRANE_IP` 是**值寫錯**（要修）；
+  `WROBOT_IP` 是**正確的正式組態，只是目前那條線還沒接**（不要修）。
+🔴 **照預設值啟動，GUI 會兩邊都連不上**，而畫面上不會說是 IP 寫錯。
+
+**2. 兩台 Pi 都沒有 `tmux`、也沒有 `screen`**
+→ runbook §A 的「一鍵啟動」`./scripts/crane.sh start` / `wr.sh start` **在這兩台跑不起來**
+（腳本整個建立在 tmux 上）。沒有裝套件（會改動機器），改用 FIFO 背景啟動：
+`~/bringup/run_bg.sh <name> <log> <cmd...>`，之後 `echo exit > /tmp/<name>.fifo` 可優雅停止。
+
+**3. ⚠️ 我自己先歸錯因一次（記下來免得再犯）**
+重起本體時吃到 `[FATAL] TCP server :5001 fail`，我第一時間寫成「`TCP_server` 沒設
+`SO_REUSEADDR`」。**查了原始碼才發現它有設**（`transport/TCP_server.cpp:51`）。
+真正原因是**舊實例還活著、還握著 listening socket**（`pkill` 的 TERM 沒有立刻生效），
+兩個活著的 listener 本來就不能共用同一個埠（那要 `SO_REUSEPORT`，不是 `SO_REUSEADDR`）。
+📌 **正確做法：重起前等 `:5001` 真的沒有行程在聽**，不是等 TIME_WAIT。
+（本專案踩坑索引第四條就是「錯誤歸因錯了比沒有訊息更糟」——這次差點自己示範一遍。）
+
+### 收尾（08-28 14:5x）
+使用者確認 GUI 操作沒問題後，四支全部停止並複驗：本體 `5001`/`9527`、吊機 `5002`/`8080`
+**四個埠皆已釋放、兩台無任何殘留行程**（含 FIFO 的 `sleep` 持有者與 fifo 檔）。
+`~/projects/` 全程未動。
+
+🐛 **`exit` 只對兩支 C++ 主程式有效**：`motor_api` 與 `node server.js` 的指令通道不是 stdin，
+stdin 送 `exit` 對它們無效，要用 `kill -TERM`（兩者都吃 TERM，不需要 KILL）。
+📌 **停止流程要分兩類**，寫成一句「`echo exit > fifo` 就好」會漏掉一半。
+
+### ⚠️ 仍未驗證
+- **馬達一次都沒動過**；GUI 上的 DEPLOY / 步伐等按鈕都還沒按過
+- ✅ **PWM 實體接線已證實（08-28 下午，唯讀 `pwm status`）**：模組有回應 →
+  **QX-DO24 確實接在 gateway 上、slave 9 通**，先前「可能還插在 USB-485 轉換器上」的疑慮排除。
+  回覆：`ch1=5,50,65535,1 ch2=5,50,65535,1 ch3=ERR ch4=50,1000,0,0 duty_min=5 duty_max=10 freq_lock=50`
+  🟡 兩件值得追：**`ch3=ERR`**（其餘三通道都讀得到）；**`ch4` 存的是 duty=50 / freq=1000**，
+  兩者都在 driver 的安全鎖（5~10% / 50Hz）之外——那是模組自己存的組態，不是 driver 寫的，
+  但代表**模組出廠/廠商測試殘留值仍在**，日後啟用 ch4 前要先覆蓋
+- `depth_cam`（:9530）沒跑 —— 相機路線已永久移除，預期如此
 
 ---
 

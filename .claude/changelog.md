@@ -13,7 +13,16 @@
 
 ---
 
-## [2026-08-28-drv5] Claude Code — 🔴🔴 上滑台每個 cm 指令都走 7.7 倍（實機量測）
+## [2026-08-28-drv5 ＝ 2026-08-28k] Claude Code — 🔴🔴 上滑台每個 cm 指令都走 7.7 倍（實機量測）
+
+> 📌 **兩個編號是同一個改動**：`-drv5` 是 `fix/driver-crc` 原生，`k` 是 cherry-pick 到
+> `refactor/app-layer` 時的編號；兩分支合併後併為一筆，兩個編號都保留以便回溯。
+> 🔴 **為什麼當初要 cherry-pick 進「功能等價」分支**：
+> 🔴 **為什麼破例讓「功能等價」分支多一項改動**：等價性的目的是證明搬家沒搬壞，
+> 而那個證明 2026-08-28 已經完成並留下兩份獨立證據（源碼逐位元 + 實機輸出逐字比對，
+> 見 `runbook.md` §A2）。**為了保住一個已達成目的的證明，而讓上機版本每一步把滑台
+> 推到底，取捨已經反過來了。** cherry-pick 只挑這一個 commit，
+> **不含 driver 回覆驗證那批**，所以整理分支相對 main 仍然只多可逐項解釋的改動。
 ### 修改檔案
 - `user_lib/DM2J_RS570.h` / `.cpp` — 新增 `set_lead_cm_per_rev()` / `set_travel_limit_cm()`；
   五個 cm↔pulse 換算點收斂到 `cm_to_pulse_()` / `pulse_to_cm_()`；三個 cm 移動函式加 `travel_reject_()`

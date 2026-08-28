@@ -118,9 +118,16 @@
 #if CRANE_VFD_IS_SE3
   #include "SE3_inverter.h"
   using CraneVFD = SE3_inverter;
+  // [2026-08-28] The init() banner used to hardcode "(MH300)" OUTSIDE this #if,
+  // so it printed MH300 no matter what the macro said — on the bench (macro = 1,
+  // running SE3) the log named the wrong inverter, which sends whoever reads it
+  // to the wrong driver. Tie the name to the macro so "flip this ONE macro" is
+  // actually true.
+  static constexpr const char* CRANE_VFD_NAME = "SE3";
 #else
   #include "MH300_inverter.h"
   using CraneVFD = MH300_inverter;
+  static constexpr const char* CRANE_VFD_NAME = "MH300";
 #endif
 
 // Keepalive fault poll — abstracts the SE3-vs-MH300 fault-register difference.
@@ -4212,9 +4219,9 @@ int main() {
     if (g_gw_a_ok.load()) {
         if (!vfd_left.init(cli_A, VFD_LEFT_SLAVE, false)) {
             g_dev_vfd_left = true;
-            std::cout << "[OK]   VFD left (MH300)  USR_A slave " << VFD_LEFT_SLAVE << std::endl;
+            std::cout << "[OK]   VFD left (" << CRANE_VFD_NAME << ")  USR_A slave " << VFD_LEFT_SLAVE << std::endl;
         } else {
-            std::cerr << "[WARN] VFD left (MH300) init failed — left rope motion disabled" << std::endl;
+            std::cerr << "[WARN] VFD left (" << CRANE_VFD_NAME << ") init failed — left rope motion disabled" << std::endl;
         }
         // CLV900 middle winch intentionally NOT initialized (2026-05-14):
         // hardware not yet installed. When re-enabled it shares cli_A with
@@ -4231,9 +4238,9 @@ int main() {
     if (g_gw_b_ok.load()) {
         if (!vfd_right.init(cli_B, VFD_RIGHT_SLAVE, false)) {
             g_dev_vfd_right = true;
-            std::cout << "[OK]   VFD right (MH300) USR_B slave " << VFD_RIGHT_SLAVE << std::endl;
+            std::cout << "[OK]   VFD right (" << CRANE_VFD_NAME << ") USR_B slave " << VFD_RIGHT_SLAVE << std::endl;
         } else {
-            std::cerr << "[WARN] VFD right (MH300) init failed — right rope motion disabled" << std::endl;
+            std::cerr << "[WARN] VFD right (" << CRANE_VFD_NAME << ") init failed — right rope motion disabled" << std::endl;
         }
     } else {
         std::cerr << "[WARN] USR_B down — skipping SE3 right init" << std::endl;
