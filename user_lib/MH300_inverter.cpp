@@ -162,7 +162,11 @@ bool MH300_inverter::writeParam(uint16_t reg, uint16_t value)
     // Echo: 8-byte copy of the request (slave + 0x06 + reg + val + crc).
     // A Modbus exception reply is 5 bytes: slave + (0x06|0x80=0x86) + code + crc,
     // so surface the exception code — it says WHY the drive rejected the write.
-    if (respLen < 8 || resp[0] != deviceID || resp[1] != 0x06) {
+    // [2026-08-28] CRC added by the driver audit (same shape as SE3_inverter).
+    // Echo frame = slave+fc+addr(2)+val(2)+crc(2); without this a bit-flipped
+    // echo that left slave and FC intact was accepted as a successful write.
+    if (respLen < 8 || resp[0] != deviceID || resp[1] != 0x06
+        || crc16(resp, 6) != (uint16_t)(resp[6] | (resp[7] << 8))) {
         if (respLen >= 3 && resp[1] == 0x86) {
             LOG_ERR(_log_tag, "writeParam reg=0x%04X REJECTED — Modbus exception 0x%02X "
                               "(01=illegal func, 02=illegal addr, 03=illegal value, "
@@ -198,7 +202,10 @@ bool MH300_inverter::readParam(uint16_t reg, uint16_t& value)
         return true;
     }
     // Reply: slave + 0x03 + bytecount(2) + hi + lo + crc(2) = 7 bytes.
-    if (respLen < 7 || resp[0] != deviceID || resp[1] != 0x03 || resp[2] != 0x02) {
+    // [2026-08-28] CRC added — see writeParam above. Read frame =
+    // slave+fc+bc(=2)+data(2)+crc(2).
+    if (respLen < 7 || resp[0] != deviceID || resp[1] != 0x03 || resp[2] != 0x02
+        || crc16(resp, 5) != (uint16_t)(resp[5] | (resp[6] << 8))) {
         LOG_ERR(_log_tag, "readParam reg=0x%04X bad reply len=%d", reg, respLen);
         return true;
     }

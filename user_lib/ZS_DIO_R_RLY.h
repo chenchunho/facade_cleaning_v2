@@ -1,3 +1,23 @@
+// ⚰️ RETIRED FROM PRODUCTION — 2026-05-07, marked 2026-08-28
+//
+// 捲揚機繼電器控制。2026-05-07 起左右鋼索改由兩台 SE3-210 變頻器驅動
+// （Crane_control_PI/main.cpp:41），本 driver **已不在任何主控程式裡**：
+// 全 repo 只剩 `Linux_test/main.cpp` 的第 10 項選單引用它，作為 bench 工具。
+//
+// 🔴 **本檔刻意不隨 2026-08-28 的 driver 稽核一起硬化。** 那一輪替
+// SD76 / DSZL / DY-500 / SE3 / MH300 / CLV900 / ZDT / PQW / DM2J 補上了
+// 回覆驗證（slave id / 功能碼 / 長度邊界 / CRC）。本檔同樣缺這些檢查，
+// 但既然 production 不再使用，改它只會增加沒人驗證的改動面。
+//   → parseBitResponse() 已有 `3 + byte_count + 2` 的長度邊界，走 vector，
+//     **沒有記憶體覆寫風險**；缺的是 slave id 與 CRC，後果僅止於
+//     bench 工具讀到錯的繼電器狀態。
+//
+// 📌 **哪些內容仍然有效**：暫存器與線圈位址對照見
+// `.claude/summaries/ZS_DIO_MODBUS_SUMMARY.md`（保留作歷史對照）。
+//
+// ⚠️ **若日後要讓它重回 production，先補回覆驗證再說**——照
+// `PQW_IO_16O_RLY::parseReadResponse()` 的寫法即可，那支是同類型的
+// 繼電器模組、同樣走 FC 0x01。
 #ifndef ZS_DIO_R_RLY_H
 #define ZS_DIO_R_RLY_H
 

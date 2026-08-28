@@ -111,6 +111,9 @@ bool CLV900_inverter::writeParam(uint16_t reg, uint16_t value)
 	if (respLen < 8) return true;
 	if (resp[0] != req[0] || resp[1] != 0x06) return true;
 	if (resp[2] != req[2] || resp[3] != req[3]) return true;
+	// [2026-08-28] CRC added by the driver audit (same shape as SE3_inverter).
+	// Echo frame = slave+fc+addr(2)+val(2)+crc(2).
+	if (crc16(resp, 6) != (uint16_t)(resp[6] | (resp[7] << 8))) return true;
 	if (resp[4] != req[4] || resp[5] != req[5]) return true;
 
 	return false;
@@ -142,6 +145,9 @@ bool CLV900_inverter::readParam(uint16_t reg, uint16_t& value)
 	if (resp[0] != (uint8_t)deviceID) return true;
 	if (resp[1] != 0x03) return true;       // exception (0x83) handled here
 	if (resp[2] != 0x02) return true;
+	// [2026-08-28] CRC added — see writeParam above.
+	// Read frame = slave+fc+bc(=2)+data(2)+crc(2).
+	if (crc16(resp, 5) != (uint16_t)(resp[5] | (resp[6] << 8))) return true;
 
 	value = (uint16_t)((resp[3] << 8) | resp[4]);
 	return false;
