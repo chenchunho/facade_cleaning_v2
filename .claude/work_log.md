@@ -290,6 +290,51 @@ threshold 再實作」：① `cmd_hold` 與 motion 互斥（避免 hold 跟 moti
 
 ---
 
+## 2026-08-28（下午·續）— 整套跑起來供 Web GUI 操作（吊機＋本體＋手臂三支）
+
+### 已完成
+用 `~/bringup/`（**整理分支**）把整套起起來，`~/projects/` 全程未動：
+
+| 程式 | 機器 | 埠 |
+|---|---|---|
+| `crane_control_PI.out` | 吊機 `.5.17` | 5002 |
+| `node server.js` | 吊機 `.5.17` | 8080（GUI 入口 **http://192.168.5.17:8080**） |
+| `facade_cleaning_v2.out` | 本體 `.5.26` | 5001 |
+| `motor_api`（手臂） | 本體 `.5.26` | 9527 |
+
+驗證：`ping` → `OK pong`；`status` → `OK state=idle crane_attached=on **arm_attached=on**`；
+motor_api 直接問 `STATUS` → `[M1] pos=0.0051 ... [M2] pos=-0.1184 ...`（CAN 兩顆馬達都讀得到）。
+**馬達沒有動過。**
+
+### 🔴 啟動時才發現的三件事（都不是我們改壞的）
+
+**1. `web_backend/server.js` 兩個預設 IP 都連不上，必須用環境變數蓋掉**
+- `CRANE_IP` 預設 `192.168.1.101` —— **吊機實際是 `.1.10`**（這條 CLAUDE.md 早就記過，
+  但沒人改 `server.js`）→ 蓋成 `127.0.0.1`（web 與 crane 同機）
+- `WROBOT_IP` 預設 `192.168.1.100` —— **本體有線目前不通**（只有 WiFi `.5.26` 活著），
+  從吊機 ping 不到 → 蓋成 `192.168.5.26`
+🔴 **照預設值啟動，GUI 會兩邊都連不上**，而畫面上不會說是 IP 寫錯。
+
+**2. 兩台 Pi 都沒有 `tmux`、也沒有 `screen`**
+→ runbook §A 的「一鍵啟動」`./scripts/crane.sh start` / `wr.sh start` **在這兩台跑不起來**
+（腳本整個建立在 tmux 上）。沒有裝套件（會改動機器），改用 FIFO 背景啟動：
+`~/bringup/run_bg.sh <name> <log> <cmd...>`，之後 `echo exit > /tmp/<name>.fifo` 可優雅停止。
+
+**3. ⚠️ 我自己先歸錯因一次（記下來免得再犯）**
+重起本體時吃到 `[FATAL] TCP server :5001 fail`，我第一時間寫成「`TCP_server` 沒設
+`SO_REUSEADDR`」。**查了原始碼才發現它有設**（`transport/TCP_server.cpp:51`）。
+真正原因是**舊實例還活著、還握著 listening socket**（`pkill` 的 TERM 沒有立刻生效），
+兩個活著的 listener 本來就不能共用同一個埠（那要 `SO_REUSEPORT`，不是 `SO_REUSEADDR`）。
+📌 **正確做法：重起前等 `:5001` 真的沒有行程在聽**，不是等 TIME_WAIT。
+（本專案踩坑索引第四條就是「錯誤歸因錯了比沒有訊息更糟」——這次差點自己示範一遍。）
+
+### ⚠️ 仍未驗證
+- **馬達一次都沒動過**；GUI 上的 DEPLOY / 步伐等按鈕都還沒按過
+- **PWM 實體接線仍未證實**（`presence not probed`，要到第一個 `pwm set` 才知道）
+- `depth_cam`（:9530）沒跑 —— 相機路線已永久移除，預期如此
+
+---
+
 ## 2026-08-28（下午）— 🎉 `init()` 檢查表兩台都跑完，四件未驗改動全數通過
 
 ### 已完成 —— 這條待辦掛了很久：「唯一未驗的是 `init()`」現在清掉了
