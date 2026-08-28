@@ -405,14 +405,20 @@
     </ul>
     <div class="row">
       <span class="label">收繩總和停止門檻:</span>
-      <input type="number" id="crane-up-stop-total-input" value="50" step="1" min="0">
+      <!-- [2026-08-28 per user] 50 → 70，與 Crane_control_PI 的
+           UP_STOP_TOTAL_KG_DEFAULT 對齊（兩邊要一起改，否則欄位帶出的
+           數字跟吊機開機後的實際值不符） -->
+      <input type="number" id="crane-up-stop-total-input" value="70" step="1" min="0">
       <span class="label">kg　（目前:</span>
       <span id="crane-up-stop-total-current" class="hl">?</span>
       <span class="label">kg）</span>
     </div>
     <div class="row">
       <span class="label">收繩軟停張力:</span>
-      <input type="number" id="crane-retract-tension-stop-input" value="25" step="1" min="0">
+      <!-- [2026-08-28 per user] 25 → 50，與 Crane_control_PI 的
+           RETRACT_TENSION_STOP_KG_DEFAULT 對齊（兩邊要一起改，否則欄位帶出的
+           數字跟吊機開機後的實際值不符） -->
+      <input type="number" id="crane-retract-tension-stop-input" value="50" step="1" min="0">
       <span class="label">kg　（目前:</span>
       <span id="crane-retract-tension-stop-current" class="hl">?</span>
       <span class="label">kg）</span>
@@ -553,7 +559,7 @@
     </div>
     <div class="row">
       <span class="label">DEPLOY：牆距</span>
-      <input type="number" id="arm-wall-mm" value="300" min="1" step="10">
+      <input type="number" id="arm-wall-mm" value="400" min="1" step="10">
       <span class="label">mm　／　工具頭</span>
       <select id="arm-slot">
         <option value="LEFT">LEFT</option>
@@ -594,7 +600,7 @@
     <hr>
     <div class="row">
       <span class="label">🧽 清潔 sweep：牆距</span>
-      <input type="number" id="arm-clean-wall-mm" value="300" min="1" step="10">
+      <input type="number" id="arm-clean-wall-mm" value="400" min="1" step="10">
       <span class="label">mm　／　回合數</span>
       <input type="number" id="arm-clean-rounds" value="1" min="1" max="20" step="1">
       <button id="btn-arm-clean-sweep" class="danger arm-action">CLEAN SWEEP（補水→INIT→滾筒+刮刀）</button>
@@ -605,7 +611,7 @@
       <button data-tgt="washrobot" data-cmd="arm_clean_sweep_dry" class="arm-action">乾式清洗（INIT→滾筒+刮刀，不噴水）</button>
       <ul class="hint">
         <li>跑的就是「同步步伐」內建的那段清洗，所以測到的行為跟實際走路時完全一致</li>
-        <li>牆距固定 380mm（與步伐內建清洗相同），不吃上面的牆距欄位</li>
+        <li>牆距固定 400mm（與步伐內建清洗相同），不吃上面的牆距欄位</li>
         <li>不噴水、<b>不移動機器人</b>；INIT 失敗會自動退化成只掃上滑台、不開刷</li>
       </ul>
     </div>

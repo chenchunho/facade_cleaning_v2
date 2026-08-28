@@ -829,6 +829,20 @@ if (pwmEl.duty) pwmEl.duty.addEventListener('input', pwmUpdatePulse);
 function parsePwmStatus(line) {
     if (!pwmEl.status) return;
     if (line.startsWith('ERR pwm_')) { pwmEl.status.textContent = line.trim(); return; }
+    // [2026-08-28] 成功也要有回饋。原本只認 ERR 和 status 回覆，寫入成功時回的是
+    // 裸 "OK"，不符合下面兩個 regex → 畫面完全不動，看起來就像按鈕沒作用。
+    // 後端現在回 "OK pwm_set ch=.. hz=.. ctrl=.. duty=.." / "OK pwm_saved"。
+    if (line.startsWith('OK pwm_set')) {
+        const g = k => (line.match(new RegExp('\\b' + k + '=([^\\s]+)')) || [])[1] || '?';
+        pwmEl.status.textContent =
+            `✓ 已寫入 ch${g('ch')}: ${g('duty')}% / ${g('hz')}Hz / 控制=${g('ctrl')}`
+            + '（模組已收到；馬達沒轉請按「讀取狀態」核對實際值）';
+        return;
+    }
+    if (line.startsWith('OK pwm_saved')) {
+        pwmEl.status.textContent = '✓ 已保存為開機預設值（flash 已寫入，本次上電不要再存第二次）';
+        return;
+    }
     if (!/\bch1=/.test(line) || !/freq_lock=/.test(line)) return;
     const parts = [];
     for (let ch = 1; ch <= 4; ++ch) {
@@ -855,6 +869,10 @@ function pwmSend() {
         pwmEl.status.textContent = '占空比必須在 5.0~10.0% 之間（5%=停止, 10%=全速）';
         return;
     }
+    // [2026-08-28] 先標「送出中」，回覆到達時才被覆蓋。這樣即使後端整個沒回
+    // （例如 washrobot 斷線），畫面也停在「送出中」而不是完全沒反應 —— 兩者對
+    // 使用者是不同的資訊。
+    pwmEl.status.textContent = `送出中… pwm set ${ch} ${hz} ${ctrl} ${duty.toFixed(1)}`;
     send('washrobot', `pwm set ${ch} ${hz} ${ctrl} ${duty.toFixed(1)}`);
 }
 
@@ -885,6 +903,7 @@ if (btnPwmSave) {
         }
         msg += '\n注意：存的是模組目前的值，不是畫面上的值 —— 想存畫面上的設定，\n請先按「暫存寫入」。';
         if (!confirm(msg)) return;
+        pwmEl.status.textContent = '送出中… pwm save';   // [2026-08-28] 同 pwmSend
         send('washrobot', 'pwm save');
     };
 }

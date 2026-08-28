@@ -97,6 +97,28 @@ private:
 	int  _last_pressure = 0;
 	std::string _log_tag;
 
+	// [2026-08-28] 連續失敗時縮短 recv timeout（fast-fail），避免一顆掛掉的表
+	// 把整條 bus 的時間佔滿。
+	//
+	// 起因（bench log 2026-08-27）：.22 gateway 整條不通時，四顆 JC-100 各花
+	// 滿 1000ms timeout，輪一圈就 4 秒，而每一次的整整 1 秒都握著 TCP_client 的
+	// socket_mtx。同一條 bus 上的其他指令（PWM 寫入、PQW 繼電器）得排在後面等鎖，
+	// 表現出來就是「按了按鈕過超久才有反應」。故障時整條 bus 等於自我癱瘓。
+	//
+	// ⚠ 刻意「縮短 timeout」而不是「跳過發包」：
+	//   跳過的話，上層那些靠重試次數判斷吸附狀態的迴圈（smart_extend /
+	//   disable_seal 的 read_err_cnt）會拿到一連串立即失敗，等於偷偷改掉了它們
+	//   的語意。縮短只影響「失敗要等多久」，重試次數、error_flag 行為都不變。
+	//
+	// PROBE_EVERY：不能永遠停在短 timeout，否則 bus 復原後若回覆稍慢就再也回不
+	// 來。每 N 次補一次完整 timeout 當探針。
+	static constexpr int FAST_FAIL_AFTER  = 3;      // 連續失敗幾次後開始 fast-fail
+	static constexpr int FAST_RECV_MS     = 100;    // fast-fail 時的 recv timeout（正常回覆 <20ms @115200）
+	static constexpr int NORMAL_RECV_MS   = 1000;   // 原本的值，成功時沿用
+	static constexpr int PROBE_EVERY      = 10;     // 每 N 次失敗補一次完整 timeout
+	int  _consec_fail    = 0;
+	bool _fast_fail_noted = false;   // 進入/離開 fast-fail 各只印一次，避免 log 洪水
+
 	bool send_command(uint8_t func, uint16_t reg, uint16_t data, std::vector<uint8_t>& res);
 };
 

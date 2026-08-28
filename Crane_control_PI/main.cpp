@@ -380,12 +380,24 @@ static constexpr double TENSION_DIFF_MAX_KG_DEFAULT = 50.0;  // L/R imbalance th
 // successful completion, NOT the hard overload alarm above — no EVT
 // tension_alarm). Keep this BELOW TENSION_MAX_KG. Runtime-adjustable via
 // set_retract_tension_stop_kg / web.
-static constexpr double RETRACT_TENSION_STOP_KG_DEFAULT = 25.0;
+// [2026-08-28 per user] 25 → 50 kg。仍遠低於 TENSION_MAX_KG_DEFAULT(100)，
+// 符合上面「Keep this BELOW TENSION_MAX_KG」的要求。
+// ⚠ 但要留意 UP_STOP_TOTAL_KG_DEFAULT（見下方，70 kg，那是 left+right 的「總和」）：
+//   本值是「每一條繩」的門檻，兩條都收到 50 kg 時總和是 100 kg = 該門檻的兩倍。
+//   兩者走不同路徑（本值在 motion_rope 的 retract，UP_STOP 只在 UP hold 模式生效），
+//   目前不會互相觸發；但若之後要用手動 UP hold 承受同等張力，UP_STOP_TOTAL 必須
+//   一起往上調，否則一按就立刻 hold_all_off。
+static constexpr double RETRACT_TENSION_STOP_KG_DEFAULT = 50.0;
 
 // Hold-mode total tension threshold (sum of left+right). When any UP hold is
 // active and total exceeds this, hold_loop calls hold_all_off + EVT.
 // Placeholder — tune on site after DSZL-107 scale factor validated.
-static constexpr double UP_STOP_TOTAL_KG_DEFAULT = 50.0;
+// [2026-08-28 per user] 50 → 70 kg。仍低於「兩條繩各自收到
+// RETRACT_TENSION_STOP_KG_DEFAULT(50) 時的總和 100 kg」，所以手動 UP hold 承受
+// 同等張力時仍會先觸發 hold_all_off — 若要讓 hold 撐到跟 retract 同等張力，
+// 這個值得再往 100 靠。兩者路徑不同（本值只在 UP hold 的 hold_loop 生效，
+// RETRACT_TENSION_STOP 在 motion_rope 的 retract），不會互相觸發。
+static constexpr double UP_STOP_TOTAL_KG_DEFAULT = 70.0;
 static constexpr int    HOLD_LOOP_ACTIVE_MS      = 50;     // poll period when any hold flag set
 static constexpr int    HOLD_LOOP_IDLE_MS        = 200;    // poll period when no hold flags (just refresh tension cache)
 

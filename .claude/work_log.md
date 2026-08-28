@@ -1,5 +1,44 @@
 # Work Log
 
+## 2026-08-28 — 開發環境：本機可以在 commit 前做 C++ 語法檢查
+
+> **規範權威：** 無（環境筆記，非設計決策）。這台開發機的既有工具，不是新增依賴。
+
+專案沒有 CMake/Makefile，改完 C++ 只能等部署到 Pi 才知道編不編得過 —— 這輪就因此
+讓使用者踩到一次 `missing terminating " character`（腳本寫入時把 `\n` 寫成了真實
+換行，字串跨行）。其實本機裝了 Visual Studio 2022，`cl /Zs`（只做語法檢查、不產出
+obj）可以當場驗，**幾秒鐘就有結果**。
+
+```
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+cl /nologo /utf-8 /std:c++17 /EHsc /Zs ^
+   /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+   /FIwinsock2.h /FIws2tcpip.h /I user_lib ^
+   user_lib\WASH_ROBOT.cpp
+```
+
+四個 flag 都是必要的，少一個就會被大量假錯誤淹沒：
+
+| flag | 少了會怎樣 |
+|------|-----------|
+| `/utf-8` | MSVC 用 cp950 讀檔，中文註解裡的字元被誤解 → 一堆 `C2001 常數中包含新行字元`，看起來像字串壞掉但其實是編碼 |
+| `/FIwinsock2.h /FIws2tcpip.h` | `windows.h` 先於 `winsock2.h` 被拉進來 → ~100 個 `sockaddr 重複定義`，在第一個 include 就爆，**根本讀不到你改的碼** |
+| `/DNOMINMAX` | `windows.h` 的 `min`/`max` 巨集吃掉 `std::max(...)` → 20+ 個 `C2589 '(' :: 右邊的語彙基元不合法` |
+
+**⚠ 判讀方式：比對 HEAD，不要看絕對錯誤數。** 這是 Linux 目標的專案，MSVC 有些
+地方比 GCC 嚴格（例如 `WASH_ROBOT.cpp:7160` 的 `CRANE_METER_SANITY_MAX_CM` 在
+lambda 內被 MSVC 要求顯式 capture，GCC/C++17 不需要）。那類錯誤 HEAD 本來就有，
+不是你改出來的。做法：
+
+```
+git show HEAD:user_lib/WASH_ROBOT.cpp > /tmp/head.cpp
+# 兩邊用同一組 flag 編，比對錯誤「集合」而非數量
+```
+
+行號會因為新增註解而位移（這輪是 +46 行），所以比對時要看錯誤**種類與相對位置**，
+不是行號本身。另外 `find /c "error"` 的數字在撞到 `C1003 錯誤計數超過 100 停止編譯`
+時會被截斷成假的相等，別被騙。
+
 ## 2026-08-17 — 新增操作說明：M2（工具頭馬達）重裝後的校正流程
 
 > **規範權威：** `.claude/changelog.md` 2026-08-14a（手動量測 + `SET_HALF_RANGE`）/ 2026-08-14b（`lr_calibrated` flag）/ 2026-08-14c（`lr_half_range` 預設值 0.7275）；程式位置 `cleaning_arm/main_api.h:225-251`、`cleaning_arm/main_api.cpp:1992-2028`。這塊目前沒有獨立規格文件，權威就是原始碼本身 + 上述 changelog 條目。

@@ -394,6 +394,113 @@ int TCP_client::sendAndReceive(const char* tx_buf, int tx_len,
 	return received;
 }
 
+// [2026-08-28] Fragmentation-tolerant sibling of sendAndReceive(). See the
+// header for WHY this exists (USR-TCP232 packs by inter-character gap; at
+// 115200 that gap is ~0.3ms so one Modbus frame can arrive as two TCP
+// segments). Identical drain+send half — only the recv half differs.
+int TCP_client::sendAndReceiveQuiet(const char* tx_buf, int tx_len,
+                                    char* rx_buf, int rx_size,
+                                    int send_timeout_ms, int total_timeout_ms,
+                                    int quiet_ms)
+{
+	std::lock_guard<std::mutex> lock(socket_mtx);
+	if (!connected || sock == INVALID_SOCKET) return -1;
+
+	// Drain stale bytes — same rationale as sendAndReceive(): inside the same
+	// lock as the upcoming send+recv, so no concurrent caller can have pending
+	// in-flight reply bytes that this drain might steal.
+	{
+#ifdef _WIN32
+		u_long mode = 1;
+		ioctlsocket(sock, FIONBIO, &mode);
+#else
+		int orig_flags = fcntl(sock, F_GETFL, 0);
+		fcntl(sock, F_SETFL, orig_flags | O_NONBLOCK);
+#endif
+		char trash[256];
+		int total_drained = 0;
+		while (true) {
+			int got = recv(sock, trash, sizeof(trash), 0);
+			if (got <= 0) break;
+			total_drained += got;
+			if (total_drained > 4096) break;   // safety: cap, don't drain forever
+		}
+#ifdef _WIN32
+		mode = 0;
+		ioctlsocket(sock, FIONBIO, &mode);
+#else
+		fcntl(sock, F_SETFL, orig_flags);
+#endif
+		if (total_drained > 0) {
+			LOG_DBG(_log_tag, "drained %d stale bytes before TX (atomic/quiet)", total_drained);
+		}
+	}
+
+	// Send
+#ifdef _WIN32
+	setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&send_timeout_ms, sizeof(send_timeout_ms));
+#else
+	struct timeval tv;
+	tv.tv_sec  = send_timeout_ms / 1000;
+	tv.tv_usec = (send_timeout_ms % 1000) * 1000;
+	setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+	int sent = send(sock, tx_buf, tx_len, 0);
+	if (sent <= 0) {
+		connected = false;   // dead socket, not just slow — see sendData()'s comment
+		return 0;
+	}
+	LOG_HEX(_log_tag, "TX", tx_buf, tx_len);
+
+	// Receive, accumulating until the reply goes quiet (mutex still held → the
+	// whole transaction stays atomic against other threads on this socket).
+	//
+	// Two clocks:
+	//   - total_timeout_ms : hard cap measured from now; bounds "device never
+	//                        answered" and also a pathological dribble.
+	//   - quiet_ms         : per-read socket timeout AFTER the first byte. Once a
+	//                        read times out with bytes already in hand, the frame
+	//                        is complete — that is the terminating condition.
+	// Before any byte arrives we wait on the remaining total budget, not quiet_ms,
+	// so a slow-to-answer device isn't cut off after a few ms.
+	const auto start = std::chrono::steady_clock::now();
+	int total = 0;
+
+	while (total < rx_size - 1) {
+		const auto elapsed = (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - start).count();
+		const int remaining = total_timeout_ms - elapsed;
+		if (remaining <= 0) break;
+
+		const int wait_ms = (total == 0) ? remaining
+		                                 : (quiet_ms < remaining ? quiet_ms : remaining);
+#ifdef _WIN32
+		setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&wait_ms, sizeof(wait_ms));
+#else
+		tv.tv_sec  = wait_ms / 1000;
+		tv.tv_usec = (wait_ms % 1000) * 1000;
+		setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
+		int got = recv(sock, rx_buf + total, rx_size - 1 - total, 0);
+		if (got > 0) {
+			total += got;
+			continue;               // more may still be coming — keep reading
+		}
+		if (got == 0) {             // orderly remote close = real disconnect
+			connected = false;
+			return (total > 0) ? total : -1;
+		}
+		// got < 0 = timeout/EWOULDBLOCK. With bytes in hand this is the normal
+		// end of frame; with none it means the device never answered.
+		break;
+	}
+
+	if (total <= 0) return 0;
+	LOG_HEX(_log_tag, "RX", rx_buf, total);
+	rx_buf[total] = 0;
+	return total;
+}
+
 //=========== utility: available / close ===========
 
 int TCP_client::available() {

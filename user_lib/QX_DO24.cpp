@@ -298,7 +298,7 @@ bool QX_DO24::sendAndReceive(const std::vector<uint8_t>& request, std::vector<ui
 
 	LOG_HEX(_log_tag, "TX", request.data(), (int)request.size());
 
-	// ⚠ MUST use TCP_client::sendAndReceive (the atomic drain→send→recv), NOT a
+	// ⚠ MUST use an ATOMIC transaction (drain→send→recv under one lock), NOT a
 	// bare sendData()+receiveData() pair.
 	//
 	// This module shares the RS485_3 gateway (cli_22_) with JC-100 ×4, PQW relay,
@@ -311,15 +311,42 @@ bool QX_DO24::sendAndReceive(const std::vector<uint8_t>& request, std::vector<ui
 	// enough to let the other side go" during a step, so corrupting them is a
 	// fall risk, not just a comms nuisance. JC-100 was migrated to the atomic
 	// API for exactly this reason; PWM has to play by the same rule.
+	//
+	// ⚠ [2026-08-28] ...but it must be the QUIET variant, not plain
+	// sendAndReceive(). 05a3c7e moved this call to the atomic API and, in doing
+	// so, silently dropped the accumulate-fragments loop that used to live right
+	// here. That commit justified it with "8 byte frames arrive in one piece in
+	// practice (JC100/SD76/SE3 all do this)" — true for those three, because they
+	// are all 9600 baud. THIS module is 115200, the only one in the project.
+	// The USR-TCP232 packs by inter-character gap (~3.5 char times): ~3.6ms at
+	// 9600 (frame long complete → one recv) but only ~0.3ms at 115200, so the
+	// gateway can forward the first few bytes and send the rest as a SECOND TCP
+	// segment. A single recv() then returns a truncated frame → CRC/echo check
+	// fails → every command looks "rejected". Bench symptom: `d 1 5.9` refused
+	// with the range message even though 5.9 is inside [5,10].
+	// sendAndReceiveQuiet keeps the atomicity AND re-accumulates fragments.
 	char rx[256];
-	int len = client->sendAndReceive(reinterpret_cast<const char*>(request.data()),
-	                                 (int)request.size(), rx, sizeof(rx), 500, 500);
+	int len = client->sendAndReceiveQuiet(reinterpret_cast<const char*>(request.data()),
+	                                      (int)request.size(), rx, sizeof(rx),
+	                                      /*send*/500, /*total*/500, /*quiet*/20);
 	response.clear();
 	if (len > 0) response.insert(response.end(), (uint8_t*)rx, (uint8_t*)rx + len);
 
 	LOG_HEX(_log_tag, "RX", response.data(), (int)response.size());
 
-	if (response.size() < 5) return false;
+	// [2026-08-28] 這條路徑原本是靜默 return false —— 其他每個失敗分支（CRC、
+	// device rejected）都有 LOG_ERR，只有「沒回應 / 回覆過短」沒有。結果是呼叫端
+	// 只拿到一個 false，Linux_test 又把所有 false 都印成「占空比必須在 5~10%」，
+	// 真正的原因（模組根本沒回話）完全看不到。分開兩種情況講清楚。
+	if (response.empty()) {
+		LOG_ERR(_log_tag, "no reply (timeout) — 檢查 slave ID / 波特率(本模組 115200) / 接線");
+		return false;
+	}
+	if (response.size() < 5) {
+		LOG_ERR(_log_tag, "reply too short (%d bytes, need >=5) — 可能是分片未收齊或雜訊",
+		        (int)response.size());
+		return false;
+	}
 	uint16_t calc_crc = modbusCRC(response.data(), (int)response.size() - 2);
 	uint16_t recv_crc = response[response.size() - 2] | (response[response.size() - 1] << 8);
 	if (calc_crc != recv_crc) {
