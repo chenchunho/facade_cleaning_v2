@@ -483,32 +483,32 @@ private:
 
     // QX-DO24 四路 PWM 輸出模組（2026-08-26 新增，共用 cli_22_）
     //
-    // 🚫 [2026-08-27] 整個 PWM 功能停用中（PWM_ENABLED=false）。原因是 slave 撞號：
-    //   PWM_SLAVE=6 當初選 6 的前提是「cli_22_ 上 JC100 只用 slave 1~4，6 是空的」
-    //   （見下方 CUP_SLAVE_FIRST 註解：2026-08-27 把吸盤編號 1-4 改成 5-8）。
-    //   改號之後 cli_22_ 的 JC100 佔用 5,6,7,8 —— **slave 6 同時是右腳下吸盤的
-    //   真空表和這顆 PWM 模組**。bench log 的
+    // QX-DO24 四路 PWM 輸出模組（cli_22_ 上）
+    //
+    // [2026-08-27] 曾因 slave 撞號整組停用：PWM_SLAVE=6 當初選 6 的前提是
+    //   「cli_22_ 上 JC100 只用 slave 1~4，6 是空的」，而同日把吸盤編號 1-4 改成
+    //   5-8 之後，slave 6 同時變成右腳下吸盤的真空表和這顆 PWM 模組。bench log 的
     //       [ERR] [QX:6] device rejected FC 0x10: err 0x7C (未定義錯誤碼)
-    //   就是這個撞號：0x7C 不是合法的 Modbus exception code（標準只到 0x0B），
-    //   那是 JC100 的回覆被 PWM driver 撿走後亂解出來的位元組。
+    //   就是撞號的產物（0x7C 不是合法 Modbus exception code，標準只到 0x0B ——
+    //   那是 JC100 的回覆被 PWM driver 撿走後亂解出來的位元組）。
+    //   撞號不只是通訊雜訊：FC 0x10 是 write-multiple-registers，發給 slave 6 的
+    //   寫入會真的落到 JC100 slave 6 的組態暫存器上，而 JC100 的壓力值正是步伐中
+    //   「這一側還吸得夠牢、可以放另一側」的判準 —— 弄壞它是掉落風險。
     //
-    //   為什麼一定要停而不只是「反正模組沒接、通訊失敗而已」：
-    //   FC 0x10 是 write-multiple-registers。發給 slave 6 的寫入會真的落到
-    //   **JC100 slave 6** 上，有機會改掉它的組態暫存器（含 slave ID / 波特率）。
-    //   而 JC100 的壓力值正是步伐中「這一側還吸得夠牢、可以放另一側」的判準
-    //   —— 弄壞它是掉落風險，不只是通訊雜訊（同一個理由已寫在 QX_DO24.cpp 的
-    //   sendAndReceive 註解裡，那邊假設的仍是 JC100 1~4）。
+    // [2026-08-28 per user] 解除停用：user 已用 USB-485 直連把模組的 slave ID
+    //   改成 9，撞號的前提消失。cli_22_ 目前佔用情形 ——
+    //       5,6,7,8 JC100 ／ 10,11 DY500 ／ 13 XKC ／ 14 DM2J
+    //       （12 PQW 已於 2026-08-27 搬到 cli_20_）
+    //   → 9 確實是空的，兩邊都不撞。
+    //   波特率也不再是問題：per user，這條 bus 上所有裝置都是 115200（原本註記的
+    //   「其他裝置 9600、必須把模組改回 9600」已不適用，CLAUDE.md 那段待更新）。
     //
-    //   重新啟用的前提（三件都要做完，缺一件就會再撞或再吵）：
-    //     1. 用 USB-485 直連把模組的 slave ID 改到 cli_22_ 上真正空的號
-    //        （目前已用：5,6,7,8 JC100 / 10,11 DY500 / 12 PQW / 13 XKC / 14 DM2J
-    //         → 可用例如 1~4、9、15+），並同步改下面的 PWM_SLAVE
-    //     2. 同樣用 USB-485 直連把波特率從 115200 改回 9600（寫 0x21=3）配合
-    //        bus 上其他裝置；**必須在接上 bus 之前改完**，否則接上去就無法通訊、
-    //        也改不回來
-    //     3. 把 PWM_ENABLED 改成 true
-    static constexpr bool PWM_ENABLED = false;
-    static constexpr int  PWM_SLAVE   = 6;   // ⚠ 撞 JC100 slave 6，見上方
+    // ⚠ 這個開關只管「軟體要不要送封包」。模組的 RS485 線若還插在 USB-485 轉換器
+    //   上（廠商工具那條路），沒接到 USR gateway 的 A/B 端子，即使 PWM_ENABLED=true
+    //   也一樣每個指令 timeout —— Mode B init 不發包，所以連線階段不會報錯，
+    //   要到第一個指令才看得出來。
+    static constexpr bool PWM_ENABLED = true;
+    static constexpr int  PWM_SLAVE   = 9;   // 2026-08-28 per user: 6→9（模組端已改）
 
     // ZDT pusher slave IDs — [v2] 4 cups only: right{1,2} / left{3,4}
     //   right foot: upper = slave 1, lower = slave 2   (valve CH1)
@@ -524,8 +524,26 @@ private:
     static constexpr int CUP_SLAVE_FIRST = 5;
     static constexpr int CUP_SLAVE_LAST  = 8;
 
-    static constexpr int ZDT_RF1 = 5, ZDT_RF2 = 6;  // right foot upper/lower (2026-08-27: 1,2 → 5,6)
-    static constexpr int ZDT_LF1 = 7, ZDT_LF2 = 8;  // left foot upper/lower  (2026-08-27: 3,4 → 7,8)
+    // ⚠⚠ 這組左右歸屬跟實體不符（2026-08-28 user 指出）⚠⚠
+    //   程式碼假設：右={5,6}、左={7,8}
+    //   實體現況：  {5,7} 同一側、{6,8} 同一側
+    // 也就是這裡的「右側」實際上是「一邊各拿一顆」。尚未修正，因為要改對需要
+    // 知道 (a){5,7} 是左還是右、(b) 每側裡誰在上——兩者都會影響吊機繩對應
+    // (pay_out_right/left) 與伸出長度預設，猜錯是掉落風險。
+    //
+    // 在修正之前：**不要使用交替步伐**（do_step_down_/do_step_up_）。它的
+    // 「錨定側是否還吸著」判斷建立在這組歸屬上，歸屬錯就等於沒有保護。
+    // 同步步伐 4 顆一起動、不依賴分側錨定，受影響較小（見 group_seal_ok_）。
+    static constexpr int ZDT_RF1 = 5, ZDT_RF2 = 6;  // ⚠ 實體上 5 與 6 不同側
+    static constexpr int ZDT_LF1 = 7, ZDT_LF2 = 8;  // ⚠ 實體上 7 與 8 不同側
+
+    // [2026-08-28 per user]「4 顆裡有 2 顆吸住就算 OK」——取代原本的「每側各 ≥1」。
+    // 改這個的直接原因：上面那組左右歸屬是錯的，任何「分側」判準都算不準，
+    // 而 bench log 已經出現誤觸發（5、6 沒吸到被判成「右側全裸」→ 白白後退，
+    // 但實體上 5、6 分屬兩側、另兩顆還吸著，本來應該放行）。
+    // ⚠ 已知取捨：這條規則擋不住「吸住的 2 顆剛好在同一側」的情況（例如 5、7），
+    //   那時另一側整個懸空但仍會被判成 OK。等左右歸屬確認後應改回分側判準。
+    static constexpr int SEAL_MIN_CUPS_TOTAL = 2;
 
     // DM2J rail/arm slave IDs
     // 2026-05-26: 上滑台從 cli_20_ slave 5 搬到 cli_22_ slave 14，目的是讓
@@ -534,7 +552,11 @@ private:
     static constexpr int DM2J_LEFT_WHEEL  = 2;    // cli_20_
     static constexpr int DM2J_RIGHT_FOOT  = 3;    // cli_20_
     static constexpr int DM2J_RIGHT_WHEEL = 4;    // cli_20_
-    static constexpr int DM2J_ARM         = 14;   // cli_22_ (was cli_20_ slave 5 pre-2026-05-26)
+    // 上滑台（手臂清洗滑軌）。2026-08-28 per user 確認實體接在 192.168.1.20，
+    // 掛回 cli_20_（在此之前程式對 cli_22_ 發指令，每次掃動都是 writeMulti no
+    // response）。slave 號維持 14 —— .20 上只有 ZDT 5~8 與 PQW 12，不撞號。
+    // 沿革：cli_20_ slave 5（~2026-05-26）→ cli_22_ slave 14 → cli_20_ slave 14。
+    static constexpr int DM2J_ARM         = 14;   // cli_20_ (2026-08-28 per user)
 
     // Pusher motion
     static constexpr int PUSHER_EXTEND_PULSE       = 30000;    // center / fallback ~10 cm (對齊 body，2026-04-24)
@@ -576,6 +598,23 @@ private:
     // [2026-07-31 per user] 破真空閥時序，比照 Linux_test 功能31 bench 驗證值。
     static constexpr int BREAK_VACUUM_PRE_RETRACT_MS = 80;   // CH_BREAK_VACUUM ON -> 收腳指令送出
     static constexpr int BREAK_VACUUM_TOTAL_ON_MS    = 500;  // CH_BREAK_VACUUM ON -> OFF（收腳指令在這段時間內送出）
+
+    // [2026-08-28] 真空閥 OFF -> 破真空閥 ON 之間的強制靜置。
+    //
+    // ⚠ 這不是保守值，是 PQW 模組的實際行為：兩個繼電器寫入間隔一旦壓到接近零，
+    //   第二個就不會實際動作（TCP/Modbus 層仍然回成功，所以完全無聲）。
+    //   Linux_test 兩個 menu 早就踩過並各自解決了：
+    //     - menu 31（單腳）：ZDT-prep 執行緒（release_stall_flag + 100ms + enable
+    //       + 200ms）跟 valve-off 並行跑，白撿到 ~300ms，所以一直是好的
+    //     - menu 33（4 腳）：沒有那個並行執行緒，第一次測就發現破真空從沒 fire 過，
+    //       補上明寫的 300ms 才正常（見該 menu 的註解）
+    //   主程式走的是 menu 33 那條路（沒有並行 prep），卻沒補這個 gap。
+    //
+    // bench 指紋（2026-08-27 log，同一顆 slave 7 前後對比）：
+    //     第一次  STALL at 900ms  peakI=3061mA   ← 破真空沒 fire，硬撕到卡死
+    //     RETRY   done  at 450ms  peakI=3mA      ← PAUSE 等按鍵 = 超大 gap，正常
+    //   差三個數量級，兩次唯一的差別就是中間隔了多久。
+    static constexpr int BREAK_VACUUM_PRE_ON_REST_MS = 300;
     static constexpr int PUSHER_RPM_BODY_EXTEND = 700;   // body 組 extend 速度（與其他組同速）
     static constexpr int PUSHER_ACC           = 255;     // acc 用（feet / center extend，max）
     static constexpr int PUSHER_ACC_RETRACT   = 255;     // retract 用（所有組，高 acc 快速收回）
@@ -669,7 +708,9 @@ private:
     // 掃動在 do_step_sync_rail_sweep_），分開註解容易只關一半——那會變成手臂每步
     // 花 10s 校正卻不清洗。cmd_arm_clean_sweep_dry()（乾掃測試指令）刻意不受此
     // gate 管，因為那支就是拿來測上滑台裝好沒有的工具。
-    static constexpr bool STEP_SYNC_ARM_CLEAN_ENABLED = false;
+    // [2026-08-28 per user] 上滑台已接上 → 改回 true，恢復步伐內建清潔
+    // （INIT 並行 + DEPLOY RIGHT/滾筒 + CH_BRUSH + 滑台掃動 + DEPLOY LEFT/刮刀 + PARK）。
+    static constexpr bool STEP_SYNC_ARM_CLEAN_ENABLED = true;
 
     // ⚠ 這個常數只給 do_step_sync_rail_sweep_（同步步伐內建的上滑台掃動）用；
     //   do_arm_sweep_ / do_arm_clean_sweep_ / continuous 用的是上面的 ARM_SWEEP_CM。
@@ -686,12 +727,33 @@ private:
     // [2026-07-24 per user] 行程 -10→-4、RPM 500→400→300 後重算：
     // 巡航距離 4−0.6(加減速)=3.4cm，300rpm=5cm/s → 巡航 ~680ms +
     // 加速 60ms + 減速 60ms + 緩衝 150ms ≈ 950ms → 抓 1000ms。
+    //
+    // ⚠⚠ [2026-08-28] 1000 → 4500：**2026-08-26 把行程 -8→17 時漏改這裡**
+    //   （跟 DM2J_ARM_STEP_SWEEP_CM 同一批漏的）。1000ms 是為 4cm 行程算的，
+    //   拿去等 17cm 只夠走到約 4cm。
+    //   用上面同一條公式對 17cm @ 250rpm 重算：
+    //       1cm/rev 螺桿，250rpm = 250/60 = 4.167 cm/s
+    //       加速斜坡 ~60ms(≈0.15cm) + 減速斜坡 ~60ms
+    //       巡航 (17 − 0.3) / 4.167 = 4.008 s
+    //       fire retry/緩衝 ~150ms
+    //       → 合計 ≈ 4.28 s，取 4500ms 留餘裕
+    //   影響：這個值太短時，滑台還在走就進到下一步。手臂 DEPLOY 失敗時最明顯 ——
+    //   `if (deployed)` 整段被跳過，0→17 與 17→0 之間只剩這個等待，滑台會在
+    //   ~4cm 處被反向指令叫回頭，實際只掃了四分之一。DEPLOY 正常時是靠
+    //   DEPLOY 本身 + DM2J_ARM_DEPLOY_SETTLE_MS 「碰巧」補足時間，不是設計保證。
+    //   ⚠ 改 DM2J_ARM_STEP_SWEEP_CM 或 _RPM 時，必須用上面的公式重算這個值。
     // ⚠ 純計算估計值，未實機驗證；跟 ARM_SWEEP_EST_MS 分開設，避免沿用 55cm
     // 那組估計值讓同步步伐的滑台掃動平白多等好幾秒（沒有實際意義的等待）。
-    static constexpr int    DM2J_ARM_STEP_SWEEP_EST_MS = 1000;
+    static constexpr int    DM2J_ARM_STEP_SWEEP_EST_MS = 4500;   // 2026-08-28: 1000→4500（17cm 行程重算）
+
+    // [2026-08-28 per user] DEPLOY 完成後、讓上滑台開始移動前的靜置時間。
+    // 給滾筒轉起來 / 工具頭貼牆穩定的時間，避免滑台一動工具還沒到位。
+    // 原本是兩處寫死的 sleep_ms_(2500)（2026-07-24 per user 2000→2500），
+    // 抽成常數以免又發生「改了一處漏另一處」。per user 再加長：2500 → 3500。
+    static constexpr int    DM2J_ARM_DEPLOY_SETTLE_MS = 3500;
     // [2026-07-24 per user] LEFT/RIGHT deploy wall_mm for this sync-step sweep
     // — separate from ARM_CLEAN_WALL_MM(330) used by the continuous sweep engine.
-    static constexpr int    DM2J_ARM_STEP_SWEEP_WALL_MM = 380;   // 2026-07-27 per user: 360→380
+    static constexpr int    DM2J_ARM_STEP_SWEEP_WALL_MM = 400;   // 2026-08-28 per user: 380→400；2026-07-27 per user: 360→380
 
     // 2026-05-26: Fire-and-forget sweep (avoid cli_22_ contention from PR_move_cm's
     // status poll fighting JC100 pressure reads during disable_seal). PR_move_cm_nowait
@@ -756,7 +818,7 @@ private:
     static constexpr float ARM_SWEEP_M2_RATE_THRESHOLD_NM    = 100.0f; // 實質 disable
 
     // Cleaning sweep at the end of each step_up / step_down (2026-05-21 per user)
-    static constexpr int ARM_CLEAN_WALL_MM = 380;  // DEPLOY wall distance (fixed); 2026-07-27 per user: 360→380；2026-07-24: 330→360 per user，手臂已實機裝上；2026-06-02: 350→330 試「上貼下不貼」是不是 M1 過度外擺造成；2026-05-27: 300→350 拉大讓 M1 往前推更多（靠刮刀座彈性吸收過壓）
+    static constexpr int ARM_CLEAN_WALL_MM = 400;  // DEPLOY wall distance (fixed); 2026-08-28 per user: 380→400；2026-07-27 per user: 360→380；2026-07-24: 330→360 per user，手臂已實機裝上；2026-06-02: 350→330 試「上貼下不貼」是不是 M1 過度外擺造成；2026-05-27: 300→350 拉大讓 M1 往前推更多（靠刮刀座彈性吸收過壓）
     static constexpr int ARM_CLEAN_ROUNDS  = 1;    // wet+dry rounds per step
 
     // Vacuum
@@ -1348,7 +1410,7 @@ private:
     // is tagged for batch deletion.
     // ============================================================
     static constexpr bool ARM_ROPE_PROTECTION       = true;
-    static constexpr int  ARM_ROPE_PROTECT_WALL_MM  = 380;   // 2026-07-27 per user: 360→380，跟 ARM_CLEAN_WALL_MM 統一；2026-07-24: 250→360 per user；2026-05-22: 300→250 per user
+    static constexpr int  ARM_ROPE_PROTECT_WALL_MM  = 400;   // 2026-08-28 per user: 380→400，跟 ARM_CLEAN_WALL_MM 統一；2026-07-27 per user: 360→380；2026-07-24: 250→360 per user；2026-05-22: 300→250 per user
     enum class ArmStowState { Unknown, Center, Parked };
     std::atomic<ArmStowState> arm_stow_state_{ArmStowState::Unknown};
 
@@ -1812,12 +1874,18 @@ private:
     // → contention-immune on cli_22_). Re-fires ARM_SWEEP_FIRE_RETRIES times
     // (50ms spacing) for redundancy against lost Modbus writes, then sleeps
     // ARM_SWEEP_EST_MS to let the arm physically reach target before next fire.
-    // Does NOT return error — sweep cleanup runs regardless.
     // rpm/acc/dec/est_ms (2026-07-23 per user, default ARM_SWEEP_* — every
     // existing caller unaffected): lets do_step_sync_rail_sweep_ fire at its
     // own DM2J_ARM_STEP_SWEEP_* speed/estimate instead of the 55cm/1000rpm
     // tuning this function was originally built around.
-    void arm_sweep_fire_nowait_(double target_cm,
+    //
+    // [2026-08-28] 回傳 true = 至少有一次寫入成功（滑台真的在動）；
+    //              false = ARM_SWEEP_FIRE_RETRIES 次全滅，滑台完全沒動，
+    //                      且已跳過 est_ms 等待（沒東西在動就不用等）。
+    // 原本回傳 void、把 PR_move_cm_nowait 的結果整個丟掉，於是 DM2J:14 掛在錯的
+    // gateway 時，log 仍照印「rail sweep done」——看起來一切正常。
+    // 呼叫端可以忽略回傳值（語意與舊版相同），要精確回報時再接。
+    bool arm_sweep_fire_nowait_(double target_cm,
                                  int rpm = ARM_SWEEP_RPM, int acc = ARM_SWEEP_ACC, int dec = ARM_SWEEP_DEC,
                                  int est_ms = ARM_SWEEP_EST_MS);
 

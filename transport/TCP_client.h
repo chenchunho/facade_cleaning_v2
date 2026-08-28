@@ -53,6 +53,40 @@ public:
 	                   char* rx_buf, int rx_size,
 	                   int send_timeout_ms, int recv_timeout_ms);
 
+	// [2026-08-28] Same atomic drain→send→recv transaction as sendAndReceive(),
+	// but the recv side LOOPS and accumulates until the reply goes quiet, instead
+	// of taking whatever one recv() call happens to return.
+	//
+	// Why this exists — the USR-TCP232 gateway decides when to forward RS485
+	// bytes onto TCP based on the inter-character gap (~3.5 character times):
+	//     9600 baud  -> ~3.6ms : an 8-byte Modbus frame is long complete before
+	//                            the gateway packs it -> always arrives in one
+	//                            recv() -> plain sendAndReceive() is fine
+	//   115200 baud  -> ~0.3ms : the gateway can pack and forward after the first
+	//                            few bytes, so the SAME 8-byte frame arrives as
+	//                            TWO TCP segments -> a single recv() returns a
+	//                            truncated frame -> CRC/echo check fails
+	// QX-DO24 is the only 115200 device in this project; everything else
+	// (JC-100 / SD76 / SE3 / DM2J / ZDT / PQW) is 9600. That is exactly why
+	// 05a3c7e's "8 byte frames arrive in one piece in practice" assumption held
+	// for those and broke PWM: the old QX_DO24 code had its own accumulate loop,
+	// and switching it to the atomic (single-recv) API silently removed that.
+	//
+	// Quiet-period termination rather than an expected-length argument: a length
+	// would force this class to parse Modbus function codes, and error frames are
+	// SHORTER than success replies (6 bytes) so it would also need that special
+	// case or it would burn the full timeout on every rejected command.
+	//
+	// Cost: every call pays `quiet_ms` after the last byte. Use only where reply
+	// fragmentation is actually possible; leave 9600 devices on sendAndReceive().
+	//
+	// Returns total accumulated byte count (>0), 0 on send failure / nothing
+	// received, -1 on disconnect.
+	int sendAndReceiveQuiet(const char* tx_buf, int tx_len,
+	                        char* rx_buf, int rx_size,
+	                        int send_timeout_ms, int total_timeout_ms,
+	                        int quiet_ms);
+
 	int available();
 	void close();
 	bool isConnected() { return connected; }

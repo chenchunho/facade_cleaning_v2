@@ -13,6 +13,467 @@
 
 ---
 
+## [2026-08-28j] Claude Code — 合併 `origin/main` 0d5f6bc 進整理分支
+### 修改檔案
+- （合併）`app/WASH_ROBOT.cpp` / `.h`、`transport/TCP_client.cpp` / `.h`、
+  `user_lib/JC_100_METER.*`、`user_lib/QX_DO24.cpp`、`Linux_test/main.cpp`、
+  `Crane_control_PI/main.cpp`、`web_backend/public/*` — 全部由 main 帶入，**零手改**
+- `transport/TCP_client.cpp` — 🔴 **手動修補**：`sendAndReceiveQuiet()` 的 `send()` 補 `SEND_FLAGS`
+- `CLAUDE.md`、`.claude/work_log.md` — 解衝突
+- `.claude/per_program_cautions.md` — 更正 §0.2（與同批程式改動矛盾）
+
+### 合併結果
+main 的 bench 修正（08-27h ~ 08-28i）與本分支的分層重構（`user_lib/` → `app/` + `transport/`）
+**自動合併成功**，git 正確追蹤了兩處 100% rename，C++ 零衝突、`user_lib/` 沒有長回重複檔。
+衝突只有兩份文件。
+
+### 🔴 真正的風險不在衝突，在「合乾淨了但語意漏一塊」
+`sendAndReceiveQuiet()` 是 main 在 `[2026-08-28b]` 新增的函式，而 `MSG_NOSIGNAL`
+修補（`9e1ad1b`）是**同期在本分支**做的。兩邊沒碰到同幾行 → git 沒有任何提示，
+**新函式帶著 `send(..., 0)` 就進來了**。
+
+後果不是「少一個旗標」：對端已關閉時 `send()` 會發 SIGPIPE，預設行為是**終止整個行程**。
+這條路徑的唯一呼叫端是 `QX_DO24`，而連結它的 `Linux_test` **沒有**
+`signal(SIGPIPE, SIG_IGN)` —— 正是當初把防線從呼叫端下移到 driver 的理由。
+
+已改為 `SEND_FLAGS` 並在原地寫下這段來由。**這是「合併後要逐一檢查對方新增的程式碼
+有沒有繞過我方新防線」的具體案例**，rename 追得對不代表語意接得上。
+
+### 文件：as-built 圖被對方的程式改動變成過期
+`CLAUDE.md` 的匯流排拓樸是 08-28 由**原始碼**重建的，而 main 同日改掉了兩個 bus 事實：
+- **DM2J 上滑台 `.22` → `.20`**（實體一直在 `.20`，程式發到 `.22` 三天沒人發現）
+- **QX-DO24 PWM `slave 6` → `9`，並解除停用**
+
+兩處都已改。⚠️ **`app/WASH_ROBOT.h:1082` 的成員註解仍寫「`.22 = ... arm-rail ...`」，已過期**（未改，屬對方那批的既有債，只在 CLAUDE.md 標註）。
+
+保留 main 舊架構圖裡我方重建時漏掉的**網關之外**實體網路：Fathom-X tether →
+8 Port PoE Switch → 兩台 Pi / USR 網關 / PoE 攝影機 ×4。
+
+### `per_program_cautions.md`（main 新增，211 行）
+好文件，但 §0.2 的 bus 表與**它自己那個 commit 的程式改動相反**（仍寫 DM2J 在 `.22`、
+PWM 6 停用中、bus 9600）。已就地更正並標註日期與依據；同時補進 `CLAUDE.md` 的
+`.claude/` 索引表（該表的規矩是「新增檔案必須加一列」，否則等於不存在）。
+
+## [2026-08-28i] Claude Code
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — `DM2J_ARM_STEP_SWEEP_EST_MS` 1000 → **4500**；新增 `DM2J_ARM_DEPLOY_SETTLE_MS = 3500`
+- `user_lib/WASH_ROBOT.cpp` — 兩處寫死的 `sleep_ms_(2500)` 改吃新常數
+
+### 🎯 滑台「還沒到 17 或 0 就結束了」—— 又一個 08-26 的漏改
+user 回報掃動還沒走到端點就進下一步。**`DM2J_ARM_STEP_SWEEP_EST_MS` 還停在 1000ms，
+那是為 4cm 行程算的**，2026-08-26 把行程 `-8 → 17` 時沒跟著重算（跟
+`DM2J_ARM_STEP_SWEEP_CM` 是同一批漏的）。
+
+用該常數註解裡原本就有的公式（1cm/rev 螺桿）對 17cm @ 250rpm 重算：
+
+| 項目 | 時間 |
+|------|------|
+| 加速斜坡 | ~60ms |
+| 巡航 (17 − 0.3) ÷ 4.167 cm/s | **4008ms** |
+| 減速斜坡 | ~60ms |
+| fire retry / 緩衝 | ~150ms |
+| **合計** | **≈ 4.28 s** → 取 **4500ms** |
+
+原本只等 1 秒 = 滑台才走到約 4cm 就進下一步。
+
+**手臂 DEPLOY 失敗時最明顯**：`if (deployed)` 整段被跳過，`0→17` 與 `17→0` 之間就
+只剩這個等待，滑台會在 ~4cm 處被反向指令叫回頭。DEPLOY 正常時是靠 DEPLOY 本身耗時
++ settle 「碰巧」補足，**不是設計保證**。已在註解寫明：日後改
+`DM2J_ARM_STEP_SWEEP_CM` 或 `_RPM` 必須用同一條公式重算此值。
+
+### DEPLOY 後靜置 2500 → 3500（per user）
+原本是兩處各自寫死的 `sleep_ms_(2500)`，抽成 `DM2J_ARM_DEPLOY_SETTLE_MS`。這個檔案
+已經因為「同一個數字散在多處、改一漏一」出過三次事（`ARM_SWEEP_CM` /
+`DM2J_ARM_STEP_SWEEP_CM` / 本次的 `EST_MS`）。
+
+### 順序確認：不需要改
+user 要求「0→17 前先 deploy RIGHT，到 17 之後 deploy LEFT 再 17→0」——
+`do_step_sync_rail_sweep_` **現行順序已經完全是這樣**：
+```
+DEPLOY RIGHT(滾筒) + CH_BRUSH on → settle → 0→17 → CH_BRUSH off
+→ DEPLOY LEFT(刮刀) → settle → 17→0 → PARK
+```
+之前看不出來，是因為上滑台掛在錯的 gateway、根本沒動（見 2026-08-28f2）。
+
+### `ARM_SWEEP_EST_MS`（3900）查過，不用改
+那是獨立 `arm_sweep` 按鈕走的另一條路徑，為 55cm @ 1000rpm 算的。現在
+`ARM_SWEEP_CM=17` @ 1000rpm 只需約 1.5s —— **估太長是安全的**（只是多等，該常數的
+註解本來就記載這個判斷），與上面「估太短會被打斷」的情況相反。
+
+---
+
+## [2026-08-28h] Claude Code
+### 修改檔案
+- `Crane_control_PI/main.cpp` — `UP_STOP_TOTAL_KG_DEFAULT` 50 → **70**
+- `web_backend/public/index.html` — 「收繩總和停止門檻」欄位預設值 50 → **70**
+
+### 原因
+per user。兩處必須一起改：GUI 欄位只是輸入框預設，真正生效的是 crane 端的
+`g_up_stop_total_kg`（開機取自這個常數），不同步的話欄位帶出的數字會跟吊機實際
+值不符。
+
+這個門檻是 **UP hold 模式下 left+right 張力總和**，超過就 `hold_all_off` + EVT
+（`main.cpp:1739`），只在 `hold_loop` 生效。執行期可用 `set_up_stop_total_kg <kg>`
+或 GUI 欄位改。
+
+**與其他張力門檻的關係：**
+
+| 常數 | 值 | 性質 |
+|------|-----|------|
+| `TENSION_MAX_KG_DEFAULT` | 100 | 單側過載硬警報 |
+| `RETRACT_TENSION_STOP_KG_DEFAULT` | 50 | **每一條繩**的 retract 軟停 |
+| `UP_STOP_TOTAL_KG_DEFAULT` | **70** | **左+右總和**的 hold 停止 |
+
+⚠ 70 仍低於「兩條繩各自收到 50 kg 時的總和 100 kg」。也就是說手動 UP hold 若要
+承受跟 retract 軟停同等的張力，仍會先觸發 `hold_all_off`。兩者走不同路徑
+（本值只在 UP hold 的 `hold_loop`、`RETRACT_TENSION_STOP` 在 `motion_rope` 的
+retract），不會互相誤觸發；但若之後發現手動 UP hold 一按就停，這個值要再往 100
+靠。已把這段寫進常數上方註解。
+
+## [2026-08-28g] Claude Code
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — `STEP_SYNC_ARM_CLEAN_ENABLED` false → **true**
+
+### 原因
+per user：上滑台（DM2J:14）已接上，恢復同步步伐（`do_step_sync_`）內建的手臂清潔段。
+
+這個 gate 是 2026-08-27 因「上滑台未裝、每步噴一串 `[ERR] [DM2J:14] writeMulti
+no response`」而關掉的，不是設計上拿掉清洗。改回 true 後兩處同時恢復（gate 刻意
+一個開關管兩邊，避免只開一半變成「每步花 10s INIT 卻不清洗」）：
+- `WASH_ROBOT.cpp:8848` `do_step_sync_` 的 `fut_arm_init` — 跟吊機放繩並行跑 arm INIT
+- `WASH_ROBOT.cpp:8706` `do_step_sync_rail_sweep_` — 不再 early-return
+
+恢復後每步的清潔序列（與腳伸出併行）：
+`DEPLOY 400 RIGHT`(滾筒) → CH_BRUSH ON → 2.5s → 滑台 0→17cm → CH_BRUSH OFF →
+`DEPLOY 400 LEFT`(刮刀) → 2.5s → 滑台 17→0 → PARK。水閥/水泵仍不接。
+
+### ⚠ 上機時要看的
+牆距同批改成 400（見 `[2026-08-28f]`），而 bench log 顯示 `DEPLOY 400` 兩側目前
+都失敗（LEFT err=0.293 rad；RIGHT 觸發 `[M1 SAFETY]` 超速煞車）。DEPLOY 失敗在
+這條路徑上是**非致命**的 —— 會 fallback 成「只跑純滑台掃動、不開刷」，不擋步伐，
+但等於清洗沒真的發生。若上機看到 `arm deploy RIGHT (brush) failed — rail sweep
+only, no brush`，要處理的是 `cleaning_arm/main_api.cpp` 的 touch_wall 收尾。
+
+## [2026-08-28f] Claude Code
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — 三個手臂貼牆距離常數 380 → **400 mm**
+  - `DM2J_ARM_STEP_SWEEP_WALL_MM`（步伐內建清洗 / 乾式清洗）
+  - `ARM_CLEAN_WALL_MM`（連續清洗 sweep；也是 `settings_.arm_clean_wall_mm` 的開機值）
+  - `ARM_ROPE_PROTECT_WALL_MM`（護繩 DEPLOY CENTER）
+- `web_backend/public/index.html` — 兩個牆距輸入框預設 300 → **400**（`arm-wall-mm`、
+  `arm-clean-wall-mm`），以及乾式清洗說明文字「牆距固定 380mm」→ 400mm
+
+### 原因
+per user：手臂貼牆距離改 400 mm。
+
+三個常數自 2026-07-27 起就是刻意統一的（同一個貼牆姿態），所以一起改；只改其中
+一個會讓「步伐內建清洗」跟「GUI 清洗 sweep」貼牆深度不一致。
+
+GUI 兩個輸入框先前還停在 300，跟程式常數 380 早就不同步（bench 時要手動改成
+400 才對得上），一併對齊成 400。注意這兩個框只是**手動 DEPLOY / CLEAN SWEEP**
+的輸入預設，步伐流程走的是上面的常數，兩條路徑不共用。
+
+### ⚠ 尚未驗證的風險
+使用者 bench log 顯示 `DEPLOY 400 LEFT` / `DEPLOY 400 RIGHT` 目前**會失敗**：
+- LEFT: `err=0.293 rad`，收尾多次 `[M1 MOVE] passive suspected`（tau 掉到 0.05~0.24 Nm）
+- RIGHT: 觸發 `[M1 SAFETY] vel=0.409 rad/s exceeds 0.4` 緊急煞車
+
+400 mm 比舊值 380 外擺更多、重力力矩更大，M1 收尾段扭力不足的症狀可能會更明顯。
+若改完實機 DEPLOY 仍失敗，要處理的是 `cleaning_arm/main_api.cpp` 的 touch_wall
+收尾（重力前饋 / kp / 速度限制），不是這裡的牆距數字。
+
+## [2026-08-28f2] Claude Code  ← 編號補記：與上方 f（貼牆距離）為不同批改動，先後獨立
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` — DM2J 上滑台 `cli_22_` → **`cli_20_`**；`arm_sweep_fire_nowait_` 回報失敗；重試前先等掃動結束
+- `user_lib/WASH_ROBOT.h` — `DM2J_ARM` 註解、`arm_sweep_fire_nowait_` 改回傳 bool
+- `CLAUDE.md` — 拓樸圖與 `DM2J_RS570` 條目更新
+
+### 🎯 上滑台完全不動的根因：程式對錯的 gateway 發指令
+per user：**上滑台實體接在 192.168.1.20**，但程式一直掛在 `cli_22_`。所以每次掃動都是
+```
+[DBG] [DM2J:14] PR_move_cm_nowait 17.000 cm -> 170000 pulses
+[ERR] [DM2J:14] writeMulti no response      ← 發到沒有這顆裝置的 gateway
+```
+重試 3 次全滅 ×2 段掃動 = 每步 6 次失敗，然後流程照樣印「rail sweep done」。
+
+`.20` 上目前只有 ZDT 推桿 5~8 與 PQW 12，**slave 14 是空的**，不撞號。
+
+⚠ 副作用：上滑台從此與 ZDT 推桿共用 `.20`，而 rail sweep 是背景執行緒、與主執行緒
+伸腳並行。`TCP_client::socket_mtx` 保證幀不交錯（不會壞封包），且
+`arm_sweep_fire_nowait_` 是 fire-and-forget、`arm_monitor_during_sweep_` 已短路成純
+sleep（不讀 status），佔用很短，只是時序略慢。注意 `pusher_two_stage_retract_` 持有
+的是 `zdt_bus_mtx_`，DM2J 不拿那把鎖 —— 兩者靠 `socket_mtx` 序列化，安全但不互斥。
+
+### 「rail sweep done」是假的 —— fire-and-forget 把回傳值整個丟掉
+```cpp
+D_(DM2J_ARM).PR_move_cm_nowait(...);   // ← bool 回傳值（true=error）直接丟棄
+```
+上滑台三次寫入全滅時，log 仍印「rail sweep done (RIGHT/brush deploy -> 17 -> ...)」，
+看起來一切正常。這正是這個 bug 拖了三天才被發現的原因。
+
+`arm_sweep_fire_nowait_` 改為回傳 bool：
+- `true` = 至少一次寫入成功（滑台真的在動）
+- `false` = 全滅 → 印明確錯誤 + `EVT arm_sweep_rail_no_response`，**並跳過 `est_ms` 等待**（沒東西在動就不用等，上滑台不通時每步省下兩段行程時間）
+
+`do_step_sync_rail_sweep_` 的收尾訊息改成依實際結果分流；兩段掃動都失敗時印
+「⚠ rail sweep 沒有實際發生」。呼叫端可忽略回傳值，語意與舊版相同。
+
+### 重試伸腳前先等清洗掃動結束（per user）
+rail sweep 是背景執行緒，與第一次伸腳「刻意並行」（2026-07-23「一伸出腳就開始清潔」），
+但它的 `wait()` 原本只在函式最尾端 —— 也就是**重試是在手臂還 DEPLOY 貼著牆、上滑台
+還在移動時跑的**。重試會再推動推桿改變機體姿態，手臂那時還壓在玻璃上，可能刮傷或被扯壞。
+
+只在「重試」這條路徑先 `wait()`，正常路徑（`fails` 為空）根本走不到，**並行度不變**。
+尾端那個 `fut_rail_sweep.wait()` 保留 —— future 已 ready 時是 no-op，且仍負責覆蓋
+沒進重試的正常路徑。
+
+### 順帶記錄：真空系統本身正常
+同批 bench log 顯示四顆吸盤都吸住（-47 / -61 / -61 / -63 kPa）。前一次全部
+`fresh_p=0~1kPa` 且 `peakI=2~6mA`（遠低於 `DISABLE_LOW_CONTACT_PEAK_MA`=400）是
+**推桿從頭到尾沒碰到任何東西**（機器離牆太遠），不是真空或吸盤故障。
+
+---
+
+## [2026-08-28e] Claude Code
+### 修改檔案
+- `Crane_control_PI/main.cpp` — `RETRACT_TENSION_STOP_KG_DEFAULT` 25 → **50**
+- `web_backend/public/index.html` — 「收繩軟停張力」欄位預設值 25 → **50**
+
+### 收繩軟停張力預設值改 50 kg（per user）
+兩處必須一起改，否則 GUI 欄位帶出的數字跟吊機開機後的實際值不符（該欄位只是輸入
+框預設，真正的值是 crane 端的 `g_retract_tension_stop_kg`，開機時取自這個常數）。
+
+**約束檢查：**
+
+| 常數 | 值 | 與新值 50 的關係 |
+|------|-----|-----------------|
+| `TENSION_MAX_KG_DEFAULT`（單側過載硬警報） | 100 | ✅ 50 < 100，符合原註解「Keep this BELOW TENSION_MAX_KG」 |
+| `TENSION_DIFF_MAX_KG_DEFAULT`（左右差硬警報） | 50 | ✅ 那是左右「差值」，不是絕對值 |
+| `UP_STOP_TOTAL_KG_DEFAULT`（UP hold 的左右**總和**門檻） | 50 | ⚠️ 見下 |
+
+⚠ **`UP_STOP_TOTAL_KG_DEFAULT` 值得留意**：它是 left+right 的**總和**門檻，而本次
+改的是**每一條繩**的門檻。兩條都收到 50 kg 時總和 100 kg = 該門檻的兩倍。
+目前**不會**互相觸發（兩者走不同路徑：本值在 `motion_rope` 的 retract 判斷，
+`UP_STOP_TOTAL` 只在 UP hold 模式的 `hold_loop` 生效），但若之後要用手動 UP hold
+承受同等張力，`UP_STOP_TOTAL_KG_DEFAULT` 必須一起往上調，否則一按就立刻
+`hold_all_off`。已把這段寫進常數上方的註解。
+
+`user_lib/WASH_ROBOT.h` 的 `ATTACH_PAYOUT_TARGET_KG = 10.0` 未動 —— 那只是 crane
+status 讀不到時的 fallback，正常路徑一律用 crane 的即時值。
+
+---
+
+## [2026-08-28d] Claude Code
+### 修改檔案
+- `user_lib/JC_100_METER.h` / `.cpp` — 連續失敗時 fast-fail + log 節流
+- `user_lib/WASH_ROBOT.cpp` — `cmd_pwm_set` 全程 console 留痕
+
+### bench 真相：不是 PWM 壞了，是整條 .22 bus 不通
+```
+[JC100:7] TIMEOUT        ← 四顆吸盤壓力表全部
+[JC100:8] TIMEOUT
+[JC100:5] TIMEOUT
+[QX:9]    no reply       ← PWM 只是受害者之一
+[JC100:6] TIMEOUT
+```
+**⚠ 更正前一天的誤判**：status 裡的 `p5=0 p6=0 p7=0 p8=0` 被我讀成「沒吸所以是
+0」，其實是 `comm error, return last pressure: 0` —— timeout 後回傳的快取值。
+bus 那時就已經不通，壓力表安靜地回著舊值。
+
+**安全面查證後沒有掉落風險**（本來擔心「bus 掛掉時回著『還吸住』的舊值 → 系統以為
+安全就放腳」）：吸附判斷都有檢查 `error_flag`（`WASH_ROBOT.cpp:5263 / 5584 / 5942`），
+且 `read_pressure_()` 只在 `error_flag == 0` 時更新快取。系統會把 timeout 當「讀不
+到」而非「吸住」。**會被騙的只有看 status 的人。**
+
+### 為什麼 PWM「過了超級久才開」
+JC-100 的 recv timeout 是 1000ms，四顆輪一圈 4 秒，而**每一次的整整 1 秒都握著
+`TCP_client::socket_mtx`**。同一條 bus 上的 `pwm set` 得排在後面等鎖。等輪到它時
+bus 狀況好就寫進去（馬達開了），不好就是 `no reply`。故障時整條 bus 自我癱瘓。
+
+### 修法：fast-fail（縮短 timeout），不是 backoff（跳過發包）
+| | 每顆失敗耗時 | 4 顆一圈 | socket_mtx 佔用 |
+|---|---|---|---|
+| 修改前 | 1000ms | **4.0 秒** | ~100% |
+| 修改後 | 前 3 次 1000ms，之後 100ms | **0.76 秒** | ~19% |
+
+平均 `(9×100 + 1×1000)/10 = 190ms`，約 **5 倍**改善。bus 正常時 `_consec_fail`
+恆為 0，完全不介入。
+
+**⚠ 刻意選「縮短 timeout」而不是「跳過發包」**：跳過的話，上層那些靠重試次數判斷
+吸附狀態的迴圈（`smart_extend` / `disable_seal` 的 `read_err_cnt`）會拿到一連串立即
+失敗，等於偷偷改掉它們的語意。縮短只影響「失敗要等多久」，重試次數與 `error_flag`
+行為完全不變。
+
+`PROBE_EVERY=10`：不能永遠停在短 timeout，否則 bus 復原後若回覆稍慢就再也回不來，
+每 10 次補一次完整 timeout 當探針。CRC 錯也計入連續失敗（同樣不該霸佔 bus）。
+
+**log 節流**：原本四顆表每秒各印 ERR+WRN，把 console 灌爆、淹掉真正的線索。現在
+只在「剛進入 fast-fail」與「每次探針」印，恢復時印一行 INF。
+
+### `cmd_pwm_set` 全程 console 留痕
+bench 上曾出現「GUI 送出後 washrobot 完全沒回、console 也一個字都沒有」，當時無法
+分辨是 (a) 指令沒送到 (b) 送到但在 early-return 折返（driver 沒被呼叫所以沒 log）
+(c) 送到了只是回覆慢。現在進入時無條件印一行（含 `enabled` / `slave`），三個寫入
+各自失敗也印 —— 沒印=(a)，印了但無後續=(b)。
+
+---
+
+## [2026-08-28c] Claude Code
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — `PWM_ENABLED` false→**true**、`PWM_SLAVE` 6→**9**
+- `user_lib/WASH_ROBOT.cpp` — `cmd_pwm_set`/`cmd_pwm_save` 回覆帶可辨識前綴；三處 gate 註解與錯誤字串更新
+- `web_backend/public/app.js` — PWM 面板顯示成功回饋 + 送出中狀態
+- `CLAUDE.md` — QX_DO24 條目：slave 6→9、波特率記載更正
+
+### 網頁 PWM 按鈕「按了沒動」—— 三個原因疊在一起
+**1. PWM 被我在 2026-08-27h 整組停用了（`PWM_ENABLED=false`）。**
+當時的理由是 `PWM_SLAVE=6` 撞上改號後的 JC100 slave 6。**user 已用 USB-485 直連把
+模組改成 slave 9，那個前提消失** → 解除停用，`PWM_SLAVE` 同步改 9。
+cli_22_ 佔用情形：5-8 JC100／10,11 DY500／13 XKC／14 DM2J（12 PQW 已搬 cli_20_）
+→ **9 確實是空的**。
+
+**2. 寫入成功時面板完全沒有回饋 —— 這才是「按了沒反應」的直接來源。**
+`parsePwmStatus()` 掛在全域行分派器上，但只認兩種東西：`ERR pwm_*`，以及帶
+`ch1=` + `freq_lock=` 的 status 回覆。而 `cmd_pwm_set` 成功時回的是**裸 `OK`** ——
+兩個 regex 都不符 → 直接 `return`，畫面一個字都不變。失敗有訊息、成功反而沒有。
+
+修法：後端改回 `OK pwm_set ch=<n> hz=<n> ctrl=<n> duty=<x.x>` /（`pwm save` 回
+`OK pwm_saved`），前端認這個前綴並回顯實際生效的參數；`pwmSend()` 送出前先把狀態
+標成「送出中…」，這樣連「後端整個沒回」都跟「沒反應」區分得開。
+
+**3. 模組實體線可能還插在 USB-485 轉換器上（未確認）。**
+廠商工具走 USB-485 直連，`Linux_test` menu 34 與 Web 面板都走 TCP → USR gateway
+→ RS485。若模組沒接到 gateway 的 A/B 端子，前兩項修好也一樣每個指令 timeout ——
+而且 **Mode B init 不發包，連線階段完全不會報錯**，要到第一個指令才看得出來。
+
+### 一併更正 CLAUDE.md 的錯誤記載
+原本寫「模組 115200、但 .22 上 JC100/PQW/XKC/DM2J 是 9600，必須把模組改回 9600」。
+**per user：這條 bus 上所有裝置都是 115200**，該段作廢。（這個錯誤記載也是先前
+把「分片」當成 PWM 失敗根因的推論前提之一 —— 見 2026-08-28b 的自我修正。）
+
+---
+
+## [2026-08-28b] Claude Code
+### 修改檔案
+- `user_lib/TCP_client.h` / `.cpp` — 新增 `sendAndReceiveQuiet()`
+- `user_lib/QX_DO24.cpp` — 改用 quiet 版；無回應/回覆過短加 `LOG_ERR`
+- `Linux_test/main.cpp` — menu 34 的 `d`/`f`/`c`/`on`/`off`/`pulse` 錯誤訊息分流
+
+### PWM 指令全部失敗 —— `05a3c7e` 的 regression（user 指出「之前某個版本可以」）
+bench 症狀：`d 1 5.9` 回「占空比必須在 5~10% 之間」，但 5.9 明明在範圍內；
+`d 1 6` 整數也一樣，所以不是小數解析問題。
+
+**根因：`05a3c7e`（8/26）把 `QX_DO24::sendAndReceive` 從
+`sendData()+receiveData()` 換成 atomic 的 `TCP_client::sendAndReceive`，
+順帶丟掉了原本就在那裡的「累積分片」迴圈。** 該 commit 自己寫下了這個取捨：
+
+> 取捨: 舊版迴圈累積可容忍回覆分片, atomic 是單次 recv 不累積。RS485 上 8 byte
+> frame 實務上一次到齊(JC100/SD76/SE3 都這樣用)，用一點分片容忍度換掉一個真實競態划算。
+
+**那個理由對 QX-DO24 不成立 —— 它是全專案唯一的 115200 裝置，其餘全是 9600。**
+USR-TCP232 依「字元間隔時間」（約 3.5 字元時間）決定何時把 RS485 資料打包送上 TCP：
+
+| 波特率 | 3.5 字元時間 | 結果 |
+|--------|-------------|------|
+| 9600（JC100 / SD76 / SE3 / DM2J / ZDT / PQW） | ~3.6ms | 8-byte frame 早已到齊才打包 → 一次 recv 收完 ✓ |
+| **115200（QX-DO24）** | **~0.3ms** | gateway 可能收到前幾 byte 就打包 → **同一個 frame 變成兩個 TCP 段** ✗ |
+
+單次 `recv()` 只拿到前半段 → `res == req` 的 echo 比對失敗 → 回 false。
+競態修對了，但把這個裝置的通訊打壞了。
+
+### 修法
+**`TCP_client::sendAndReceiveQuiet()`（新增，不動現有 `sendAndReceive`）** —— 同樣的
+atomic drain→send→recv 交易，但 recv 端在**鎖內**迴圈累積，直到回覆靜默或總逾時。
+兩者不衝突，只是迴圈必須在鎖內。只有 `QX_DO24` 改用它，9600 的裝置維持原樣不變慢。
+
+用「靜默期」而非傳 `expected_len` 終止的理由：長度參數會逼 `TCP_client` 去解析
+Modbus 功能碼，而且錯誤幀（6 bytes）比成功回覆**短**，還得特判否則每次被拒的指令
+都要等滿 500ms。靜默期是通用規則，不必懂封包內容。代價是每次呼叫多等 `quiet_ms`
+（設 20ms，跟舊版迴圈的 `receiveData(..., 20)` 同一個數字）。
+
+兩個計時器：`total_timeout_ms` 是硬上限；`quiet_ms` 只在**收到第一個 byte 之後**
+才當作每次 read 的逾時。收到第一個 byte 之前用剩餘的總預算等，免得反應慢的裝置
+被幾 ms 就切掉。
+
+### 順手修掉「訊息說謊」——這才是真正卡住 debug 的東西
+`setPWM_*` 回 false 有 **5 種**原因（client 未設 / 通道越界 / 參數超範圍 / raw 越界 /
+通訊或 echo 失敗），而：
+
+1. **driver 的「沒回應」路徑是唯一沒有 `LOG_ERR` 的失敗分支**（CRC 錯、device
+   rejected 都有）→ 真正的原因被丟掉。已補上，並區分「完全無回應（timeout）」與
+   「回覆過短（分片未收齊）」。
+2. **Linux_test 把 5 種原因全印成同一句「占空比必須在 5~10% 之間」。**
+   已改成：範圍先在 menu 這層自己判（那才真的是參數問題），過了範圍還失敗就明講
+   「參數合法但寫入失敗 → 通訊問題（slave ID / 波特率 / 接線），先用 `v` 確認模組
+   有回應」。`f`/`c`/`on`/`off`/`pulse` 同樣處理。
+   範圍判斷用正向寫法 `!(x >= min && x <= max)`，順便維持 `d81e740` 擋 NaN 的性質。
+
+### 驗證
+本機有 MSVC，用 `cl /Zs` 做了語法檢查（詳見 work_log 的環境筆記）：
+
+| 檔案 | 結果 |
+|------|------|
+| `TCP_client.cpp` + `QX_DO24.cpp` | **0 errors** |
+| `Linux_test/main.cpp` | **0 errors** |
+| `WASH_ROBOT.cpp` | 3 errors，但 HEAD 同一位置（位移 46 行）完全相同 → 既有的 MSVC lambda-capture 嚴格性差異，GCC 交叉編譯不受影響 |
+
+---
+
+## [2026-08-28a] Claude Code
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — 新增 `BREAK_VACUUM_PRE_ON_REST_MS = 300`
+- `user_lib/WASH_ROBOT.cpp` — `pusher_two_stage_retract_`：加靜置 + 3 處 `controlRelay` 回傳值檢查
+
+### 破真空閥實際上從沒 fire 過（bench 抓到，user 指出方向）
+使用者回報：破真空實體確實接在 relay CH6，**用 Linux_test 測是正常的**。
+「Linux_test 正常、主程式不正常」正是關鍵線索 —— 兩邊差在兩件事。
+
+**⚠ 先更正一個誤判**：前一天我拿 `[2stage_retract] CH6 ON` 這行 log 當作「程式端
+正常、問題在實體接線」的證據。那是錯的：
+```cpp
+std::cout << "... CH6 ON ...";              // ← 先印，不論成敗
+pqw_.controlRelay(CH_BREAK_VACUUM, true);   // ← 才寫，回傳值直接丟掉
+```
+註解寫 `best-effort, log-only on failure`，但**根本沒有 log failure 的碼**。
+那行 log 完全不能用來判斷繼電器有沒有動作。Linux_test 同一位置是有檢查的。
+
+**根因：真空閥 OFF → 破真空閥 ON 之間的間隔被壓到接近零。**
+這是 PQW 模組的已知行為（間隔太近，第二個寫入不會實際動作，但 TCP/Modbus 層仍回
+成功，所以完全無聲）。`Linux_test` 兩個 menu 早就各自解決過：
+
+| | gap 來源 | 狀態 |
+|---|---|---|
+| menu 31（單腳） | ZDT-prep 執行緒（`release_stall_flag`+100ms+`enable`+200ms）跟 valve-off **並行**跑，白撿 ~300ms | 一直正常 |
+| menu 33（4 腳） | 沒有那個並行執行緒 → 首測就發現破真空從沒 fire，補上**明寫的 300ms** | 修過後正常 |
+| **主程式** | 走 menu 33 那條路（無並行 prep），**卻沒補 gap** | ❌ |
+
+**決定性證據（2026-08-27 bench log，同一顆 slave 7 前後對比）：**
+```
+第一次   STALL at 900ms   peakI=3061mA   ← 破真空沒 fire，硬撕到卡死
+RETRY    done  at 450ms   peakI=3mA      ← PAUSE 等按鍵 = 超大 gap，正常
+```
+差三個數量級，兩次唯一的差別就是中間隔了多久。
+
+### 修法
+1. **`BREAK_VACUUM_PRE_ON_REST_MS = 300`**，在 `CH_BREAK_VACUUM` ON 之前無條件靜置。
+   放在 `pusher_two_stage_retract_` 內部而非各呼叫端 —— 該函式有 **16 個呼叫點**，
+   全都是「關閥 → 收腳」序列，逐一補會漏。代價：每次收腳固定 +300ms。
+2. **ON 檢查回傳值**：失敗時明確告知「本次為硬撕，預期電流偏高甚至 STALL」+ 發
+   `EVT break_vacuum_on_fail`。**不中止流程** —— 腳留在伸出狀態更危險。
+3. **OFF 檢查回傳值**（比 ON 更關鍵：關不掉 = 閥持續充氣 → 下次伸腳吸不住）。
+   ⚠ 失敗時**不**解除 `bv_guard.armed`，讓 RAII guard 結束時再關一次 —— 多關一次
+   是無害的冪等操作，漏關則是實質危險。
+4. RAII guard 自己的關閥也加上失敗訊息（那是最後一道保險，它再失敗就沒人關了）。
+
+**刻意不用 `pqw_set_relay_verified_`（readback 版）**：它成功時要等 200ms 才回來，
+會把「ON → 80ms → 收腳」這個 bench 調出來的時序推成 200ms 才開始收。驗證機制不該
+順帶改掉動作時序。這裡採 Linux_test 的做法：只檢查 TCP-level 回傳值（零成本）。
+
+順帶修掉兩處過時註解：函式名的 `two_stage` 是歷史遺留（2026-07-31 起已是破真空輔助
+的**單段**直收，沒有第二段）；檔頭註解還寫著 `CH_BREAK_VACUUM(14)`。
+
+---
+
 ## [2026-08-27h] Claude Code
 ### 修改檔案
 - `user_lib/WASH_ROBOT.h` — 新增 `PWM_ENABLED = false`
@@ -136,6 +597,60 @@ gate 住**兩處**：
 gate** —— 那支指令的用途正是手動測上滑台/手臂裝好沒有，被 gate 攔掉就沒東西可測。
 獨立的手臂清洗按鈕（`do_arm_sweep_` / `do_arm_clean_sweep_` / `_continuous_`）同理
 不受 gate 管，都是手動觸發。
+
+---
+
+## 2026-08-28 Claude (Sadie) — 🚨 ZDT 左右歸屬跟實體不符 + 真空判準改「4 顆有 2 顆」
+
+### 🚨 發現：程式碼的左右分組是錯的（尚未修正）
+user 指出**實體是 `{5,7}` 同一側、`{6,8}` 同一側**，但程式碼是：
+```cpp
+ZDT_RF1 = 5, ZDT_RF2 = 6;   // 以為 5,6 都在右
+ZDT_LF1 = 7, ZDT_LF2 = 8;   // 以為 7,8 都在左
+```
+所以 `group_slaves_("right")` 回的 `{5,6}` **實際上是「一邊各拿一顆」**。
+
+**已造成的實際後果**（user 提供的 bench log）：`cups not sealed after extend: 5 6` →
+程式判成「右側整側全裸」→ 觸發 10cm 後退重試。但 5、6 實體分屬兩側、另外兩顆還吸著，
+**依實體規則本來應該直接放行**，那次後退是白做的。
+
+**更危險的反向情況**：若吸住的是 `{5,7}`（實體同一側）、`{6,8}` 全掉 —— 舊規則會判
+right OK（有 5）、left OK（有 7）→ **放行**，但實體上有一整側懸空。
+
+**為什麼沒有一併修正常數**：要改對需要 (a) `{5,7}` 到底是左還是右、(b) 每側裡誰在上下。
+兩者都會連動吊機繩對應（`pay_out_right`/`left`）與伸出長度預設（`PUSHER_EXTEND_FEET_PULSE`
+是靠 `slave == ZDT_RF1 || slave == ZDT_LF1` 判「上面那顆」），**猜錯是掉落風險**，已請 user 確認。
+
+⚠ **在修正之前不要使用交替步伐**（`do_step_down_`/`do_step_up_`）——它的「錨定側是否還吸著」
+判斷完全建立在這組歸屬上，歸屬錯就等於沒有保護。同步步伐 4 顆一起動、不依賴分側錨定，
+受影響較小。
+
+### 修改：真空判準改成「4 顆裡有 2 顆吸住就 OK」（per user）
+既然分側算不準，user 決定改成不分側的總數判準。
+
+- `WASH_ROBOT.h`：新增 `SEAL_MIN_CUPS_TOTAL = 2`
+- `WASH_ROBOT.cpp` `group_seal_ok_()`：改用「全部 4 顆裡吸住 ≥2」當通過條件。
+  `out_unsealed` 仍只列本 group 沒吸到的（呼叫端拿去做重試/補吸目標與 log，語意不變），
+  所以 20 幾個呼叫端都不用動
+- 實作上**只掃一次 4 顆**再導出兩個答案 —— `vacuum_check_` 每顆 3 取樣、顆間 50ms，
+  分兩次掃 group 會多花一倍 bus 時間
+
+### 新舊規則對照（驗算過）
+| 情境 | 舊規則 | 新規則 | 實體真相 | 新規則 |
+|---|---|---|---|---|
+| **7,8 吸住（log 實況）** | ❌ 誤擋 | ✅ | 安全 | **修好了** |
+| 5,6 吸住 | ❌ 誤擋 | ✅ | 安全 | **修好了** |
+| **5,7 吸住（同一側）** | ✅ | ✅ | **危險** | ⚠ **仍擋不住** |
+| 6,8 吸住（同一側）| ✅ | ✅ | **危險** | ⚠ **仍擋不住** |
+| 只有 1 顆 / 全掉 | ❌ | ❌ | 危險 | ✅ |
+
+⚠ **已知取捨（自覺決定，不是疏漏）**：新規則擋不住「吸住的 2 顆剛好在同一側」。
+左右歸屬確認後應改回分側判準。這點在 `WASH_ROBOT.h` 常數註解與 `group_seal_ok_()`
+函式註解裡都寫明了。
+
+### 順帶
+`group_slaves_()` 上方 2026-08-27 寫的註解宣稱「right/left still genuinely address only
+that side's two motors」——**那句話是錯的**，已刪並改成警告。
 
 ---
 

@@ -5782,43 +5782,58 @@ static void test_qx_do24() {
         // ⚠ A missing/garbled numeric arg makes `iss >> x` leave x = 0 (C++11).
         // For `d` that means 0% duty and for `c` it means "turn the output off" —
         // i.e. a typo would silently stop a running motor. Reject instead.
+        // [2026-08-28] setPWM_* 回 false 有 5 種原因（client 未設 / 通道越界 /
+        // 參數超出安全範圍 / raw 越界 / Modbus 通訊或 echo 失敗），舊寫法把它們
+        // 全部印成同一句「參數超出範圍」。bench 上踩到的實況：`d 1 5.9` 明明在
+        // [5,10] 內卻被說範圍錯誤，真正原因是模組沒回話。
+        // 改法：範圍先在這層自己判（那才真的是參數問題），過了範圍還失敗就一定
+        // 是通訊層，明講並指向 v 指令。
+        auto comm_fail = [&](const char* what) {
+            cout << "  [ERR] " << what << " — 參數合法但寫入失敗，這是通訊問題"
+                    "（slave ID / 波特率 / 接線），不是參數問題\n"
+                    "        先用 v 讀版本號確認模組有回應；driver 的 [ERR] 行有詳細原因\n";
+        };
+
         if (verb == "d") {
             double duty;
             if (!(iss >> duty)) { cout << "  [!] 用法: d <通道1~4> <占空比%>\n"; continue; }
-            if (pwm.setPWM_Duty(dch, duty)) {
-                cout << tag << "duty=" << duty << "%\n";
-            } else {
+            if (!(duty >= pwm.dutyMinPct() && duty <= pwm.dutyMaxPct())) {   // 正向寫法同時擋 NaN
                 cout << "  [WARN] 拒絕 — 占空比必須在 " << pwm.dutyMinPct() << "~"
                      << pwm.dutyMaxPct() << "% 之間（" << pwm.dutyMinPct() << "%=停止, "
                      << pwm.dutyMaxPct() << "%=全速）\n";
+                continue;
             }
+            if (pwm.setPWM_Duty(dch, duty)) cout << tag << "duty=" << duty << "%\n";
+            else                            comm_fail("setPWM_Duty");
         } else if (verb == "f") {
             int freq;
             if (!(iss >> freq)) { cout << "  [!] 用法: f <通道1~4> <頻率Hz>\n"; continue; }
-            if (pwm.setPWM_Freq(dch, freq)) {
-                cout << tag << "freq=" << freq << "Hz\n";
-            } else {
+            if (freq < pwm.freqMinHz() || freq > pwm.freqMaxHz()) {
                 cout << "  [WARN] 拒絕 — 頻率鎖定 " << pwm.freqMinHz();
                 if (pwm.freqMaxHz() != pwm.freqMinHz()) cout << "~" << pwm.freqMaxHz();
                 cout << "Hz（占空比 5%=停止/10%=全速 只有在 50Hz 成立）\n";
+                continue;
             }
+            if (pwm.setPWM_Freq(dch, freq)) cout << tag << "freq=" << freq << "Hz\n";
+            else                            comm_fail("setPWM_Freq");
         } else if (verb == "c") {
             int val;
             if (!(iss >> val)) { cout << "  [!] 用法: c <通道1~4> <0/65535/1~65534>\n"; continue; }
-            cout << (pwm.setPWM_Control(dch, (uint16_t)val) ? tag + "control=" + std::to_string(val) + "\n"
-                                                             : "  [WARN] setPWM_Control failed\n");
+            if (val < 0 || val > 65535) { cout << "  [WARN] 拒絕 — control 必須是 0~65535\n"; continue; }
+            if (pwm.setPWM_Control(dch, (uint16_t)val)) cout << tag << "control=" << val << "\n";
+            else                                        comm_fail("setPWM_Control");
         } else if (verb == "on") {
-            cout << (pwm.setPWM_Control(dch, 65535) ? tag + "continuous output ON\n"
-                                                    : "  [WARN] setPWM_Control failed\n");
+            if (pwm.setPWM_Control(dch, 65535)) cout << tag << "continuous output ON\n";
+            else                                comm_fail("setPWM_Control(65535)");
         } else if (verb == "off") {
-            cout << (pwm.setPWM_Control(dch, 0) ? tag + "OFF\n"
-                                                : "  [WARN] setPWM_Control failed\n");
+            if (pwm.setPWM_Control(dch, 0)) cout << tag << "OFF\n";
+            else                            comm_fail("setPWM_Control(0)");
         } else if (verb == "pulse") {
             int n;
             if (!(iss >> n)) { cout << "  [!] 用法: pulse <通道1~4> <脈衝數1~65534>\n"; continue; }
             if (n < 1 || n > 65534) { cout << "  [!] pulse count must be 1~65534\n"; continue; }
-            cout << (pwm.setPWM_Control(dch, (uint16_t)n) ? tag + "pulse burst " + std::to_string(n) + "\n"
-                                                          : "  [WARN] setPWM_Control failed\n");
+            if (pwm.setPWM_Control(dch, (uint16_t)n)) cout << tag << "pulse burst " << n << "\n";
+            else                                      comm_fail("setPWM_Control(pulse)");
         } else {
             cout << "  [!] unknown command '" << verb << "' — see menu above\n";
         }
