@@ -37,6 +37,8 @@
 | 🔴 | **`connectToServer` 的非阻塞 connect 少了 `getsockopt(SO_ERROR)`** → 連到沒人聽的埠也判定成功、印 `reconnect success`、`connected=true`。失敗的 connect 同樣會讓 socket 可寫，`select()>0` 不足以判定成功 | `transport/TCP_client.cpp:180-220` | **未修** ✔（08-28 實機證據：吊機 5002 無人在聽，本體印了 20 次 reconnect success） | work_log 2026-08-28（實機驗證） |
 | 🟡 | `init()` 印 `VFD left/right (MH300)` 是**寫死字串**，在 `#if CRANE_VFD_IS_SE3` 之外 → 旗標是 1（實際跑 SE3）卻印 MH300，會把人導去查錯的 driver | `Crane_control_PI/main.cpp:4215,4234` | **未修** ✔ | work_log 2026-08-28（實機驗證） |
 | 🔴 | `readRegister()` 不驗 reply CRC、不驗 byteCount → 壞掉的 Modbus reply 被當有效值往上傳（bench 已造成實體損害，詳見下方） | `user_lib/SD76_length_meters.cpp` | **未修** ✔ | mailbox 2026-05-14 |
+| 🔴 | `web_backend/server.js` 兩個預設 IP 都連不上：`CRANE_IP` 寫 `192.168.1.101`（吊機實際 `.1.10`）、`WROBOT_IP` 寫 `192.168.1.100`（本體有線不通，只有 WiFi `.5.26`）。**照預設啟動 GUI 兩邊都連不上，畫面不會說是 IP 錯** | `web_backend/server.js:23-25` | **未修** ✔（08-28 啟動時實測，以環境變數繞過） | work_log 2026-08-28 |
+| 🟡 | 兩台 Pi 都沒有 `tmux`／`screen` → runbook §A「一鍵啟動」`scripts/crane.sh`／`wr.sh` **在這兩台跑不起來**。替代方案 `~/bringup/run_bg.sh`（FIFO 背景啟動）已放兩台 | `scripts/*.sh`、`.claude/runbook.md` §A | **未修** ✔ | work_log 2026-08-28 |
 | 🔴 | 緊急收繩按鈕實際上**沒有張力保護**，跟 `motion_flow.md` §8 的安全性描述相反 | `Crane_control_PI/main.cpp` `cmd_manual()` | **未修** ✔ | ONBOARDING §6 |
 | 🔴 | `cmd_side_measured()` 進場沒重置 `abort_flag` → 被 stop 過一次後所有 v2 step 指令永久回 `ERR aborted`，只能重開程式 | `Crane_control_PI/main.cpp:2800` | **未修** ✔ | ONBOARDING §1 ＋ work_log 2026-07-15 |
 | 🔴 | DSZL-107 scale factor 仍是 placeholder（driver `-0.01` / 廠商說 `0.02`），張力門檻等於沒有基準；#1 只有 bench 手拉估值、#2 完全沒校 | `user_lib/DSZL_107.cpp`、`Crane_control_PI/main.cpp` | **未修** ✔ | work_log 2026-05-07 ＋ 2026-06-02 |
@@ -327,6 +329,15 @@ motor_api 直接問 `STATUS` → `[M1] pos=0.0051 ... [M2] pos=-0.1184 ...`（CA
 兩個活著的 listener 本來就不能共用同一個埠（那要 `SO_REUSEPORT`，不是 `SO_REUSEADDR`）。
 📌 **正確做法：重起前等 `:5001` 真的沒有行程在聽**，不是等 TIME_WAIT。
 （本專案踩坑索引第四條就是「錯誤歸因錯了比沒有訊息更糟」——這次差點自己示範一遍。）
+
+### 收尾（08-28 14:5x）
+使用者確認 GUI 操作沒問題後，四支全部停止並複驗：本體 `5001`/`9527`、吊機 `5002`/`8080`
+**四個埠皆已釋放、兩台無任何殘留行程**（含 FIFO 的 `sleep` 持有者與 fifo 檔）。
+`~/projects/` 全程未動。
+
+🐛 **`exit` 只對兩支 C++ 主程式有效**：`motor_api` 與 `node server.js` 的指令通道不是 stdin，
+stdin 送 `exit` 對它們無效，要用 `kill -TERM`（兩者都吃 TERM，不需要 KILL）。
+📌 **停止流程要分兩類**，寫成一句「`echo exit > fifo` 就好」會漏掉一半。
 
 ### ⚠️ 仍未驗證
 - **馬達一次都沒動過**；GUI 上的 DEPLOY / 步伐等按鈕都還沒按過
