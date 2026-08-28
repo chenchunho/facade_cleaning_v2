@@ -121,10 +121,53 @@ bool SD76_length_meters::readRegister(uint16_t addr, uint16_t count, uint8_t* ra
 	if (sendModbus(req, 8, resp, respLen))
 		return true;
 
+	// [2026-08-28] Reply validation. Before this, the only checks were
+	// `respLen >= 5` and `resp[1] == 0x03` — so any garbled RS485 frame that
+	// happened to carry 0x03 in byte 1 was accepted, and its byteCount drove
+	// the memcpy below straight into the caller's 2..8-byte stack buffer.
+	//
+	// Two observed consequences:
+	//   - bench 2026-05-14: bit-flipped frames passed the FC check, the meter
+	//     reported balance err 224cm / -214cm on a 30cm-scale rope difference,
+	//     balance trim went to ±5Hz, and SE3 OC/OL tripped 18 times in 30s.
+	//     The application-layer >30cm jump filter in meter_loop was a bandage;
+	//     this is the root fix.
+	//   - harness 2026-08-28: a reply claiming byteCount=0xFF segfaults the
+	//     process outright (255 bytes memcpy'd into uint8_t raw[2]).
+	//
+	// Order matters: bound byteCount BEFORE it is used as a length anywhere.
 	if (respLen < 5) return true;
-	if (resp[1] != 0x03) return true;
 
-	int byteCount = resp[2];
+	// A shared RS485 gateway carries several slaves; a reply addressed to
+	// another one must not be read as ours (cli_M hosts SD76 left + right).
+	if (resp[0] != deviceID) {
+		LOG_ERR(_log_tag, "reply slave mismatch: got %d want %d", (int)resp[0], (int)deviceID);
+		return true;
+	}
+	// 0x83 here = Modbus exception reply; anything else = not our FC.
+	if (resp[1] != 0x03) {
+		LOG_ERR(_log_tag, "reply FC 0x%02X (expected 0x03)", (int)resp[1]);
+		return true;
+	}
+
+	const int byteCount = resp[2];
+	if (byteCount != count * 2) {
+		LOG_ERR(_log_tag, "byteCount %d != requested %d", byteCount, count * 2);
+		return true;
+	}
+	// Frame must actually contain the data it claims, plus the 2 CRC bytes.
+	if (respLen < 3 + byteCount + 2) {
+		LOG_ERR(_log_tag, "frame truncated: len %d < %d", respLen, 3 + byteCount + 2);
+		return true;
+	}
+
+	const uint16_t rx_crc = (uint16_t)resp[3 + byteCount]
+	                      | ((uint16_t)resp[4 + byteCount] << 8);
+	if (crc16(resp, 3 + byteCount) != rx_crc) {
+		LOG_ERR(_log_tag, "CRC mismatch on REG 0x%04X", addr);
+		return true;
+	}
+
 	memcpy(raw, &resp[3], byteCount);
 
 	if (debug_mode) {

@@ -141,6 +141,37 @@ bool DSZL_107::modbus_read(uint16_t addr, uint16_t quantity, uint8_t* rx, int& r
 
     LOG_HEX(_log_tag, "RX read", buf, n);
 
+    // [2026-08-28] Reply validation — same class of defect fixed in
+    // SD76_length_meters::readRegister the same day, found by the driver audit.
+    //
+    // Before this, the only checks were `n >= 9` and the fc byte. `bc` came
+    // straight off the wire and drove the memcpy below; `n < 9 + bc` bounded it
+    // against the RECEIVE buffer (256) but never against the CALLER's, which is
+    // uint8_t buf[64] at both call sites. A reply claiming bc=247 therefore
+    // wrote 250 bytes into 64 — stack corruption on the tension-sensor path
+    // that hold_loop's safety monitor depends on.
+    //
+    // Modbus TCP carries no CRC (TCP checksums the frame), so the RTU fix does
+    // not transfer directly; the equivalents here are the MBAP transaction id
+    // and unit id, plus a byte-count that must match what we asked for.
+
+    // Transaction id echo. The 400ms receive timeout means a late reply to an
+    // earlier, abandoned transaction can still be sitting in the socket when
+    // the next request goes out — without this it would be read as the answer
+    // to the current one.
+    const uint16_t rx_txid = ((uint16_t)(uint8_t)buf[0] << 8) | (uint8_t)buf[1];
+    if (rx_txid != txid_) {
+        LOG_ERR(_log_tag, "stale/foreign reply txid=%u want=%u", rx_txid, txid_);
+        return true;
+    }
+    // Protocol id must be 0 for Modbus.
+    if (buf[2] != 0 || buf[3] != 0) return true;
+    // Unit id must be the slave we addressed.
+    if ((uint8_t)buf[6] != slaveID) {
+        LOG_ERR(_log_tag, "reply unit %d != slave %d", (int)(uint8_t)buf[6], (int)slaveID);
+        return true;
+    }
+
     uint8_t fc = (uint8_t)buf[7];
     if (fc == (0x03 | 0x80)) {
         LOG_ERR(_log_tag, "Modbus exception code=0x%02X at addr=0x%04X",
@@ -149,11 +180,20 @@ bool DSZL_107::modbus_read(uint16_t addr, uint16_t quantity, uint8_t* rx, int& r
     }
     if (fc != 0x03) return true;
 
-    int bc = (uint8_t)buf[8];
-    if (n < 9 + bc) return true;
+    // Byte count must match the quantity requested. This is what bounds the
+    // memcpy: callers ask for 2 or 4 registers, so payload is 7 or 11 bytes.
+    const int bc = (uint8_t)buf[8];
+    if (bc != quantity * 2) {
+        LOG_ERR(_log_tag, "byteCount %d != requested %d", bc, quantity * 2);
+        return true;
+    }
+    if (n < 9 + bc) {
+        LOG_ERR(_log_tag, "frame truncated: %d < %d", n, 9 + bc);
+        return true;
+    }
 
     // Strip MBAP header except unit byte: caller sees [unit][fc][bc][data...]
-    int payload = 3 + bc;
+    const int payload = 3 + bc;
     memcpy(rx, buf + 6, payload);
     rxLen = payload;
     return false;
