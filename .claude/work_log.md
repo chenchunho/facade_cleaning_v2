@@ -367,6 +367,52 @@ git-bash 的 `bash.exe.stackdump`），而移除攝影機的 commit `e3c8820` �
 
 ---
 
+### ✅ driver 回覆驗證稽核全部收尾（16 支，4 個 commit）
+
+mailbox 2026-05-14 開出、擱置 3.5 個月的行動項，2026-08-28 結案。
+
+| 結果 | 數量 | 是哪些 |
+|---|---|---|
+| 本次修補 | **9 支** | SD76／DSZL／DY-500／PQW／SE3／ZDT／DM2J／MH300／CLV900 |
+| 本來就有驗 | 4 支 | JC-100／XKC／QX-DO24／WT901BC（sum 式） |
+| 標記退役 | 1 支 | ZS_DIO（production 已不用，只剩 `Linux_test`） |
+| 無通訊／未被引用 | 2 支 | FrameAnalyzer／DIHOOL |
+
+**🔴 記憶體覆寫這個類別已經關閉**：三支（SD76／DSZL／DY-500）都會被壞幀打成
+呼叫端堆疊覆寫，實測 SIGSEGV／SIGBUS／SIGBUS。修完之後 repo 裡沒有已知的第四支。
+
+**測試框架已進版控**：`Linux_test/fake_slaves/`。原本兩支一次性腳本合併成通用的
+`fake_rtu.py`（除 DSZL 外全部走 RTU over TCP，一支服務 7 支 driver）。
+全部驗證 **20 + 8 + 7 + 6 + 5 = 46 個情境通過**，一律先對未修補版證明缺陷存在再修。
+
+**📌 三個決策，記下來免得日後被「順手補完」**
+1. **`PQW` 的寫入 echo 路徑刻意不動**——韌體 echo 格式非標準，先前「讀回來比對」
+   造成間歇假失敗、**把機器卡在序列中間且無可恢復路徑**（work_log 2026-04-23／04-27）。
+   只硬化 FC01 讀取
+2. **`ZDT` 的 `readEcho()` 不檢查 slave id**——`trigger_sync_move()` 走廣播 `0x00`
+3. **`DM2J` 的 `sendRecv()` 不檢查 slave id**——`writeSingle_sync()` 走廣播；
+   但 `recv_frame_()` **要**檢查，因為手臂滑台是 `cli_22_` 上的 slave 14，
+   同 bus 還有 JC100 5-8／XKC 13／DY500 10-11，匯流排競爭是有紀錄的症狀
+
+**🐛 稽核過程中我犯的三個錯（都被測試抓出來，值得記）**
+1. **測試用錯 `init()` overload**（不 probe 的那個）→ 五個故障情境一個都沒觸發卻全部「通過」
+2. **溢位測試值取極端值 `bc=255`** → 落在缺陷窗口之外、回 FAIL，差點判定「無缺陷」。
+   窗口是 62~247，換 `bc=100` 才 SIGBUS
+3. **`wrongslave`／`badfc` 的幀帶著正確 CRC** → 只補 CRC 抓不到。
+   `dm2j` 因此在第一輪還是被判 WRONG，才回頭補上 slave id 與 FC 檢查。
+   **CRC 只證明「這則訊息沒壞」，不證明「這則訊息是給我的」**
+
+**🔴 行為改變風險（部署前必讀）**
+- **`ZDT` 在步態迴圈裡**，原本被吞掉的壞幀現在是明確失敗 → **步態中途失敗頻率可能上升**。
+  第一次上機要有人看著
+- **`PQW`** 可能讓既有待辦「CH6 verify fail 三次後沒人 catch」更常出現 → 那條要一起重評
+- **`SD76`** 可能讓既有待辦「crane 端偶發 `ERR meter_left_read_fail`」更常出現
+- 三者都是**把原本看不見的問題變可見**，不是新故障
+
+🔴 **九支全部尚未部署、尚未上實機驗證。**
+
+---
+
 ### 🔒 DSZL_107 同型溢位已修（稽核找出的第二支，而且是活的）
 
 細節見 `changelog.md` `[2026-08-28b]`。DSZL 走 Modbus TCP（MBAP）沒有 CRC，
@@ -412,14 +458,14 @@ mailbox 2026-05-14 附帶的行動項，開了 3.5 個月從未執行。**只稽
 |---|---|---|---|---|---|
 | `SD76_length_meters` | ✅ | ✅ | ✅ | ✅ | 🟢 **本次已修** |
 | `DSZL_107` | ✅ | ✅ | ✅ | n/a（Modbus TCP，改驗 txid） | 🟢 **2026-08-28 已修**（`bc=100` 實測 SIGBUS 已消失） |
-| `DY_500_weight_sensor` | ❌ | ❌ | ❌ | ❌ | 🔴 **溢位**：`memcpy(rx, buf, n)`，n≤128 進 `buf[64]`；**硬體未安裝，目前打不到** |
-| `CLV900_inverter` | ✅ | ✅ | ✅ 固定 `0x02` | ❌ | 🟡 值不可信（未安裝） |
-| `MH300_inverter` | ✅ | ✅ | ✅ 固定 `0x02` | ❌ | 🟡 值不可信（未啟用） |
-| `SE3_inverter` | ✅ | ✅ | ✅ 固定 `0x02` | ❌ | 🟡 值不可信 —— ⚠️ **bench 現正在用這支** |
-| `ZDT_motor_control` | ✅ 部分 | ✅ | ✅ vector | ❌ | 🟡 |
-| `DM2J_RS570` | ❌ | ❌ | ✅ `receiveData(rx, 32)` 上限 | ❌ | 🟡 |
-| `PQW_IO_16O_RLY` | ❌ | 部分（例外碼） | ✅ vector | ❌ | 🟡 |
-| `ZS_DIO_R_RLY` | ❌ | 部分（例外碼） | ✅ 有夾 `3+bc+2` | ❌ | 🟡 |
+| `DY_500_weight_sensor` | ✅ | ✅ | ✅ | ✅ | 🟢 **已修**（溢位實測 SIGBUS 已消失） |
+| `CLV900_inverter` | ✅ | ✅ | ✅ 固定 `0x02` | ✅ | 🟢 **已修**（未安裝，先鋪路） |
+| `MH300_inverter` | ✅ | ✅ | ✅ 固定 `0x02` | ✅ | 🟢 **已修**（未啟用，先鋪路） |
+| `SE3_inverter` | ✅ | ✅ | ✅ 固定 `0x02` | ✅ | 🟢 **已修**（read + write echo 兩處） |
+| `ZDT_motor_control` | ✅ 呼叫端 | ✅ | ✅ vector | ✅ | 🟢 **已修**（收斂在 `readEcho()` 一處） |
+| `DM2J_RS570` | ✅ | ✅ | ✅ | ✅ | 🟢 **已修**（新 private `recv_frame_()` + `sendRecv()`） |
+| `PQW_IO_16O_RLY` | ✅ | ✅ | ✅ vector | ✅ | 🟢 **已修**（僅 FC01 讀取；寫入 echo 依原決策不動） |
+| `ZS_DIO_R_RLY` | ❌ | 部分 | ✅ 有夾 `3+bc+2` | ❌ | ⚰️ **標記退役**（production 已不用，只剩 `Linux_test`） |
 | `JC_100_METER` | — | — | — | ✅ | 🟢 |
 | `XKC_Y25_RS485` | — | — | — | ✅ | 🟢 |
 | `QX_DO24` | — | — | — | ✅ | 🟢 |
