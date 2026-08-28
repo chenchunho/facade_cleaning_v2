@@ -3,6 +3,7 @@
 #include "log_utils.h"
 #include <cmath>
 #include <chrono>
+#include <thread>
 
 //=========== init ===========
 
@@ -94,7 +95,7 @@ void QX_DO24::setFreqLimits(int min_hz, int max_hz) {
 bool QX_DO24::setPWM_Duty(int channel, double duty_percent) {
 	// ch>3 would write into 0x04+ = channel-1 frequency registers, silently
 	// corrupting frequency instead of failing. QX-DO24 has 4 channels only.
-	if (!client || channel < 0 || channel > 3) return false;
+	if (!client || channel < 0 || channel > 3) { last_fail_ = Fail::NotReady; return false; }
 
 	// Safety window — see setDutyLimits() in the header. Defaults to the wired
 	// motor's 5%=stop / 10%=full-speed range; anything outside is refused rather
@@ -111,6 +112,7 @@ bool QX_DO24::setPWM_Duty(int channel, double duty_percent) {
 	// Reachable via `d 1 nan` (istream >> double accepts "nan") or any caller
 	// computing duty from a division that yields 0.0/0.0.
 	if (!(duty_percent >= duty_min_pct && duty_percent <= duty_max_pct)) {
+		last_fail_ = Fail::OutOfRange;
 		LOG_ERR(_log_tag, "duty %.1f%% outside safety limits [%.1f, %.1f] (or NaN) — refused",
 		        duty_percent, duty_min_pct, duty_max_pct);
 		return false;
@@ -140,13 +142,14 @@ bool QX_DO24::setPWM_Duty(int channel, double duty_percent) {
 //=========== control: PWM Frequency (0x10, 32-bit register write) ===========
 
 bool QX_DO24::setPWM_Freq(int channel, int freq) {
-	if (!client || channel < 0 || channel > 3) return false;
-	if (freq < 1 || freq > 200000) return false;   // manual: 1~200000 Hz
+	if (!client || channel < 0 || channel > 3) { last_fail_ = Fail::NotReady;   return false; }
+	if (freq < 1 || freq > 200000)             { last_fail_ = Fail::OutOfRange; return false; }   // manual: 1~200000 Hz
 
 	// Safety clamp — see setFreqLimits(). Locked to 50Hz by default because the
 	// duty window (5%=stop / 10%=full) is only valid at 50Hz; at the module's
 	// 1000Hz power-on default the same percentages are meaningless pulse widths.
 	if (freq < freq_min_hz || freq > freq_max_hz) {
+		last_fail_ = Fail::OutOfRange;
 		LOG_ERR(_log_tag, "freq %d Hz outside safety limits [%d, %d] — refused",
 		        freq, freq_min_hz, freq_max_hz);
 		return false;
@@ -175,7 +178,7 @@ bool QX_DO24::setPWM_Freq(int channel, int freq) {
 
 bool QX_DO24::setPWM_Control(int channel, uint16_t val) {
 	// ch>3 would run past 0x0F into 0x10 = [保存输出] (limited flash write cycles).
-	if (!client || channel < 0 || channel > 3) return false;
+	if (!client || channel < 0 || channel > 3) { last_fail_ = Fail::NotReady; return false; }
 	uint16_t addr = 0x000C + channel;
 
 	std::vector<uint8_t> req = {
@@ -293,7 +296,7 @@ static const char* qx_err_name(uint8_t err) {
 	}
 }
 
-bool QX_DO24::sendAndReceive(const std::vector<uint8_t>& request, std::vector<uint8_t>& response) {
+bool QX_DO24::sendAndReceiveOnce_(const std::vector<uint8_t>& request, std::vector<uint8_t>& response) {
 	if (!client) return false;
 
 	LOG_HEX(_log_tag, "TX", request.data(), (int)request.size());
@@ -339,10 +342,12 @@ bool QX_DO24::sendAndReceive(const std::vector<uint8_t>& request, std::vector<ui
 	// 只拿到一個 false，Linux_test 又把所有 false 都印成「占空比必須在 5~10%」，
 	// 真正的原因（模組根本沒回話）完全看不到。分開兩種情況講清楚。
 	if (response.empty()) {
+		last_fail_ = Fail::NoReply;
 		LOG_ERR(_log_tag, "no reply (timeout) — 檢查 slave ID / 波特率(本模組 115200) / 接線");
 		return false;
 	}
 	if (response.size() < 5) {
+		last_fail_ = Fail::TooShort;
 		LOG_ERR(_log_tag, "reply too short (%d bytes, need >=5) — 可能是分片未收齊或雜訊",
 		        (int)response.size());
 		return false;
@@ -350,6 +355,7 @@ bool QX_DO24::sendAndReceive(const std::vector<uint8_t>& request, std::vector<ui
 	uint16_t calc_crc = modbusCRC(response.data(), (int)response.size() - 2);
 	uint16_t recv_crc = response[response.size() - 2] | (response[response.size() - 1] << 8);
 	if (calc_crc != recv_crc) {
+		last_fail_ = Fail::CrcMismatch;
 		LOG_ERR(_log_tag, "CRC mismatch (calc %04X != recv %04X)", calc_crc, recv_crc);
 		return false;
 	}
@@ -359,11 +365,53 @@ bool QX_DO24::sendAndReceive(const std::vector<uint8_t>& request, std::vector<ui
 	// device busy) is thrown away, which matters most on first wiring-up.
 	if (response[1] & 0x80) {
 		uint8_t err = (response.size() >= 4) ? response[3] : 0;   // vendor layout: ERR at [3]
+		last_fail_ = Fail::DeviceRejected;
 		LOG_ERR(_log_tag, "device rejected FC 0x%02X: err 0x%02X (%s)",
 		        (unsigned)(response[1] & 0x7F), (unsigned)err, qx_err_name(err));
 		return false;
 	}
+	last_fail_ = Fail::None;
 	return true;
+}
+
+//=========== 交易層重試 ===========
+// 見 QX_DO24.h 的說明：實測寫入約 20% 無回應，而失敗時模組會**保持前一個輸出**
+// （通訊斷掉時螺旋槳不會停）。所以重試放這一層，所有呼叫端一律受保護。
+//
+// 只重試傳輸層失敗。device rejected 是模組明確表態，重試沒有意義。
+// 對這些暫存器而言重試是冪等的：重送同一個「設成 X」不會累積效果。
+bool QX_DO24::sendAndReceive(const std::vector<uint8_t>& request, std::vector<uint8_t>& response) {
+	const int kMaxAttempts = 3;
+	const int kBackoffMs   = 40;   // 讓 .22 bus 上的其他裝置有機會把當下那筆交易做完
+
+	for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+		if (sendAndReceiveOnce_(request, response)) {
+			if (attempt > 1)
+				LOG_INF(_log_tag, "recovered on attempt %d/%d", attempt, kMaxAttempts);
+			return true;
+		}
+		if (last_fail_ == Fail::DeviceRejected) return false;   // 重試無意義
+		if (attempt < kMaxAttempts) {
+			LOG_WRN(_log_tag, "attempt %d/%d failed (%s) — retrying in %d ms",
+			        attempt, kMaxAttempts, last_fail_str(), kBackoffMs);
+			std::this_thread::sleep_for(std::chrono::milliseconds(kBackoffMs));
+		}
+	}
+	LOG_ERR(_log_tag, "all %d attempts failed (%s)", kMaxAttempts, last_fail_str());
+	return false;
+}
+
+const char* QX_DO24::last_fail_str() const {
+	switch (last_fail_) {
+		case Fail::None:           return "none";
+		case Fail::NoReply:        return "no_reply_timeout";
+		case Fail::TooShort:       return "reply_too_short";
+		case Fail::CrcMismatch:    return "crc_mismatch";
+		case Fail::DeviceRejected: return "device_rejected";
+		case Fail::OutOfRange:     return "param_out_of_safety_range";
+		case Fail::NotReady:       return "client_not_set_or_bad_channel";
+	}
+	return "unknown";
 }
 
 //=========== utility: Modbus CRC ===========
