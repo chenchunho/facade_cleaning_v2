@@ -117,6 +117,53 @@ void DM2J_RS570::PR_trigger_sync(int pr_num)
 //=========== control: PR Move (cm) ===========
 
 // mode => 0 relative, 1 absolute
+//=========== 機構標定：cm <-> pulse ===========
+// [2026-08-28] 這一層以前不存在，cm↔pulse 直接寫死「1 圈 = 1 cm」散在 5 個地方。
+// 上滑台實測 7.731 cm/圈（皮帶軸，三點量測 + 一次預測性驗證命中），
+// 也就是每個 cm 指令都走了 7.7 倍 —— 而驅動器只數脈衝，回報的永遠是漂亮的
+// 整數，log、狀態、位置回讀三邊都看不出來。
+
+void DM2J_RS570::set_lead_cm_per_rev(double cm_per_rev)
+{
+	if (cm_per_rev <= 0.0) {
+		LOG_ERR(_log_tag, "set_lead_cm_per_rev(%.4f) ignored — must be > 0", cm_per_rev);
+		return;
+	}
+	lead_cm_per_rev_ = cm_per_rev;
+	LOG_INF(_log_tag, "lead = %.4f cm/rev", cm_per_rev);
+}
+
+void DM2J_RS570::set_travel_limit_cm(double lo_cm, double hi_cm)
+{
+	travel_lo_cm_ = lo_cm;
+	travel_hi_cm_ = hi_cm;
+	if (lo_cm == hi_cm) LOG_INF(_log_tag, "travel limit disabled");
+	else                LOG_INF(_log_tag, "travel limit = [%.2f, %.2f] cm", lo_cm, hi_cm);
+}
+
+int DM2J_RS570::cm_to_pulse_(double cm, uint16_t ppr) const
+{
+	return (int)(cm / lead_cm_per_rev_ * (double)ppr);
+}
+
+double DM2J_RS570::pulse_to_cm_(int32_t pulse, uint16_t ppr) const
+{
+	if (ppr == 0) return 0.0;
+	return (double)pulse / (double)ppr * lead_cm_per_rev_;
+}
+
+// Reject instead of grinding. Deliberately LOUD: the whole point is that an
+// out-of-range command previously produced no error anywhere — not from the
+// drive (it just counts pulses), not from the app, not in the log.
+bool DM2J_RS570::travel_reject_(double cm, const char* what)
+{
+	if (travel_lo_cm_ == travel_hi_cm_) return false;          // 停用
+	if (cm >= travel_lo_cm_ && cm <= travel_hi_cm_) return false;
+	LOG_ERR(_log_tag, "%s %.3f cm REJECTED — outside travel limit [%.2f, %.2f]",
+	        what, cm, travel_lo_cm_, travel_hi_cm_);
+	return true;
+}
+
 bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec)
 {
 	// Modbus read with up to 3 attempts — absorbs transient gateway / bus
@@ -128,6 +175,10 @@ bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int ac
 		}
 		return true;                                    // failed after retries
 	};
+
+	// [2026-08-28] Range check BEFORE any bus traffic — cheapest place to stop a
+	// command that would drive the mechanism into its end stop.
+	if (travel_reject_(pos_cm, "PR_move_cm")) return true;
 
 	// --- pulse-per-rev (with retry) ---
 	uint16_t ppr = 0;
@@ -142,8 +193,8 @@ bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int ac
 		return true;
 	}
 
-	const int pos_pulse = (int)(pos_cm * ppr);
-	LOG_DBG(_log_tag, "PR_move_cm %.3f cm -> %d pulses (PPR=%u)", pos_cm, pos_pulse, ppr);
+	const int pos_pulse = cm_to_pulse_(pos_cm, ppr);
+	LOG_DBG(_log_tag, "PR_move_cm %.3f cm -> %d pulses (PPR=%u, lead=%.4f)", pos_cm, pos_pulse, ppr, lead_cm_per_rev_);
 
 	// Expected absolute encoder position after the move — used by the
 	// !ever_busy check to tell a genuine no-op from a dropped trigger.
@@ -165,7 +216,7 @@ bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int ac
 		}
 		expected_pos = start_pos + pos_pulse;
 	}
-	const int32_t pos_tol = (int32_t)(0.3 * ppr);   // ~0.3 cm — far below any real move delta
+	const int32_t pos_tol = (int32_t)(0.3 / lead_cm_per_rev_ * ppr);   // ~0.3 cm — far below any real move delta
 
 	// Trigger + wait, with re-trigger retry if the trigger has no effect.
 	const int trigger_retry_max = 3;
@@ -263,10 +314,11 @@ bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int ac
 
 bool DM2J_RS570::PR_move_cm_nowait(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec)
 {
+	if (travel_reject_(pos_cm, "PR_move_cm_nowait")) return true;
 	uint16_t ppr = 10000;
 	// PPR skipped to save one round-trip; assumes default 10000
-	int pos_pulse = (int)(pos_cm * ppr);
-	LOG_DBG(_log_tag, "PR_move_cm_nowait %.3f cm -> %d pulses (PPR=%u)", pos_cm, pos_pulse, ppr);
+	int pos_pulse = cm_to_pulse_(pos_cm, ppr);
+	LOG_DBG(_log_tag, "PR_move_cm_nowait %.3f cm -> %d pulses (PPR=%u, lead=%.4f)", pos_cm, pos_pulse, ppr, lead_cm_per_rev_);
 
 	PR_move_set(pr_num, mode, rpm, pos_pulse, acc, dec);
 	PR_trigger(pr_num);
@@ -275,9 +327,10 @@ bool DM2J_RS570::PR_move_cm_nowait(int pr_num, int mode, int rpm, double pos_cm,
 
 bool DM2J_RS570::PR_move_cm_set(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec)
 {
+	if (travel_reject_(pos_cm, "PR_move_cm_set")) return true;
 	uint16_t ppr = 10000;
-	int pos_pulse = (int)(pos_cm * ppr);
-	LOG_DBG(_log_tag, "PR_move_cm_set %.3f cm -> %d pulses (PPR=%u)", pos_cm, pos_pulse, ppr);
+	int pos_pulse = cm_to_pulse_(pos_cm, ppr);
+	LOG_DBG(_log_tag, "PR_move_cm_set %.3f cm -> %d pulses (PPR=%u, lead=%.4f)", pos_cm, pos_pulse, ppr, lead_cm_per_rev_);
 
 	PR_move_set(pr_num, mode, rpm, pos_pulse, acc, dec);
 	return false;
@@ -636,7 +689,7 @@ bool DM2J_RS570::read_position_cm(double& cm)
 	if (read_motor_position(pos)) return true;
 	if (read_pulse_per_rev(ppr) || ppr == 0) return true;
 
-	cm = (double)pos / (double)ppr;
+	cm = pulse_to_cm_(pos, ppr);
 	return false;
 }
 

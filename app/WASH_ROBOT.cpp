@@ -153,7 +153,13 @@ bool WashRobot::init() {
         std::cerr << "[FATAL] DM2J arm rail (slave " << DM2J_ARM << " @ cli_20_) init fail\n";
         return true;
     }
-    std::cout << "[OK] DM2J arm rail (slave " << DM2J_ARM << " @ cli_20_)\n";
+    // [2026-08-28] 機構標定必須緊接在 init 之後、任何移動之前 —— 漏掉這兩行，
+    // 每個 cm 指令就會走 7.7 倍並一路撞到行程底，而且不會有任何錯誤訊息。
+    D_(DM2J_ARM).set_lead_cm_per_rev(ARM_RAIL_LEAD_CM_PER_REV);
+    D_(DM2J_ARM).set_travel_limit_cm(0.0, ARM_RAIL_TRAVEL_MAX_CM);
+    std::cout << "[OK] DM2J arm rail (slave " << DM2J_ARM << " @ cli_20_)"
+              << " lead=" << ARM_RAIL_LEAD_CM_PER_REV << " cm/rev"
+              << " travel<=" << ARM_RAIL_TRAVEL_MAX_CM << " cm\n";
 
     // ZDT slave 5..8 on cli_20_ ([v2] 4 cups: right{5,6} / left{7,8})
     // [2026-08-27 per user] slave 1-4 → 5-8，見 WASH_ROBOT.h CUP_SLAVE_FIRST。

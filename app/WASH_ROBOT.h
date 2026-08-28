@@ -556,6 +556,26 @@ private:
     // 掛回 cli_20_（在此之前程式對 cli_22_ 發指令，每次掃動都是 writeMulti no
     // response）。slave 號維持 14 —— .20 上只有 ZDT 5~8 與 PQW 12，不撞號。
     // 沿革：cli_20_ slave 5（~2026-05-26）→ cli_22_ slave 14 → cli_20_ slave 14。
+    // ---- 上滑台機構標定（2026-08-28 實機量測）--------------------------------
+    // 🔴 這是皮帶軸，不是螺桿。程式在此之前一路假設「1 圈 = 1 cm」，於是每一個
+    //    cm 指令都走了 7.7 倍 —— `ARM_SWEEP_CM = 17` 實際會下 131 cm 的行程指令，
+    //    而滑台總行程只有 50 cm，也就是每一次掃動都是一路撞到底。
+    //    完全隱形：驅動器只數脈衝、回報永遠是漂亮的整數；`do_arm_sweep_()` 成功
+    //    路徑一個字都不印；而上滑台在 2026-08-28 之前掛在錯的 gateway、三天沒動。
+    //
+    // 量測方法（三點 + 一次預測性驗證，皆為實機拿尺量）：
+    //    指令 1.0 → 7 cm ／ 2.0 → 15 cm ／ 5.0 → 38 cm
+    //    最小平方：實際 = 7.731 × 指令 − 0.615   （殘差全在 ±0.15 cm 內）
+    //    截距 −0.6 cm = 皮帶自硬限位起步的鬆弛量（backlash）
+    //    驗證：反推「物理 20 cm」→ 指令 2.666 → 實際量到 20 cm ✅
+    // 📌 想把導程釘得更精確，最準的是數皮帶輪齒數 × 齒距（整數，無讀尺誤差）。
+    static constexpr double ARM_RAIL_LEAD_CM_PER_REV = 7.731;
+
+    // 滑台總行程（實機目測 50 cm）。留 2 cm 餘裕給鬆弛量與量測誤差。
+    // 🔴 這個上限的價值不在「限制」，在於**超範圍會被明確拒絕並記錄** ——
+    //    2026-08-28 之前，下一個超出行程兩倍的指令，三邊都沒有任何抗議。
+    static constexpr double ARM_RAIL_TRAVEL_MAX_CM   = 48.0;
+
     static constexpr int DM2J_ARM         = 14;   // cli_20_ (2026-08-28 per user)
 
     // Pusher motion
@@ -744,6 +764,10 @@ private:
     //   ⚠ 改 DM2J_ARM_STEP_SWEEP_CM 或 _RPM 時，必須用上面的公式重算這個值。
     // ⚠ 純計算估計值，未實機驗證；跟 ARM_SWEEP_EST_MS 分開設，避免沿用 55cm
     // 那組估計值讓同步步伐的滑台掃動平白多等好幾秒（沒有實際意義的等待）。
+    // 🔴 [2026-08-28 晚] 這個 4500 是用「1cm/rev 螺桿」算的，**前提是錯的**（實測 7.731 cm/rev 皮帶軸）。
+    //    正確值：250rpm × 7.731 = 32.2 cm/s → 17cm 只需 528ms，加斜坡與緩衝約 650ms。
+    //    **刻意暫不調小**：估太長只是多等（安全），估太短會把移動打斷（危險），
+    //    而換算修正本身還沒在 bench 實跑過。等新換算驗證通過再一起重調。
     static constexpr int    DM2J_ARM_STEP_SWEEP_EST_MS = 4500;   // 2026-08-28: 1000→4500（17cm 行程重算）
 
     // [2026-08-28 per user] DEPLOY 完成後、讓上滑台開始移動前的靜置時間。
@@ -779,6 +803,8 @@ private:
     // waits longer than the (much shorter) real 10cm move actually needs, which
     // is safe (no correctness impact), just not time-optimal. Tighten this if
     // the extra wait is annoying on the bench.
+    // 🔴 同上：3900 依「1cm/rev」而來。實際 1000rpm × 7.731 = 128.8 cm/s → 17cm 僅 132ms。
+    //    暫不調小，理由同 DM2J_ARM_STEP_SWEEP_EST_MS。
     static constexpr int ARM_SWEEP_EST_MS          = 3900;
 
     // [2026-05-28] Sweep obstacle monitor (Option A + C).
