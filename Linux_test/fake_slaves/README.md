@@ -1,0 +1,56 @@
+# fake_slaves — 不用硬體驗證 driver 的回覆處理
+
+`user_lib/` 的 driver 只有接上真裝置才跑得到「收到壞幀會怎樣」的路徑，
+而那正是最容易出事、也最少被測到的地方。這裡的假從站在 `127.0.0.1` 上
+提供同樣的線路格式，並且**可以故意把回覆弄壞**。
+
+## 為什麼會有這個目錄
+
+2026-08-28 的 driver 稽核發現 `SD76_length_meters` 與 `DSZL_107` 都會接受
+壞掉的 Modbus 幀，並把長度欄位直接拿去 `memcpy` 進呼叫端的堆疊緩衝
+（2~64 位元組）。實測：SD76 `byteCount=0xFF` → **SIGSEGV**；
+DSZL `bc=100` → **SIGBUS**。
+
+兩支都修了，而且**先對未修補的版本跑一次證明缺陷存在，再跑修補後的版本**。
+📌 **編譯過不等於驗證過**——這個目錄存在就是為了讓「真的拿它做一次事」有工具。
+
+## 用法
+
+```bash
+# 1) 開假從站（背景），2) 跑測試程式，3) 等從站收工
+python3 fake_rtu.py --mode badcrc --slave 1 --port 14001 &
+sleep 0.4 && ./test_sd76 badcrc
+```
+
+| 檔案 | 用途 |
+|---|---|
+| `fake_rtu.py` | **Modbus RTU over TCP**——`user_lib/` 除 DSZL 外全部走這個（USR-TCP232 透傳） |
+| `fake_dszl_tcp.py` | **Modbus TCP（MBAP）**——只有 `DSZL_107`（X518 原生 :502） |
+| `test_<device>.cpp` | 各 driver 的測試程式，一支一個 |
+
+編譯測試程式（在 Pi 上，路徑依實際擺放調整）：
+
+```bash
+g++ -std=c++17 -O2 -I../../user_lib -I../../transport -o test_sd76 \
+    test_sd76.cpp ../../user_lib/SD76_length_meters.cpp ../../transport/TCP_client.cpp -lpthread
+```
+
+## 🔴 兩個會讓測試「全部通過卻什麼都沒測到」的陷阱
+
+**① 先確認 driver 的 `init()` 會不會 probe。**
+會 probe 的話，第 1 個請求是 probe，必須正常回覆否則 `init()` 就先失敗了，
+故障要放在第 2 個請求（`--fault-from 2`）。
+`SD76` 有兩個 overload：`init(TCP_client&, ...)` **會** probe、
+`init(ip, port, ...)` **不會**。第一版測試用錯 overload，結果五個故障情境
+一個都沒被觸發、卻全部「通過」。
+
+**② 溢位情境的 byte count 必須落在窗口內。**
+窗口＝「幀還塞得進 driver 的收包緩衝」且「payload 超過**呼叫端**的緩衝」。
+取極端值（`0xFF`）通常只會被既有的長度檢查擋掉，看起來像「這裡沒缺陷」——
+DSZL 就是這樣差點被判無缺陷，`bc=255` 回 FAIL，換成 `bc=100` 才 SIGBUS。
+用 `--overflow-bc` 指定。
+
+## 限制
+
+- 只驗**協定層**的處理，不驗裝置語意（暫存器值對不對、時序對不對）
+- 不取代實機驗證。這裡通過只代表「壞幀不會把程式打壞」
