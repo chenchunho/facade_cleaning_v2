@@ -161,7 +161,7 @@ bool WashRobot::init() {
               << " lead=" << ARM_RAIL_LEAD_CM_PER_REV << " cm/rev"
               << " travel<=" << ARM_RAIL_TRAVEL_MAX_CM << " cm\n";
 
-    // ZDT slave 5..8 on cli_20_ ([v2] 4 cups: right{5,6} / left{7,8})
+    // ZDT slave 5..8 on cli_20_ ([v2] 4 cups: right{5,7} / left{6,8}，2026-08-28 修正)
     // [2026-08-27 per user] slave 1-4 → 5-8，見 WASH_ROBOT.h CUP_SLAVE_FIRST。
     for (int i = CUP_SLAVE_FIRST; i <= CUP_SLAVE_LAST; ++i) {
         if (Z_(i).init(cli_20_, i, dbg)) {
@@ -6268,15 +6268,13 @@ std::vector<int> WashRobot::group_slaves_(const std::string& group) const {
     // Slave numbers below are the CURRENT ones (2026-08-27: 1-4 → 5-8).
     //
     // ⚠⚠ [2026-08-28 user 指出] "right"/"left" 這兩組**跟實體不符**。
-    // 實體是 {5,7} 同一側、{6,8} 同一側，所以下面的 "right"={5,6} 實際上是
-    // 「一邊各拿一顆」，"left"={7,8} 同理。**不要把這兩個 group 當成真的分側**。
-    // 之前這裡寫著「right/left still genuinely address only that side's two
-    // motors」——那句話是錯的，已刪。
-    // 完整說明與修正前提見 WASH_ROBOT.h 的 ZDT_RF1 註解。
-    if (group == "right")       all = {ZDT_RF1, ZDT_RF2};                     // {5,6} ⚠ 非同側
-    else if (group == "left")   all = {ZDT_LF1, ZDT_LF2};                     // {7,8} ⚠ 非同側
+    // ✅ [2026-08-28] 分側已修正：right={5,7}、left={6,8}（實體排列見 WASH_ROBOT.h
+    //    的 ZDT_RF1 註解）。在此之前 right 是 {5,6}＝「一邊各拿一顆」，
+    //    所以任何分側判準都算不準；那段警告已隨常數修正一併移除。
+    if (group == "right")       all = {ZDT_RF1, ZDT_RF2};                     // {5,7} 右上/右下
+    else if (group == "left")   all = {ZDT_LF1, ZDT_LF2};                     // {6,8} 左上/左下
     else if (group == "all" || group == "feet")
-                                all = {ZDT_RF1, ZDT_RF2, ZDT_LF1, ZDT_LF2};   // {5,6,7,8}
+                                all = {ZDT_RF1, ZDT_RF2, ZDT_LF1, ZDT_LF2};   // {5,7,6,8}
     if (disabled_zdt_slaves_.empty()) return all;
     std::vector<int> out;
     for (int s : all)
@@ -6290,10 +6288,12 @@ int WashRobot::group_valve_ch_(const std::string& group) {
     return -1;
 }
 
-// Per-slave preset extend pulse. [v2] only feet cups 1-4 remain: upper(1,3) / lower(2,4).
+// Per-slave preset extend pulse. [v2] 只剩 4 顆吸盤：上面那對 / 下面那對。
+// 📌 這裡吃的是 RF1/LF1（上）與 RF2/LF2（下），所以 2026-08-28 修正左右歸屬時
+//    這段一行都不用改 —— 結構本來就對，錯的只有常數的值。
 int WashRobot::preset_extend_pulse_for_slave_(int slave) const {
-    if (slave == ZDT_RF1 || slave == ZDT_LF1) return PUSHER_EXTEND_FEET_PULSE;          // upper 1,3
-    if (slave == ZDT_RF2 || slave == ZDT_LF2) return PUSHER_EXTEND_FEET_PULSE_LOWER;    // lower 2,4
+    if (slave == ZDT_RF1 || slave == ZDT_LF1) return PUSHER_EXTEND_FEET_PULSE;          // upper = 5,6
+    if (slave == ZDT_RF2 || slave == ZDT_LF2) return PUSHER_EXTEND_FEET_PULSE_LOWER;    // lower = 7,8
     return PUSHER_EXTEND_PULSE;   // fallback
 }
 

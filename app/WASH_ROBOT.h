@@ -543,9 +543,14 @@ private:
     static constexpr bool PWM_ENABLED = true;
     static constexpr int  PWM_SLAVE   = 9;   // 2026-08-28 per user: 6→9（模組端已改）
 
-    // ZDT pusher slave IDs — [v2] 4 cups only: right{1,2} / left{3,4}
-    //   right foot: upper = slave 1, lower = slave 2   (valve CH1)
-    //   left  foot: upper = slave 3, lower = slave 4   (valve CH3)
+    // ZDT pusher slave IDs — [v2] 只剩 4 顆吸盤推桿。
+    // 🔴 [2026-08-28 per user 確認] 實體排列（**由上往下看**）：
+    //
+    //          右      左
+    //     上    5       6
+    //     下    7       8
+    //
+    //   → 右側 = {5, 7}（上、下）；左側 = {6, 8}（上、下）
     // v1 body{5,6,7,8} + center{9} cups retired (2026-07-07).
     // [2026-08-27 per user] 4 顆吸盤的 slave ID 由 1-4 改為 5-8。
     // ZDT 推桿與 JC100 真空表共用同一組編號（推桿 slave N 末端的吸盤 = 真空表
@@ -559,18 +564,20 @@ private:
     //    會逼它自己寫死 1..4，而那正是 zdt_pusher / zdt_disable / zdt_enable
     //    在 08-27 改號後全部失效的原因。
 
-    // ⚠⚠ 這組左右歸屬跟實體不符（2026-08-28 user 指出）⚠⚠
-    //   程式碼假設：右={5,6}、左={7,8}
-    //   實體現況：  {5,7} 同一側、{6,8} 同一側
-    // 也就是這裡的「右側」實際上是「一邊各拿一顆」。尚未修正，因為要改對需要
-    // 知道 (a){5,7} 是左還是右、(b) 每側裡誰在上——兩者都會影響吊機繩對應
-    // (pay_out_right/left) 與伸出長度預設，猜錯是掉落風險。
+    // ✅ [2026-08-28] 左右歸屬已修正。原本是 RF={5,6} / LF={7,8}，那把「兩顆在上面的」
+    //    當成了右側 —— 於是每一個「分側」判準（尤其是交替步伐的「錨定側是否還吸著」）
+    //    實際上都在看「一邊各一顆」，等於沒有保護。
     //
-    // 在修正之前：**不要使用交替步伐**（do_step_down_/do_step_up_）。它的
-    // 「錨定側是否還吸著」判斷建立在這組歸屬上，歸屬錯就等於沒有保護。
-    // 同步步伐 4 顆一起動、不依賴分側錨定，受影響較小（見 group_seal_ok_）。
-    static constexpr int ZDT_RF1 = 5, ZDT_RF2 = 6;  // ⚠ 實體上 5 與 6 不同側
-    static constexpr int ZDT_LF1 = 7, ZDT_LF2 = 8;  // ⚠ 實體上 7 與 8 不同側
+    // 📌 **程式的結構原本就是對的，錯的只有這四個數字。** RF1/LF1 是「上面那對」、
+    //    RF2/LF2 是「下面那對」（見 preset_extend_pulse_for_slave_），改成下面這組之後
+    //    分側、上下伸出長度、吊機繩對應（pay_out_right/left）、錨定檢查
+    //    **31 處使用點全部自動跟著正確**，不需要逐一修改。
+    //
+    // 🔴 **尚未在實機驗證**：修正依據是 2026-08-28 使用者口頭確認的實體排列，
+    //    程式尚未在機器上跑過交替步伐。**第一次跑 do_step_down_/do_step_up_ 要有人在旁邊**，
+    //    並先確認「放開哪一側時，另一側的兩顆確實還吸著」與觀察到的一致。
+    static constexpr int ZDT_RF1 = 5, ZDT_RF2 = 7;  // 右：上 5 / 下 7
+    static constexpr int ZDT_LF1 = 6, ZDT_LF2 = 8;  // 左：上 6 / 下 8
 
     // [2026-08-28 per user]「4 顆裡有 2 顆吸住就算 OK」——取代原本的「每側各 ≥1」。
     // 改這個的直接原因：上面那組左右歸屬是錯的，任何「分側」判準都算不準，
@@ -636,8 +643,8 @@ private:
     // ⚠ 另注意：do_cross_obstacle_ 的 2×preset = 24 cm **已超出 20 cm 行程**。
     // 該功能的 GUI 入口已於 2026-08-26 移除，後端仍在——不要用 raw command 呼叫
     // cross_obstacle_*，否則推桿會直接撞底。
-    static constexpr int PUSHER_EXTEND_FEET_PULSE       = 36000;  // feet upper (slave 5,7) 12.0 cm (2026-08-27: 24300→36000 per user；2026-07-27: 統一兩顆都 8.1cm；慣例 3000 pulse=1cm)
-    static constexpr int PUSHER_EXTEND_FEET_PULSE_LOWER = 36000;  // feet lower (slave 6,8) 12.0 cm (2026-08-27: 24300→36000 per user，與 upper 保持一致)
+    static constexpr int PUSHER_EXTEND_FEET_PULSE       = 36000;  // feet upper (slave 5,6) 12.0 cm ([2026-08-28] 原註解寫 5,7 —— 那是「右側」不是「上面」) (2026-08-27: 24300→36000 per user；2026-07-27: 統一兩顆都 8.1cm；慣例 3000 pulse=1cm)
+    static constexpr int PUSHER_EXTEND_FEET_PULSE_LOWER = 36000;  // feet lower (slave 7,8) 12.0 cm ([2026-08-28] 原註解寫 6,8 —— 那是「左側」不是「下面」) (2026-08-27: 24300→36000 per user，與 upper 保持一致)
     static constexpr int PUSHER_EXTEND_BODY_PULSE       = 34000;  // body upper (slave 5,6) ~11.3 cm (2026-05-28: 30000→36000 +6000=+2cm; 2026-05-28i: 36000→33000 -3000=-1cm，bench 顯示 36000+over 害 Phase 1 fast 700rpm 撞 wall peakI 1500mA+；2026-05-29: 33000→34000 +1000=+0.8cm，邊際提速 iter loop 收斂)
     static constexpr int PUSHER_EXTEND_BODY_PULSE_SHORT = 35400;  // body lower (slave 7,8) ~11.8 cm (2026-05-28: 29400→32400 +3000=+1cm；2026-05-28h: 32400→35400 +3000=+1cm，bench log body lower wall at 42798、SHORT 仍不夠導致 iter 0 plateau,加深一輪)
     static constexpr int PUSHER_RETRACT_PULSE      = 300;   // 收腳目標 (2026-07-14: 0→300 ≈0.1cm)。高速收到 0=機械原點會撞 hardstop「叩」一聲；停在原點前 0.1cm 避免撞擊。<FAKE-DONE 容差 50°(500pulse)、300pulse=30° 仍算收好
