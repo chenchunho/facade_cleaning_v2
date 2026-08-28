@@ -320,10 +320,11 @@ main 在 `[2026-08-28b]` 新增的 `TCP_client::sendAndReceiveQuiet()` 帶著 `s
   **與它自己那個 commit 的程式改動相反**，已就地更正並補進 `CLAUDE.md` 的 `.claude/` 索引表。
 
 ### 待完成
-- 🔴 **`~/bringup/` 的二進位是合併前的**（08-28 12:01 建，合併在 12:30）→ 上機前要重建，
-  否則跑到的是沒有 main 那批 bench 修正的版本
-- 🔴 **`fix/driver-crc` 尚未合併 main**，它還停在 `refactor/app-layer` 的舊點上；
-  該分支要上機前得做同一次合併（且同樣要檢查語意漏接）
+- ✅ **`~/bringup/` 已重建（08-28 12:42/12:43）** —— 兩台的 `.out` md5 皆已改變，
+  確認是合併後的版本；`~/projects/` 時間戳全程未變
+- ✅ **`fix/driver-crc` 已合併 main**（merge `f33ccfe`，兩台編譯通過），
+  並在該分支修掉一個「修補本身沒生效」的問題（見下方待辦與該分支 changelog `-drv3`）
+- 🔴 **上機仍是上整理分支**（`~/bringup/` 放的就是它）；driver 分支的行為改變不與這次混在一起
 - 🟡 `app/WASH_ROBOT.h:1082` 成員註解仍寫「`.22 = ... arm-rail ...`」，已過期（屬 main 那批的既有債）
 - 🟡 兩台 Pi 的 `~/merge_check_20260828/` 是這次的拋棄式編譯資料夾，確認不需要後可刪
 
