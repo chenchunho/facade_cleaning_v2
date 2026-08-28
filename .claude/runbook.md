@@ -276,26 +276,73 @@ right 同理，另加兩行 `[WARN] ... init failed` 路徑（正常不會出現
 
 ### C1. Washrobot 接受（`:5001`）
 
-```
-init                           # Phase 2：收輪 → 泵浦 ON → 推桿伸 → IMU baseline
-attach                         # Phase 3：中心推桿伸 → 三區閥開 → 真空驗證
-detach                         # 脫附回 Ready
-step_down                      # 單步（腳下移 + 身體下移 + 清洗一次）
-run <n>                        # 連續 n 步
-pause / resume                 # 暫停 / 恢復
-emergency_stop                 # 立即停機（ZDT/DM2J 完成當前動作）
-reset                          # Error → Idle（需確認現場安全）
-ping                           # watchdog
-status                         # 查狀態
-vacuum <g> <on|off>            # g = feet / body / center / all
-pusher <g> <extend|retract>    # g = feet / body / center
-move <motor> <cm>              # motor = left_foot / right_foot / arm
-arm_sweep                      # 執行一次上滑台清洗來回
-tilt_mode <on|off>             # Phase 5 平衡校正模式（僅 Roll）
-confirm_balance <yes|no>       # 回應 EVT balance_ask
-return_home <cm>               # Phase 6 召回（吸盤脫附 → 推桿收 → crane 放繩 cm）
-shutdown                       # 關閉主程式
-```
+> 🔴 **2026-08-28 由分派器（`facade_cleaning_v2/main.cpp`）逐一對照重寫。**
+> 舊版列 18 個指令，其中 **3 個早已 `removed_in_v2`**（`move` / `tilt_mode` /
+> `confirm_balance`），而**漏掉約 48 個實際可用的**——包括現在真正在跑的
+> `step_down_sync` 同步步伐、整個 `arm_*` 手臂家族、`pwm`、`realign`、`zdt_*`。
+> 照舊版操作的人會送出必定失敗的指令，同時不知道能用的東西。
+> 📌 **改指令時請一併更新這裡**；分派器現有 81 個分支、其中 **15 個是 `removed_in_v2` 墓碑**。
+
+#### 步伐（最常用）
+| 指令 | 說明 |
+|---|---|
+| `step_down_sync` / `step_up_sync` | **同步步伐**——4 顆吸盤一起動，不依賴分側錨定 |
+| `step_down` / `step_up` | **交替步伐**——🔴 依賴左右分側；2026-08-28 才修好歸屬，**尚未實機驗證** |
+| `step_down_with_sweep` / `step_up_with_sweep` | 步伐 + 清洗 |
+| `step_down_sweep_after_feet` / `step_up_sweep_after_feet` | 清洗時機在伸腳之後 |
+| `step_down_sweep_ba` / `step_up_sweep_ba` | 清洗時機：before/after 變體 |
+| `run <steps> [cm] [down\|up] [alt\|sync]` | 連續 n 步（`alt`＝交替、`sync`＝同步） |
+| `cross_obstacle_down` / `cross_obstacle_up` | 跨越障礙 |
+| `pause` / `resume` / `continue` / `skip` | 流程控制 |
+| `emergency_stop` | 立即停機 |
+| `reset` / `recover` | Error → Idle（需確認現場安全） |
+
+#### 吸附與推桿
+| 指令 | 說明 |
+|---|---|
+| `attach` / `detach` | 吸附 / 脫附 |
+| `vacuum <group> <on\|off>` | 真空閥（⚠️ v2 只剩單一閥，左右已合併於 CH1） |
+| `pusher <group> <extend\|retract>` | 整組推桿 |
+| `zdt_pusher <5..8> <extend\|retract>` | **單支**推桿。⚠️ `extend` 走的是 `disable_seal` **迭代尋封序列**（可推到 ~47994 脈衝／16cm），**不是移動到預設的 36000** |
+| `zdt_disable <5..8>` / `zdt_enable <5..8>` | 停用／恢復單支推桿（故障時用） |
+| `zdt_zero <right\|left\|all>` | 歸零 |
+| `zdt_release_stall` | 解除堵轉 |
+| `realign` | 四腳位置重新對齊 |
+
+> 🔴 **slave 編號是 5~8，不是 1~4**（2026-08-27 改號）。實體排列（由上往下看）：
+> 右 = {5 上, 7 下}、左 = {6 上, 8 下}。
+
+#### 手臂與清洗
+| 指令 | 說明 |
+|---|---|
+| `arm_init` / `arm_park` / `arm_status` | 手臂校正 / 收回 / 狀態 |
+| `arm_deploy <wall_mm> <LEFT\|CENTER\|RIGHT>` | 手臂貼牆 |
+| `arm_sweep` | 上滑台掃動一次（開刷、0→17cm→0） |
+| `arm_clean_sweep <wall_mm> <rounds>` | 連續清洗 |
+| `arm_clean_sweep_dry` | 乾式清洗（不噴水） |
+| `brush <on\|off>` / `pump <on\|off>` / `water_pump <on\|off>` / `water_inlet <on\|off>` | 刷子 / 泵浦 / 水路 |
+| `water_level` | 水箱水位 |
+| `pwm <set\|save\|status>` | 螺旋槳 PWM。`set <ch> <hz> <control> <duty%>`；🔴 **左右螺旋槳共用 CH1**，duty 5%=停 / 10%=全速、鎖 50Hz |
+
+#### 狀態、設定與腳本
+| 指令 | 說明 |
+|---|---|
+| `ping` / `status` | 存活 / 狀態（⚠️ status 的壓力值**看不出是新鮮值還是 timeout 快取**） |
+| `get_settings` / `set_setting <key> <value>` / `save_settings` | 執行期設定 |
+| `set_first_step <left\|right>` / `set_follower_mode <imu\|meter>` | 步伐參數 |
+| `imu_guard <on\|off>` / `imu_zero` | IMU 保護 / 歸零 |
+| `crane_attached <on\|off>` / `arm_attached <on\|off>` | 子系統啟用旗標 |
+| `save_script <name> <csv>` / `load_script <name>` / `list_scripts` / `delete_script <name>` | 腳本 |
+| `run_script [up\|down] [alt\|sync] <csv>` / `run_saved <name> [up\|down] [alt\|sync]` | 執行腳本 |
+| `return_home <descent_cm>` | 召回 |
+| `init` / `shutdown` | 初始化 / 關閉主程式 |
+| `run_depth_avoid` / `depth_avoid_continue <cm>` / `depth_avoid_stop` | 深度避障（⚠️ 相機路線已作廢，這幾個的實際可用性未驗） |
+
+#### ⚰️ 已移除（送出只會得到 `ERR removed_in_v2`，**不要再寫進文件**）
+`move`、`tilt_mode`、`confirm_balance`、`wheels`、`wheels_attached`、
+`dm2j_group`、`dm2j_zero`、`obstacle_check`、`obstacle_detect`、`obstacle_response`、
+`run_avoid`、`balance_calibrate_start`、`balance_calibrate_record`、
+`balance_calibrate_abort`、`balance_calibrate_status`
 
 ### C2. Crane 接受（`:5002`）
 
