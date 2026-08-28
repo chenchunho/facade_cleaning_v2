@@ -34,7 +34,7 @@
 
 | 優先度 | 項目 | 涉及檔案 | 現況 | 來源與原始日期 |
 |---|---|---|---|---|
-| 🔴 | `readRegister()` 不驗 reply CRC、不驗 byteCount → 壞掉的 Modbus reply 被當有效值往上傳（bench 已造成實體損害，詳見下方） | `user_lib/SD76_length_meters.cpp` | **未修** ✔ | mailbox 2026-05-14 |
+| 🟢 | ~~`readRegister()` 不驗 reply CRC~~ **2026-08-28 已修**（分支 `fix/driver-crc`）：補 slave ID／FC／`byteCount == count*2`／幀長／CRC 五項。實測缺陷比原記載更嚴重——`byteCount=0xFF` 會 **SIGSEGV**（堆疊覆寫），不只是髒資料。🔴 **尚未部署、尚未上實機** | `user_lib/SD76_length_meters.cpp` | **已修** ✔（假從站 5/5 通過） | mailbox 2026-05-14 |
 | 🔴 | 緊急收繩按鈕實際上**沒有張力保護**，跟 `motion_flow.md` §8 的安全性描述相反 | `Crane_control_PI/main.cpp` `cmd_manual()` | **未修** ✔ | ONBOARDING §6 |
 | 🔴 | `cmd_side_measured()` 進場沒重置 `abort_flag` → 被 stop 過一次後所有 v2 step 指令永久回 `ERR aborted`，只能重開程式 | `Crane_control_PI/main.cpp:2800` | **未修** ✔ | ONBOARDING §1 ＋ work_log 2026-07-15 |
 | 🔴 | DSZL-107 scale factor 仍是 placeholder（driver `-0.01` / 廠商說 `0.02`），張力門檻等於沒有基準；#1 只有 bench 手拉估值、#2 完全沒校 | `user_lib/DSZL_107.cpp`、`Crane_control_PI/main.cpp` | **未修** ✔ | work_log 2026-05-07 ＋ 2026-06-02 |
@@ -49,7 +49,7 @@
 | 🟡 | 沒有任何機制偵測「M2 被重新安裝過」；重裝後若位置落在 ±1.5 rad 內，INIT 會**靜默**移到錯的 CENTER | `cleaning_arm/main_api.cpp:1992-2028` | **未修** | work_log 2026-08-17 |
 | 🟡 | `LR_CALIBRATE` 自動雙向尋邊不可靠（假觸發撞牆、或衝很遠都撞不到），目前只能走手動流程 | `cleaning_arm/main_api.cpp` | **未修** | work_log 2026-08-17 |
 | 🟡 | 同步步伐（`step_down_sync`/`step_up_sync`）沒有地面淨空 / 障礙檢查，完全信任使用者輸入的 cm | `user_lib/WASH_ROBOT.cpp` `do_step_sync_` | **未修** | work_log 2026-07-22 |
-| 🟡 | 規範文件架構圖與程式碼脫節：`motion_flow.md` §2 仍寫 v1 的「DM2J×5 / ZDT×9 / 三區真空」，crane 拓樸也已再排過 | `.claude/motion_flow.md` §2（`CLAUDE.md` 另有任務同步處理中） | **未修** ✔ | ONBOARDING §5 |
+| 🟢 | 規範文件架構圖與程式碼脫節 —— **2026-08-28 已解**：`CLAUDE.md` `## Architecture` 全節由原始碼重建（v2 as-built）。`motion_flow.md` §2 **刻意維持 v1 不動**（它是已凍結的 v1 世代文件，見本檔文件世代表），不是遺漏 | `CLAUDE.md` `## Architecture` | **已修** ✔ | ONBOARDING §5 |
 | 🟡 | DSZL-107 熱修走路 B（RTU+CRC16 → Modbus TCP MBAP）的 review 沒做完，且當時說「規範文件未動、待 review 後一起更新」 | `user_lib/DSZL_107.{h,cpp}` | driver **已修** ✔（MBAP 已在 code）／文件 **未修** | mailbox 2026-05-08 |
 | 🟡 | SD76 SCAL/DP 校正 API 的公式假設（`display = pulse × SCAL × 10^(-DP)`）、是否需要 save_params、DP 上限行為都還沒 bench 驗證 | `user_lib/SD76_length_meters.cpp` | API **已修** ✔／驗證 **待查** | mailbox 2026-05-09 |
 | 🟡 | 新 driver `SE3_inverter` 的 review 與硬體驗證未結案：USR2 IP、SE3 keypad 預設（站號/波特率/控制源/watchdog）、方向約定、暫存器位址 | `user_lib/SE3_inverter.{h,cpp}` | **待查** | mailbox 2026-05-07 |
@@ -100,7 +100,7 @@
 | 🔴 | SE3 `P.79` 切換程序與「`P.5` 必為 0」**是唯一副本**，而且 bench 目前**仍在跑 SE3**（`Crane_control_PI/main.cpp:116` `#define CRANE_VFD_IS_SE3 1`），不是已作廢的舊文件：改 `P.79` 前須先停馬達、解除 OPT，再 `P.79=3 → 2 → 6`（防 latch 卡住）；`P.5`（multi-speed）必須保持 0，否則多段速會覆蓋 H1002 頻率命令 | `.claude/se3_mode6_migration_plan.md` §1.1、`Crane_control_PI/main.cpp:116` | **有效** ✔ | `se3_mode6_migration_plan.md` §1.1 |
 | 🔴 | QX-DO24 PWM（螺旋槳 ESC 控制）目前停用，`PWM_SLAVE=6` 撞 JC100 真空計。停用註解的理由是「nothing in the automatic gait depends on it (web panel only)」——這對舊架構成立，**對新架構不成立**：新架構設計文件寫明貼附序列的第一步就是「先讓螺旋槳把機體壓穩」。同 bus 的 slave 1-8 已被吸盤佔滿（`Linux_test/main.cpp:891` feet `{1,2,3,4}` / body `{5,6,7,8}`）、10/11 為 DY-500（未安裝），需挑一個空號並對照 `cli_22_` 上所有裝置確認不撞號 | `user_lib/WASH_ROBOT.cpp:175-192`（`PWM_ENABLED`） | **未修（阻塞新架構）** ✔ | changelog 2026-08-27h ＋ 新架構設計 2026-08-27 |
 | 🟡 | **`SERIAL_PORT_H` guard 衝突：兩個不同的序列埠實作共用同一個 guard** | `user_lib/SerialPort.h`（322 行，cleaning_arm/damiao 用）與 `transport/Serial_port.h`（本專案用，WASH_ROBOT.h / WT901BC_TTL.h / Linux_test）。目前不爆只因使用者不重疊；**一旦同一編譯單元同時碰到兩者，第二個被 guard 靜默吃掉**，症狀是「class 莫名找不到」、錯誤訊息不指向真因。修正方向：guard 改唯一名稱或 `#pragma once`，動前先確認無別處拿此 guard 名做條件編譯。兩檔開頭皆已標註 | 未修 | 分層重構 2026-08-27 |
-| 🔴 | **部署的程式沒有進版控 —— `web_ver2` 與 repo 分岔 589 行** | Pi `~/projects/web_ver2/server.js` 330 行（**2026-08-27 15:31 改過**）+ `public/app.js` 2,087 行，repo `web_backend/` 對應為 259 / 1,936 行。不是增量是另一個程式。另有 `~/projects/web/`（Jul 3）。**這讓「repo 是權威」當場失效**，也代表 repo 的前端改動可能從未上線、Pi 上的改動從未回流 | 未修 | 實機盤查 2026-08-27 |
+| 🟡 | **Pi 上的 `web_ver2` 落後 repo 一個 commit** ⚠️ 原記「分岔 589 行 / 不是增量是另一個程式」是**誤判**，2026-08-28 更正 | Pi `~/projects/web_ver2/`（在**吊機** `raspberry-cran`，不是本體）四個檔全是 repo 內容的複本：`server.js`／`style.css` 與 commit `faf1d3f` **逐位元相同**、`app.js` 與 `a894ae1` 逐位元相同、`index.html` 與 HEAD 的差異**全部**是攝影機面板那一段。**沒有任何人手改過的內容，repo 仍是權威**，只是落後移除攝影機的 commit `e3c8820` | 待部署（🔴 **main 分支的人正在改這兩台，部署前先確認**） | 更正 2026-08-28（原：實機盤查 2026-08-27） |
 | 🔴 | **張力刻度仍是 placeholder，kg 讀值無意義** | 實機 `status` 讀到 `dsz_left_scale=-0.01 dsz_right_scale=-0.01`，即待辦既有的 DSZL placeholder。當下讀值 `tension_left=27.35 / right=14.98` 是用佔位刻度算出來的。**這是 `crane_balance_hold_plan` 重啟前提「張力可信」仍未達成的實證** | 未修 | 實機讀取 2026-08-27 |
 | 🔴 | **左右張力差 12.4 kg，且左側已越過收繩停止門檻** | `retract_tension_stop_kg=25`，左側讀值 27.35 已高於它 → 若刻度正確，收繩指令會立刻觸發張力停止。⚠️ 但因上一列（刻度是佔位值），也可能是假象 —— **兩種可能都不可接受**，要先解決刻度才能判斷 | 未修 | 實機讀取 2026-08-27 |
 | 🔴 | **VFD 故障碼顯示是壞的：一邊報假警、一邊讀不到** | `vfd_fault left` → `f1~f4 = 160/OPT`（四格全故障）；`vfd_fault right` → `ERR read_fail`。根因是 `mh300_migration_plan` Phase 3-3 未完成：`format_vfd_fault_codes`（`Crane_control_PI/main.cpp:1529`）仍讀 SE3 的 H1007/H1008、`vfd_fault_name()` 仍是 SE3 代號表。**故障診斷目前不可用** | 未修 | 實機讀取 2026-08-27 |
@@ -285,6 +285,262 @@ threshold 再實作」：① `cmd_hold` 與 motion 互斥（避免 hold 跟 moti
 | 🟢 | 空壓機與電動缸電流重疊 | 空壓機啟動與電動缸同動時的電流重疊 | **暫緩**；症狀為電動缸偶發失步或抱閘異響，實機測試時可能浮現 | 設計彙整 §6 暫緩項目 |
 | 🟢 | 空壓機振動干擾姿態 | 空壓機振動對陀螺儀姿態判斷的干擾 | **暫緩**，實機測試時可能浮現 | 設計彙整 §6 暫緩項目 |
 | 🟢 | 儲氣筒壓力未讀 | Pi 未讀取儲氣筒壓力，假設氣壓恆定可用 | **暫緩**，實機測試時可能浮現 | 設計彙整 §6 暫緩項目 |
+
+---
+
+## 2026-08-28 — 更正「部署分岔」誤判
+
+> **規範權威：** 待辦總表（本檔最上方）該列已同步更正。
+
+### 🐛 踩到的坑（本專案已記過的同型錯誤，第三次）
+
+🔴 **`diff` 回報「整個檔案每一行都不同」時，先問「為什麼是*全部*」，不要直接推論成「另一個程式」。**
+
+08-27 的結論是「Pi 上的 `web_ver2` 與 repo 分岔 589 行、不是增量是另一個程式、讓『repo 是權威』當場失效」。
+實際原因是 **Pi 上的檔案是 CRLF、repo 是 LF** —— `diff` 因此判定每一行都不同。去掉 `\r` 之後：
+
+| 檔案 | 表面 | 實際 | 結論 |
+|---|---|---|---|
+| `server.js` | 330 行全不同 | +77 / −6 | 與 commit `faf1d3f` **逐位元相同** |
+| `public/app.js` | 2,087 行全不同 | +160 / −9 | 與 commit `a894ae1` **逐位元相同** |
+| `public/style.css` | 1,104 行全不同 | +113 / −3 | 與 commit `faf1d3f` **逐位元相同** |
+| `public/index.html` | 908 行全不同 | +60 / −6 | 差異**全部**是攝影機面板那一段 |
+
+**時間軸完全吻合**：Pi 上所有檔案 mtime 都是 `2026-08-27 15:31`（**同一秒＝複製不是編輯**；旁證是目錄裡躺著
+git-bash 的 `bash.exe.stackdump`），而移除攝影機的 commit `e3c8820` 是**同日 17:16**。
+即：有人 15:31 把當時的 Windows 工作樹 scp 上 Pi，兩小時後才 commit 攝影機移除。
+
+📌 **更正後的事實**：**沒有分岔，repo 仍是權威**，Pi 只是落後一個 commit。
+📌 **順帶更正**：`web_ver2` 在**吊機** `raspberry-cran`（`user@192.168.5.17`），不在本體 —— 本體上根本沒有這個目錄。
+
+**這與本檔既有的兩條是同一型**：〈在某一個時間點看一眼就下定論〉、〈一次觀察就下結論（SD76 CRC 誤報）〉。
+差別只在這次的觸發器是「工具的輸出被當成結論」而不是「觀察次數不足」。
+
+🔮 **伏筆**：日後從 WSL 這端 `scp`／`rsync` 送原始碼上 Pi（repo 是 LF）就不會再混進 CRLF；
+**經 Windows 中轉才會**。要比對 Pi 與 repo 一律先 `sed 's/\r$//'` 正規化再 `diff`。
+
+---
+
+### 📚 全 repo 盤點：把「孤兒檔案」全部登記進 `CLAUDE.md`
+
+**問題**：一份沒被任何索引指到的文件等於不存在。接手的人只能靠現有程式碼反推——
+**那正是 DM2J 那次踩雷的方式**。這次把 `.claude/` 與根目錄全部盤完，`CLAUDE.md` 新增兩張索引表，
+並各自標明「🔴 新增檔案必須在這裡加一列」。
+
+**`.claude/`（13 項）**：5 個孤兒 —— `crane_balance_hold_plan.md`／`mh300_migration_plan.md`／
+`step_speedup_phase1_plan.md`／`mailbox.md`／`gen_deploy_pdf.py`，其中**兩個裝著待辦表標為「唯一副本」的內容**。
+
+**根目錄（8 項孤兒）**：`README.md`（唯一記載 fork 出身）／`ONBOARDING.md`（**52 KB、11 章知識庫**）／
+`facade_cleaning_v2.sln`／`deploy_and_test.pdf`／4 個 `.txt` 手冊擷取／`.vs`＋`tmp`（已 gitignore）。
+
+**🐛 盤點抓到的實際錯誤**
+- 🔴 **`CLAUDE.md` 的 Build System 寫 `washrobot_new_PI.sln`——repo 裡沒有這個檔**
+  （那是 fork 前 v1 的檔名），實際是 `facade_cleaning_v2.sln`。照舊寫法跑會直接失敗。已更正
+- 🔴 msbuild 範例寫 `/p:Platform=ARM`，但**只有 `Debug|ARM64` 設了 include 路徑**。已改 ARM64
+- ⚠️ **4 個檔（228 KB）是「看了會被誤導」而不只是沒用**：`main_tmp.txt` 描述的是 v1 拓樸
+  （`.21` 匯流排、`washrobot_new_PI` 抬頭）；`dm2j_manual.txt`／`dm2j_manual2.txt`／`zdt_modbus.txt`
+  編碼壞掉無法閱讀，且都已被 `summaries/` 取代。**是否刪除待使用者決定**
+
+**📌 `.claude/summaries/`（8 份手冊摘要、1,228 行）另立一節**：原始 PDF 不在 repo
+（Windows 端 `D:\洗窗戶機器人\電控設備資料\`），所以對只有 repo 的人來說**這 8 份就是手冊本身**。
+🔴 既有待辦「VFD 故障碼顯示是壞的」要的 SE3 錯誤碼對照表，**就在
+`SE3_INVERTER_MODBUS_SUMMARY.md` 的 `## Error Code Reference (H1007 / H1008)`**。
+
+**🔴 一條通則**：「已歸檔」不等於「內容失效」。`archive/se3_mode6_migration_plan.md` 判定為已作廢，
+但 bench 現在跑的還是 SE3，它的 §1.1 是**唯一一張「SE3 故障 ↔ workaround」對照表**。
+歸檔時墓碑抬頭務必寫清楚「裡面哪些知識仍然有效」——現有三份墓碑都寫得很好，這條是為了保持。
+
+---
+
+### 📚 `.claude/summaries/`（細節）
+
+**問題**：8 份硬體手冊摘要（1,228 行）**從未出現在任何索引裡**，接手的人不會知道它存在，
+只能靠 driver 現有程式碼反推協定——**那正是 DM2J 那次踩雷的方式**。
+
+📌 **原始 PDF 不在 repo 裡**（Windows 端 `D:\洗窗戶機器人\電控設備資料\`），
+所以對只有 repo 的人來說，這 8 份摘要**就是手冊本身**。
+
+已在 `CLAUDE.md` 文件架構表加一列 + 新增一節列出每份的重點。
+🔴 **順帶發現**：既有待辦「VFD 故障碼顯示是壞的」要的 SE3 錯誤碼對照表，
+**就在 `SE3_INVERTER_MODBUS_SUMMARY.md` 的 `## Error Code Reference (H1007 / H1008)`**
+——不必再翻 PDF。
+
+---
+
+### 🔒 DSZL_107 同型溢位已修（稽核找出的第二支，而且是活的）
+
+細節見 `changelog.md` `[2026-08-28b]`。DSZL 走 Modbus TCP（MBAP）沒有 CRC，
+對應檢查換成 **txid / unit id / byteCount**。強制 `bc == quantity*2` 就完全夾住，
+**不必改 API 簽名**。🔴 這條是張力感測路徑，`hold_loop` 安全監控靠它。
+
+**🐛 我第一版測試值挑錯，差點得到「缺陷不存在」的結論**
+`bc=255` 修補前**回 FAIL 而非崩潰**——該幀 264 位元組超過 256 收包緩衝，既有的
+`n < 9 + bc` 剛好擋住。真正的溢位窗口是 **`bc` 介於 62~247**。補了 `bc=100` 才重現
+**SIGBUS，3/3**。
+📌 **通則：邊界類驗證的測試值必須落在窗口內，取極端值反而測不到。**
+「通過」看起來像「缺陷不存在」，其實是測試值落在窗口之外——**與 08-27 那次
+「SD76 CRC 誤報」是鏡像關係**（那次是誤判有問題，這次差點誤判沒問題）。
+
+### 🗑️ 刪除四個會誤導人的檔案（228 KB）
+
+`main_tmp.txt`（v1 拓樸的舊副本）＋ `dm2j_manual.txt`／`dm2j_manual2.txt`／`zdt_modbus.txt`
+（編碼壞掉無法閱讀，已被 `summaries/` 取代）。
+📌 **判準是「看了會被誤導」而不只是「沒用」。** 保留 `dm2j_manual_utf8.txt` 作原文對照。
+四個檔都在版控裡，需要時從 git 歷史取回。
+
+---
+
+### 🔒 SD76 CRC 修補完成 + 全 driver 回覆驗證稽核（分支 `fix/driver-crc`）
+
+修補內容與驗證過程見 `changelog.md` `[2026-08-28a]`，這裡只記結論與待辦。
+
+**🔴 修補前實測到的最嚴重一項**：`byteCount = 0xFF` 的回覆讓行程 **SIGSEGV**——
+待辦原本記的是「壞值往上傳」，實際是**堆疊覆寫**（255 位元組 memcpy 進 `uint8_t raw[2]`）。
+
+**🐛 我的測試框架第一版是錯的**：用了不做 probe 的 `init(ip, port, ...)` overload，
+導致五個故障情境一個都沒被觸發、卻全部「通過」。→ **驗證通過 ≠ 真的做了事**，
+本專案第 N 次。修法是改用 production 真正在用的 `init(TCP_client&, ...)`。
+
+---
+
+### 📋 全 driver 回覆驗證稽核表（16 支，2026-08-28 逐檔讀原始碼）
+
+mailbox 2026-05-14 附帶的行動項，開了 3.5 個月從未執行。**只稽核不修**——
+一次改 16 支等於同時動 16 個上層錯誤路徑，出事無法歸因。
+
+| Driver | slave ID | FC | 長度邊界 | 收 CRC | 風險 |
+|---|---|---|---|---|---|
+| `SD76_length_meters` | ✅ | ✅ | ✅ | ✅ | 🟢 **本次已修** |
+| `DSZL_107` | ✅ | ✅ | ✅ | n/a（Modbus TCP，改驗 txid） | 🟢 **2026-08-28 已修**（`bc=100` 實測 SIGBUS 已消失） |
+| `DY_500_weight_sensor` | ❌ | ❌ | ❌ | ❌ | 🔴 **溢位**：`memcpy(rx, buf, n)`，n≤128 進 `buf[64]`；**硬體未安裝，目前打不到** |
+| `CLV900_inverter` | ✅ | ✅ | ✅ 固定 `0x02` | ❌ | 🟡 值不可信（未安裝） |
+| `MH300_inverter` | ✅ | ✅ | ✅ 固定 `0x02` | ❌ | 🟡 值不可信（未啟用） |
+| `SE3_inverter` | ✅ | ✅ | ✅ 固定 `0x02` | ❌ | 🟡 值不可信 —— ⚠️ **bench 現正在用這支** |
+| `ZDT_motor_control` | ✅ 部分 | ✅ | ✅ vector | ❌ | 🟡 |
+| `DM2J_RS570` | ❌ | ❌ | ✅ `receiveData(rx, 32)` 上限 | ❌ | 🟡 |
+| `PQW_IO_16O_RLY` | ❌ | 部分（例外碼） | ✅ vector | ❌ | 🟡 |
+| `ZS_DIO_R_RLY` | ❌ | 部分（例外碼） | ✅ 有夾 `3+bc+2` | ❌ | 🟡 |
+| `JC_100_METER` | — | — | — | ✅ | 🟢 |
+| `XKC_Y25_RS485` | — | — | — | ✅ | 🟢 |
+| `QX_DO24` | — | — | — | ✅ | 🟢 |
+| `WT901BC_TTL` | n/a（序列 IMU） | n/a | — | ✅ sum | 🟢 |
+| `DIHOOL_control` | ❌ | ❌ | ? | ❌ | ⚪ **未被任何主程式引用**（全 repo grep 無呼叫端） |
+| `FrameAnalyzer` | — | — | — | — | ⚪ 無通訊 |
+
+📌 **`.claude/summaries/` 的 8 份手冊摘要證實**這些裝置全用標準 Modbus CRC16
+（0xA001 / init 0xFFFF / LSB first），所以補驗 CRC 在協定上一律成立，
+而且**每支 driver 都已經有 CRC 函式**（只用在發送端），補驗證不需要新寫演算法。
+
+**🔴 稽核產生的新待辦（依風險排序）**
+
+1. 🔴 **`DSZL_107` 同型溢位，且它是活的**——張力計走 `hold_loop` 安全監控。
+   `n < 9 + bc` 只夾了收包長度，沒夾呼叫端的 `buf[64]`
+2. 🔴 **`DY_500` 三項全缺**（連 FC 都不檢查）——但硬體未安裝、polling 關閉，**目前打不到**
+3. 🟡 **`SE3` 補收 CRC**——bench 現用，值不可信但無記憶體風險
+4. 🟡 其餘 6 支補 slave ID / CRC
+
+---
+
+### 📐 全專案架構掃描 → `CLAUDE.md` `## Architecture` 全節重建
+
+**動機**：每個 session 都在重掃同一批檔案。這次一次掃完並落成文件，下次直接讀。
+
+**改了什麼**：`CLAUDE.md` 原本的架構圖是 **v1**（`DM2J×5`／`ZDT×9`／三區真空／`.21` 匯流排），
+與現行程式碼差距大到會誤導。整節由原始碼重建，每個數字標出處檔案行號。新增了原本沒有的
+**「執行時的行程拓樸」**——它回答「我該 ssh 去哪台」，而這件事原本要靠實機盤查才知道。
+
+📌 **`motion_flow.md` §2 刻意不動**：它是已凍結的 v1 世代文件，維持 v1 是正確的，不是遺漏。
+待辦總表該列已據此結案。
+
+### 🐛 掃描中發現的三件事
+
+**1. `WASH_ROBOT.cpp` 有 3,879 行死碼（佔全檔 12,931 行的 30%）**
+16 個 `#if 0` 區塊，最大一塊 897 行。🔴 **關鍵**：既有待辦寫「v1 舊 body 用 `#if 0` 包起來當
+reference，bench 驗證 v2 綠燈後再硬刪」——但它們**已經無法靠改回 `#if 1` 復活**，
+裡面引用的 `ZDT_LB1`／`ZDT_RB1`／`ZDT_C` 在 `WASH_ROBOT.h` 裡**已經不存在**
+（預處理器吃掉才沒報錯）。所以「留作參考」只剩閱讀價值、沒有復原價值 —— **刪除的顧慮比想像中小**。
+
+**2. 註解描述舊配置、程式碼本身是對的**（`WASH_ROBOT.h:513` 開頭的「right{1,2}/left{3,4}」、
+`:1020` 的「.20 = ZDT pushers 1-4」、`cmd_water_pump` 宣告處的「PQW CH6」實為 CH14）。
+📌 **判準：常數定義 > 附近註解。**
+
+**3. 🔴🔴 CH6／CH14 是安全關鍵的一對**：CH6 = 破真空閥、CH14 = 水泵（2026-08-27 對調）。
+若水泵仍指向 CH6，清洗時開水泵＝開破真空 → 4 顆吸盤同時失壓 → **貼牆狀態下脫落**。
+兩個常數的沿革註解務必保留。
+
+### 🔧 順手更正 `runbook.md` 的過期事實
+
+- 吊機有線 `192.168.1.101` → **`192.168.1.10`**（5 處）
+- `ssh pi@` → `ssh nexuni@` / `ssh user@`（4 處，帳號本來就不是 `pi`）
+- ⚠️ 一併記下：`web_backend/server.js` 的 `CRANE_IP` 預設值**仍是 `.101`**（過期），
+  但現行程式實際走 `app/WASH_ROBOT.h` 的 `CRANE_IP = "192.168.5.17"`（WiFi），所以不影響運轉
+
+---
+
+### ✅ 吊機端編譯驗證通過（`refactor/app-layer` 首次編譯）
+
+在 `user@192.168.5.17:~/verify_20260828/`（**刻意不碰 `~/projects/`**，main 分支的人正在上面工作）：
+
+```
+g++ -std=c++17 -O2 -Itransport -Iuser_lib -o crane.out \
+    Crane_control_PI/main.cpp transport/{TCP_client,TCP_server}.cpp \
+    user_lib/{CLV900_inverter,DSZL_107,DY_500_weight_sensor,PQW_IO_16O_RLY,MH300_inverter,SD76_length_meters,SE3_inverter}.cpp -lpthread
+```
+
+- **零錯誤零警告**，49 秒，產出 aarch64 ELF 416 KB
+- **意義**：分層重構（`TCP_client.h` `user_lib/` → `transport/`）在吊機端成立；
+  順帶驗掉 `MSG_NOSIGNAL` 那個 commit（`transport/TCP_client.cpp`，先前從未編譯過）
+- `-Wall -Wextra` 全 10 個編譯單元只有 **4 個警告，且都不是重構造成的**：
+  `DSZL_107.h` 成員初始化順序 3 個 `-Wreorder`、`DY_500_weight_sensor.cpp:221` 一個
+  `hasError` 設了沒用（🟡 **這是「錯誤被吞掉」的小型案例**，DY500 硬體未安裝所以目前無感）
+
+### ✅ 本體端編譯驗證通過（分層重構最大的一塊）
+
+在 `nexuni@192.168.5.26:~/verify_20260828/`（同樣不碰 `~/projects/`）。14 個編譯單元先各自產 `.o`
+（`xargs -P4`，wall 23 秒 / CPU 50 秒）再連結，**零錯誤**，產出 `wr.out` aarch64 ELF 1,035 KB。
+
+- **`app/WASH_ROBOT.{h,cpp}`（15,321 行、佔全專案 37%）從 `user_lib/` 搬到 `app/` 後編得過** ——
+  這是分層重構爆炸半徑最大的一步
+- `transport/Serial_port.cpp` 首次被編譯（吊機那包沒有它）
+- 🔴 **`SERIAL_PORT_H` guard 衝突沒有發生 —— 而且是用正面斷言驗的**，不是靠「沒看到錯誤訊息」：
+  `g++ -M` 展開相依樹確認 `WASH_ROBOT.cpp`／`main.cpp`／`WT901BC_TTL.cpp` 三者
+  **都只拉到 `transport/Serial_port.h`，沒有任何一個碰到 `user_lib/SerialPort.h`**。
+  原因是後者只經 `user_lib/damiao.h` 進來，而 `damiao.h` 只有 `cleaning_arm` 用 ——
+  📌 **這條待辦仍然有效**（風險還在，只是這個編譯組合碰不到它），不要因為這次沒爆就結案
+
+`-Wall -Wextra` 共 10 個警告，**沒有一個來自重構**：`WASH_ROBOT` 7 個（成員初始化順序、
+兩個 `cmd_step_*` 裡沒用到的 `cur`、一個 `size_t` vs `int` 比較、一個沒用到的 lambda 參數）、
+`Serial_port.cpp` 2 個、`DY_500` 1 個。
+
+⚠️ **`Serial_port.cpp` 那 2 個不是缺陷**：`tx_multiplier`／`tx_constant` 只在 `#ifdef _WIN32`
+分支裡有意義，Linux 端本來就用不到 —— 查過原始碼才下這個結論，沒有只看警告就當成 bug。
+
+📌 **兩台的 `~/verify_20260828/` 已於同日依使用者指示刪除**（吊機 2.4 MB／本體 5.6 MB，
+內容只有原始碼複本與編譯產物）。下次要驗證重新 `rsync` 一份即可，指令見本節上方。
+
+### ⏸ 本體 B3（硬體連線）未做：機器被佔用
+
+`facade_cleaning`（pid 2866）已運轉 1h28m、佔著 5001、握著 `.22` 匯流排三條連線、
+並連著吊機 5002；`192.168.5.25` 開了 7 個 SSH session。跑 `init()` 需要獨佔 `.20`/`.22`，
+會跟運轉中的系統搶匯流排，因此**只編譯、沒有執行 `wr.out`**。
+
+---
+
+### 🐛 我製造的風險：`--help` 把程式啟動了
+
+`./crane.out --help` —— **這支程式不認 `--help`，等於直接啟動**。它連上 `.30`/`.31`/`.34` 三個 RS485
+網關才退出（`.32`/`.33` 因為被正在運轉的 pid 1653 佔著而 connect failed）。
+**有幾秒鐘我的行程與運轉中的系統共用同一條 485 匯流排。**
+
+📌 **通則**：在有硬體的機器上跑沒跑過的二進位，先確認它**不會在 main 一開頭就自動連硬體**
+（本專案的 `main()` 就是這樣寫的）。要看用法請讀原始碼，不要拿 `--help` 試。
+事後已確認：我的行程無殘留，pid 1653 五條硬體連線都在、系統正常。
+
+### ⏸ A3~A5 未做（吊機被佔用）
+
+盤查時 `crane_control_PI.out`（pid 1653）已運轉 1h56m、`node` 同時在跑、5002/8080 皆被佔，
+另有兩個從 `192.168.5.25` 進來的 SSH session；**本體 `192.168.5.26` 也連著吊機 5002**
+——整套系統正在被人操作。因此**沒有啟動程式、沒有送任何指令、沒有讓機器動**。
 
 ---
 
