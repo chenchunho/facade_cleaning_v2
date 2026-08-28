@@ -13,6 +13,42 @@
 
 ---
 
+## [2026-08-28-drv4] Claude Code — 重連把失敗的 connect 判成成功
+### 修改檔案
+- `transport/TCP_client.cpp` — 監控執行緒的重連路徑補上 `getsockopt(SO_ERROR)`
+
+### 🎯 實機抓到：吊機沒開，本體卻印了 20 次「reconnect success」
+`ss -ltn` 確認吊機 `:5002` **沒有任何東西在聽**，本體的 log 仍每 500ms 印一次
+`[INF] [TCP 192.168.5.17:5002] reconnect success`。
+
+根因是非阻塞 connect 的經典錯誤：
+```cpp
+res = select(new_sock + 1, NULL, &writefds, NULL, &timeout);
+if (res > 0) success = true;      // ← 少了 SO_ERROR 檢查
+```
+🔴 **失敗的 connect（`ECONNREFUSED`）同樣會讓 socket 變成可寫**，所以 `select() > 0`
+根本分不出成功與失敗。POSIX 要求接著讀 `SO_ERROR`——**那是唯一能分辨的東西**。
+結果 `connected = true` 掛在一個死掉的對端上。
+
+📌 初始的 `connectToServer`（第 94 行）用的是**阻塞** connect，那支是對的——
+所以 `init()` 才會正確印 `[WARN] crane not yet reachable`。
+**只有監控執行緒的重連路徑會說謊**，而那正好是「跑到一半對端掉了」的那條路徑。
+
+### 驗證：雙向斷言（只證明「不再說謊」不夠）
+| 情境 | 期望 | 實測 |
+|---|---|---|
+| 吊機 server **關閉** | 不得出現 `reconnect success` | ✅ **0 次**，改印 `reconnect failed (will retry in 500ms)`；`init()` 仍全項 OK |
+| 吊機 server **開啟** | 必須正常連上 | ✅ `[OK] crane 192.168.5.17:5002`，**0 行** reconnect |
+
+🔴 **第二項是刻意做的**：本專案踩過「斷言寫錯把成功判成失敗」——
+只驗負向的話，把重連整個改壞也一樣「通過」。
+
+### 順帶澄清一個假警報
+前一輪測到 `[SHUTDOWN]` 時 `water_inlet off` 三次全失敗、`valve state UNKNOWN`，
+**那只是因為當時吊機沒開**。兩台同時跑時收尾完全乾淨，不是缺陷。
+
+---
+
 ## [2026-08-28-drv3] Claude Code — DM2J 寫入結果一路被丟掉，main 的「掃動全滅偵測」接到的是常數
 ### 修改檔案
 - `user_lib/DM2J_RS570.h` / `.cpp` — `PR_move_set` / `PR_trigger` / `PR_trigger_sync`

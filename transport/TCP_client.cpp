@@ -192,7 +192,31 @@ void TCP_client::reconnectLoop() {
 				timeout.tv_usec = 0;
 
 				res = select((int)new_sock + 1, NULL, &writefds, NULL, &timeout);
-				if (res > 0) success = true;
+				// [2026-08-28] select() > 0 alone is NOT success. A connect that
+				// FAILED (ECONNREFUSED on a port nobody listens to) also makes the
+				// socket writable, so the old `if (res > 0) success = true` reported
+				// "reconnect success" and set connected = true against a dead peer.
+				// Measured on the bench: crane :5002 had no listener at all
+				// (confirmed with ss -ltn) and washrobot still logged 20 consecutive
+				// "reconnect success" lines, one every 500 ms.
+				// POSIX requires reading SO_ERROR to tell the two apart — that is
+				// the only thing that distinguishes them.
+				if (res > 0) {
+					int so_err = 0;
+#ifdef _WIN32
+					int errlen = sizeof(so_err);
+					if (getsockopt(new_sock, SOL_SOCKET, SO_ERROR,
+					               (char*)&so_err, &errlen) == 0 && so_err == 0) {
+						success = true;
+					}
+#else
+					socklen_t errlen = sizeof(so_err);
+					if (getsockopt(new_sock, SOL_SOCKET, SO_ERROR,
+					               &so_err, &errlen) == 0 && so_err == 0) {
+						success = true;
+					}
+#endif
+				}
 			}
 			else if (res == 0) {
 				success = true;
