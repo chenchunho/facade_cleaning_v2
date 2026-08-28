@@ -37,7 +37,8 @@
 | 🔴 | **`connectToServer` 的非阻塞 connect 少了 `getsockopt(SO_ERROR)`** → 連到沒人聽的埠也判定成功、印 `reconnect success`、`connected=true`。失敗的 connect 同樣會讓 socket 可寫，`select()>0` 不足以判定成功 | `transport/TCP_client.cpp:180-220` | **未修** ✔（08-28 實機證據：吊機 5002 無人在聽，本體印了 20 次 reconnect success） | work_log 2026-08-28（實機驗證） |
 | 🟡 | `init()` 印 `VFD left/right (MH300)` 是**寫死字串**，在 `#if CRANE_VFD_IS_SE3` 之外 → 旗標是 1（實際跑 SE3）卻印 MH300，會把人導去查錯的 driver | `Crane_control_PI/main.cpp:4215,4234` | **未修** ✔ | work_log 2026-08-28（實機驗證） |
 | 🔴 | `readRegister()` 不驗 reply CRC、不驗 byteCount → 壞掉的 Modbus reply 被當有效值往上傳（bench 已造成實體損害，詳見下方） | `user_lib/SD76_length_meters.cpp` | **未修** ✔ | mailbox 2026-05-14 |
-| 🔴 | `web_backend/server.js` 兩個預設 IP 都連不上：`CRANE_IP` 寫 `192.168.1.101`（吊機實際 `.1.10`）、`WROBOT_IP` 寫 `192.168.1.100`（本體有線不通，只有 WiFi `.5.26`）。**照預設啟動 GUI 兩邊都連不上，畫面不會說是 IP 錯** | `web_backend/server.js:23-25` | **未修** ✔（08-28 啟動時實測，以環境變數繞過） | work_log 2026-08-28 |
+| 🔴 | 🔮 **eth 串接之後要回頭改 `WASH_ROBOT.h` 的 `CRANE_IP`**：目前是 bench 用的 WiFi `192.168.5.17`（註解顯示已改過三次）。串上 eth 之後**它仍然會走 WiFi**——有線路徑就在旁邊卻沒被用到，而且完全不會有訊息告訴你。機器吊在半空中時控制流量跑在 WiFi 上，是實質風險 | `app/WASH_ROBOT.h:414` | **待處理（等 eth 串接）** | work_log 2026-08-28 per user |
+| 🔴 | `web_backend/server.js` 的 **`CRANE_IP` 預設值寫錯**：`192.168.1.101`，吊機實際是 `192.168.1.10`（`.101` 沒有任何機器回應）。⚠️ 同一行的 `WROBOT_IP = 192.168.1.100` **是對的、不要動**（見上一列：eth 尚未串接而已）。照預設啟動 GUI 連不到吊機，**畫面不會說是 IP 錯** | `web_backend/server.js:25` | **未修** ✔（08-28 啟動時實測，以環境變數繞過） | work_log 2026-08-28 |
 | 🟡 | 兩台 Pi 都沒有 `tmux`／`screen` → runbook §A「一鍵啟動」`scripts/crane.sh`／`wr.sh` **在這兩台跑不起來**。替代方案 `~/bringup/run_bg.sh`（FIFO 背景啟動）已放兩台 | `scripts/*.sh`、`.claude/runbook.md` §A | **未修** ✔ | work_log 2026-08-28 |
 | 🔴 | 緊急收繩按鈕實際上**沒有張力保護**，跟 `motion_flow.md` §8 的安全性描述相反 | `Crane_control_PI/main.cpp` `cmd_manual()` | **未修** ✔ | ONBOARDING §6 |
 | 🔴 | `cmd_side_measured()` 進場沒重置 `abort_flag` → 被 stop 過一次後所有 v2 step 指令永久回 `ERR aborted`，只能重開程式 | `Crane_control_PI/main.cpp:2800` | **未修** ✔ | ONBOARDING §1 ＋ work_log 2026-07-15 |
@@ -313,11 +314,13 @@ motor_api 直接問 `STATUS` → `[M1] pos=0.0051 ... [M2] pos=-0.1184 ...`（CA
 **1. `web_backend/server.js` 兩個預設 IP 都連不上，必須用環境變數蓋掉**
 - `CRANE_IP` 預設 `192.168.1.101` —— **吊機實際是 `.1.10`**（這條 CLAUDE.md 早就記過，
   但沒人改 `server.js`）→ 蓋成 `127.0.0.1`（web 與 crane 同機）
-- `WROBOT_IP` 預設 `192.168.1.100` —— ⚠️ **這個值本身是對的**（本體 `eth0` 確實是 `.1.100`、
-  `carrier=1`、`operstate=up`），斷的是**兩台之間的有線 L2 路徑**：雙向 ping 全失敗、
-  `ip neigh` 顯示 `192.168.1.100 dev eth0 FAILED`。兩台 eth0 各自 carrier 都在，
-  但**彼此不在同一個 L2 段**（PoE switch／線路問題）→ 蓋成 WiFi `192.168.5.26`
-  📌 **這兩個預設值的性質不同**：`CRANE_IP` 是**值寫錯**，`WROBOT_IP` 是**假設了一條斷掉的路徑**
+- `WROBOT_IP` 預設 `192.168.1.100` —— ✅ **這個值是對的，不要改**。
+  本體 `eth0` 確實是 `.1.100`、`carrier=1`、`operstate=up`。
+  🔴 **08-28 per user：兩台目前「刻意」還沒用 eth 串接，之後實際使用時會串。**
+  所以雙向 ping 失敗與 `ip neigh ... FAILED` 是**預期結果、不是故障**，
+  不要去查 PoE switch 或線路。bench 期間以環境變數蓋成 WiFi `192.168.5.26` 是**暫時 workaround**。
+  📌 **兩個預設值性質完全不同**：`CRANE_IP` 是**值寫錯**（要修）；
+  `WROBOT_IP` 是**正確的正式組態，只是目前那條線還沒接**（不要修）。
 🔴 **照預設值啟動，GUI 會兩邊都連不上**，而畫面上不會說是 IP 寫錯。
 
 **2. 兩台 Pi 都沒有 `tmux`、也沒有 `screen`**
