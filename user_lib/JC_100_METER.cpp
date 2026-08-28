@@ -71,16 +71,32 @@ bool JC_100_METER::send_command(uint8_t func, uint16_t reg, uint16_t data, std::
 
 	LOG_HEX(_log_tag, "TX", frame, 8);
 
+	// [2026-08-28] fast-fail：連續失敗夠多次後改用短 timeout，讓這顆表不再霸佔
+	// socket_mtx（完整說明見 JC_100_METER.h 的 FAST_FAIL_AFTER 區塊）。
+	// 每 PROBE_EVERY 次補一次完整 timeout，確保 bus 復原時回得來。
+	const bool probe = (_consec_fail % PROBE_EVERY) == 0;
+	const bool fast  = (_consec_fail >= FAST_FAIL_AFTER) && !probe;
+	const int  recv_to = fast ? FAST_RECV_MS : NORMAL_RECV_MS;
+
 	// Atomic transaction — see TCP_client::sendAndReceive doc. JC100 shares
 	// the RS485_3 gateway with DY500 weight + PQW relay; multiple readers
 	// must not interleave Modbus on the same bus.
 	char rxBuf[256];
 	int len = client->sendAndReceive((const char*)frame, 8,
 	                                 rxBuf, 256,
-	                                 500, 1000);
+	                                 500, recv_to);
 	if (len < 5) {
 		error_flag = 1;
-		LOG_ERR(_log_tag, "TIMEOUT");
+		++_consec_fail;
+		// Log 節流：連續失敗時只在「剛進入 fast-fail」和「每次探針」印，否則
+		// 四顆表 × 每秒重試會把 console 灌爆（bench 上就是這樣淹掉真正的線索）。
+		if (!_fast_fail_noted && _consec_fail >= FAST_FAIL_AFTER) {
+			_fast_fail_noted = true;
+			LOG_ERR(_log_tag, "TIMEOUT ×%d — 進入 fast-fail (recv %dms)，log 節流至每 %d 次",
+			        _consec_fail, FAST_RECV_MS, PROBE_EVERY);
+		} else if (!_fast_fail_noted || probe) {
+			LOG_ERR(_log_tag, "TIMEOUT (連續 %d 次)", _consec_fail);
+		}
 		return true;
 	}
 
@@ -90,10 +106,17 @@ bool JC_100_METER::send_command(uint8_t func, uint16_t reg, uint16_t data, std::
 	uint16_t rCrc = (uint8_t)rxBuf[len - 2] | ((uint8_t)rxBuf[len - 1] << 8);
 	if (cCrc != rCrc) {
 		error_flag = 1;
-		LOG_ERR(_log_tag, "CRC error");
+		++_consec_fail;   // CRC 錯也算通訊失敗 — 同樣不該霸佔 bus
+		if (!_fast_fail_noted || probe) LOG_ERR(_log_tag, "CRC error (連續失敗 %d 次)", _consec_fail);
 		return true;
 	}
 
+	if (_fast_fail_noted) {
+		LOG_INF(_log_tag, "通訊恢復（先前連續失敗 %d 次）— 回到正常 timeout %dms",
+		        _consec_fail, NORMAL_RECV_MS);
+	}
+	_consec_fail = 0;
+	_fast_fail_noted = false;
 	error_flag = 0;
 	res.assign((uint8_t*)rxBuf, (uint8_t*)rxBuf + len);
 	return false;

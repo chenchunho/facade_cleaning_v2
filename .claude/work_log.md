@@ -288,6 +288,47 @@ threshold 再實作」：① `cmd_hold` 與 motion 互斥（避免 hold 跟 moti
 
 ---
 
+## 2026-08-28（午）— 合併 main 的 bench 修正批次進整理分支 + 兩台 Pi 實機編譯通過
+
+### 已完成
+- **`origin/main` 0d5f6bc（Sadie-fang「fix bug」，16 檔 +1367/-134）已合併進 `refactor/app-layer`**
+  （merge commit `5f0bbd4`）。內容是 08-27h ~ 08-28i 的 bench 修正：破真空閥 300ms gap、
+  JC-100 fast-fail、`sendAndReceiveQuiet` 分片修復、PWM 改 slave 9 復用、上滑台 DM2J 搬回 `.20`、
+  牆距 380→400、滑台掃動等待 1000→4500ms、吊機兩個張力門檻。
+- **C++ 自動合併零衝突**，git 正確追蹤 `user_lib/` → `app/` + `transport/` 的兩處 100% rename，
+  `user_lib/` 沒有長回重複檔。衝突只有 `CLAUDE.md` 與本檔兩份文件。
+- **兩台 Pi 實機編譯通過**（g++ 14.2.0 / Debian）：本體 `facade_cleaning_v2.out`（14 個編譯單元）、
+  吊機 `crane_control_PI.out`、`linux_test.out` 三支全 OK。
+  🔴 **在隔離資料夾 `~/merge_check_20260828/` 編**，per user：不碰 `~/projects/`（對方的 VS 遠端建置
+  落點）也不碰 `~/bringup/`（上機用二進位）。已複驗兩者時間戳未變。**只編譯、沒有執行**
+  （runbook：這兩支 `main()` 一開頭就連硬體）。
+
+### 🔴 這次合併真正的風險不是衝突，是「合乾淨了但語意漏一塊」
+main 在 `[2026-08-28b]` 新增的 `TCP_client::sendAndReceiveQuiet()` 帶著 `send(..., 0)` 進來，
+**繞過了本分支同期做的 `MSG_NOSIGNAL` 修補**（`9e1ad1b`）。兩邊沒碰到同幾行 → git 一句話都不會說。
+後果不是「少一個旗標」：對端已關閉時 `send()` 發 SIGPIPE = **終止整個行程**，而這條路徑的唯一
+呼叫端 `QX_DO24` 所連結的 `Linux_test` 正好**沒有** `signal(SIGPIPE, SIG_IGN)`。已改為 `SEND_FLAGS`，
+四處 `send()` 複驗全部帶旗標。
+
+📌 **通則**：rename 追得對 ≠ 語意接得上。合併後要逐一檢查「對方新增的程式碼有沒有繞過我方新加的防線」，
+這件事 git 不會提醒，跟本專案「東西壞了但沒有人被告知」是同一類。
+
+### 順帶修掉的文件失真
+- `CLAUDE.md` 的 as-built 匯流排圖是 08-28 由**原始碼**重建的，main 同日改掉兩個 bus 事實
+  → 圖立刻過期。已更新（DM2J `.22`→`.20`、QX PWM slave 6→9 且解除停用）。
+- main 新增的 `.claude/per_program_cautions.md`（211 行，好文件）§0.2 的 bus 表
+  **與它自己那個 commit 的程式改動相反**，已就地更正並補進 `CLAUDE.md` 的 `.claude/` 索引表。
+
+### 待完成
+- 🔴 **`~/bringup/` 的二進位是合併前的**（08-28 12:01 建，合併在 12:30）→ 上機前要重建，
+  否則跑到的是沒有 main 那批 bench 修正的版本
+- 🔴 **`fix/driver-crc` 尚未合併 main**，它還停在 `refactor/app-layer` 的舊點上；
+  該分支要上機前得做同一次合併（且同樣要檢查語意漏接）
+- 🟡 `app/WASH_ROBOT.h:1082` 成員註解仍寫「`.22 = ... arm-rail ...`」，已過期（屬 main 那批的既有債）
+- 🟡 兩台 Pi 的 `~/merge_check_20260828/` 是這次的拋棄式編譯資料夾，確認不需要後可刪
+
+---
+
 ## 2026-08-28 — 更正「部署分岔」誤判
 
 > **規範權威：** 待辦總表（本檔最上方）該列已同步更正。
@@ -626,6 +667,47 @@ g++ -std=c++17 -O2 -Itransport -Iuser_lib -o crane.out \
 盤查時 `crane_control_PI.out`（pid 1653）已運轉 1h56m、`node` 同時在跑、5002/8080 皆被佔，
 另有兩個從 `192.168.5.25` 進來的 SSH session；**本體 `192.168.5.26` 也連著吊機 5002**
 ——整套系統正在被人操作。因此**沒有啟動程式、沒有送任何指令、沒有讓機器動**。
+
+---
+
+## 2026-08-28 — 開發環境：本機可以在 commit 前做 C++ 語法檢查
+
+> **規範權威：** 無（環境筆記，非設計決策）。這台開發機的既有工具，不是新增依賴。
+
+專案沒有 CMake/Makefile，改完 C++ 只能等部署到 Pi 才知道編不編得過 —— 這輪就因此
+讓使用者踩到一次 `missing terminating " character`（腳本寫入時把 `\n` 寫成了真實
+換行，字串跨行）。其實本機裝了 Visual Studio 2022，`cl /Zs`（只做語法檢查、不產出
+obj）可以當場驗，**幾秒鐘就有結果**。
+
+```
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+cl /nologo /utf-8 /std:c++17 /EHsc /Zs ^
+   /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+   /FIwinsock2.h /FIws2tcpip.h /I user_lib ^
+   user_lib\WASH_ROBOT.cpp
+```
+
+四個 flag 都是必要的，少一個就會被大量假錯誤淹沒：
+
+| flag | 少了會怎樣 |
+|------|-----------|
+| `/utf-8` | MSVC 用 cp950 讀檔，中文註解裡的字元被誤解 → 一堆 `C2001 常數中包含新行字元`，看起來像字串壞掉但其實是編碼 |
+| `/FIwinsock2.h /FIws2tcpip.h` | `windows.h` 先於 `winsock2.h` 被拉進來 → ~100 個 `sockaddr 重複定義`，在第一個 include 就爆，**根本讀不到你改的碼** |
+| `/DNOMINMAX` | `windows.h` 的 `min`/`max` 巨集吃掉 `std::max(...)` → 20+ 個 `C2589 '(' :: 右邊的語彙基元不合法` |
+
+**⚠ 判讀方式：比對 HEAD，不要看絕對錯誤數。** 這是 Linux 目標的專案，MSVC 有些
+地方比 GCC 嚴格（例如 `WASH_ROBOT.cpp:7160` 的 `CRANE_METER_SANITY_MAX_CM` 在
+lambda 內被 MSVC 要求顯式 capture，GCC/C++17 不需要）。那類錯誤 HEAD 本來就有，
+不是你改出來的。做法：
+
+```
+git show HEAD:user_lib/WASH_ROBOT.cpp > /tmp/head.cpp
+# 兩邊用同一組 flag 編，比對錯誤「集合」而非數量
+```
+
+行號會因為新增註解而位移（這輪是 +46 行），所以比對時要看錯誤**種類與相對位置**，
+不是行號本身。另外 `find /c "error"` 的數字在撞到 `C1003 錯誤計數超過 100 停止編譯`
+時會被截斷成假的相等，別被騙。
 
 ---
 

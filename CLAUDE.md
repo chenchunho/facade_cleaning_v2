@@ -43,6 +43,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `work_log.md` | 現況 + **唯一待辦總表** | 🟢 活的，**只讀最上面** |
 | `changelog.md` | 變更帳本（append-only，不壓縮） | 🟢 活的，只在追溯時查 |
 | `runbook.md` | 操作手冊：啟動順序、按鈕、raw command、緊急處置 | 🟢 活的 |
+| `per_program_cautions.md` | 各程式「最容易踩、後果最嚴重」的交接摘要（2026-08-28 由 main 帶入） | 🟢 活的，但 §0.2 的 bus 表已隨同批程式改動過期，見檔內 2026-08-28 更正 |
 | `summaries/` | 8 份硬體手冊摘要（原始 PDF 不在 repo） | 🟢 活的，見上一節 |
 | `motion_flow.md` | **v1 規格**（已凍結） | 🟡 §2 硬體表已過期，保留作狀態機與指令協定的原始推導 |
 | `v2_app_redesign_plan.md` | **v2 規格 = 現行程式碼的權威** | 🟢 活的 |
@@ -244,6 +245,11 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 
 所有 RS485 裝置都掛在 **USR-TCP232 透明傳輸網關**後面，程式以 **Modbus-TCP over :4001** 連網關。
 
+📌 **網關之外的實體網路**（不由程式控制，但斷了什麼都連不上）：
+外部訊號 →（2-wire tether 雙絞線）**Fathom-X Tether Interface Board** →（Ethernet）
+**8 Port PoE Switch** → 兩台 Pi、全部 USR 網關、以及 **PoE 防水 2MP 攝影機 × 4**
+（左上/左下/右上/右下；`frame_capture/` 走 RTSP，預設 cam1 `.110` / cam2 `.111`）。
+
 #### 本體 washrobot（權威：`app/WASH_ROBOT.h` + `WashRobot::init()`）
 
 ```
@@ -252,21 +258,29 @@ Raspberry Pi 5（本體主控）
   ├─ 127.0.0.1:9527 ──────────────────── motor_api → damiao USB-CAN
   │                                        M1 DM10010L 大臂 / M2 DM4340_48V 工具頭
   │
-  ├─ USR #1  192.168.1.20  (cli_20_)  ─── 「動力 bus」
+  ├─ USR #1  192.168.1.20  (cli_20_)  ─── 「動力 + 滑台 bus」
   │     ├─ ZDT slave 5,6 ── 右腳 上/下 推桿（SMC LEYG25）
   │     ├─ ZDT slave 7,8 ── 左腳 上/下 推桿
-  │     └─ PQW slave 12 ─── 8CH 繼電器（2026-08-27 從 .22 搬來）
+  │     ├─ PQW slave 12 ─── 8CH 繼電器（2026-08-27 從 .22 搬來）
+  │     └─ DM2J slave 14 ── 上滑台（乘載機械手臂；2026-08-28 從 .22 搬回）
   │
-  └─ USR #3  192.168.1.22  (cli_22_)  ─── 「感測 + 滑台 bus」
+  └─ USR #3  192.168.1.22  (cli_22_)  ─── 「感測 bus」
         ├─ JC-100 slave 5~8 ── 真空壓力計（與 ZDT 同號：推桿 N 末端的吸盤 = 真空表 N）
-        ├─ QX-DO24 slave 6 ─── PWM（🔴 **停用中**，撞 JC100 slave 6）
+        ├─ QX-DO24 slave 9 ─── PWM（2026-08-28 由 6 改號並重新啟用，見下）
         ├─ DY-500 slave 10,11 ─ 鋼索重量感測（**未安裝**，polling 關閉）
-        ├─ XKC-Y25 slave 13 ── 水箱水位（不探測，首次讀取才會發現缺件）
-        └─ DM2J   slave 14 ── 上滑台（乘載機械手臂）
+        └─ XKC-Y25 slave 13 ── 水箱水位（不探測，首次讀取才會發現缺件）
 ```
 
 🔴 **同號不衝突的理由**：ZDT 5-8 在 `.20`、JC100 5-8 在 `.22`，**兩條實體 bus**。
 `CUP_SLAVE_FIRST/LAST`（`WASH_ROBOT.h:524`）是唯一真實來源，所有遍歷吸盤的迴圈都吃它。
+
+📌 **2026-08-28 兩處異動（來自 main 的 bench 修正，合併進來）**：
+- **DM2J 上滑台 `.22` → `.20`**：實體接線一直在 `.20`，程式卻對 `.22` 發指令 →
+  每次掃動 `writeMulti no response` ×3，而流程照印「rail sweep done」。
+  ⚠️ 現在滑台與 ZDT 推桿共用 `.20`，靠 `TCP_client::socket_mtx` 序列化（幀不交錯）；
+  但 `pusher_two_stage_retract_` 持有的是 `zdt_bus_mtx_`，**DM2J 不拿那把鎖**——安全但不互斥。
+- **QX-DO24 PWM `slave 6` → `9` 並解除停用**：6 撞上改號後的 JC100 右腳下吸盤真空表。
+  ⚠️ `app/WASH_ROBOT.h:1082` 的成員註解仍寫「`.22 = ... arm-rail ...`」，**已過期**。
 
 #### 吊機 crane（權威：`Crane_control_PI/main.cpp:161-168`）
 
@@ -383,7 +397,7 @@ Socket timeouts: 100-500ms per device. TCP monitor thread: 500ms reconnect polli
 | `TCP_client` | TCP socket abstraction | WinSock2/BSD | Cross-platform TCP with auto-reconnect & monitor thread |
 | `TCP_server` | TCP listener | WinSock2/BSD | washrobot :5001 / crane :5002，多 client、line-buffered |
 | `Serial_port` | Serial port (Windows/Linux) | Native | TTL serial communication (8N1, multiple baud rates) |
-| `DM2J_RS570` | 步進馬達驅動器 × 5 | Modbus-TCP (RS485_1 + RS485_3) | 左腳/左輪/右腳/右輪 @ RS485_1 slave 1~4；上滑台 @ RS485_3 slave 14（2026-05-26 搬遷，讓 arm sweep 跟 feet rail 並行不撞 bus），cm 精度，PR/JOG/Home 模式 |
+| `DM2J_RS570` | 步進馬達驅動器 × 1（v2 只剩上滑台） | Modbus-TCP (RS485_1 .20 slave 14) | **上滑台（乘載機械手臂）@ 192.168.1.20 slave 14**（2026-08-28 per user 確認實體接在 .20）。cm 精度，PR/JOG/Home 模式，PPR=10000（1cm=10000 pulses，與 ZDT 的 3000/cm 不同）。<br>bus 沿革：.20 slave 5 → 2026-05-26 搬到 .22 slave 14（v1 時代為了讓 arm sweep 跟 feet rail 並行不撞 bus）→ **2026-08-28 搬回 .20 slave 14**。在搬回之前程式對 .22 發指令而實體在 .20，每次掃動都是 `writeMulti no response` × 3，且流程仍照印「rail sweep done」（fire-and-forget 不看回傳值，已一併修正）。<br>⚠ 現在與 ZDT 推桿 5~8 / PQW 12 共用 .20：rail sweep 是背景執行緒、與主執行緒伸腳並行，靠 `TCP_client::socket_mtx` 序列化（幀不會交錯），但注意 `pusher_two_stage_retract_` 持有的是 `zdt_bus_mtx_`，DM2J 不拿那把鎖。<br>v1 的左腳/左輪/右腳/右輪 @ RS485_1 slave 1~4 在 v2 已移除 |
 | `ZDT_motor_control` | 閉環步進驅動卡 × 9 | Modbus-TCP (RS485_2) | 驅動 SMC LEYG25 推桿，encoder 回饋，堵轉保護 |
 | `JC_100_METER` | 真空氣壓感測器 × 9 | Modbus-TCP (RS485_3) | 讀取壓力 (0.1 kPa)，裝於各推桿末端吸盤 |
 | `DY_500_weight_sensor` | 鋼索重量感測器 × 2 | Modbus-TCP (RS485_3) | 讀取重量 (int32/float)，裝於機體與鋼索連接處 |
@@ -394,7 +408,7 @@ Socket timeouts: 100-500ms per device. TCP monitor thread: 500ms reconnect polli
 | `DSZL_107` | 張力感測器 × 2（X518 採集板） | Modbus-TCP (獨佔 gateway) | 左 (USR_C.32 slave 1) / 右 (USR_D.33 slave 1)，各獨佔一條 RS485 bus；scale factor 預設 0.01（待實機校正）。Washrobot 透過 `crane_cmd_("tension")` 跨 PI 拿 kg。 |
 | `CLV900_inverter` | 變頻器 × 1 | Modbus-TCP (USR_A.30 slave 3) | 中間絞盤變頻器，控制 bus 上（未安裝） |
 | `SE3_inverter` | 士林變頻器 × 2 | Modbus-TCP (USR_A 控制 bus) | 左 (USR_A.30 slave 1) / 右 (USR_A.30 slave 2)；2026-05-07 取代原 ZS_DIO_R_RLY 繼電器；2026-05-15 re-layout 右 SE3 從 USR_B 移到 USR_A、slave 1→2；hold 預設 20Hz / 自動運動 30Hz；reg 0x1101 控制位元、0x1002 頻率（RAM）、0x100A 輸出頻率 |
-| `QX_DO24` | 4 路 PWM 輸出模組 × 1（新硬體，2026-08） | Modbus-TCP (RS485_3 .22 slave 6) | 四川旗芯 QX-DO24，4 通道獨立占空比/頻率/控制（0=關/65535=持續輸出/1~65534=脈衝數）。**安全限制（driver 強制）**：占空比鎖 5~10%（5%=停止/10%=全速）、頻率鎖 50Hz——兩者連動，只鎖一個等於沒鎖。`Linux_test` menu 34 + Web GUI「PWM 控制」panel 已接（`pwm set/save/status`）。slave 6 已確認不撞號（v2 的 JC100 只用 1~4）。**bench 用廠商工具 USB-485 直連驗證過**：slave 6 / 通道1 @ 50Hz / 占空比 5~10% 驅動馬達成功。<br>**🚫 尚未接上 .22 bus，接線前必須先解決波特率衝突**：模組目前 115200，但 .22 上既有 JC100/PQW/XKC/DM2J 是 9600，**一條 RS485 只能一個波特率**。要把模組改回 9600（寫 `0x21=3`）配合 bus，**且必須在接上 bus 之前用 USB-485 直連改完**，否則接上去就無法通訊也改不回來 |
+| `QX_DO24` | 4 路 PWM 輸出模組 × 1（新硬體，2026-08） | Modbus-TCP (RS485_3 .22 **slave 9**) | 四川旗芯 QX-DO24，4 通道獨立占空比/頻率/控制（0=關/65535=持續輸出/1~65534=脈衝數）。**安全限制（driver 強制）**：占空比鎖 5~10%（5%=停止/10%=全速）、頻率鎖 50Hz——兩者連動，只鎖一個等於沒鎖。`Linux_test` menu 34 + Web GUI「PWM 控制」panel 已接（`pwm set/save/status`）。**bench 用廠商工具 USB-485 直連驗證過**：通道1 @ 50Hz / 占空比 5~10% 驅動馬達成功。<br>**slave 沿革（2026-08-28 per user 已改為 9）**：原本選 6 的前提是「v2 的 JC100 只用 1~4」，但 2026-08-27 把吸盤編號改成 5-8 之後 **slave 6 就撞上右腳下吸盤的真空表**，bench 出現 `[ERR] [QX:6] device rejected FC 0x10: err 0x7C`（0x7C 不是合法 Modbus exception code，那是 JC100 的回覆被 PWM driver 撿走）。撞號不只是雜訊：FC 0x10 會把 write-multiple 打進 JC100 的組態暫存器，而 JC100 壓力值是步伐的放腳判準 → 掉落風險。user 已用 USB-485 直連把模組改成 **slave 9**（cli_22_ 上 5-8 JC100／10,11 DY500／13 XKC／14 DM2J，9 是空的）。<br>**波特率（2026-08-28 per user 更正）**：模組 115200，且 **.22 這條 bus 上所有裝置都是 115200** —— 先前記載的「其他裝置 9600、必須把模組改回 9600」**不正確**，已作廢。<br>⚠ 仍待確認：模組的 RS485 線是否已從 USB-485 轉換器移到 USR gateway 的 A/B 端子。沒接上去的話，`PWM_ENABLED=true` 也一樣每個指令 timeout（Mode B init 不發包，連線階段不會報錯） |
 
 **未使用：**
 

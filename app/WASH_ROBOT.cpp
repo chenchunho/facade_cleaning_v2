@@ -134,13 +134,26 @@ bool WashRobot::init() {
               << " (override via WR_DRIVER_DEBUG=0|1)\n";
 
     // [v2] DM2J feet/wheel rails removed. Only the arm-cleaning slide rail
-    // (DM2J_ARM slave 14 @ cli_22_) remains — arm subsystem unchanged (currently
-    // not installed; Mode-B init does no probe, so absence won't fail boot).
-    if (D_(DM2J_ARM).init(cli_22_, DM2J_ARM, dbg)) {
-        std::cerr << "[FATAL] DM2J arm rail (slave " << DM2J_ARM << " @ cli_22_) init fail\n";
+    // (DM2J_ARM slave 14) remains.
+    //
+    // [2026-08-28 per user] cli_22_ → cli_20_：上滑台實體接在 192.168.1.20，
+    // 程式卻一直對 .22 發指令，所以每一次掃動都是
+    //     [DBG] PR_move_cm_nowait 17.000 cm -> 170000 pulses
+    //     [ERR] writeMulti no response          ← 發到沒有這顆裝置的 gateway
+    // 重試 3 次全滅，然後流程照樣印「rail sweep done」（fire-and-forget 不看結果）。
+    // .20 上目前只有 ZDT 推桿 5~8 與 PQW 12，slave 14 是空的，不撞號。
+    //
+    // ⚠ 副作用：上滑台從此跟 ZDT 推桿共用同一條 bus，而 rail sweep 是背景執行緒、
+    //   與主執行緒的伸腳並行。TCP_client::socket_mtx 保證幀不交錯（不會壞封包），
+    //   且 arm_sweep_fire_nowait_ 是 fire-and-forget、arm_monitor_during_sweep_
+    //   已短路成純 sleep（不讀 status），所以佔用很短，只是時序略慢。
+    //   注意 pusher_two_stage_retract_ 持有的是 zdt_bus_mtx_，DM2J 不拿那把鎖 ——
+    //   兩者靠 socket_mtx 序列化，安全但不互斥。
+    if (D_(DM2J_ARM).init(cli_20_, DM2J_ARM, dbg)) {
+        std::cerr << "[FATAL] DM2J arm rail (slave " << DM2J_ARM << " @ cli_20_) init fail\n";
         return true;
     }
-    std::cout << "[OK] DM2J arm rail (slave " << DM2J_ARM << " @ cli_22_)\n";
+    std::cout << "[OK] DM2J arm rail (slave " << DM2J_ARM << " @ cli_20_)\n";
 
     // ZDT slave 5..8 on cli_20_ ([v2] 4 cups: right{5,6} / left{7,8})
     // [2026-08-27 per user] slave 1-4 → 5-8，見 WASH_ROBOT.h CUP_SLAVE_FIRST。
@@ -177,17 +190,16 @@ bool WashRobot::init() {
     // QX-DO24 PWM output (slave 6, same bus). Mode B init does no probe, so a
     // missing module is only discovered on the first pwm command — that's fine
     // here because nothing in the automatic gait depends on it (web panel only).
-    // [2026-08-27] 停用中 — PWM_SLAVE=6 撞 JC100 slave 6（吸盤改號 1-4→5-8 的
-    // 副作用），完整理由與重啟條件見 WASH_ROBOT.h 的 PWM_ENABLED 註解。
-    // 連 init 都不做：Mode B init 只是記下 client+ID 不發包，但不 init 就能保證
-    // 任何漏掉 gate 的呼叫路徑也發不出東西到 slave 6。
+    // PWM_ENABLED 為 false 時連 init 都不做：Mode B init 只是記下 client+ID 不發包，
+    // 但不 init 就能保證任何漏掉 gate 的呼叫路徑也發不出東西到那個 slave 號上。
+    // （2026-08-27 曾因 slave 撞 JC100 而停用；2026-08-28 模組改 slave 9 後解除，
+    //   沿革見 WASH_ROBOT.h 的 PWM_ENABLED 註解。）
     if (PWM_ENABLED) {
         pwm_.init(cli_22_, PWM_SLAVE, dbg);
         std::cout << "[OK] QX-DO24 PWM slave " << PWM_SLAVE << " (presence not probed)\n";
     } else {
-        std::cout << "[--] QX-DO24 PWM DISABLED — slave " << PWM_SLAVE
-                  << " 撞 JC100 slave " << PWM_SLAVE
-                  << "（見 WASH_ROBOT.h PWM_ENABLED 註解）\n";
+        std::cout << "[--] QX-DO24 PWM DISABLED (PWM_ENABLED=false) — slave "
+                  << PWM_SLAVE << " 不會收到任何封包（見 WASH_ROBOT.h PWM_ENABLED 註解）\n";
     }
 
     // DY-500 weight sensors (slaves 10, 11): NOT physically installed on this
@@ -2289,15 +2301,28 @@ bool WashRobot::ensure_arm_center_for_rope_(const std::string& ctx) {
 // (driver 只是重新 load PRx slot + re-trigger)。
 // 最後 sleep ARM_SWEEP_EST_MS 估計 motion 時間，否則下一段 fire 會覆蓋前一段
 // target 害 arm 跳到新 target 沒走完前一段。
-void WashRobot::arm_sweep_fire_nowait_(double target_cm, int rpm, int acc, int dec, int est_ms) {
+bool WashRobot::arm_sweep_fire_nowait_(double target_cm, int rpm, int acc, int dec, int est_ms) {
+    // [2026-08-28] 回傳值原本被整個丟掉，於是上滑台三次寫入全滅時流程照樣印
+    // 「rail sweep done」——bench 上 DM2J:14 掛在錯的 gateway 時，log 看起來
+    // 一切正常，實際上滑台一動也沒動。現在追蹤有沒有任何一次成功。
+    bool any_ok = false;
     for (int i = 0; i < ARM_SWEEP_FIRE_RETRIES; ++i) {
-        D_(DM2J_ARM).PR_move_cm_nowait(0, 1, rpm, target_cm, acc, dec);
+        if (!D_(DM2J_ARM).PR_move_cm_nowait(0, 1, rpm, target_cm, acc, dec)) any_ok = true;
         if (i < ARM_SWEEP_FIRE_RETRIES - 1) sleep_ms_(ARM_SWEEP_FIRE_SPACING_MS);
+    }
+    if (!any_ok) {
+        std::cerr << "[arm_sweep] DM2J:" << DM2J_ARM << " " << ARM_SWEEP_FIRE_RETRIES
+                  << " 次寫入全部失敗 — 上滑台沒有移動（目標 " << target_cm << " cm）\n";
+        evt_("arm_sweep_rail_no_response cm=" + std::to_string((int)target_cm));
+        // 寫入都沒進去就不必等 est_ms 的行程時間 —— 沒有東西在動。
+        // 省下的時間在「上滑台整個不通」時很可觀（每步兩次掃動 × est_ms）。
+        return false;
     }
     // [2026-05-28] Replace plain sleep with monitor loop (Option A: DM2J:14
     // alarm bit + Option C: damiao M2 tau spike). Sets arm_sweep_obstacle_pending_
     // on detection → main thread try_or_pause_ external-pause picks it up.
     arm_monitor_during_sweep_(est_ms);
+    return true;
 }
 
 // [2026-05-28] Watches for obstacles during slide motion (replaces plain sleep).
@@ -4816,9 +4841,18 @@ bool WashRobot::pusher_move_many_(const std::vector<int>& slaves, int pulse, int
     return false;
 }
 
+// ⚠ 函式名的 "two_stage" 是歷史遺留 —— 2026-07-31 起已經是「破真空輔助的單段
+//   直收」，破真空取代了原本的慢撕階段。沒有第二段。
+//
+// [2026-08-28] 補上 BREAK_VACUUM_PRE_ON_REST_MS（關真空閥 -> 開破真空閥之間的
+// 強制靜置）+ 兩個 controlRelay 的回傳值檢查。在此之前 ON/OFF 都是裸寫、回傳值
+// 丟掉，所以「CH ON」那行 log 不論成敗都照印 —— 破真空實際上從沒 fire 過也看不
+// 出來。bench 指紋見 WASH_ROBOT.h 的 BREAK_VACUUM_PRE_ON_REST_MS 註解。
+//
 // [2026-07-31 per user] Rewritten to mirror Linux_test menu 31
 // (test_break_vacuum_leg) exactly, generalized to N slaves at once and
-// CH16(bench) -> CH_BREAK_VACUUM(14, production): CH_BREAK_VACUUM actively
+// CH16(bench) -> CH_BREAK_VACUUM(2026-08-27 per user 起為 CH6；曾短暫是 14):
+// CH_BREAK_VACUUM actively
 // charges air into the cups to force the seal open, so the old two-stage
 // slow-peel-then-fast retract is no longer needed — every slave now goes
 // straight to PUSHER_RETRACT_PULSE at PUSHER_RPM_RETRACT_FULL, with the valve
@@ -4874,14 +4908,41 @@ bool WashRobot::pusher_two_stage_retract_(const std::vector<int>& slaves) {
         ~BreakVacuumGuard() {
             if (armed) {
                 std::cerr << "[2stage_retract] SAFETY closing CH" << CH_BREAK_VACUUM << " on exit\n";
-                self->pqw_.controlRelay(CH_BREAK_VACUUM, false);
+                // [2026-08-28] 解構子裡不能拋，但至少要讓失敗被看見 —— 這是最後
+                // 一道關閥保險，它再失敗就真的沒人關了（閥持續充氣 -> 下次伸腳吸不住）。
+                if (self->pqw_.controlRelay(CH_BREAK_VACUUM, false)) {
+                    std::cerr << "[2stage_retract] ⚠ SAFETY close CH" << CH_BREAK_VACUUM
+                              << " ALSO FAILED — 閥可能仍在充氣，請人工確認\n";
+                }
             }
         }
     } bv_guard(this);
 
+    // [2026-08-28] 強制靜置後才碰破真空閥 —— 呼叫端剛關過真空閥（vacuum_valve_
+    // "feet" false），間隔太近的話這顆 CH 不會實際動作。完整理由與 bench 指紋見
+    // WASH_ROBOT.h 的 BREAK_VACUUM_PRE_ON_REST_MS。
+    // 放在這裡而不是各呼叫端：pusher_two_stage_retract_ 有 16 個呼叫點，全都是
+    // 「關閥 -> 收腳」的序列，逐一補會漏。代價是每次收腳固定 +300ms。
+    sleep_ms_(BREAK_VACUUM_PRE_ON_REST_MS);
+
+    // ⚠ 一定要檢查回傳值。原本這行是裸寫 + 丟掉回傳值（註解寫 log-only on failure，
+    // 但根本沒有 log failure 的碼），於是上面那行 "CH ON" 在寫入之前就印了 ——
+    // 不論成敗都照印，log 完全無法用來判斷破真空到底有沒有作用。比照 Linux_test
+    // menu 31/33 改成檢查 TCP-level 回傳值。
+    // 刻意不用 pqw_set_relay_verified_（readback 版）：它成功時要等 200ms 才回來，
+    // 會把「ON -> 80ms -> 收腳」這個 bench 調出來的時序推成 200ms 才開始收，
+    // 驗證機制不該順帶改掉動作時序。
     std::cout << "[2stage_retract] CH" << CH_BREAK_VACUUM << " ON (break-vacuum charge)\n";
-    pqw_.controlRelay(CH_BREAK_VACUUM, true);   // best-effort, log-only on failure (matches bench)
+    const bool bv_on_fail = pqw_.controlRelay(CH_BREAK_VACUUM, true);
     bv_guard.armed = true;   // from here on, ANY return path closes the valve automatically
+    if (bv_on_fail) {
+        // 不中止：收腳仍要進行（腳留在伸出狀態更危險）。但要讓操作者知道這一次
+        // 是「沒有破真空輔助的硬撕」，對應症狀就是收腳電流飆高 / STALL。
+        std::cerr << "[2stage_retract] CH" << CH_BREAK_VACUUM
+                  << " ON FAILED (TCP-level) — 破真空沒作用，本次收腳為硬撕，"
+                     "預期電流偏高甚至 STALL\n";
+        evt_("break_vacuum_on_fail ch=" + std::to_string(CH_BREAK_VACUUM));
+    }
     const auto bv_on_at = std::chrono::steady_clock::now();
 
     sleep_ms_(BREAK_VACUUM_PRE_RETRACT_MS);
@@ -4907,9 +4968,19 @@ bool WashRobot::pusher_two_stage_retract_(const std::vector<int>& slaves) {
         if (held_ms < BREAK_VACUUM_TOTAL_ON_MS)
             sleep_ms_((int)(BREAK_VACUUM_TOTAL_ON_MS - held_ms));
     }
+    // [2026-08-28] 同樣要檢查回傳值，而且這邊比 ON 更關鍵：關不掉代表破真空閥
+    // 一直在充氣，之後伸腳要吸附時吸不住（正壓灌進吸盤）。
+    // ⚠ 失敗時「不」解除 bv_guard.armed —— 讓 RAII guard 在函式結束時再關一次，
+    //   多關一次是無害的冪等操作，漏關則是實質危險。
     std::cout << "[2stage_retract] CH" << CH_BREAK_VACUUM << " OFF\n";
-    pqw_.controlRelay(CH_BREAK_VACUUM, false);
-    bv_guard.armed = false;   // closed deliberately above — guard is now a harmless no-op
+    if (pqw_.controlRelay(CH_BREAK_VACUUM, false)) {
+        std::cerr << "[2stage_retract] CH" << CH_BREAK_VACUUM
+                  << " OFF FAILED (TCP-level) — 閥可能仍在充氣，交給 RAII guard 再關一次\n";
+        evt_("break_vacuum_off_fail ch=" + std::to_string(CH_BREAK_VACUUM));
+        // armed 維持 true，guard 的解構子會再送一次 OFF
+    } else {
+        bv_guard.armed = false;   // closed deliberately above — guard is now a harmless no-op
+    }
 
     // ---- Wait for all slaves to reach 0 (single batch wait) ----
     // Uses existing zdt_wait_motion_done_many_ helper. Stall during stage 2 → fail.
@@ -6189,11 +6260,15 @@ bool WashRobot::smart_extend_subset_(const std::string& group, const std::vector
 std::vector<int> WashRobot::group_slaves_(const std::string& group) const {
     std::vector<int> all;
     // Slave numbers below are the CURRENT ones (2026-08-27: 1-4 → 5-8).
-    // right/left still genuinely address only that side's two motors — the Web
-    // GUI stopped exposing them separately, but the commands are not aliases
-    // for "feet" and must keep working for raw-command / step-gait callers.
-    if (group == "right")       all = {ZDT_RF1, ZDT_RF2};                     // {5,6}
-    else if (group == "left")   all = {ZDT_LF1, ZDT_LF2};                     // {7,8}
+    //
+    // ⚠⚠ [2026-08-28 user 指出] "right"/"left" 這兩組**跟實體不符**。
+    // 實體是 {5,7} 同一側、{6,8} 同一側，所以下面的 "right"={5,6} 實際上是
+    // 「一邊各拿一顆」，"left"={7,8} 同理。**不要把這兩個 group 當成真的分側**。
+    // 之前這裡寫著「right/left still genuinely address only that side's two
+    // motors」——那句話是錯的，已刪。
+    // 完整說明與修正前提見 WASH_ROBOT.h 的 ZDT_RF1 註解。
+    if (group == "right")       all = {ZDT_RF1, ZDT_RF2};                     // {5,6} ⚠ 非同側
+    else if (group == "left")   all = {ZDT_LF1, ZDT_LF2};                     // {7,8} ⚠ 非同側
     else if (group == "all" || group == "feet")
                                 all = {ZDT_RF1, ZDT_RF2, ZDT_LF1, ZDT_LF2};   // {5,6,7,8}
     if (disabled_zdt_slaves_.empty()) return all;
@@ -6395,13 +6470,38 @@ std::vector<int> WashRobot::vacuum_check_(const std::string& group) {
     return fail;
 }
 
-// [2026-07-08 per user] step_down/up "sealed enough" rule: a group is anchored
-// enough to proceed if AT LEAST ONE of its cups sealed (was: all cups). Returns
-// true = sealed enough; out_unsealed = cups that did not reach threshold.
-// Retry/refuse only when EVERY cup in the group failed.
+// "sealed enough" 判準。
+//
+// [2026-07-08 per user] 原規則：每一側 ≥1 顆吸住就算該側錨定夠。
+// [2026-08-28 per user] 現規則：**4 顆裡總共有 SEAL_MIN_CUPS_TOTAL(=2) 顆吸住
+//   就算 OK**，不再分側。
+//
+// 為什麼改：ZDT_RF*/LF* 那組左右歸屬跟實體不符（見 WASH_ROBOT.h 的警告），
+// 「分側」算出來的答案本來就不對。bench log 已經出現誤觸發——5、6 沒吸到被
+// 判成「右側整側全裸」而觸發後退，但實體上 5、6 分屬兩側、另外兩顆還吸著，
+// 依實體規則本來應該直接放行。
+//
+// ⚠ 已知取捨（不是疏漏）：本規則擋不住「吸住的 2 顆剛好在同一側」的情況
+//   （例如 5、7 都吸住、6、8 都掉），那時另一側整個懸空但仍會回 true。
+//   左右歸屬確認後應改回分側判準。
+//
+// 回傳 true = 夠吸；out_unsealed 仍然只列「本 group 裡」沒吸到的杯子，
+// 供呼叫端做重試 / top-up 的目標清單與 log 使用（這部分語意沒變）。
+//
+// 實作上只掃一次 4 顆再導出兩個答案 —— vacuum_check_ 每顆要 3 取樣、
+// 顆間隔 50ms，分兩次掃 group 會多花一倍 bus 時間。
 bool WashRobot::group_seal_ok_(const std::string& group, std::vector<int>& out_unsealed) {
-    out_unsealed = vacuum_check_(group);
-    return out_unsealed.size() < group_slaves_(group).size();
+    const std::vector<int> all_unsealed = vacuum_check_("all");
+    const std::vector<int> all_slaves   = group_slaves_("all");
+
+    // 本 group 的未吸清單（呼叫端拿去重試/補吸/印 log）
+    out_unsealed.clear();
+    for (int s : group_slaves_(group))
+        if (std::find(all_unsealed.begin(), all_unsealed.end(), s) != all_unsealed.end())
+            out_unsealed.push_back(s);
+
+    const int sealed_total = (int)all_slaves.size() - (int)all_unsealed.size();
+    return sealed_total >= SEAL_MIN_CUPS_TOTAL;
 }
 
 // [2026-07-08 per user] Best-effort top-up of a side's still-unsealed cup(s)
@@ -8684,29 +8784,40 @@ void WashRobot::do_step_sync_rail_sweep_(const char* tag, bool init_ok, bool for
         // 變數改用語意命名（brush / squeegee）而非方位，之後再換邊就不會又看錯。
         std::ostringstream oss_brush;
         oss_brush << "DEPLOY " << DM2J_ARM_STEP_SWEEP_WALL_MM << " RIGHT";   // RIGHT = 滾筒側
-        deployed = (arm_cmd_(oss_brush.str(), 30).rfind("OK", 0) == 0);
+        // [2026-08-28] 保留回覆內容 —— 原本只印 "failed"，查不出是逾時、M2 轉不到位
+        // 還是 motor_api 根本沒回。
+        const std::string rep_brush = arm_cmd_(oss_brush.str(), 30);
+        deployed = (rep_brush.rfind("OK", 0) == 0);
         if (deployed) {
             pqw_.controlRelay(CH_BRUSH, true);
-            // [2026-07-24 per user] 滾筒 deploy 後等 2.5s 再讓 DM2J 滑台開始移動，給滾筒
-            // 轉起來/貼牆穩定的時間，避免滑台一動滾筒還沒轉穩（2026-07-24: 2000→2500 per user +500ms）。
-            sleep_ms_(2500);
+            // [2026-07-24 per user] 滾筒 deploy 後靜置再讓 DM2J 滑台開始移動，給滾筒
+            // 轉起來/貼牆穩定的時間，避免滑台一動滾筒還沒轉穩。
+            // [2026-08-28 per user] 2500 → DM2J_ARM_DEPLOY_SETTLE_MS(3500)，並抽成常數
+            // （原本兩處各自寫死，容易改一處漏一處）。
+            sleep_ms_(DM2J_ARM_DEPLOY_SETTLE_MS);
         } else {
-            std::cerr << "[" << tag << "] arm deploy RIGHT (brush) failed — rail sweep only, no brush\n";
+            std::cerr << "[" << tag << "] arm deploy RIGHT (brush) failed — rail sweep only, no brush"
+                      << " (motor_api 回覆: " << rep_brush << ")\n";
         }
     }
 
-    arm_sweep_fire_nowait_(DM2J_ARM_STEP_SWEEP_CM,
+    const bool rail_ok_out = arm_sweep_fire_nowait_(DM2J_ARM_STEP_SWEEP_CM,
                            DM2J_ARM_STEP_SWEEP_RPM, DM2J_ARM_STEP_SWEEP_ACC, DM2J_ARM_STEP_SWEEP_DEC,
                            DM2J_ARM_STEP_SWEEP_EST_MS);
     if (check_abort_()) {
-        if (deployed) {
-            pqw_.controlRelay(CH_BRUSH, false);
-            arm_cmd_("PARK", 30);
-        }
+        // [2026-08-28] 同下方 PARK 的理由：abort 收尾也改吃 init_ok。
+        // CH_BRUSH 無條件關 —— 沒開過時關它是 no-op，開著沒關才是問題。
+        pqw_.controlRelay(CH_BRUSH, false);
+        if (init_ok) arm_cmd_("PARK", 30);
         return;
     }
 
-    if (deployed) {
+    // [2026-08-28 per user] 換邊條件由 deployed 改為 init_ok。
+    // user 回報「從頭到尾都是 DEPLOY RIGHT 沒換」：DEPLOY RIGHT 失敗時 deployed=false，
+    // 這整段（含 DEPLOY LEFT）就被跳過，手臂停在原位、滑台空掃兩趟。
+    // 但第一段失敗不代表第二段也會失敗，而且刮刀那一趟本來就是獨立的清洗動作——
+    // 第一趟沒刷成，第二趟至少該刮。init_ok 才是「手臂通不通」的正確判準。
+    if (init_ok) {
         // [2026-07-27 per user] 換成刮刀側的同時關掉滾筒馬達——刮刀是乾刮，
         // 滾筒(濕刷+CH_BRUSH)沒道理繼續轉。跟原本收尾才關（PARK 前）分開，提早到
         // 切換的當下就關，不要等到整段結束。
@@ -8717,20 +8828,33 @@ void WashRobot::do_step_sync_rail_sweep_(const char* tag, bool init_ok, bool for
         if (arm_cmd_(oss_squeegee.str(), 30).rfind("OK", 0) != 0) {
             std::cerr << "[" << tag << "] arm deploy LEFT (squeegee) failed — continuing rail only\n";
         } else {
-            // [2026-07-24 per user] 每次 deploy 後都先等 2.5s 再讓滑台移動（2000→2500 per user +500ms）。
-            sleep_ms_(2500);
+            // [2026-07-24 per user] 每次 deploy 後都先靜置再讓滑台移動。
+            // [2026-08-28 per user] 同上，改吃 DM2J_ARM_DEPLOY_SETTLE_MS。
+            sleep_ms_(DM2J_ARM_DEPLOY_SETTLE_MS);
         }
     }
 
-    arm_sweep_fire_nowait_(0.0,
+    const bool rail_ok_back = arm_sweep_fire_nowait_(0.0,
                            DM2J_ARM_STEP_SWEEP_RPM, DM2J_ARM_STEP_SWEEP_ACC, DM2J_ARM_STEP_SWEEP_DEC,
                            DM2J_ARM_STEP_SWEEP_EST_MS);
 
-    if (deployed) {
+    // [2026-08-28] PARK 條件由 deployed 改為 init_ok —— 這是安全收尾。
+    // 若 DEPLOY 實際讓手臂動了、只是回覆逾時被判失敗，舊寫法就永遠不 PARK，
+    // 手臂留在伸出狀態跟著機器繼續走步伐（刮玻璃／被扯壞）。PARK 對已經 PARK
+    // 的手臂是冪等 no-op，多送一次無害；漏送才是實質危險。
+    // 仍以 init_ok 為條件：手臂整個不通時 arm_cmd_ 會白等 30s timeout。
+    if (init_ok) {
         arm_cmd_("PARK", 30);
     }
-    std::cout << "[" << tag << "] rail sweep done (RIGHT/brush deploy -> " << DM2J_ARM_STEP_SWEEP_CM
-              << " -> LEFT/squeegee deploy -> 0 -> PARK)\n";
+    // [2026-08-28] 訊息必須反映實際發生的事。原本無條件印 "rail sweep done"，
+    // 於是上滑台三次寫入全滅（DM2J 掛在錯的 gateway）時 log 仍看起來一切正常。
+    if (rail_ok_out || rail_ok_back) {
+        std::cout << "[" << tag << "] rail sweep done (RIGHT/brush deploy -> " << DM2J_ARM_STEP_SWEEP_CM
+                  << " -> LEFT/squeegee deploy -> 0 -> PARK)\n";
+    } else {
+        std::cerr << "[" << tag << "] ⚠ rail sweep 沒有實際發生 — DM2J:" << DM2J_ARM
+                  << " 兩段掃動的寫入都失敗，上滑台完全沒動（手臂 DEPLOY/PARK 仍已執行）\n";
+    }
 }
 
 // [2026-07-22 per user] Synchronized step gait — deliberately DIFFERENT safety
@@ -8889,6 +9013,25 @@ std::string WashRobot::do_step_sync_(bool up) {
         std::cout << "[" << tag << "] cups not sealed after extend:";
         for (int s : fails) std::cout << " " << s;
         std::cout << " — checking per-side whether retry is needed\n";
+
+        // [2026-08-28 per user] ⚠ 重試之前必須先等清洗掃動整段結束（含手臂 PARK）。
+        //
+        // rail sweep 是在 step 5 用背景執行緒發動的，跟第一次伸腳「刻意並行」
+        // （2026-07-23 per user「一伸出腳就開始清潔」）。但它的 wait() 原本只在
+        // 函式最尾端，也就是說**重試是在手臂還 DEPLOY 貼著牆、上滑台還在移動的
+        // 時候跑的**。重試會再次推動推桿改變機體姿態 —— 手臂這時還壓在玻璃上，
+        // 可能被刮傷或扯壞。bench 上 user 就是看到這個才提出來的。
+        //
+        // 只在「重試」這條路徑等，不動正常路徑：伸腳一次就成功時 fails 為空，
+        // 完全不會走到這裡，並行度照舊。異常路徑本來就慢，多等這一下換掉一個
+        // 實體碰撞風險是划算的。
+        // 尾端那個 fut_rail_sweep.wait() 保留不動 —— future 已 ready 時它是
+        // no-op，而它仍要負責覆蓋「沒有進重試」的正常路徑。
+        if (fut_rail_sweep.valid()) {
+            std::cout << "[" << tag << "] 等待清洗掃動結束（含手臂 PARK）再重試伸腳\n";
+            fut_rail_sweep.wait();
+            std::cout << "[" << tag << "] 掃動已結束，開始重試\n";
+        }
 
         std::vector<int> right_fails, left_fails;
         for (int s : fails) {
@@ -12064,26 +12207,57 @@ std::string WashRobot::cmd_water_pump(bool on) {
 // QX_DO24::setChannel): duty is only meaningful once the frequency is right,
 // and control goes last so the load never sees an intermediate state.
 std::string WashRobot::cmd_pwm_set(int ch, int hz, int control, double duty_pct) {
+    // [2026-08-28] 無條件先印一行「指令進來了」。bench 上遇到 GUI 送出 pwm set
+    // 後 washrobot 完全沒回、console 也一個字都沒有，當時無法分辨是
+    //   (a) 指令沒送到 washrobot（backend / binary 版本問題）
+    //   (b) 送到了但在某個 early-return 就折返（driver 從沒被呼叫，所以沒有 log）
+    //   (c) 送到了、driver 也跑了，只是回覆慢或被淹沒
+    // 這行讓三者立刻分得開：沒印 = (a)；印了但沒有後續 driver log = (b)。
+    std::cout << "[pwm_set] ch=" << ch << " hz=" << hz << " ctrl=" << control
+              << " duty=" << duty_pct << " (enabled=" << (PWM_ENABLED ? "1" : "0")
+              << " slave=" << PWM_SLAVE << ")\n";
+
     State cur = state_.load();
     if (cur == State::Error) return state_violation_(cur);
-    // [2026-08-27] PWM 停用中 —— slave 撞 JC100 slave 6，見 WASH_ROBOT.h
-    // PWM_ENABLED 註解。在這裡擋掉而不是只靠 init 不做，是因為 driver 的
-    // client 指標若被別的路徑設起來，寫入就會落到 JC100 的組態暫存器上。
-    if (!PWM_ENABLED) return "ERR pwm_disabled_slave_conflict_with_jc100\n";
+    // PWM 停用時在這裡也擋一道，不是只靠 init 不做 —— driver 的 client 指標
+    // 若被別的路徑設起來，寫入就會落到那個 slave 號的裝置上（2026-08-27 撞號
+    // 事件正是這個風險的實例）。沿革見 WASH_ROBOT.h 的 PWM_ENABLED 註解。
+    if (!PWM_ENABLED) {
+        std::cout << "[pwm_set] REJECTED — PWM_ENABLED=false\n";
+        return "ERR pwm_disabled\n";
+    }
     if (ch < 1 || ch > 4)                 return "ERR pwm_channel_must_be_1_to_4\n";
     if (control < 0 || control > 65535)   return "ERR pwm_control_out_of_range\n";
 
     const int dch = ch - 1;                       // driver API is 0-based
 
-    if (!pwm_.setPWM_Freq(dch, hz))
+    // 三個寫入各自留痕。driver 自己的 LOG_ERR 只在 debug_mode 開時才印，而且
+    // 「沒回應」那條路徑以前完全靜默（2026-08-28b 才補上）——這裡無條件印，
+    // 確保 console 一定看得到是卡在哪一步。
+    if (!pwm_.setPWM_Freq(dch, hz)) {
+        std::cout << "[pwm_set] setPWM_Freq FAILED (slave " << PWM_SLAVE << " 無回應或拒絕)\n";
         return "ERR pwm_freq_rejected_locked_" + std::to_string(pwm_.freqMinHz()) + "hz\n";
-    if (!pwm_.setPWM_Duty(dch, duty_pct))
+    }
+    if (!pwm_.setPWM_Duty(dch, duty_pct)) {
+        std::cout << "[pwm_set] setPWM_Duty FAILED\n";
         return "ERR pwm_duty_rejected_must_be_" + std::to_string((int)pwm_.dutyMinPct())
              + "_to_" + std::to_string((int)pwm_.dutyMaxPct() ) + "_pct\n";
-    if (!pwm_.setPWM_Control(dch, (uint16_t)control))
+    }
+    if (!pwm_.setPWM_Control(dch, (uint16_t)control)) {
+        std::cout << "[pwm_set] setPWM_Control FAILED\n";
         return "ERR pwm_control_write_fail\n";
+    }
+    std::cout << "[pwm_set] OK — 三個寫入都成功\n";
 
-    return "OK\n";
+    // [2026-08-28] 回覆帶上實際寫進去的值，不要只回裸 "OK"。
+    // 面板的行分派器認得 "ERR pwm_*"，但裸 OK 不符合它的任何 regex ——
+    // 於是寫入成功時畫面完全靜止，使用者無從分辨「送出成功」和「被吞掉」。
+    // 帶 pwm_set 前綴讓前端可以認，順便把生效的參數回顯出來。
+    std::ostringstream ok;
+    ok << "OK pwm_set ch=" << ch << " hz=" << hz
+       << " ctrl=" << control << " duty=" << std::fixed << std::setprecision(1)
+       << duty_pct << "\n";
+    return ok.str();
 }
 
 // ⚠ Writes flash. Deliberately NOT called by any automatic flow — only the
@@ -12094,22 +12268,22 @@ std::string WashRobot::cmd_pwm_set(int ch, int hz, int control, double duty_pct)
 std::string WashRobot::cmd_pwm_save() {
     State cur = state_.load();
     if (cur == State::Error) return state_violation_(cur);
-    // [2026-08-27] PWM 停用中 —— slave 撞 JC100 slave 6，見 WASH_ROBOT.h
-    // PWM_ENABLED 註解。在這裡擋掉而不是只靠 init 不做，是因為 driver 的
-    // client 指標若被別的路徑設起來，寫入就會落到 JC100 的組態暫存器上。
-    if (!PWM_ENABLED) return "ERR pwm_disabled_slave_conflict_with_jc100\n";
+    // PWM 停用時在這裡也擋一道，不是只靠 init 不做 —— driver 的 client 指標
+    // 若被別的路徑設起來，寫入就會落到那個 slave 號的裝置上（2026-08-27 撞號
+    // 事件正是這個風險的實例）。沿革見 WASH_ROBOT.h 的 PWM_ENABLED 註解。
+    if (!PWM_ENABLED) return "ERR pwm_disabled\n";
     if (!pwm_.saveOutputAsDefault()) return "ERR pwm_save_fail\n";
-    return "OK\n";
+    return "OK pwm_saved\n";   // 同上：讓面板認得出成功，不要靜默
 }
 
 // Reports all 4 channels for the panel. freq_ok=0 flags "frequency is not the
 // locked value", which invalidates the 5~10% duty mapping — the module reverts
 // to 1000Hz on every power cycle, so this is the normal state after a reboot.
 std::string WashRobot::cmd_pwm_status() {
-    // [2026-08-27] PWM 停用中 —— slave 撞 JC100 slave 6，見 WASH_ROBOT.h
-    // PWM_ENABLED 註解。在這裡擋掉而不是只靠 init 不做，是因為 driver 的
-    // client 指標若被別的路徑設起來，寫入就會落到 JC100 的組態暫存器上。
-    if (!PWM_ENABLED) return "ERR pwm_disabled_slave_conflict_with_jc100\n";
+    // PWM 停用時在這裡也擋一道，不是只靠 init 不做 —— driver 的 client 指標
+    // 若被別的路徑設起來，寫入就會落到那個 slave 號的裝置上（2026-08-27 撞號
+    // 事件正是這個風險的實例）。沿革見 WASH_ROBOT.h 的 PWM_ENABLED 註解。
+    if (!PWM_ENABLED) return "ERR pwm_disabled\n";
     std::ostringstream oss;
     oss << "OK";
     for (int ch = 1; ch <= 4; ++ch) {
