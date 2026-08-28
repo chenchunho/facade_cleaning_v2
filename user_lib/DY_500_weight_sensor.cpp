@@ -124,12 +124,54 @@ bool DY_500_weight_sensor::modbus_read(uint16_t addr, uint16_t quantity,
 
 	char buf[128];
 	int n = client->receiveData(buf, sizeof(buf), 400);
-	if (n < 7) return true;
+	if (n < 5) return true;          // slave + fc + bc + crc(2) is the shortest legal reply
 
 	LOG_HEX(_log_tag, "RX read", buf, n);
 
-	memcpy(rx, buf, n);
-	rxLen = n;
+	// [2026-08-28] Reply validation. This driver previously checked only
+	// `n >= 7` and then did `memcpy(rx, buf, n)` — n up to 128, into the
+	// caller's uint8_t buf[64] (both call sites). No slave id, no function
+	// code, no byte count, no CRC: every class of check was missing.
+	//
+	// Third and last driver of this shape found by the 2026-08-28 audit
+	// (see SD76_length_meters and DSZL_107, fixed the same day). DY-500 is
+	// not physically installed and polling is disabled, so this one was not
+	// reachable in practice — it is fixed to close the class, not a live bug.
+	if ((uint8_t)buf[0] != slaveID) {
+		LOG_ERR(_log_tag, "reply slave mismatch: got %d want %d",
+		        (int)(uint8_t)buf[0], (int)slaveID);
+		return true;
+	}
+	if ((uint8_t)buf[1] != 0x03) {   // 0x83 = Modbus exception reply
+		LOG_ERR(_log_tag, "reply FC 0x%02X (expected 0x03)", (int)(uint8_t)buf[1]);
+		return true;
+	}
+
+	// Byte count must match what we asked for. This is what bounds the memcpy:
+	// callers request 2 registers, so the whole frame is 9 bytes.
+	const int bc = (uint8_t)buf[2];
+	if (bc != quantity * 2) {
+		LOG_ERR(_log_tag, "byteCount %d != requested %d", bc, quantity * 2);
+		return true;
+	}
+	const int frame = 3 + bc + 2;    // slave + fc + bc + data + crc
+	if (n < frame) {
+		LOG_ERR(_log_tag, "frame truncated: %d < %d", n, frame);
+		return true;
+	}
+
+	const uint16_t rx_crc = (uint16_t)(uint8_t)buf[3 + bc]
+	                      | ((uint16_t)(uint8_t)buf[4 + bc] << 8);
+	if (CRC16((uint8_t*)buf, 3 + bc) != rx_crc) {
+		LOG_ERR(_log_tag, "CRC mismatch on REG 0x%04X", addr);
+		return true;
+	}
+
+	// Copy the validated frame only — never whatever happened to arrive.
+	// Callers parse data from offset 3 and keep the legacy `len < 7` check,
+	// which a 9-byte frame still satisfies.
+	memcpy(rx, buf, frame);
+	rxLen = frame;
 	return false;
 }
 
@@ -218,12 +260,12 @@ bool DY_500_weight_sensor::get_weight_float(float& outValue)
 	uint8_t buf[64];
 	int len = 0;
 
-	bool hasError = false;
-
+	// [2026-08-28] Removed a dead `bool hasError` here: every path that set it
+	// already falls through to the weightErrorCount++ handling below, so it was
+	// written and never read (-Wunused-but-set-variable). Behaviour unchanged.
 	// 1. read data (FLOAT addr 0x9CA4, 2 registers)
 	if (modbus_read(0x9CA4, 2, buf, len) || len < 7)
 	{
-		hasError = true;
 	}
 	else
 	{
@@ -244,7 +286,7 @@ bool DY_500_weight_sensor::get_weight_float(float& outValue)
 			fValue < -5000.0f ||
 			fValue > 5000.0f)
 		{
-			hasError = true;
+			// fall through to the error handling below
 		}
 		else
 		{
