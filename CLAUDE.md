@@ -24,12 +24,41 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | **`.claude/runbook.md`** | 操作手冊 | 我怎麼**用**它（啟動順序、按鈕、raw command、緊急處置） | 查用 | 中 |
 | **`.claude/work_log.md`** | 現況 | 我接手要先知道什麼（**待辦總表** + 踩過的坑） | **只讀最上面** | 高 |
 | **`.claude/changelog.md`** | 變更帳本 | 這行程式碼為什麼長這樣 | 只在追溯時往回查 | 每次改動 |
+| **`.claude/summaries/`** | 硬體手冊摘要 | **這顆裝置的協定長什麼樣**（暫存器、功能碼、錯誤碼） | 寫／改 driver 前查 | 低 |
 
 **寫入規則**：改了程式 → 寫 `changelog`；改變了「現況或待辦」→ 才動 `work_log`；改變了「應該怎樣」→ 動規格文件或本檔。**三者不重複寫同一件事。**
 
 - **唯一一份彙整 TODO 表放在 `.claude/work_log.md` 最上方**，其他地方不要再開第二份待辦清單
 - 決策 / 規範 / 架構變動一律寫進 **git 追蹤的 .md 檔**，不要只留在對話或 Claude 的本機 auto memory
   —— memory 不跟著 repo 走，換台機器就沒了
+
+#### `.claude/` 完整索引 —— 🔴 **新增檔案必須在這裡加一列**
+
+📌 **2026-08-28 建立。動機**：`summaries/`（8 份手冊摘要、1,228 行）在此之前**沒有出現在任何索引裡**，
+接手的人只能靠 driver 現有程式碼反推協定——**那正是 DM2J 那次踩雷的方式**。
+一份沒被指到的文件等於不存在。
+
+| 檔案 | 是什麼 | 狀態 |
+|---|---|---|
+| `work_log.md` | 現況 + **唯一待辦總表** | 🟢 活的，**只讀最上面** |
+| `changelog.md` | 變更帳本（append-only，不壓縮） | 🟢 活的，只在追溯時查 |
+| `runbook.md` | 操作手冊：啟動順序、按鈕、raw command、緊急處置 | 🟢 活的 |
+| `summaries/` | 8 份硬體手冊摘要（原始 PDF 不在 repo） | 🟢 活的，見上一節 |
+| `motion_flow.md` | **v1 規格**（已凍結） | 🟡 §2 硬體表已過期，保留作狀態機與指令協定的原始推導 |
+| `v2_app_redesign_plan.md` | **v2 規格 = 現行程式碼的權威** | 🟢 活的 |
+| `洗窗機器人設計彙整.md` | **v3 新架構設計**（沿用舊硬體改寫） | 🟢 活的，27 項待辦在 `work_log.md` |
+| `mh300_migration_plan.md` | SE3 → Delta MH300 變頻器遷移 | 🟡 **進行中且未完成**。🔴 Phase 0 的 keypad 參數表是**唯一副本** |
+| `crane_balance_hold_plan.md` | 吊機平衡保持 | 🟡 **暫緩，但 2026-08-27 前提已反轉**（同步步伐放繩期間四顆吸盤全放、無錨定）→ 需重新評估 |
+| `step_speedup_phase1_plan.md` | 單 step 25-30s → 12-15s 加速 | 🟡 標「進行中」，含瓶頸量測表 |
+| `mailbox.md` | ⚰️ **墓碑檔**：多人協作信箱，2026-08-27 退休 | ⚪ 16 條未結案項已全數併入 `work_log.md` 待辦總表 |
+| `gen_deploy_pdf.py` | 產生 `deploy_and_test.pdf` 的腳本 | ⚪ **只能在 Windows 跑**（寫死 `C:\Windows\Fonts\msjh.ttc`），需 `fpdf` |
+| `archive/camera_obstacle_plan.md` | ⚰️ 已作廢：相機路線整條移除 | ⚪ Phase 3~6 一項未做 |
+| `archive/scripted_run_plan.md` | ⚰️ 已完成（實作超出原規劃） | ⚠️ **計畫裡兩處決策已被推翻，照著做會做錯**（見墓碑抬頭） |
+| `archive/se3_mode6_migration_plan.md` | ⚰️ 已作廢（從未開工，被 MH300 取代） | 🔴 **但內容仍然有效**——bench 現在跑的還是 SE3。§1.1 是唯一一張「SE3 故障 ↔ workaround」對照表；§7 記著四個已被否決的方向 |
+
+🔴 **「已歸檔」不等於「內容失效」**——`se3_mode6_migration_plan.md` 就是活生生的例子：
+計畫本身死了，但它裝著現行硬體唯一的故障對照表。**歸檔時墓碑抬頭一定要寫清楚
+「裡面哪些知識仍然有效」**（見下方「plan 檔的生命週期」）。
 
 #### 🔴 規格文件有三個世代，不要拿錯
 
@@ -40,6 +69,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | v3 | `.claude/洗窗機器人設計彙整.md` | 🆕 新架構方向：四輪滾動＋兩具 22 吋螺旋槳貼牆＋橫向滑台＋雙主控，**沿用既有硬體改寫** |
 
 > ⚠️ 因為是「舊硬體改寫」，`user_lib/` 的驅動層大致沿用 —— **既有的驅動層技術債不會隨應用層重寫而消失，它跟著硬體走**。
+
+#### `.claude/summaries/` — 寫 driver 之前先來這裡
+
+📌 **原始 PDF 手冊不在 repo 裡**（放在 Windows 端 `D:\洗窗戶機器人\電控設備資料\`），
+所以這 8 份摘要對只有 repo 的人來說**就是手冊本身**。動任何 `user_lib/` 的 driver 之前先查這裡，
+不要憑 driver 現有的程式碼反推協定 —— 那正是 DM2J 那次踩雷的方式。
+
+| 檔案 | 裝置 | 特別值得看的 |
+|---|---|---|
+| `SE3_INVERTER_MODBUS_SUMMARY.md` | 士林 SE3-210 變頻器（**bench 現用**） | 310 行、最完整。**錯誤碼表 H1007/H1008**、`P.79` 模式切換、通訊逾時的安全設定、H1101-H1106 magic command |
+| `ZDT_MODBUS_SUMMARY.md` | ZDT 閉環步進（吸盤推桿） | 兩種韌體（X / Emm5.0）暫存器語意不同，**拿錯會讀到垃圾** |
+| `DM2J_RS_MODBUS_SUMMARY.md` | DM2J-RS570（上滑台） | ⚠️ **2026-04-24 之前的版本多處錯誤**，driver 也踩了同一個雷（見檔內警告）；含 `Known Driver Bugs` 一節 |
+| `CLV900_INVERTER_MODBUS_SUMMARY.md` | CLV900 變頻器（中間絞盤，未安裝） | **不支援 `0x10` 多寫**、故障碼 U0-01 |
+| `SD76_MODBUS_SUMMARY.md` | SD76-C 計米器 | 暫存器圖、工作模式、錯誤碼、資料編碼（BCD） |
+| `JC_100_MODBUS_SUMMARY.md` | JC-100 真空壓力表 | 量程與單位（0.1 kPa int16 signed） |
+| `PQW_IO_MODBUS_SUMMARY.md` | PQW 繼電器模組 | 線圈位址、暫存器圖、輸出模式 |
+| `ZS_DIO_MODBUS_SUMMARY.md` | ZS-DIO 繼電器（已被 SE3 取代） | 保留作歷史對照 |
+
+🔴 **一個具體例子**：既有待辦「VFD 故障碼顯示是壞的（`vfd_fault` 一邊報假警一邊讀不到）」，
+它要的 SE3 錯誤碼對照表**就在 `SE3_INVERTER_MODBUS_SUMMARY.md` 的
+`## Error Code Reference (H1007 / H1008)`** —— 不必再去翻 PDF。
+
+📌 **摘要一律註明來源檔案路徑**（見各檔開頭的 `Source:`），這樣才追得回原始手冊。
 
 #### plan 檔的生命週期
 
@@ -72,7 +124,8 @@ C++ 機器人控制系統，包含洗窗機器手臂（wash robot arm）與吊�
 
 ## Build System
 
-**IDE:** Visual Studio (solution: `washrobot_new_PI.sln`)  
+**IDE:** Visual Studio (solution: `facade_cleaning_v2.sln`)
+> 🐛 **2026-08-28 更正**：本檔原本寫 `washrobot_new_PI.sln`——那是 fork 前 v1 的檔名，repo 裡根本沒有這個檔。照舊寫法跑會直接失敗。  
 **Build method:** MSBuild with remote SSH deployment to Linux/ARM targets  
 **No CMake or Makefile** — all build configuration is in `.vcxproj` files  
 
@@ -81,7 +134,8 @@ Compiled binaries land in `bin/[arch]/[config]/` within each project directory.
 
 To build from command line (if using MSBuild):
 ```
-msbuild washrobot_new_PI.sln /p:Configuration=Debug /p:Platform=ARM
+# 🔴 Platform 必須是 ARM64——只有 Debug|ARM64 設了 AdditionalIncludeDirectories
+msbuild facade_cleaning_v2.sln /p:Configuration=Debug /p:Platform=ARM64
 ```
 
 ## Repository Structure
@@ -107,6 +161,26 @@ scripts/             # tmux launcher：wr.sh / crane.sh / cams.sh
 tmp/                 # 暫存工作區（已 gitignore，不進版控）
 ```
 
+#### 根目錄完整盤點 —— 🔴 **新增檔案必須在這裡加一列**
+
+📌 **2026-08-28 建立。** 上面的樹狀圖只畫了程式目錄，根目錄還有 8 個檔／目錄
+**從未被任何索引提到**。同 `.claude/` 索引的理由：沒被指到的檔案等於不存在。
+
+| 項目 | 是什麼 | 狀態 |
+|---|---|---|
+| `README.md` | repo 門面。🔴 **唯一記載 fork 出身**：自 `washrobot_new_PI` commit `9f174f9`（tag `v2-fork-from-v1`）於 2026-06-25 分出 | 🟡 「跟 v1 主要差別」多數仍是 TBD |
+| `ONBOARDING.md` | **52 KB、11 章的知識庫**：硬體驅動踩坑、工程心法、v2 步態引擎詳解、crane 通訊 hardening 三疊 bug、已退役子系統 | 🟢 活的。⚠️ 第 2 章「尚未解決」已改為指標，**待辦只在 `work_log.md`** |
+| `facade_cleaning_v2.sln` | VS 方案檔（**不是** `washrobot_new_PI.sln`） | 🟢 活的 |
+| `deploy_and_test.pdf` | 部署測試說明，由 `.claude/gen_deploy_pdf.py` 產生 | 🟡 產生腳本只能在 Windows 跑 |
+| `dm2j_manual_utf8.txt` | DM2J 手冊的**可讀**文字擷取（簡體中文） | 🟡 已被 `.claude/summaries/DM2J_RS_MODBUS_SUMMARY.md` 濃縮，保留作原文對照 |
+| `.vs/`（43 MB）／`tmp/` | VS 快取／暫存工作區 | ⚪ 已在 `.gitignore`，不進版控 |
+
+🗑️ **2026-08-28 已刪除 4 個檔（228 KB）**：`main_tmp.txt`（v1 時期 `main.cpp` 開頭註解的舊副本，
+抬頭仍寫 `washrobot_new_PI`、`.21` 匯流排——**看它會得到錯的拓樸**）、
+`dm2j_manual.txt`／`dm2j_manual2.txt`／`zdt_modbus.txt`（PDF 文字擷取，編碼壞掉無法閱讀，
+且都已被 `.claude/summaries/` 取代）。
+📌 **理由是「看了會被誤導」而不只是「沒用」。** 四個檔都在版控裡，需要時從 git 歷史取回。
+
 > 🐛 **`user_lib/SerialPort.h` 與 `transport/Serial_port.h` 是兩個不同的檔，卻共用同一個
 > include guard `SERIAL_PORT_H`**。前者是 `cleaning_arm` 的 damiao 那一套（經 `user_lib/damiao.h`），
 > 後者是本專案的序列埠。目前不爆是因為使用者不重疊 —— 但**只要哪天同一個編譯單元碰到兩者，
@@ -124,146 +198,173 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 
 ## Architecture
 
-### 系統主體架構
+> 📌 **2026-08-28 全面改寫：本節由原始碼逐檔掃描重建。**
+> 先前的架構圖是 **v1**（`DM2J×5`／`ZDT×9`／三區真空／`.21` 匯流排），與現行程式碼差距已大到會誤導。
+> v1 的原始推導保留在 `.claude/motion_flow.md`（已凍結），**不要在這裡重建 v1**。
+> 🔴 **權威來源是原始碼常數**，本節每個數字都標了出處檔案與行號，改硬體時一併改這裡。
+
+### 執行時的行程拓樸（先看這個——它決定你要 ssh 去哪台）
+
+**兩台 Pi，但程式不是各跑各的**。2026-08-28 實機觀測：
 
 ```
-[遠端/外部網路訊號]
-  │
-  ▼ (2-wire Tether 雙絞線)
-[長距離通訊橋接] Fathom-X Tether Interface Board
-  │
-  ▼ (Ethernet)
-[網路核心] 8 Port PoE Switch
-  │
-  ├─▶ (Ethernet) Raspberry Pi 5 (eth0) ─── 系統主控 ─── 192.168.1.100
-  │     ├─▶ (USB→TTL) 姿態儀 WT901BC
-  │     └─▶ (USB→CAN) damiao USB-CAN dongle ─── /dev/ttyACM0 @ 921600 baud
-  │           ├─ M1 damiao DM10010L  (大臂馬達, CAN slave 0x01 / master 0x11)
-  │           └─ M2 damiao DM4340_48V (工具頭, CAN slave 0x02 / master 0x22)
-  │           # 由 cleaning_arm/motor_api 服務驅動 (TCP :9527)，washrobot 透過
-  │           # arm_cmd_("INIT/DEPLOY/PARK/STATUS") 經 127.0.0.1:9527 下指令。
-  │           # 注意 CAN bus 末端需要 120Ω 終端電阻
-  │
-  ├─▶ (PoE) 防水型 2MP 攝影機 × 4
-  │     ├─ 左上
-  │     ├─ 左下
-  │     ├─ 右上
-  │     └─ 右下
-  │
-  ├─▶ (Ethernet) USR-TCP232-304 #1 ─── RS485_1 ─── 192.168.1.20
-  │     └─▶ DM2J_RS570 × 4 (Slave 1~4)
-  │           ├─ Slave 1: 左腳
-  │           ├─ Slave 2: 左輪
-  │           ├─ Slave 3: 右腳
-  │           └─ Slave 4: 右輪
-  │           # 2026-05-26: 上滑台 (slave 5) 搬到 .22 slave 14，原因見 RS485_3
-  │
-  ├─▶ (Ethernet) USR-TCP232-304 #2 ─── RS485_2 ─── 192.168.1.21
-  │     └─▶ ZDT_motor_control × 9 (Slave 1~9) ─── 驅動 SMC LEYG25 200mm 推桿
-  │           ├─ Slave 1~2: 右腳 × 2     (updated 2026-04-23)
-  │           ├─ Slave 3~4: 左腳 × 2
-  │           ├─ Slave 5,7: 右身體 × 2
-  │           ├─ Slave 6,8: 左身體 × 2
-  │           └─ Slave 9:   中心 × 1
-  │
-  ├─▶ (Ethernet) USR-TCP232-304 #3 ─── RS485_3 ─── 192.168.1.22
-  │     ├─▶ JC_100_METER × 9 (Slave 1~9) ─── 真空氣壓感測器，各裝於推桿末端吸盤
-  │     ├─▶ DY_500_weight_sensor × 2 (Slave 10~11) ─── 鋼索重量感測器
-  │     ├─▶ PQW_IO_16O_RLY × 1 (Slave 12, 8CH) ─── 吸盤真空 + 清洗系統控制
-  │     │     ├─ CH1: dp0105 真空泵浦 × 9（共用，給電/斷電）
-  │     │     ├─ CH2: VT307 電磁閥 ─── 腳組吸盤（左腳 + 右腳，共 4 顆）
-  │     │     ├─ CH3: VT307 電磁閥 ─── 身體組吸盤（左右身體，共 4 顆）
-  │     │     ├─ CH4: VT307 電磁閥 ─── 中心吸盤（獨立 1 顆，姿態校正用）
-  │     │     ├─ CH5: 手臂刷洗滾筒馬達（裝於上滑台機械臂，清洗時旋轉）
-  │     │     ├─ CH6: 水箱泵浦
-  │     │     ├─ CH7: 保留（原水箱進水球閥，2026-06-05 控制權移到 crane 端 PQW，CH7 腳位空著）
-  │     │     └─ CH8: 保留
-  │     ├─▶ XKC_Y25_RS485 × 1 (Slave 13) ─── 水箱水位感測（非接觸電容式）
-  │     └─▶ DM2J_RS570 × 1 (Slave 14) ─── 上滑台（乘載機械手臂）
-  │           # 2026-05-26 搬遷：從 RS485_1 slave 5 移到這。理由是讓 arm sweep
-  │           # 跟 feet rail (cli_20_ slave 1,3) 真正並行不撞 bus。代價是
-  │           # arm motion 期間跟 JC100 pressure_poll / PQW valve op 在 cli_22_
-  │           # 序列化（半雙工 modbus + TCP_client::socket_mtx_）。
-  │
-  │ ─────────── 吊機 (Crane) 子系統 ───────────
-  │
-  ├─▶ (Ethernet) Raspberry Pi ─── 吊機主控 ─── 192.168.1.101
-  │
-  └─▶ (Ethernet) USR-TCP232-304 #A ─── RS485_control ─── 192.168.1.30
-  │     ├─▶ SE3_inverter (Slave 1) ─── 左鋼索變頻器（士林 SE3-210，取代原 ZS_DIO 繼電器 2026-05-07）
-  │     ├─▶ SE3_inverter (Slave 2) ─── 右鋼索變頻器（士林 SE3-210；2026-05-15 從 USR_B 移到 USR_A）
-  │     ├─▶ CLV900 (Slave 3) ─── 中間絞盤變頻器（未安裝）
-  │     └─▶ (reserved Slave 4) ─── SD76 middle 中間管線計米 (未安裝)
-  │
-  └─▶ (Ethernet) USR-TCP232-304 #M ─── RS485_sensing + 進水控制 ─── 192.168.1.34
-  │     ├─▶ SD76_length_meters (Slave 1) ─── 左鋼索計米（2026-05-15 從 USR_A 移到此 bus、slave 2→1）
-  │     ├─▶ SD76_length_meters (Slave 2) ─── 右鋼索計米
-  │     ├─▶ (reserved Slave 4) ─── SD76 middle 中間管線計米 (未安裝)
-  │     └─▶ PQW_IO_16O_RLY × 1 (Slave 12, 8CH) ─── 進水球閥控制（2026-06-05 從 washrobot cli_22_ slave 12 CH7 搬來）
-  │           └─ CH4: 水箱進水球閥（頂樓水壓 → 水箱補水）；其他 CH 保留
-  │           # 跟 SD76 共用 cli_M：meter_loop poll ~50-100ms + 偶爾 relay write，bus 衝突極輕
-  │
-  └─▶ (Ethernet) USR-TCP232-304 #C ─── RS485_crane_dsz_l ─── 192.168.1.32
-  │     └─▶ DSZL_107 (Slave 1) ─── 左鋼索張力感測（X518 採集板，獨佔 RS485）
-  │
-  └─▶ (Ethernet) USR-TCP232-304 #D ─── RS485_crane_dsz_r ─── 192.168.1.33
-        └─▶ DSZL_107 (Slave 1) ─── 右鋼索張力感測（X518 採集板，獨佔 RS485）
-
-# 拓樸理由（2026-05-15 re-layout）：
-#   - **控制 bus** (USR_A .30)：兩台 SE3 + 未來 CLV900。所有「寫 / 命令 / 馬達」流量
-#   - **感測 bus** (USR_B .31)：兩台 SD76 + 未來 middle 計米。所有「讀 / 長度回授」流量
-# Trade-off：兩台 SE3 共一條 bus → Modbus RTU half-duplex 序列化（drift floor ~30-50ms），
-# 但 meter_loop 輪詢 SD76 不再撞到 SE3 dispatch（修掉 2026-05-15 看到的 200-300ms drift）。
-# DSZL-107 各佔 1 個 bus，避免 X518 採樣率高時被別的 device polling 拖慢。
-# 之前的左/右繩 + 中間共線設計（2026-05-07~05-14）已 retired。
+                    瀏覽器
+                      │ WebSocket + HTTP
+                      ▼
+  ┌─────────────────────────────────────────────┐
+  │ 吊機 Pi  raspberry-cran                      │   ⚠️ web GUI 在吊機這台，不在本體
+  │   node server.js            :8080            │
+  │   Crane_control_PI          :5002            │
+  └───────┬──────────────────────────┬──────────┘
+          │ TCP 文字協定              │ TCP 文字協定
+          ▼                          ▼
+  ┌───────────────────┐    （橋接兩邊，見下）
+  │ 本體 Pi  washrobot │
+  │   facade_cleaning_v2   :5001                 │
+  │   motor_api（手臂）     :9527  ← 127.0.0.1 本機 │
+  └───────────────────┘
 ```
 
-### 分散式系統通訊
+- **web_backend 刻意放在吊機側**：本體在半空中掛掉時，GUI 仍能透過吊機手動收繩救援
+- **本體會主動當 TCP client 連吊機 `:5002`**（`app/WASH_ROBOT.h` `CRANE_IP`），
+  自動步態下移時由本體下 `pay_out_left/right <cm>` 同步放繩 —— 兩台之間是**本體指揮吊機**
+- **手臂 `motor_api` 跑在本體 Pi 的 `127.0.0.1:9527`**，本體用
+  `arm_cmd_("INIT"/"DEPLOY"/"PARK"/"STATUS")` 下指令
 
-- **washrobot RPi (192.168.1.100)** 跑 `washrobot_new_PI/main.cpp`，TCP server :5001
-- **crane RPi (192.168.1.101)** 跑 `Crane_control_PI/main.cpp`，TCP server :5002
-- **Web GUI backend (Node.js)** 跑在 **crane RPi (.101) :8080**，橋接 Browser WebSocket ↔ 兩裝置的 TCP
-  - 刻意放在救援側：washrobot 在半空中掛掉時，GUI 仍可透過 crane 手動收繩救援
-  - 失聯模式 + 緊急收繩（按住持續收）行為詳見 `.claude/motion_flow.md` §8
-- 自動下移時 washrobot 當 TCP client 連 crane :5002 下 `pay_out <cm>` 指令同步放繩
-- 指令協定：簡單文字，`\n` 結尾；回應 `OK\n` / `OK <data>\n` / `ERR <msg>\n` / `EVT <type> <data>\n`
-- 詳見 `.claude/motion_flow.md`
+| 位址 | 機器 | 帳號 | 備註 |
+|---|---|---|---|
+| `192.168.1.100` / `192.168.5.26` | 本體 `washrobot` | `nexuni` | 有線／WiFi |
+| `192.168.1.10` / `192.168.5.17` | 吊機 `raspberry-cran` | `user` | 🔴 **有線是 `.10` 不是 `.101`** |
 
-### 吸盤控制邏輯
+⚠️ **三份文件對吊機 IP 的說法不一致**：`web_backend/server.js` 的 `CRANE_IP` 預設值仍是
+`192.168.1.101`（過期）、`runbook.md` 的表也寫 `.101`、只有 08-27 實測記到 `.10`。
+現行程式實際走的是 `app/WASH_ROBOT.h` 的 `CRANE_IP = "192.168.5.17"`（**WiFi**）。
 
-每組推桿末端配有吸盤，真空吸附由以下元件組成：
-- **dp0105** (24V 真空產生器) — 9 顆共用繼電器 CH1 統一供電
-- **VT307** (24V 負壓電磁閥) — 3 分區控制，支援尺蠖式交替吸附：
-  - **CH2: 腳組** — 左腳 × 2 + 右腳 × 2 = 4 顆吸盤（ZDT 推桿 slave 1,2,3,4 末端）
-  - **CH3: 身體組** — 左身體 × 2 + 右身體 × 2 = 4 顆吸盤（ZDT 推桿 slave 5,6,7,8 末端）
-  - **CH4: 中心** — 1 顆吸盤（ZDT 推桿 slave 9 末端），獨立控制，姿態校正時可單獨吸附
+### 匯流排拓樸（as-built，2026-08-28 由原始碼確認）
 
-### 電源架構（參考）
+所有 RS485 裝置都掛在 **USR-TCP232 透明傳輸網關**後面，程式以 **Modbus-TCP over :4001** 連網關。
+
+#### 本體 washrobot（權威：`app/WASH_ROBOT.h` + `WashRobot::init()`）
 
 ```
-[總電源輸入] AC 220V
+Raspberry Pi 5（本體主控）
+  ├─ USB→TTL  /dev/ttyUSB0 @ WT901BC ──── 姿態儀 IMU（Serial_port，非 Modbus）
+  ├─ 127.0.0.1:9527 ──────────────────── motor_api → damiao USB-CAN
+  │                                        M1 DM10010L 大臂 / M2 DM4340_48V 工具頭
   │
-  ├─▶ [A組] EPP-200-24 (DC 24V) ─────────▶ 馬達剎車與機械手臂
-  │     ├─ 上滑台、左腳、右腳、左輪、右輪（步進剎車 + 24V）
-  │     └─ 機械手臂電源 [未來擴充]
+  ├─ USR #1  192.168.1.20  (cli_20_)  ─── 「動力 bus」
+  │     ├─ ZDT slave 5,6 ── 右腳 上/下 推桿（SMC LEYG25）
+  │     ├─ ZDT slave 7,8 ── 左腳 上/下 推桿
+  │     └─ PQW slave 12 ─── 8CH 繼電器（2026-08-27 從 .22 搬來）
   │
-  ├─▶ [B組] EPP-200-24 (DC 24V) ─────────▶ 氣動、感測 I/O 與通訊介面
-  │     ├─ Fathom-X Tether Interface Board
-  │     ├─ SMC 推桿 ZDT 步進
-  │     ├─ JC-100 氣壓表
-  │     ├─ DY-500 重量感測器控制器 (100KG)
-  │     └─ PQW 繼電器 (8CH)
-  │          ├─ (Relay) ▶ dp0105 真空產生器
-  │          └─ (Relay) ▶ VT307 電磁閥
-  │
-  ├─▶ [C組] EPP-200-48 (DC 48V) ─────────▶ 主動力與網路
-  │     ├─ 8 Port PoE Switch
-  │     └─ DM2J_RS570 步進控制器 × 5
-  │
-  └─▶ [變壓器] 插座式變壓器 (DC 5V) ──────▶ 主控與通訊模組
-        ├─ Raspberry Pi 5
-        └─ USR-TCP232-304 × 3
+  └─ USR #3  192.168.1.22  (cli_22_)  ─── 「感測 + 滑台 bus」
+        ├─ JC-100 slave 5~8 ── 真空壓力計（與 ZDT 同號：推桿 N 末端的吸盤 = 真空表 N）
+        ├─ QX-DO24 slave 6 ─── PWM（🔴 **停用中**，撞 JC100 slave 6）
+        ├─ DY-500 slave 10,11 ─ 鋼索重量感測（**未安裝**，polling 關閉）
+        ├─ XKC-Y25 slave 13 ── 水箱水位（不探測，首次讀取才會發現缺件）
+        └─ DM2J   slave 14 ── 上滑台（乘載機械手臂）
 ```
+
+🔴 **同號不衝突的理由**：ZDT 5-8 在 `.20`、JC100 5-8 在 `.22`，**兩條實體 bus**。
+`CUP_SLAVE_FIRST/LAST`（`WASH_ROBOT.h:524`）是唯一真實來源，所有遍歷吸盤的迴圈都吃它。
+
+#### 吊機 crane（權威：`Crane_control_PI/main.cpp:161-168`）
+
+```
+Raspberry Pi（吊機主控）
+  ├─ USR_A  192.168.1.30 ── SE3 變頻器（左鋼索）        ← 控制 bus
+  ├─ USR_B  192.168.1.31 ── SE3 變頻器（右鋼索）        ← 控制 bus
+  ├─ USR_M  192.168.1.34 ── SD76 計米 ×2 + PQW slave 12  ← 感測 bus
+  │                          PQW CH4 = 水箱進水球閥
+  ├─ X518   192.168.1.32:502 ── DSZL-107 左張力（原生 Modbus TCP，非 :4001）
+  └─ X518   192.168.1.33:502 ── DSZL-107 右張力
+```
+
+📌 **左右 SE3 各佔一條 bus**（不是共線）：半雙工 RTU 下兩台共線會序列化，2026-05-15 量到
+200-300ms drift，拆開後降到 ~30-50ms。張力計各自獨佔一條，避免 X518 高採樣率被別的輪詢拖慢。
+
+⚠️ **`CRANE_VFD_IS_SE3`（`main.cpp:116`）目前是 `1`——bench 實際仍在跑 SE3，不是 MH300。**
+MH300 driver 已存在但遷移未完成（故障碼那段仍讀 SE3 的 H1007/H1008）。
+
+### 吸盤控制邏輯（🔴 已從 v1 的三區變成**單閥四吸盤**）
+
+```
+PQW 8CH 繼電器（本體 .20 slave 12）        權威：app/WASH_ROBOT.h:449-474
+  ├─ CH1  VT307 電磁閥 ── 全部 4 顆吸盤（唯一一顆閥）
+  │        ⚠️ CH_VALVE_LEFT == CH_VALVE_RIGHT == 1（2026-08-27 左右合併）
+  ├─ CH2  dp0105 真空產生器（運轉期間常開）
+  ├─ CH6  🔴 破真空閥（2026-08-27 從 CH14 搬來）
+  ├─ CH14 水箱噴水泵浦（2026-08-27 從 CH6 讓位過來）
+  └─ CH15 手臂滾筒刷馬達
+```
+
+🔴🔴 **CH6 與 CH14 絕不可同號**：若水泵仍指向 CH6，清洗時開水泵＝開破真空閥
+→ 4 顆吸盤同時失去真空 → **機器在貼牆狀態下脫落**。這兩個常數的沿革註解務必保留。
+
+⚠️ v1 的「腳組 / 身體組 / 中心」三區真空、`ZDT×9`、`DM2J` 腳輪滑軌**全部退場**。
+現在只有 4 顆吸盤（= 2 隻腳 × 上下各一），步態靠**左右交替**而非上下分區。
+
+### 應用層：狀態機與併發模型
+
+**狀態機**（`app/WASH_ROBOT.h:377`，11 個狀態）
+
+```
+Idle → Ready → Attached → Running ⇄ Paused
+                   │         ├→ WaitingConfirm（等 confirm_balance）
+                   │         └→ PausedOnError（等 continue / skip / emergency_stop）
+                   ├→ Balancing / ReturningHome / Calibrating
+                   └→ Error（只剩 status / ping / reset / return_home 可用）
+```
+
+**指令分兩條路徑**（`facade_cleaning_v2/main.cpp:388-412`）—— 這是個容易誤改的設計：
+
+| 路徑 | 指令 | 執行方式 |
+|---|---|---|
+| **FAST** | `ping` `status` `pause` `resume` `continue` `skip` `emergency_stop` `reset` `zdt_release_stall` | 直接在收包執行緒同步跑，立即回覆 |
+| **SLOW** | 其餘全部（會搶 `motion_mtx_` 或阻塞等人介入的） | 另開 detached thread |
+
+🔴 **為什麼要分**：長時間運動指令若佔住收包執行緒，同一條 TCP 連線就送不進
+`continue`/`skip`/`stop` → **GUI 死鎖**。這是修過的 bug，不要合併回單一路徑。
+
+**背景執行緒**
+
+| 本體（`WASH_ROBOT.h`） | 吊機（`Crane_control_PI/main.cpp:4364+`） |
+|---|---|
+| `crane_wd_thread_` 吊機看門狗 | `watchdog_loop` 心跳逾時 → abort |
+| `crane_keepalive_thread_` | `hold_loop` 張力監控 → 超標 `hold_all_off()` |
+| `water_inlet_watchdog_thread_` | `meter_loop` SD76 輪詢（含 >30cm 跳變過濾） |
+| `imu_mon_thread_` | `vfd_keepalive_loop` |
+| `pressure_poll_thread_`（保留但**從不啟動**） | |
+
+### 🔴 掃描時發現的三件事（記在這裡免得下次重掃）
+
+**1. `WASH_ROBOT.cpp` 有 3,879 行死碼（佔全檔 30%）**
+16 個 `#if 0` 區塊，最大一塊 897 行。都是 v1 退役程式碼「留作參考」。
+🔴 **它們已經無法靠把 `#if 0` 改成 `#if 1` 復活**——裡面引用的 `ZDT_LB1`／`ZDT_RB1`／`ZDT_C`
+等符號**在 `WASH_ROBOT.h` 裡已經不存在了**（預處理器把它們吃掉才沒報錯）。
+所以「留作參考」只剩**閱讀**價值，沒有復原價值。
+
+**2. 有些註解描述的是舊配置，程式碼本身是對的**
+例如 `WASH_ROBOT.h:513` 開頭仍寫「right{1,2} / left{3,4}」（下一行才更正為 5-8）、
+`:1020` 寫「.20 = ZDT pushers 1-4」、`cmd_water_pump` 宣告處寫「PQW CH6」但常數是 CH14。
+📌 **判準：常數定義 > 附近註解**。
+
+**3. `init()` 一失敗就 `return`，一次只會看到最前面那一個問題**
+（本專案慣例 `true`＝失敗）。硬體連線驗證可能要跑好幾輪才挖得完。
+
+### 電源架構（參考，v1 時期記錄，未隨 v2 更新）
+
+⚠️ 下表是 v1 的配置，`DM2J×5` 那條已不存在。保留是因為**這是電源分組的唯一記載**，
+但**不要拿它推論現行硬體**。
+
+```
+[總電源] AC 220V
+  ├─ [A] EPP-200-24 → 馬達剎車與機械手臂
+  ├─ [B] EPP-200-24 → 氣動、感測 I/O 與通訊介面（推桿 ZDT、JC-100、DY-500、PQW 繼電器）
+  ├─ [C] EPP-200-48 → 8 Port PoE Switch、DM2J 步進控制器（v1 為 ×5）
+  └─ [變壓器] DC 5V → Raspberry Pi、USR-TCP232
+```
+
 
 ### Communication
 
