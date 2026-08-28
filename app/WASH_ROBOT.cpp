@@ -6297,15 +6297,17 @@ int WashRobot::preset_extend_pulse_for_slave_(int slave) const {
     return PUSHER_EXTEND_PULSE;   // fallback
 }
 
-// Convert cm overextension to ZDT pulses based on slave's group ratio
-//   feet (CUP_SLAVE_FIRST..LAST): 20000 pulses = 7 cm → 2857 pulses/cm
-// [2026-08-27] ⚠ 這裡原本是「feet=1-4 / body=5-9」的 v1 分組。吸盤 slave 由 1-4
-// 改為 5-8 之後，若保留那個 body 分支，feet 會掉進去拿到 3000 pulses/cm，比正確
-// 的 2857 多 5%——而且不會報錯，是靜默算錯。v2 沒有 body 推桿，該分支直接移除。
+// Convert cm overextension to ZDT pulses.
+// 🔴 [2026-08-28] 這裡原本對 feet 用 `20000/7 = 2857`，並在註解宣告 3000 是
+//    「多 5%、靜默算錯」。**實機拿尺量的結果相反：3000 才對**（47994 脈衝 = 16cm，
+//    另有四條獨立證據，見 WASH_ROBOT.h 的 CUP_PULSE_PER_CM）。
+//    `20000 = 7cm` 很可能是量在 v1 的 body 推桿上，08-27 重構時被錯誤套用到 feet。
+//    📌 **「更正」本身也需要被驗證。**
+// v2 只剩 4 顆吸盤推桿，兩個分支同值，保留 fallback 只為語意明確。
 int WashRobot::cm_to_pulses_for_slave_(int slave, double cm) {
     if (slave >= CUP_SLAVE_FIRST && slave <= CUP_SLAVE_LAST)
-        return (int)(cm * (20000.0 / 7.0));
-    return (int)(cm * 3000.0);   // fallback（v2 已無 body 推桿，正常不會走到）
+        return (int)(cm * CUP_PULSE_PER_CM);
+    return (int)(cm * CUP_PULSE_PER_CM);   // v2 已無 body 推桿，正常不會走到
 }
 
 // Record successful seal pulse — used by fine_tune & cycle_group_
@@ -9568,7 +9570,7 @@ std::string WashRobot::do_feet_realign_(bool apply_threshold, bool caller_holds_
     const std::vector<int> feet = {ZDT_RF1, ZDT_RF2, ZDT_LF1, ZDT_LF2};
     constexpr double REAL_POS_MIN_DEG = -10.0;    // tolerate small negatives at zero
     constexpr double REAL_POS_MAX_DEG = 6000.0;   // SMC LEYG25 20cm = 6000° = corrupt-frame guard
-    constexpr double FEET_PULSE_PER_CM = 20000.0 / 7.0;   // ZDT pulse ↔ cm (feet slaves 1-4)
+    constexpr double FEET_PULSE_PER_CM = CUP_PULSE_PER_CM;   // [2026-08-28] 原為 20000/7=2857，實測應為 3000（見 WASH_ROBOT.h）
     auto feet_skip = [this](int s) -> bool { return disabled_zdt_slaves_.count(s) > 0; };
 
     // caller_holds_lock (end-of-step auto-call): do_step_*_ already holds motion_mtx_

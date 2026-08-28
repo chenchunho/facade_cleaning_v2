@@ -36,6 +36,8 @@
 |---|---|---|---|---|
 | 🔴 | **`connectToServer` 的非阻塞 connect 少了 `getsockopt(SO_ERROR)`** → 連到沒人聽的埠也判定成功、印 `reconnect success`、`connected=true`。失敗的 connect 同樣會讓 socket 可寫，`select()>0` 不足以判定成功 | `transport/TCP_client.cpp:180-220` | **未修** ✔（08-28 實機證據：吊機 5002 無人在聽，本體印了 20 次 reconnect success） | work_log 2026-08-28（實機驗證） |
 | 🟡 | `init()` 印 `VFD left/right (MH300)` 是**寫死字串**，在 `#if CRANE_VFD_IS_SE3` 之外 → 旗標是 1（實際跑 SE3）卻印 MH300，會把人導去查錯的 driver | `Crane_control_PI/main.cpp:4215,4234` | **未修** ✔ | work_log 2026-08-28（實機驗證） |
+| ✅ | ~~推桿 cm↔pulse 用 `20000/7 = 2857`，實測應為 **3000**（5% 系統誤差）~~ | `app/WASH_ROBOT.{h,cpp}` | **已修（`[2026-08-28n]`）**：新增 `CUP_PULSE_PER_CM = 3000.0`，兩處都改吃它。實機 47994 脈衝 = 16cm + 四條交叉驗證 | work_log 2026-08-28（實機量測） |
+| 🟡 | `PUSHER_EXTEND_*` 常數的註解標的公分現在是對的（本來就用 3000），但**「12.0 cm」等標示仍未逐一複查**；另 `zdt_pusher extend` 實際走的是 `disable_seal` 尋封序列（可達 47994 脈衝／16cm），**不是預設的 36000** —— 文件與 GUI 說明都沒講 | `app/WASH_ROBOT.h`、runbook | **未修** ✔ | work_log 2026-08-28 |
 | 🔴 | `readRegister()` 不驗 reply CRC、不驗 byteCount → 壞掉的 Modbus reply 被當有效值往上傳（bench 已造成實體損害，詳見下方） | `user_lib/SD76_length_meters.cpp` | **未修** ✔ | mailbox 2026-05-14 |
 | 🔴 | 🔮 **eth 串接之後要回頭改 `WASH_ROBOT.h` 的 `CRANE_IP`**：目前是 bench 用的 WiFi `192.168.5.17`（註解顯示已改過三次）。串上 eth 之後**它仍然會走 WiFi**——有線路徑就在旁邊卻沒被用到，而且完全不會有訊息告訴你。機器吊在半空中時控制流量跑在 WiFi 上，是實質風險 | `app/WASH_ROBOT.h:414` | **待處理（等 eth 串接）** | work_log 2026-08-28 per user |
 | 🔴 | **所有上滑台 RPM 常數都是在錯誤的線速度認知下挑的**。以「1cm/rev」算時以為 250rpm=4.17cm/s、1000rpm=16.7cm/s；用實測導程 7.731 換算，實際是 **32.2 / 128.8 cm/s**。**2026-08-28 實機已發生失步**（使用者回報，手動調回）。→ `ARM_SWEEP_RPM=1000`（129cm/s）幾乎確定過快，`DM2J_ARM_STEP_SWEEP_RPM=250` 也要重新評估；ACC/DEC=100 同樣是在錯誤前提下挑的 | `app/WASH_ROBOT.h` | **未修** ✔ | work_log 2026-08-28（實機失步） |
