@@ -34,7 +34,9 @@
 
 | 優先度 | 項目 | 涉及檔案 | 現況 | 來源與原始日期 |
 |---|---|---|---|---|
-| 🟢 | ~~`readRegister()` 不驗 reply CRC~~ **2026-08-28 已修**（分支 `fix/driver-crc`）：補 slave ID／FC／`byteCount == count*2`／幀長／CRC 五項。實測缺陷比原記載更嚴重——`byteCount=0xFF` 會 **SIGSEGV**（堆疊覆寫），不只是髒資料。🔴 **尚未部署、尚未上實機** | `user_lib/SD76_length_meters.cpp` | **已修** ✔（假從站 5/5 通過） | mailbox 2026-05-14 |
+| ✅ | ~~重連的非阻塞 connect 少了 `getsockopt(SO_ERROR)` → 連到沒人聽的埠也判定成功~~ | `transport/TCP_client.cpp` | **已修（本分支 `-drv4`）** —— 雙向斷言實機驗證：吊機關→假成功 0 次、吊機開→正常連上。🔴 **`refactor/app-layer` 上仍未修**（那條分支要保持功能等價） | work_log 2026-08-28（實機驗證） |
+| 🟡 | `init()` 印 `VFD left/right (MH300)` 是**寫死字串**，在 `#if CRANE_VFD_IS_SE3` 之外 → 旗標是 1（實際跑 SE3）卻印 MH300，會把人導去查錯的 driver | `Crane_control_PI/main.cpp:4215,4234` | **未修** ✔ | work_log 2026-08-28（實機驗證） |
+| 🔴 | `readRegister()` 不驗 reply CRC、不驗 byteCount → 壞掉的 Modbus reply 被當有效值往上傳（bench 已造成實體損害，詳見下方） | `user_lib/SD76_length_meters.cpp` | **未修** ✔ | mailbox 2026-05-14 |
 | 🔴 | 緊急收繩按鈕實際上**沒有張力保護**，跟 `motion_flow.md` §8 的安全性描述相反 | `Crane_control_PI/main.cpp` `cmd_manual()` | **未修** ✔ | ONBOARDING §6 |
 | 🔴 | `cmd_side_measured()` 進場沒重置 `abort_flag` → 被 stop 過一次後所有 v2 step 指令永久回 `ERR aborted`，只能重開程式 | `Crane_control_PI/main.cpp:2800` | **未修** ✔ | ONBOARDING §1 ＋ work_log 2026-07-15 |
 | 🔴 | DSZL-107 scale factor 仍是 placeholder（driver `-0.01` / 廠商說 `0.02`），張力門檻等於沒有基準；#1 只有 bench 手拉估值、#2 完全沒校 | `user_lib/DSZL_107.cpp`、`Crane_control_PI/main.cpp` | **未修** ✔ | work_log 2026-05-07 ＋ 2026-06-02 |
@@ -288,6 +290,58 @@ threshold 再實作」：① `cmd_hold` 與 motion 互斥（避免 hold 跟 moti
 
 ---
 
+## 2026-08-28（下午）— 🎉 `init()` 檢查表兩台都跑完，四件未驗改動全數通過
+
+### 已完成 —— 這條待辦掛了很久：「唯一未驗的是 `init()`」現在清掉了
+依 runbook §A2 跑完，**baseline（純 `0d5f6bc`）與整理分支各建一份、兩支輪流跑、逐字比對**。
+
+**吊機**：兩份輸出**逐字完全一致**（28 行）。五個網關全 OK（`.30`/`.31`/`.34`/`.32`/`.33`）、
+VFD 左右、SD76 左右、PQW water、DSZL 左右，`init complete — accepting commands`。
+
+**本體**：兩份輸出**只差 IMU 的即時讀值**（`roll=-152.424` vs `-150.804`＝感測器讀數，非程式），
+其餘 64 行完全相同。🔴 **四件從沒在實機驗過的改動全部通過**：
+
+| runbook §3 預期 | 實機輸出 | 判定 |
+|---|---|---|
+| `[OK] DM2J arm rail (slave 14 @ cli_20_)` | 一致 | ✅ **08-28 搬 bus 首次實機驗證通過** |
+| `[OK] ZDT 5~8` | 一致 | ✅ 08-27 吸盤改號通過 |
+| `[OK] PQW slave 12 @ cli_20_ (.20)` | 一致 | ✅ 08-27 PQW 搬 bus 通過 |
+| `[OK] QX-DO24 PWM slave 9 (presence not probed)` | 一致 | ✅ 改號通過（⚠️ 見下） |
+
+⚠️ **`presence not probed` 不等於模組真的接上**：init 不發包，模組若還插在 USB-485 轉換器上
+也照樣印 `[OK]`，要到第一個 `pwm set` 才會 timeout。**PWM 的實體接線仍未驗證。**
+
+📌 **搬家等價性其實有兩份獨立證據**：(a) 源碼比對——`WASH_ROBOT.cpp/.h` 相對 `0d5f6bc`
+**逐位元相同**，全樹唯一可執行差異是 5 處 `send(..., 0)` → `SEND_FLAGS`，其餘 73 行全是註解；
+(b) 本次實機執行輸出一致。
+
+### 🔴 抓到兩個「訊息說謊」（都是 main 既有的，不是合併造成——baseline 輸出一模一樣）
+
+**1. `connectToServer` 把失敗的 connect 判成成功**（已進待辦總表）
+實機證據：吊機 `:5002` **確認無人在聽**（`ss -ltn` 查過），本體卻印了 **20 次**
+`[INF] [TCP 192.168.5.17:5002] reconnect success`，每 500ms 一次 flapping。
+
+根因在 `transport/TCP_client.cpp:180-220`：非阻塞 connect → `EINPROGRESS` →
+`select()` 等可寫 → `if (res > 0) success = true`。
+🔴 **失敗的 connect 同樣會讓 socket 變成可寫**，POSIX 要求這裡必須再
+`getsockopt(SO_ERROR)` 分辨，那一步沒有 → `connected = true`。
+
+影響：任何以 `connected` 判斷「吊機連線還在」的地方都會被騙。
+（指令層本身有抓到：`crane_cmd 'water_inlet off' attempt 1 failed`。）
+
+**2. `init()` 印的 VFD 型號是寫死的**（已進待辦總表）
+`CRANE_VFD_IS_SE3 = 1`（實際跑 SE3），但 `main.cpp:4215/4234` 的
+`[OK] VFD left (MH300)` 字串在 `#if` **外面**，不管旗標是什麼都印 MH300。
+
+### ⚠️ 這次測試沒有涵蓋到的
+- **兩台沒有同時跑**（吊機 server 已關才測本體）→ 本體印
+  `[WARN] crane not yet reachable`，且 `[SHUTDOWN]` 時 `water_inlet off` 三次全失敗、
+  **收尾訊息是 `valve state UNKNOWN`**。兩台同時跑的整合行為仍未驗
+- `arm 127.0.0.1:9527`（motor_api）與 depth_cam 都沒跑
+- **只驗 `init()`，沒有讓任何馬達動過**
+
+---
+
 ## 2026-08-28（午·續）— driver 分支也合併 main，並修掉一個「修補本身沒生效」的修補
 
 ### 已完成
@@ -354,10 +408,11 @@ main 在 `[2026-08-28b]` 新增的 `TCP_client::sendAndReceiveQuiet()` 帶著 `s
   **與它自己那個 commit 的程式改動相反**，已就地更正並補進 `CLAUDE.md` 的 `.claude/` 索引表。
 
 ### 待完成
-- 🔴 **`~/bringup/` 的二進位是合併前的**（08-28 12:01 建，合併在 12:30）→ 上機前要重建，
-  否則跑到的是沒有 main 那批 bench 修正的版本
-- 🔴 **`fix/driver-crc` 尚未合併 main**，它還停在 `refactor/app-layer` 的舊點上；
-  該分支要上機前得做同一次合併（且同樣要檢查語意漏接）
+- ✅ **`~/bringup/` 已重建（08-28 12:42/12:43）** —— 兩台的 `.out` md5 皆已改變，
+  確認是合併後的版本；`~/projects/` 時間戳全程未變
+- ✅ **`fix/driver-crc` 已合併 main**（merge `f33ccfe`，兩台編譯通過），
+  並在該分支修掉一個「修補本身沒生效」的問題（見下方待辦與該分支 changelog `-drv3`）
+- 🔴 **上機仍是上整理分支**（`~/bringup/` 放的就是它）；driver 分支的行為改變不與這次混在一起
 - 🟡 `app/WASH_ROBOT.h:1082` 成員註解仍寫「`.22 = ... arm-rail ...`」，已過期（屬 main 那批的既有債）
 - 🟡 兩台 Pi 的 `~/merge_check_20260828/` 是這次的拋棄式編譯資料夾，確認不需要後可刪
 
