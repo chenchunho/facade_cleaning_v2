@@ -36,6 +36,12 @@ DM2J_RS570::~DM2J_RS570()
 // sendRecv() instead, so it is unaffected by the address check.
 int DM2J_RS570::recv_frame_(uint8_t* rx, int min_len)
 {
+	// [2026-08-29] Null-client guard: the constructor leaves `client` as nullptr
+	// and only init() sets it, so a call on an un-init'd (or failed-init)
+	// instance dereferences nullptr and takes the whole process down.
+	// Application layers already gate these calls, but that is the caller
+	// remembering to be careful — the driver must not be a landmine.
+	if (!client) return -1;
 	int len = client->receiveData((char*)rx, 32, 200);
 	if (len < min_len) return -1;
 
@@ -511,6 +517,7 @@ bool DM2J_RS570::home_set_current_pos_zero()
 
 bool DM2J_RS570::read_version(uint16_t& ver1, uint16_t& ver2)
 {
+	if (!client) return true;
 	uint8_t tx[8] =
 	{
 		(uint8_t)slaveID,
@@ -537,6 +544,7 @@ bool DM2J_RS570::read_version(uint16_t& ver1, uint16_t& ver2)
 
 bool DM2J_RS570::read_status(uint32_t& status)
 {
+	if (!client) return true;
 	// 0x1003 is a SINGLE 16-bit status register per DM2J-RS V1.0 manual §5.3.2:
 	//   Bit0=FAULT  Bit1=ENABLE  Bit2=RUN  Bit4=CMD_DONE  Bit5=PATH_DONE  Bit6=HOME_DONE
 	// Previous code read 2 registers and packed as (hi<<16)|lo, putting the real
@@ -590,6 +598,7 @@ void DM2J_RS570::print_status(uint32_t status)
 
 bool DM2J_RS570::read_error_code(uint16_t& errCode)
 {
+	if (!client) return true;
 	uint8_t tx[8];
 
 	tx[0] = slaveID;
@@ -615,6 +624,7 @@ bool DM2J_RS570::read_error_code(uint16_t& errCode)
 
 bool DM2J_RS570::read_save_status(uint16_t& saveStatus)
 {
+	if (!client) return true;
 	uint8_t tx[8];
 
 	tx[0] = slaveID;
@@ -672,6 +682,7 @@ bool DM2J_RS570::reset_alarm()
 
 bool DM2J_RS570::read_motor_position(int32_t& pos)
 {
+	if (!client) return true;
 	uint8_t tx[8];
 
 	tx[0] = slaveID;
@@ -704,6 +715,7 @@ bool DM2J_RS570::read_motor_position(int32_t& pos)
 
 bool DM2J_RS570::read_pulse_per_rev(uint16_t& ppr)
 {
+	if (!client) return true;
 	uint8_t tx[8];
 
 	tx[0] = slaveID;

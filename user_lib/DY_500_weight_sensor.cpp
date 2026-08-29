@@ -104,6 +104,12 @@ uint16_t DY_500_weight_sensor::CRC16(const uint8_t* data, int len)
 bool DY_500_weight_sensor::modbus_read(uint16_t addr, uint16_t quantity,
 	uint8_t* rx, int& rxLen)
 {
+	// [2026-08-29] Null-client guard: the constructor leaves `client` as nullptr
+	// and only init() sets it, so a call on an un-init'd (or failed-init)
+	// instance dereferences nullptr and takes the whole process down.
+	// Application layers already gate these calls, but that is the caller
+	// remembering to be careful — the driver must not be a landmine.
+	if (!client) return true;
 	uint8_t req[8];
 
 	req[0] = slaveID;
@@ -186,6 +192,7 @@ bool DY_500_weight_sensor::modbus_write_single(uint16_t addr, uint16_t value)
 
 bool DY_500_weight_sensor::modbus_write_long(uint16_t addr, int32_t value)
 {
+	if (!client) return true;
 	uint8_t req[13] = {
 		slaveID, 0x10,
 		(uint8_t)(addr >> 8), (uint8_t)(addr & 0xFF),
@@ -323,6 +330,7 @@ bool DY_500_weight_sensor::get_decimal_point(int& dp)
 
 bool DY_500_weight_sensor::do_clear()
 {
+	if (!client) return true;
 	uint8_t req[13] = {
 		slaveID, 0x10,
 		0x06, 0x2A,

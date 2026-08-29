@@ -119,6 +119,12 @@ void DSZL_107::set_communication_parm(int ID, int baud, int format)
 
 bool DSZL_107::modbus_read(uint16_t addr, uint16_t quantity, uint8_t* rx, int& rxLen)
 {
+    // [2026-08-29] Null-client guard: the constructor leaves `client` as nullptr
+    // and only init() sets it, so a call on an un-init'd (or failed-init)
+    // instance dereferences nullptr and takes the whole process down.
+    // Application layers already gate these calls, but that is the caller
+    // remembering to be careful — the driver must not be a landmine.
+    if (!client) return true;
     ++txid_;
     uint8_t req[12] = {
         (uint8_t)(txid_ >> 8), (uint8_t)(txid_ & 0xFF),     // txid
@@ -207,6 +213,7 @@ bool DSZL_107::modbus_read(uint16_t addr, uint16_t quantity, uint8_t* rx, int& r
 
 bool DSZL_107::modbus_write_long(uint16_t addr, int32_t value)
 {
+    if (!client) return true;
     ++txid_;
     uint8_t req[17] = {
         (uint8_t)(txid_ >> 8), (uint8_t)(txid_ & 0xFF),     // txid

@@ -102,6 +102,12 @@ uint16_t SE3_inverter::crc16(const uint8_t* buf, int len)
 bool SE3_inverter::sendModbus(const uint8_t* req, int reqLen,
                               uint8_t* resp, int& respLen)
 {
+    // [2026-08-29] Null-client guard: the constructor leaves `client` as nullptr
+    // and only init() sets it, so a call on an un-init'd (or failed-init)
+    // instance dereferences nullptr and takes the whole process down.
+    // Application layers already gate these calls, but that is the caller
+    // remembering to be careful — the driver must not be a landmine.
+    if (!client) { respLen = 0; return true; }
     LOG_HEX(_log_tag, "TX", req, reqLen);
 
     // Atomic: TCP_client holds its mutex from drain → send → recv so a

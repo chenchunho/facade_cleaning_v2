@@ -138,6 +138,12 @@ void PQW_IO_16O_RLY::printHex(const std::vector<uint8_t>& data, const std::strin
 
 std::vector<uint8_t> PQW_IO_16O_RLY::readEcho()
 {
+	// [2026-08-29] Null-client guard: the constructor leaves `client` as nullptr
+	// and only init() sets it, so a call on an un-init'd (or failed-init)
+	// instance dereferences nullptr and takes the whole process down.
+	// Application layers already gate these calls, but that is the caller
+	// remembering to be careful — the driver must not be a landmine.
+	if (!client) return {};
 	uint8_t buf[32];
 	int n = client->receiveData((char*)buf, sizeof(buf), 200);
 
@@ -207,6 +213,7 @@ std::vector<bool> PQW_IO_16O_RLY::parseReadResponse(const std::vector<uint8_t>& 
 
 bool PQW_IO_16O_RLY::controlRelay(int id, bool status)
 {
+	if (!client) return true;
 	if (id < 1 || id > 16){//relay_count) {
 		LOG_ERR(_log_tag, "Relay ID out of range: %d", id);
 		return true;
@@ -237,6 +244,7 @@ bool PQW_IO_16O_RLY::controlRelay(int id, bool status)
 
 bool PQW_IO_16O_RLY::controlAll(bool status)
 {
+	if (!client) return true;
 	auto cmd = buildAllRelayCmd(status);
 	printHex(cmd, "TX all relay");
 
@@ -254,6 +262,7 @@ bool PQW_IO_16O_RLY::controlAll(bool status)
 
 std::vector<bool> PQW_IO_16O_RLY::readAllStatus()
 {
+	if (!client) return {};
 	auto cmd = buildReadCmd();
 	printHex(cmd, "TX read status");
 
@@ -269,5 +278,6 @@ std::vector<bool> PQW_IO_16O_RLY::readAllStatus()
 
 void PQW_IO_16O_RLY::close()
 {
+	if (!client) return;
 	client->close();
 }

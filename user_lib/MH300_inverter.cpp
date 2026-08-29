@@ -119,6 +119,12 @@ uint16_t MH300_inverter::crc16(const uint8_t* buf, int len)
 bool MH300_inverter::sendModbus(const uint8_t* req, int reqLen,
                                 uint8_t* resp, int& respLen)
 {
+    // [2026-08-29] Null-client guard: the constructor leaves `client` as nullptr
+    // and only init() sets it, so a call on an un-init'd (or failed-init)
+    // instance dereferences nullptr and takes the whole process down.
+    // Application layers already gate these calls, but that is the caller
+    // remembering to be careful — the driver must not be a landmine.
+    if (!client) { respLen = 0; return true; }
     LOG_HEX(_log_tag, "TX", req, reqLen);
 
     // Atomic drain->send->recv inside TCP_client's mutex so a concurrent caller

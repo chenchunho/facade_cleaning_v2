@@ -45,6 +45,12 @@ bool ZDT_motor_control::init(TCP_client& extClient, int ID, bool debug) {
 //=========== control: trigger commands (3.1) ===========
 
 bool ZDT_motor_control::set_zero() {
+	// [2026-08-29] Null-client guard: the constructor leaves `client` as nullptr
+	// and only init() sets it, so a call on an un-init'd (or failed-init)
+	// instance dereferences nullptr and takes the whole process down.
+	// Application layers already gate these calls, but that is the caller
+	// remembering to be careful — the driver must not be a landmine.
+	if (!client) return true;
 	auto cmd = build_write_single_register(0x000A, 0x0001);
 	LOG_HEX(_log_tag, "TX set_zero", cmd.data(), (int)cmd.size());
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
@@ -54,6 +60,7 @@ bool ZDT_motor_control::set_zero() {
 }
 
 bool ZDT_motor_control::calibrate_encoder() {
+	if (!client) return true;
 	auto cmd = build_write_single_register(0x0006, 0x0001);
 	LOG_HEX(_log_tag, "TX calibrate_encoder", cmd.data(), (int)cmd.size());
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
@@ -64,6 +71,7 @@ bool ZDT_motor_control::calibrate_encoder() {
 }
 
 bool ZDT_motor_control::reset_motor() {
+	if (!client) return true;
 	auto cmd = build_write_single_register(0x0008, 0x0001);
 	LOG_HEX(_log_tag, "TX reset_motor", cmd.data(), (int)cmd.size());
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
@@ -75,6 +83,7 @@ bool ZDT_motor_control::reset_motor() {
 //=========== control: motion commands (3.2) ===========
 
 bool ZDT_motor_control::motion_control_driver_EN(bool status) {
+	if (!client) return true;
 	std::vector<uint8_t> cmd = {
 		slave_id, 0x10, 0x00, 0xF3, 0x00, 0x02, 0x04, 0xAB,
 		(uint8_t)(status ? 0x01 : 0x00), 0x00, 0x00
@@ -93,6 +102,7 @@ bool ZDT_motor_control::motion_control_driver_EN(bool status) {
 //=========== read: system status (3.7.2) ===========
 
 bool ZDT_motor_control::get_system_status() {
+	if (!client) return true;
 	// 3.7.2 Emm bulk read: Func 0x04, Reg 0x0043, Qty 0x0010
 	std::vector<uint8_t> cmd = { slave_id, 0x04, 0x00, 0x43, 0x00, 0x10 };
 	uint16_t crc = modbusCRC(cmd.data(), (int)cmd.size());
@@ -213,6 +223,7 @@ bool ZDT_motor_control::wait_until_pos_reached(int timeout_ms, int poll_interval
 //
 // out[0] = header (informational), out[1..14] = real config (1-indexed Reg 2..15).
 bool ZDT_motor_control::read_driver_config(uint16_t out[15]) {
+	if (!client) return true;
 	std::vector<uint8_t> cmd = { slave_id, 0x04, 0x00, 0x42, 0x00, 0x0F };
 	uint16_t crc = modbusCRC(cmd.data(), (int)cmd.size());
 	cmd.push_back((uint8_t)(crc & 0xFF));
@@ -242,6 +253,7 @@ bool ZDT_motor_control::read_driver_config(uint16_t out[15]) {
 // in[0] is ignored — driver substitutes the magic+store header automatically.
 // in[1..14] map to Reg 2..15 (motor_type / ... / Clog_Ma / pos-window).
 bool ZDT_motor_control::write_driver_config(const uint16_t in[15], bool store) {
+	if (!client) return true;
 	std::vector<uint8_t> cmd;
 	cmd.reserve(9 + 30 + 2);
 	cmd.push_back(slave_id);
@@ -300,6 +312,7 @@ bool ZDT_motor_control::set_clog_ma(uint16_t mA, bool store) {
 //=========== control: release stall / emergency stop ===========
 
 bool ZDT_motor_control::release_stall_flag() {
+	if (!client) return true;
 	// Write register 0x000E = 0x0001
 	auto cmd = build_write_single_register(0x000E, 0x0001);
 
@@ -316,6 +329,7 @@ bool ZDT_motor_control::release_stall_flag() {
 }
 
 bool ZDT_motor_control::emergency_stop(bool sync) {
+	if (!client) return true;
 	// 3.2.12 emergency stop: Func 0x06, Reg 0x00FE, Data [0x98, sync flag]
 	uint16_t data = (0x98 << 8) | (sync ? 0x01 : 0x00);
 	auto cmd = build_write_single_register(0x00FE, data);
@@ -333,6 +347,7 @@ bool ZDT_motor_control::emergency_stop(bool sync) {
 //=========== control: speed mode ===========
 
 bool ZDT_motor_control::motion_control_speed_mode(int dir, int acc_rpm, int rpm, int sync, int retry) {
+	if (!client) return true;
 	// 1. Build write-multiple-registers (0x10) frame, register 0x00F6
 	std::vector<uint8_t> cmd = {
 		slave_id, 0x10, 0x00, 0xF6, 0x00, 0x03, 0x06,
@@ -400,6 +415,7 @@ bool ZDT_motor_control::motion_control_speed_mode(int dir, int acc_rpm, int rpm,
 //=========== control: position mode ===========
 
 bool ZDT_motor_control::motion_control_pos_mode(int dir, int acc_rpm, int rpm, int pulse, int mode, int sync, int retry) {
+	if (!client) return true;
 	// mode: 0=relative, 1=absolute (only valid values)
 	if (mode != 0 && mode != 1) {
 		LOG_ERR(_log_tag, "Invalid mode %d, must be 0 (relative) or 1 (absolute)", mode);
@@ -484,6 +500,7 @@ bool ZDT_motor_control::motion_control_pos_mode(int dir, int acc_rpm, int rpm, i
 }
 
 bool ZDT_motor_control::motion_control_pos_mode_nowait(int dir, int acc_rpm, int rpm, int pulse, int mode, int sync, int retry) {
+	if (!client) return true;
 	// mode: 0=relative, 1=absolute (only valid values)
 	if (mode != 0 && mode != 1) {
 		LOG_ERR(_log_tag, "Invalid mode %d, must be 0 (relative) or 1 (absolute)", mode);
@@ -563,6 +580,7 @@ bool ZDT_motor_control::motion_control_pos_mode_nowait(int dir, int acc_rpm, int
 //=========== control: misc triggers ===========
 
 bool ZDT_motor_control::factory_reset() {
+	if (!client) return true;
 	// 3.1.5 factory reset: Func 0x06, Reg 0x000F, Data 0x0001
 	auto cmd = build_write_single_register(0x000F, 0x0001);
 	LOG_HEX(_log_tag, "TX factory_reset", cmd.data(), (int)cmd.size());
@@ -575,6 +593,7 @@ bool ZDT_motor_control::factory_reset() {
 //=========== control: homing (3.3) ===========
 
 bool ZDT_motor_control::trigger_home(int mode, bool sync) {
+	if (!client) return true;
 	// 3.3.2 trigger home: Func 0x06, Reg 0x009A(Emm), Data [mode, sync flag]
 	// mode: 00=single-turn nearest 01=single-turn dir 02=no-limit collision 03=limit 04=absolute zero 05=power-loss
 	uint16_t data = ((uint16_t)mode << 8) | (sync ? 0x01 : 0x00);
@@ -587,6 +606,7 @@ bool ZDT_motor_control::trigger_home(int mode, bool sync) {
 }
 
 bool ZDT_motor_control::abort_home() {
+	if (!client) return true;
 	// 3.3.3 force abort home: Func 0x06, Reg 0x009C(Emm), Data [0x48, 0x00]
 	auto cmd = build_write_single_register(0x009C, 0x4800);
 	LOG_HEX(_log_tag, "TX abort_home", cmd.data(), (int)cmd.size());
@@ -597,6 +617,7 @@ bool ZDT_motor_control::abort_home() {
 }
 
 bool ZDT_motor_control::trigger_sync_move() {
+	if (!client) return true;
 	// 3.2.13 multi-axis sync move: Func 0x06, Reg 0x00FF, Data [0x66, 0x00]
 	// sent with broadcast address 0x00
 	std::vector<uint8_t> cmd = { 0x00, 0x06, 0x00, 0xFF, 0x66, 0x00 };
@@ -637,6 +658,7 @@ bool ZDT_motor_control::trigger_sync_move() {
 }
 
 bool ZDT_motor_control::set_home_zero_position(bool store) {
+	if (!client) return true;
 	// 3.3.1 set single-turn home zero: Func 0x06, Reg 0x0093(Emm), Data [0x88, store flag]
 	uint16_t data = (0x88 << 8) | (store ? 0x01 : 0x00);
 	auto cmd = build_write_single_register(0x0093, data);
@@ -673,6 +695,7 @@ void ZDT_motor_control::printHex(const std::vector<uint8_t>& data, const std::st
 }
 
 std::vector<uint8_t> ZDT_motor_control::readEcho(int timeout_ms) {
+	if (!client) return {};
 	uint8_t buf[128];
 	int n = client->receiveData((char*)buf, sizeof(buf), timeout_ms);
 	if (n <= 0) return {};
