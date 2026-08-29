@@ -121,9 +121,9 @@ SE3 變頻器（USR_A/B，速度輸出）＋ SD76 計米器（USR_M，位置回�
 
 | 項目 | 數字 |
 |---|---|
-| `app/WASH_ROBOT.cpp` | **13,433 行**（全 repo 44%） |
+| `app/WASH_ROBOT.cpp` | 起點 **13,435 行**（全 repo 44%）→ ✅ **階段 1 後 9,442 行** |
 | ├ `cmd_*` / `do_*` | **84 / 13** |
-| └ `#if 0` 死碼 | 18 塊 ≈ **3,879 行**（該檔 29%） |
+| └ `#if 0` 死碼 | 18 塊、**3,993 行** → ✅ **已刪（2026-08-29，經證明是 no-op）** |
 | `app/WASH_ROBOT.h` | 2,646 行，**228 個 `static constexpr`** |
 | `Crane_control_PI/main.cpp` | 4,514 行，**應用層從未抽出** |
 | `Linux_test/main.cpp` | 5,945 行 |
