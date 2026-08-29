@@ -16,3 +16,9 @@ frame_capture/__pycache__/
 
 # 暫存工作區（設計草稿、PDF 圖面等，不進版控）
 tmp/
+
+# VS 每台開發機的本機設定（Remote Target / 偵錯器）。2026-08-29 由版控移除：
+# 內容是 bench 專屬的 Remote Target，含一個只在該台機器有意義的連線 handle
+# （例如 -1125135748），所以不同 bench 的 VS 會互相覆蓋、Connection Manager 變空白。
+# 檔案留在本機、不進版控。哪個專案建置到哪台 Pi 記在 .claude/runbook.md §建置 與 CLAUDE.md。
+*.vcxproj.user
