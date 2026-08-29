@@ -58,12 +58,13 @@
 | 🔴 | 安全盤點高優先兩項未做：`cmd_hold` 與 motion 互斥、左右繩長差超標 abort | `Crane_control_PI/main.cpp` | **未修** ✔（原始碼註解仍留 TODO） | work_log 2026-05-08 |
 | 🟡 | 🆕 **`8320bf3` 新加的兩個「讓失敗看得見」欄位，出現路徑都還沒被執行到**：`status` 的 `p_err=`（只在壓力讀取失敗時附加）與 `cmd_attach` 的 `partial_seal=N`（只在部分密封時附加）。2026-08-29 實機連跑 8 次 `status`（32 筆 JC-100 讀取）**全部成功 → `p_err` 一次都沒出現**＝正確行為，但也代表**這條路徑仍未驗證**。`partial_seal` 需要真的 attach（會動作），未測。📌 **與 `recovered on attempt` 同型**：實作了、編譯了，但沒被執行過的路徑不算驗證過 | `app/WASH_ROBOT.cpp` `cmd_status`／`cmd_attach` | **待驗** ✔ | work_log 2026-08-29（實機） |
 | 🟡 | **`QX_DO24::init()` 是 14 支 driver 裡唯一活著的「`true`=成功」異類**（其餘 12 支是 Modbus 風格 `false`=成功；`DIHOOL_control` 亦為 true 但全 repo 無呼叫端＝死碼）。`bool init(...)` 的宣告兩派逐字相同，**從 `.h` 看不出來**。✅ 應用層目前沒踩到（SE3/MH300 呼叫端寫 `if (!init())` 正確；QX 唯一呼叫端 `WASH_ROBOT.cpp:204` 不檢查回傳值），**唯一受害者是那支從未執行過的測試**。→ 是否把 QX_DO24 對齊多數派（語意變更）**待決定** | `user_lib/QX_DO24.cpp:32`、`CLAUDE.md` 介面契約節 | **已記錄待決** ✔ | work_log 2026-08-29（第一次跑 `test_qx_do24` 揭露） |
-| 🟡 | `trigger_sync_move()` 是 Modbus 廣播（slave 0x00）不會有回應，卻以 `return resp.empty();` 收尾 → 廣播成功也永遠回報失敗 | `user_lib/ZDT_motor_control.cpp:506` | **未修** ✔ | mailbox 2026-04-30 |
+| 🟡 | `trigger_sync_move()` 是 Modbus 廣播（slave 0x00）不會有回應，卻以 `return resp.empty();` 收尾 → 廣播成功也永遠回報失敗 | `user_lib/ZDT_motor_control.cpp:599`（宣告 `.h:63`） | ✅ **已修（2026-08-29）**：送出成功即 `return false`。`readEcho(200)` 保留但降格為**排空**（避免上一筆交易的遲到回覆被下一筆誤讀），結果丟棄；**200ms 刻意不動**——它在步態迴圈裡，縮短是計時改變、要有機器才驗得了。三處呼叫端註解（`app/WASH_ROBOT.cpp` ×2、`Linux_test/main.cpp` ×1）已同步，TODO 已移除。🔴 **未編譯**（本機無 cc1plus、Pi 不可達） | mailbox 2026-04-30｜2026-08-29 修 |
 | ✅ | ~~`send(sock, buf, len, 0)` 沒帶 `MSG_NOSIGNAL`，Linux 下對已關閉對端寫入會 SIGPIPE 殺 process~~ | `transport/TCP_client.cpp:53`、`transport/TCP_server.cpp:21`（**檔案已於分層重構搬離 `user_lib/`**） | **已修（`9e1ad1b`，分支 `fix/msg-nosignal` 已併入）**：兩檔各定義 `constexpr int SEND_FLAGS = MSG_NOSIGNAL` 供所有 `send()` 共用。🔴 **合併 main 時 `sendAndReceiveQuiet` 曾帶著 `send(...,0)` 繞過這道防線**（`[2026-08-28j]` 已修）——**新增送出路徑一律用 `SEND_FLAGS`，不要再寫字面 0** | mailbox 2026-04-22｜2026-08-29 複查原始碼確認 |
-| 🟡 | `CLV900_inverter` 缺 null-client 防護：跳過 `init()` 時 `client == nullptr`，`sendModbus` 直接 null-deref segfault（應用層已用 `g_dev_clv900` 守起來，driver 本身沒守） | `user_lib/CLV900_inverter.cpp` | **未修** ✔ | mailbox 2026-05-14 |
+| 🟡 | `CLV900_inverter` 缺 null-client 防護：跳過 `init()` 時 `client == nullptr`，`sendModbus` 直接 null-deref segfault（應用層已用 `g_dev_clv900` 守起來，driver 本身沒守） | `user_lib/CLV900_inverter.cpp:66` | ✅ **已修（2026-08-29）**：`sendModbus` 進場 `if (!client) { LOG_ERR; respLen=0; return true; }`，沿用 `DM2J_RS570::sendRecv` 的既有慣例。🔴 **未編譯**（同上）。⚠️ **但這條只關掉 12 支裡的 1 支**——見下方新增列 | mailbox 2026-05-14｜2026-08-29 修 |
+| 🔴 | 🆕 **null-client 這個洞是 12 支 driver 裡的 10 支，不是 CLV900 一支** —— 2026-08-29 修 CLV900 時順手掃全 `user_lib/`：建構子把 `client` 設為 `nullptr`、而傳輸函式沒有任何守衛的，有 **CLV900（已修）／DSZL_107／DY_500／JC_100／MH300／PQW_IO_16O_RLY／SD76／SE3／XKC_Y25／ZDT** 共 10 支；只有 `DM2J_RS570::sendRecv`（`if (!client) return true;`）與 `QX_DO24`（3 處）本來就守了。🔴 **CLV900 之所以被單獨開票，只是因為當時有人剛好踩到它，不是因為它特別** —— 若只結掉 CLV900 那列就把這件事當「已修」，剩下 9 支會連同「已經處理過了」的印象一起消失。**這正是本日上半場清掉的那種假結案。**📌 修法是同一行守衛（回傳值依各檔慣例：Modbus 系 `true`=錯、QX_DO24 系相反），零風險但 **10 檔未編譯的 C++ 改動要有機器才敢一次上** | `user_lib/*.cpp`（掃法：建構子 `client = nullptr` ∧ 傳輸函式無 `!client` 守衛） | **未修**（CLV900 以外 9 支）✔ | 2026-08-29 修 CLV900 時帶出 |
 | ✅ | ~~`TCP_client` 缺 `SO_ERROR` 驗證 → 影響 reconnect 的邊界 case~~ ⚠️ **本列與表格第一列是同一件事**（2026-06-09 與 2026-08-28 各記了一次），2026-08-29 合併確認 | `transport/TCP_client.cpp:208,214` | **已修（`56bfa5c`／`ce8ba81`）** — 詳見表格第一列（含雙向斷言實機驗證） | work_log 2026-06-09｜2026-08-29 判為重複列 |
 | 🟡 | MH300 實機必驗清單未跑：方向映射、電流 scale、2101H run bit、fault code | `Crane_control_PI/main.cpp`（`VFD_DIR_*` 巨集）、`.claude/mh300_migration_plan.md` | **未修** ✔（註解仍寫 `RE-VERIFY on MH300`） | work_log 2026-07-07 |
-| 🟡 | **4 個 `.vcxproj.user` 被 git 追蹤** → 不同 bench 的 Remote Target 互相覆蓋（Connection Manager 顯示空白）。⚠️ 原記 5 個，`windows_test/` 已於 `a69f82f` 整個移除 → 實際 4 個 | `Crane_control_PI/`、`Linux_test/`、`cleaning_arm/`、`facade_cleaning_v2/` | **未修** ✔（仍 tracked；🔴 `.gitignore` **存在**且已有 12 條規則，只是沒加這一條——原記「`.gitignore` 未加」易被讀成整個檔不存在） | work_log 2026-07-15｜2026-08-29 複查確認 |
+| 🟡 | **4 個 `.vcxproj.user` 被 git 追蹤** → 不同 bench 的 Remote Target 互相覆蓋（Connection Manager 顯示空白）。⚠️ 原記 5 個，`windows_test/` 已於 `a69f82f` 整個移除 → 實際 4 個 | `Crane_control_PI/`、`Linux_test/`、`cleaning_arm/`、`facade_cleaning_v2/` | ✅ **已修（2026-08-29）**：四個檔 `git rm --cached`（**留在本機**）＋ `.gitignore` 加 `*.vcxproj.user`。移除前已確認「哪個專案建置到哪台 Pi」**不是唯一副本**（`.claude/runbook.md:22-23` 與 `CLAUDE.md:263-264` 都有）。📌 真正的理由是內容含只在該台機器有意義的連線 handle（如 `-1125135748`），本來就不可共用 | work_log 2026-07-15｜2026-08-29 複查確認 |
 | 🟡 | 沒有 hot re-init：裝置 flag 只在啟動時設一次，硬體中途修好要重開 crane | `Crane_control_PI/main.cpp` | **未修** | work_log 2026-05-08 |
 | 🟡 | 沒有任何機制偵測「M2 被重新安裝過」；重裝後若位置落在 ±1.5 rad 內，INIT 會**靜默**移到錯的 CENTER | `cleaning_arm/main_api.cpp:1992-2028` | **未修** | work_log 2026-08-17 |
 | 🟡 | `LR_CALIBRATE` 自動雙向尋邊不可靠（假觸發撞牆、或衝很遠都撞不到），目前只能走手動流程 | `cleaning_arm/main_api.cpp` | **未修** | work_log 2026-08-17 |
@@ -307,6 +308,60 @@ threshold 再實作」：① `cmd_hold` 與 motion 互斥（避免 hold 跟 moti
 | 🟢 | 儲氣筒壓力未讀 | Pi 未讀取儲氣筒壓力，假設氣壓恆定可用 | **暫緩**，實機測試時可能浮現 | 設計彙整 §6 暫緩項目 |
 
 ---
+
+## 2026-08-29（續五）— 清三條純程式碼待辦；其中一條掃出它其實是 10 支的問題
+
+**仍然沒有機器。** 三條都是「不需要實機就能修」的舊債，最久的放了 4 個月。
+
+### 已完成
+
+**① ZDT `trigger_sync_move()` 廣播永遠回報失敗**（mailbox 2026-04-30，債齡 4 個月）
+`user_lib/ZDT_motor_control.cpp:599` 以 `return resp.empty();` 收尾，而 slave `0x00` 是 Modbus
+廣播、依規範**沒有從站會回覆** → `readEcho(200)` 每次必逾時 → 每次必回報失敗。現場症狀是
+body extend 真的動了、log 卻每步印一次 `trigger_sync_move FAIL`。
+改為送出成功即 `return false`。`readEcho(200)` **保留但降格為排空**——上一筆交易的遲到回覆若留在
+socket buffer 裡，會被下一筆誤讀成它的回覆；結果一律丟棄。
+🔴 **200ms 刻意不動**：它不是排空所需，但它在步態迴圈裡每個 cycle 都跑，沒有人量過拿掉之後的
+時序長什麼樣。**縮短它是對運動迴圈的計時改變，該獨立成一次有機器驗證的改動，不該夾帶在
+一個修回傳值的 commit 裡。**（順帶查證：`app/WASH_ROBOT.cpp:4559` 註解說的「~150ms warm-up」
+來自 poll 迴圈開頭的 `sleep_ms_(poll_ms)`，**不是**來自這個 200ms，所以兩者沒有耦合。）
+三處呼叫端的過期註解與 TODO 已同步（`app/WASH_ROBOT.cpp` ×2、`Linux_test/main.cpp` ×1），
+`.h` 補上「回傳值只反映送出成功與否，不能確認從站真的動了」。
+
+**② `CLV900_inverter` 缺 null-client 防護**（mailbox 2026-05-14）
+`sendModbus` 進場加守衛，沿用 `DM2J_RS570::sendRecv` 既有慣例（`true` = 錯誤）。
+
+🔴 **但順手掃全 `user_lib/` 之後，這條的前提是錯的：洞在 12 支裡的 10 支，不是 CLV900 一支。**
+掃法是「建構子把 `client` 設為 `nullptr` ∧ 傳輸函式沒有 `!client` 守衛」，命中
+CLV900／DSZL_107／DY_500／JC_100／MH300／PQW／SD76／SE3／XKC_Y25／ZDT；只有 `DM2J_RS570` 與
+`QX_DO24` 本來就守了。**CLV900 之所以被單獨開票，只是因為當時有人剛好踩到它。**
+若就這樣把那列勾成「已修」，剩下 9 支會連同「這件事處理過了」的印象一起消失——
+**跟本日上半場清掉的那八條假結案是同一個機制**。已另立一列 🔴 記錄全域範圍，未併入 CLV900 那列結案。
+
+**③ 4 個 `.vcxproj.user` 被 git 追蹤**（work_log 2026-07-15）
+`git rm --cached` 四個檔（**留在本機**）＋ `.gitignore` 加 `*.vcxproj.user`。
+⚠️ **移除前先確認過它不是唯一副本**：這四個檔記著「哪個專案建置到哪台 Pi」，而
+`.claude/runbook.md:22-23` 與 `CLAUDE.md:263-264` 都有同一份對應，才動手。
+📌 真正該移除的理由比「互相覆蓋」更硬：內容含 `-1125135748` 這種**只在該台機器有意義的
+VS 連線 handle**，它在別台機器上不可能是對的，本質上就不是可共用的資料。
+
+### 🔴 未編譯 —— 這次的 C++ 改動一行都沒編過
+
+本機 `gcc` 存在但**沒有 `cc1plus`**（無 C++ frontend），兩台 Pi 也連不到（`192.168.5.26:22` timeout）。
+所以只做了人工複核：大括號配對（5 檔皆平衡）、`LOG_ERR`/`_log_tag` 在兩支 driver 中皆已在用、
+回傳值慣例與同檔其他函式一致。**這不等於編得過。**
+🔴 **下次有機器時，第一件事是把這三個 commit 編一遍**，建置指令見 `runbook.md` §建置。
+
+📌 **過程中自己示範了一次踩坑索引裡的「印出來 ≠ 檢查過」**：跑語法檢查那道指令我在尾巴接了
+`echo "(無輸出＝語法通過)"`，而編譯器其實是 fatal error 中止的——那行字照樣印了出來。
+**把「通過」寫成無條件輸出，等於做了一個永遠成立的斷言。**
+
+### 待完成
+
+- 🔴 **三個 commit 都未編譯**，有機器時優先補
+- 🔴 **null-client 其餘 9 支未修**（同一行守衛，零風險，但 9 檔未編譯的改動要有機器才敢一次上）
+- 🟡 `scripts/wr.sh:50-52` 註解改成「永久不接」（續四留下的）
+
 
 ## 2026-08-29（續四）— 「已修 ✔」那半邊的校驗：32 條裡 8 條的記載是錯的
 
