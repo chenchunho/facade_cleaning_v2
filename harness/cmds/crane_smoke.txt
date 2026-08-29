@@ -1,0 +1,6 @@
+# 吊機端冒煙腳本（:5002）—— USR_A / USR_B / USR_M / 兩台 X518 各碰一次
+ping
+status
+tension
+meter
+status

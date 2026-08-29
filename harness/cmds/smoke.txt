@@ -1,0 +1,23 @@
+# 冒煙腳本 —— 只讀不動，跑完 init 之後把每條 bus 上的裝置都碰一次。
+# 一行一個指令；# 開頭是註解；空行忽略。
+#
+# 🔴 選指令的原則：**每條匯流排至少要有一次交易**，否則那條 bus 上的重構
+#    改動不會出現在軌跡裡，而 diff 依然是綠的 —— 綠燈會變成沒有意義。
+#    覆蓋率是這套等價性驗證最弱的一環，要靠腳本自己守。
+#
+# cli_20_（ZDT 推桿 5-8 / PQW 12 / DM2J 14）
+ping
+status
+get_settings
+zdt_pusher 5
+zdt_pusher 6
+zdt_pusher 7
+zdt_pusher 8
+# cli_22_（JC100 真空 5-8 / QX-DO24 9 / DY500 10,11 / XKC 13）
+vacuum
+water_level
+pwm status
+# 跨行程（吊機 :5002）—— 由本體主動連出去
+crane_attached
+# 收尾
+status

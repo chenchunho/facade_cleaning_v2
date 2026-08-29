@@ -185,6 +185,8 @@ cleaning_arm/        # 手臂控制 binary
                      #    ⚠️ 自成一格：不使用 user_lib，自建 socket 層（main_api.{h,cpp}）
 Linux_test/          # bench 互動式硬體測試工具（含 probe_dm2j.cpp：上滑台機構標定/行程量測）
 frame_capture/       # Python 影像工具（相機路線已作廢，見 .claude/archive/）
+common/              # 橫向支援：endpoints.h（端點注入，讓程式可指向假從站）
+harness/             # 重構等價性驗證：假匯流排 + 軌跡比對（不需要機器）
 scripts/             # tmux launcher：wr.sh / crane.sh / cams.sh
 tmp/                 # 暫存工作區（已 gitignore，不進版控）
 ```
@@ -201,6 +203,7 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 | `facade_cleaning_v2.sln` | VS 方案檔（**不是** `washrobot_new_PI.sln`） | 🟢 活的 |
 | `deploy_and_test.pdf` | 部署測試說明，由 `.claude/gen_deploy_pdf.py` 產生 | 🟡 產生腳本只能在 Windows 跑 |
 | `dm2j_manual_utf8.txt` | DM2J 手冊的**可讀**文字擷取（簡體中文） | 🟡 已被 `.claude/summaries/DM2J_RS_MODBUS_SUMMARY.md` 濃縮，保留作原文對照 |
+| `harness/` | **重構的等價性驗證**（2026-08-29 新增）：假匯流排 + 軌跡正規化 + 兩個版本比對。不需要機器 | 🟡 工具已完成並自我測試過；**尚未端到端跑過**（本機缺 `g++`） |
 | `.vs/`（43 MB）／`tmp/` | VS 快取／暫存工作區 | ⚪ 已在 `.gitignore`，不進版控 |
 
 🗑️ **2026-08-28 已刪除 4 個檔（228 KB）**：`main_tmp.txt`（v1 時期 `main.cpp` 開頭註解的舊副本，
