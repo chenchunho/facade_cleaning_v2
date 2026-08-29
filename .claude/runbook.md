@@ -341,6 +341,66 @@ right 同理，另加兩行 `[WARN] ... init failed` 路徑（正常不會出現
 
 ---
 
+## A3. 本機語法檢查（不需要 Pi，幾秒鐘）
+
+📌 **2026-08-29 由 `origin/main` 帶進來、並在本機實測校正過。**
+專案沒有 CMake/Makefile，改完 C++ 一向只能等部署到 Pi 才知道編不編得過。
+Windows 端的 MSVC `cl /Zs`（只做語法檢查、不產 obj）可以當場驗。
+
+🔴 **對方文件寫的路徑在這台機器是錯的**，已校正兩處：
+1. `Visual Studio\2022\Community\...` → **這台是 `18\Community`**（`2022\` 是空的殘留目錄）
+2. `/I user_lib` → **本專案已分層**，要 `/I app /I transport /I user_lib`
+
+### 從 WSL 呼叫（`cmd.exe` 不在 PATH，要用絕對路徑）
+
+```
+/mnt/c/Windows/System32/cmd.exe /c "D:\Desktop\agent_ai\projects\facade_cleaning_v2\tmp\syncheck.bat user_lib\ZDT_motor_control.cpp"
+```
+
+`tmp/syncheck.bat`（🔴 **必須是 CRLF 換行**——LF 會讓 `cmd.exe` 把 `cd /d` 之類的行拆壞，
+症狀是「'/d' 不是內部或外部命令」這種看起來毫無關聯的錯誤）：
+
+```
+@echo off
+call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
+cd /d D:\Desktop\agent_ai\projects\facade_cleaning_v2
+cl /nologo /utf-8 /std:c++17 /EHsc /Zs /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /FIwinsock2.h /FIws2tcpip.h /I app /I transport /I user_lib %1
+```
+
+四個 flag 缺一不可（少了會被大量假錯誤淹沒，看起來像你改壞了）：
+
+| flag | 少了會怎樣 |
+|---|---|
+| `/utf-8` | MSVC 用 cp950 讀檔 → 中文註解變成一堆 `C2001 常數中包含新行字元` |
+| `/FIwinsock2.h /FIws2tcpip.h` | `windows.h` 先於 `winsock2.h` → ~100 個 `sockaddr 重複定義`，**在第一個 include 就爆，根本讀不到你改的碼** |
+| `/DNOMINMAX` | `windows.h` 的 `min`/`max` 巨集吃掉 `std::max(...)` → 20+ 個 `C2589` |
+
+### 🔴 判讀方式：比對 baseline 的**錯誤集合**，不是絕對數量
+
+這是 Linux 目標的專案，MSVC 有些地方比 GCC 嚴格。**已知的既有 MSVC-only 錯誤**：
+`app/WASH_ROBOT.cpp` 的 `CRANE_METER_SANITY_MAX_CM` 在 lambda 內被 MSVC 要求顯式 capture
+（`C3493` ×1 + `C2064` ×2 = **固定 3 個**），GCC/C++17 不需要。**那三個不是你改出來的。**
+
+baseline 要用**同一組 flag、整棵樹**建，才比得準：
+
+```
+rm -rf tmp/base && mkdir -p tmp/base && git archive <baseline-commit> | tar -x -C tmp/base
+```
+然後把 `cd /d` 指到 `...\tmp\base` 再跑一次。
+
+⚠️ **不要用 `find /c "error"` 的數字當判準**：撞到 `C1003 錯誤計數超過 100 停止編譯` 時
+數字會被截斷成**假的相等**。要看錯誤**種類與相對位置**；行號會因為新增註解而位移。
+⚠️ **行號相同不代表比對有效**——2026-08-29 就遇過兩邊都報 7254/7259，
+一度懷疑是把同一個檔編了兩次。**先 `cmp` 確認兩份確實不同、再確認差異起點在錯誤點之後**，
+才能說「錯誤集合相同」。（那次是真巧合：合併的第一處改動在 7325 行。）
+
+### 🔴 這條路能證明什麼、不能證明什麼
+
+- ✅ 能證明：**語法、型別、宣告一致性**。回傳型別寫錯、少個分號、簽名不匹配都會抓到
+- ❌ **不能**證明：GCC/ARM64 編得過（不同編譯器）、**連結得起來**（`/Zs` 不產 obj 也不 link）、
+  **行為正確**。它取代不了 Pi 上的建置，只是把「等部署才知道」的迴圈從幾分鐘縮到幾秒
+
+
 ## B. Web GUI 面板（按鈕即送指令）
 
 | Panel | 按鈕 | 對應指令 |
