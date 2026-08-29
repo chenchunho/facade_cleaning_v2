@@ -1710,7 +1710,33 @@ bool DamiaoAPI::lr_move_to_slot_impl(MotorSlot& s, int slot, float speed_rad_s)
 	// 0.15 (8.6°) 給夠 margin、一次 converged。sweep 對角度精度要求不高。
 	const float CONV_TOL = 0.15f;
 	const float DT       = 0.02f;
-	const int   MAX_LOOPS = 100;   // 2s timeout
+	// [2026-08-28 per user] MAX_LOOPS 100 → 150（2s → 3s）。
+	//
+	// bench 症狀：DEPLOY LEFT 反覆失敗、M1 因此完全沒伸出（cmd_deploy_sequence
+	// 的 Step 2 一 return，Step 3 的 touch_wall 就不會執行）。兩次 log 的數字幾乎
+	// 完全相同：
+	//     pos=-0.547227 target=-0.6775 err=0.130273 start=0.508316
+	//     pos=-0.541505 target=-0.6775 err=0.135995 start=0.50679
+	// 這種重現性不是機械卡住或扭力不足，而是 loop 預算差臨門一腳。實際算一遍
+	// （start≈0.507 → target=-0.6775，距離 1.1843 rad）：
+	//     巡航段 (1.1843 − M2_CREEP_ZONE) / (0.8 * DT) = 1.0343/0.016 = 64.6 loops
+	//     creep 段        M2_CREEP_ZONE / (0.20 * DT) =    0.15/0.004 = 37.5 loops
+	//     合計 102.1 loops  >  100
+	// 差 2.1 個 loop。注意 err(0.136) 已經 < CONV_TOL(0.15) —— **馬達其實轉到位了**，
+	// 只是收斂條件同時要求 `cur_cmd == target`（命令軌跡走完），而命令還差最後
+	// 幾個 tick。
+	//
+	// 根因是 2026-08-18 為了修「M2 甩頭」加入的 creep：它把最後 0.15 rad 的速度
+	// 砍到 1/4，光那段就吃掉 37.5 個 loop（預算的三分之一以上），當時沒有同步
+	// 放大 MAX_LOOPS。
+	//
+	// 150 的依據：最壞情況是從 RIGHT 端（+lr_half_range−0.1）走到 LEFT 端
+	// （−lr_half_range+0.05），half_range=0.7275 時距離 1.305 rad →
+	//     (1.305−0.15)/0.016 + 37.5 = 72.2 + 37.5 = 109.7 loops
+	// 取 150 留約 35% 餘裕。真的卡死時代價只是多等 1 秒。
+	// ⚠ 日後再改 M2_CREEP_ZONE / M2_CREEP_SPEED / speed_rad_s / lr_half_range，
+	//   都要用上面這條算式重算這個值。
+	const int   MAX_LOOPS = 150;   // 3s timeout (2026-08-28: 100→150，creep 段吃掉的 loop 沒被算進原本的預算)
 
 
 	bool was_enabled = s.enabled.exchange(false);

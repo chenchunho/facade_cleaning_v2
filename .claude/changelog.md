@@ -667,6 +667,463 @@ driver 稽核找出來的第二支。DSZL 走 **Modbus TCP（MBAP）不是 RTU**
 📌 **判準是「看了會被誤導」而不只是「沒用」。** 保留 `dm2j_manual_utf8.txt`（可讀版，作原文對照）。
 四個檔都在版控裡，需要時從 git 歷史取回。
 
+<!-- [2026-08-29 merge 6523b54] 以下為 origin/main（Sadie-fang）的 13 條，
+     [2026-08-28f] ~ [2026-08-28u]。changelog 是 append-only 帳本，兩邊各自往上加，
+     合併時保留雙方全部條目：我方在上、對方在下，編號各自獨立不重疊。 -->
+
+## [2026-08-28u] Claude Code
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — 新增 `CRANE_MOVE_SETTLE_MS = 300`
+- `user_lib/WASH_ROBOT.cpp` — `do_step_sync_` 步驟 2 之後加入靜置
+
+### 原因
+per user：同步移動時，吊機放完之後加 300ms delay。
+
+`crane_cmd_("pay_out"/"retract")` 回 OK 只代表吊機端的停止指令送完了 —— 機體還在
+晃、鋼索還在彈。緊接著就讀 IMU 或動推桿並不理想。
+
+放在 `do_step_sync_` 的步驟 2 與步驟 3 之間（不是塞進 `do_sync_imu_roll_correct_`
+內部），因為它屬於「吊機動作剛結束」的收尾：即使 IMU 校正因故被跳過，這段仍該等。
+後面照舊有 `check_abort_()`。
+
+### 與既有靜置的關係
+`do_sync_imu_roll_correct_` 內部本來就有 `FOLLOWER_IMU_SETTLE_MS`(800ms)，在讀 roll
+之前等機體停止擺動。兩段疊加 = 吊機停止後總共 1.1 秒才取第一個 roll 樣本。
+刻意不合併：一個是「動作結束後的收尾」、一個是「取樣前的靜置」，目的不同，
+之後要分別調整比較清楚。
+
+### 現行時序
+```
+解真空 -> 等 4 顆釋放 -> [PWM 7%] -> 靜置 300ms -> 兩段式收腳
+-> arm INIT 並行 + 吊機移動 -> 靜置 300ms -> IMU 校平(內部再等 800ms)
+-> [PWM 5%] -> 抽真空 -> 伸腳 + 清洗並行
+```
+
+### 驗證
+本機 `cl /Zs`：錯誤集合與 HEAD 相同，無新增語法問題。實機未測。
+
+## [2026-08-28t] Claude Code
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` — `do_step_sync_`：伸腳後的「原地補伸」停用（`#if 0`）
+- `user_lib/WASH_ROBOT.h` / `.cpp` — 新增 `imu_persistently_bad_()`；
+  `do_sync_imu_roll_correct_` 與 `follower_imu_level_` 的 IMU 健康判定改用視窗
+
+### 1. 原地補伸停用（per user：「這種已經掃完的就不用再補伸了」）
+第一次伸出時 `disable_seal` 已經把該側推到底 —— bench log：
+```
+iter 2 WALL I=1242mA ... pulse=37372 >= gate 31715 — endpoint, not obstacle
+iter 2 at wall + vacuum can't seal (p=-1kPa fresh_p=0) — weak_seal early
+```
+那已經是「推到牆、真空還是吸不起來」的結論。再 `smart_extend_subset_` 一次只是
+用更大電流把同一顆杯子往玻璃上再頂一輪（log 實測第二輪 1242 / 1503mA），對密封
+沒幫助，只多壓一次玻璃與推桿。
+
+停用後直接落到 `group_seal_ok_` 判定：整側全裸就停住不動回 `ERR side_unsealed`，
+每側至少 1 顆就照舊繼續。方向與 `[2026-08-28k]`（後退重吸停用、沒吸好就停住）
+一致 —— v2 現在的態度是吸不好交給人判斷，不再自動補救。
+
+原碼包在 `#if 0` 保留；等待清洗掃動結束那段仍保留（要停住不動之前，手臂該先
+PARK 好），只是訊息不再寫「再重試伸腳」。
+
+### 2. 🎯 IMU 校正失效 —— 瞬時旗標被當成裝置壞掉
+per user 指認「放繩後的 IMU 校正應該要有作用」。bench log：
+```
+[step_sync_imu] IMU read_error mid-pass — stop (non-fatal)
+```
+同一步吊機回報 `l_cm=29 r_cm=31`（左右差 2cm），校正整段沒做，歪斜留著累積。
+
+**根因**：`WT901BC_TTL::read_error` 是**逐封包**旗標 —— checksum 錯一包設 true、
+下一包正常就清回 false（`WT901BC_TTL.cpp:47/75/95`）。裝置以 115200 持續串流，
+偶發壞一包很正常。但兩處 gate 都是**瞬間讀一次**就判定 IMU 不可用：
+- `do_sync_imu_roll_correct_` 進入時（skip 整步）
+- 每個 pass 開頭（mid-pass abort）
+
+諷刺的是同一函式內的 `read_roll_avg` 早就做對了 —— 取 6 個樣本、跳過壞的、
+全壞才 fallback。gate 反而比它嚴格。
+
+**修法**：新增 `imu_persistently_bad_(samples=6, gap_ms=50)` —— 掃一個 300ms 視窗
+（與 `read_roll_avg` 同寬），期間有**任何一次**讀到正常就當可用，全壞才算真的
+不可用。兩處 gate 改用它。
+
+**一併修了交替走法**：`follower_imu_level_` 的兩個 gate 有一模一樣的缺陷
+（entry skip + mid-trim abort），同批改掉。只修 sync 不修 alt 會留下同一個坑。
+
+### 仍未解釋
+上一批 log 的 `ROLL PANIC -150.9°` 還沒有定論。roll 是 `read_roll_avg() - imu_roll0_`，
+-150.9° 不可能是真實姿態。可能是 `n==0` 時 fallback 讀到的原始 `imu_.z` 是壞值，
+也可能是角度在 ±180 附近繞回。本次修的 gate 會讓更多樣本被採用，可能連帶減少
+這個現象，但**沒有針對它加任何 sanity filter**。若還會出現，要在 `read_roll_avg`
+加離群值剔除。
+
+### 驗證
+本機 `cl /Zs`：錯誤集合與 HEAD 相同，無新增語法問題。實機未測。
+
+## [2026-08-28s] Claude Code
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — `STEP_CM_MAX` 80 → **100**
+- `web_backend/public/app.js` — `parseScriptCsv` 的 cm 範圍 5..50 → **5..100**
+
+### 原因
+per user：網頁的 script 最大值要能到 100cm。
+
+兩層都要改，少改一層就會出現「預覽說 OK 但送出被拒」或反過來：
+
+| 層 | 原本 | 現在 |
+|----|------|------|
+| 前端即時預覽 `parseScriptCsv` (app.js:1388) | 5..50 | **5..100** |
+| 後端 `parse_script_csv_` (吃 `STEP_CM_MIN..STEP_CM_MAX`) | 5..80 | **5..100** |
+
+前端原本卡 50、後端卡 80，兩邊本來就不一致；現在統一成 5..100。
+
+### ⚠ 這個上限是共用的
+`STEP_CM_MAX` 不只 script 在用，以下路徑一起被放寬到 100：
+- 手動單步 `cmd_step_down` / `cmd_step_up`（含 sync 版）
+- 自動循環 `cmd_run`
+- 深度避障建議步距的 clamp（`WASH_ROBOT.cpp:1955`）
+
+也就是說現在這些地方都可以下 100cm。若只想放寬 script、其他維持 80，要另外給
+script 一個獨立上限（目前沒有）。
+
+執行期仍可用設定面板的 `step_cm_max` 調整（`apply_to_atomic_` 邊界本來就是 5..100，
+GUI 欄位 `max="100"` 也已相符，不需要改）。
+
+### 未變動
+GUI 首頁的 `step cm` 手動輸入框（index.html:38）仍是 `max="60"`，設定面板的
+`step_cm_default` 也是 `max="60"`。那兩個是手動步距的 UI 限制，不影響 script。
+要一起放寬再說。
+
+### 驗證
+`cl /Zs`：錯誤集合與 HEAD 相同。app.js 無法在本機做語法檢查（此機器沒有 node），
+改動僅為一個數字與訊息字串，未動控制流。實機未測。
+
+## [2026-08-28r] Claude Code
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — 新增 `PWM_STEP_WRITE_TRIES = 3` /
+  `PWM_STEP_WRITE_RETRY_MS = 120`
+- `user_lib/WASH_ROBOT.cpp` — `pwm_set_duty_only_()` 改為重試迴圈
+
+### 🎯 bench: `[QX:9] no reply (timeout)` → `step_move_on FAILED`
+user bench log：同一次 `step_down_sync` 裡
+
+```
+[ERR] [QX:9] no reply (timeout) ...
+[pwm_step] step_move_on -> ch1 duty=7.0% FAILED
+...
+[pwm_step] step_move_off -> ch1 duty=5.0% OK      ← 同一步稍後就成功了
+```
+
+**關鍵是「關閉」那次成功了** —— 模組確實在 slave 9、接線與波特率都對，這是偶發
+掉包，不是設定錯誤。單次失敗就放棄太脆弱（開啟失敗 = 整段吊機移動都沒有輸出）。
+
+改成最多試 3 次（初次 + 2 次重試），每次間隔 120ms。間隔的用意是讓半雙工 RS485
+把上一筆可能遲到的回覆吐完，下一次 atomic transaction 的 drain 才不會又撞上它。
+log 會標明第幾次成功 / 幾次全滅，之後看得出偶發率。
+
+**只作用在步伐路徑**（`pwm_set_duty_only_`，開啟與關閉兩處都吃到）。面板
+`cmd_pwm_set` 維持單次 —— 那邊失敗會直接回錯誤字串給操作者，由人決定要不要再按。
+
+### 尚未釐清（根因）
+為什麼偏偏是「一步裡的第一次寫入」失敗，還沒有定論。可能方向：
+- `.22` bus 上緊接在前的是 JC-100 壓力讀取（`vacuum_release`），若上一筆回覆遲到，
+  下一筆 transaction 的 drain 之後仍可能先讀到殘留片段
+- QX 模組是全專案唯一 115200 的裝置，USR gateway 以字元間隔打包，分片行為與其他
+  9600 裝置不同（`QX_DO24::sendAndReceive` 已為此改用 `sendAndReceiveQuiet`）
+
+重試是止血，不是根治。新 log 會累積偶發率資料，之後再判斷要不要往下查。
+
+### 驗證
+本機 `cl /Zs`：錯誤集合與 HEAD 相同，無新增語法問題。實機未測。
+
+## [2026-08-28q] Claude Code
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` — `do_step_sync_`：PWM 7% 寫入點（含 300ms 靜置）
+  從「ZDT 收腳之後」往前移到「ZDT 收腳之前」
+
+### 原因
+per user：PWM 寫入 7% 移到 ZDT 收腳前。
+
+新位置在 `vacuum_wait_release_`（確認 4 顆都已釋放）之後、
+`pusher_two_stage_retract_` 之前 —— 腳已經不吸在牆上，但推桿還沒開始縮。
+
+`PWM_STEP_ON_SETTLE_MS`(300ms) 的靜置**跟著寫入點一起搬**：這段等待的用意是
+「輸出起來 / 負載轉穩之前不要動機構」，所以貼著寫入走。現在它擋在收腳之前，
+吊機移動更在其後，`[2026-08-28o]` 那個「吊機動之前一定等滿 300ms」的要求仍然成立。
+
+### 現行時序
+```
+解真空 -> 等 4 顆釋放 -> [PWM 7%] -> 靜置 300ms -> 兩段式收腳
+-> arm INIT 並行 + 吊機移動 -> IMU 校平 -> [PWM 5%] -> 抽真空 -> 伸腳
+```
+
+### 沿革（同一天改了三次，記一下免得下次看不懂）
+1. `[2026-08-28i2]` 最初放在**解真空之前**（照字面「解真空解收回腳時」）
+2. `[2026-08-28l]` per user 改到**收腳之後**（腳還吸著不該有輸出）
+3. 本次 per user 再往前挪到**收腳之前**
+
+關閉點（步驟 3.5 伸腳前寫 5%）與 `fail()` 的 abort 收尾都沒動過。
+
+### 驗證
+本機 `cl /Zs`：錯誤集合與 HEAD 相同，無新增語法問題。實機未測。
+
+## [2026-08-28p] Claude Code
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` — `cmd_run_script`：步伐迴圈開始前插入一次清洗
+
+### 原因
+per user：script 第一步先動一次手臂（清洗），再開始往下走。
+
+清洗是綁在步伐**尾段**的（`do_step_sync_` 步驟 5 伸腳時才並行發動
+`do_step_sync_rail_sweep_`），所以每一步洗的都是「移動後」那一格 —— 機器出發前
+所在的起始位置永遠不會被洗到。補上 pre-sweep 之後才完整。
+
+這等同 v1 舊 pipeline 的 `iter 1 — launching pre-feet sweep`（保留在
+`_retired_cmd_run_script_v1_sweep_` 的 `#if 0` 內），v2 重寫時沒跟著復活。
+
+### 行為
+插在 `set_state_(Running)` / `motion_active_=true` 之後、`for` 迴圈之前：
+```
+arm INIT (同步, ~10s) -> do_step_sync_rail_sweep_("run_script_pre") -> 開始第 1 步
+```
+刻意跟步伐內建那段共用同一個 `do_step_sync_rail_sweep_`，所以滾筒/刮刀/上滑台
+行程/牆距全部一致，之後改一處就兩邊都改到。
+
+- 受 `STEP_SYNC_ARM_CLEAN_ENABLED` 管：關閉時整段跳過（連 INIT 都不跑，避免白等
+  60s timeout）。
+- 失敗一律非致命：INIT 失敗 → 退化成純上滑台掃動不開刷，跟步伐內建的降級一致；
+  `do_step_sync_rail_sweep_` 本身從來不擋步伐。
+- 後面補一個 `check_abort_()`，pre-sweep 期間按停止可以在進第一步之前退出。
+- INIT 在這裡是**同步**跑的（沒有吊機移動可以並行掩蓋那 ~10s），所以按下 run 之後
+  會先靜置約 30 秒（INIT + 兩次 DEPLOY + 兩次 3.5s 靜置 + 兩趟掃動）才開始走。
+
+### 未變動
+- `cmd_run`（非 script 的自動循環）沒有加 pre-sweep，只有 script 有。
+- script 的 `n`（不刷洗）旗標在 v2 仍然無作用 —— 只影響 log 的 `mode=transit`
+  字樣與統計，實際每步都會清洗。GUI 輸入框提示「n=不刷洗」目前是假的，待處理。
+
+### 驗證
+本機 `cl /Zs`：錯誤集合與 HEAD 相同，無新增語法問題。實機未測。
+
+## [2026-08-28o] Claude Code
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — 新增 `PWM_STEP_ON_SETTLE_MS = 300`
+- `user_lib/WASH_ROBOT.cpp` — `do_step_sync_`：寫完 PWM 7% 後靜置 300ms 再讓吊機動
+
+### 原因
+per user：PWM 寫入 7% 之後 delay 300ms 再移動吊機。給輸出起來 / 負載轉穩的緩衝。
+
+插在 PWM 7% 寫入與並行 arm INIT 之間，所以吊機移動前一定等滿。同時補一個
+`check_abort_()`，讓這 300ms 內按下停止能立刻退出（其他等待點都有，這裡比照辦理）。
+
+**寫入失敗時也照等**：失敗可能只是回覆掉了、輸出其實已經起來；300ms 對步伐總時間
+無足輕重，不值得為它多分一條路徑。
+
+關閉側（伸腳前寫 5%）**不加等待** —— 那邊要的是「確定關掉」，靠 `try_or_pause_`
+擋住，不是靠時間。
+
+新時序：
+```
+解真空 -> 等 4 顆釋放 -> 兩段式縮回 -> [PWM 7%] -> 靜置 300ms
+-> arm INIT 並行 + 吊機移動 -> IMU 校平 -> [PWM 5%] -> 抽真空 -> 伸出
+```
+
+### 驗證
+本機 `cl /Zs`：錯誤集合與 HEAD 相同，無新增語法問題。實機未測。
+
+## [2026-08-28n] Claude Code
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — `CH_BRUSH` 15 → **5**
+- `user_lib/WASH_ROBOT.cpp` — `do_step_sync_rail_sweep_` 兩處滾筒 relay 寫入加上
+  回傳值檢查 + log
+- `web_backend/public/index.html` — 手動 relay 面板標籤「刷洗滾筒 (CH15)」→ (CH5)
+
+### 🎯 滾筒不轉 —— 通道號錯了
+user 實體確認：滾筒馬達接在 **CH5**。
+
+`CH_BRUSH` 在 2026-07-24 被改成 15（註解寫「5→15, arm now physically installed」），
+之後所有 `controlRelay(CH_BRUSH, ...)` 都打到 CH15 —— 一個沒接東西的繼電器。
+現象是「清洗流程整段照跑、DEPLOY 也成功、就是滾筒不轉」。
+
+CH5 目前沒有其他用途（1=閥 / 2=泵浦 / 6=破真空 / 14=水泵），不撞號。改常數即可，
+全部 13 處呼叫點都吃這個常數，不需要逐一改。
+
+### 為什麼查了這麼久 —— 沒有任何 log
+`do_step_sync_rail_sweep_` 裡兩行都是裸呼叫 `pqw_.controlRelay(CH_BRUSH, ...)`，
+回傳值沒接、也沒印 log。就算 Modbus 寫入整個失敗也一個字都不會出現，log 上
+「rail sweep done」照印。本次補上兩處檢查（PQW driver 沿用 true=失敗 慣例）：
+- ON 失敗 → 印「滾筒可能不會轉」
+- OFF 失敗 → 印「滾筒可能仍在轉，請手動關」（關不掉比開不起來嚴重）
+
+⚠ 但 PQW 韌體的 echo 檢查只驗長度不驗內容（`Linux_test` menu 5 自己有這個警告），
+所以「寫入回 OK」不等於繼電器真的切了。新的 log 只能抓硬失敗（無回應／回覆過短），
+抓不到「打到錯的通道」這種情況 —— 那仍然只能靠實體 LED 確認。
+
+### 未處理（doc 落後）
+`Linux_test` menu 5 畫面上那張 channel map 整份是舊的（還寫 CH5 滾筒 ✅ 但
+CH6 水箱泵浦 ❌、CH16 破真空 ❌、CH1/CH3 左右分開的閥 ❌）。現行 map 是
+CH1 閥 / CH2 泵浦 / CH5 滾筒 / CH6 破真空 / CH14 水泵。`CLAUDE.md` 的硬體表同樣
+停留在 v1 的 8CH 分區描述。兩處都沒動，待整批處理。
+
+### 驗證
+本機 `cl /Zs`：錯誤集合與 HEAD 相同，無新增語法問題。實機未測。
+
+## [2026-08-28m] Claude Code
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` — `do_step_sync_rail_sweep_`：拿掉「DEPLOY RIGHT 失敗
+  就提早關滾筒」那一段
+
+### 原因
+per user 釐清：滾筒的開關窗口是「**DEPLOY RIGHT 過程中開、DEPLOY LEFT 就關**」。
+
+`[2026-08-28l]` 把 ON 提前到 DEPLOY RIGHT 之前時，順手加了「DEPLOY RIGHT 失敗就
+立刻 OFF」，那等於多了一個關閉點、把窗口的結束時機變成條件式的。依 user 的定義
+拿掉：DEPLOY RIGHT 成功與否都不影響關閉點。
+
+**現在的滾筒時序**（`init_ok == true` 時）：
+```
+CH_BRUSH ON -> DEPLOY RIGHT -> 靜置 3.5s -> 滑台 0->17cm
+-> CH_BRUSH OFF -> DEPLOY LEFT -> 靜置 3.5s -> 滑台 17->0 -> PARK
+```
+`init_ok == false`（手臂不通）時整段 DEPLOY/滾筒都不執行，只做純滑台掃動 ——
+這條路徑不變。
+
+**唯一的例外關閉點**：第一趟掃動後的 `check_abort_()` 收尾仍無條件 `CH_BRUSH OFF`
++ PARK。那是 abort 路徑的安全收尾，不屬於正常窗口，保留。
+
+### 驗證
+本機 `cl /Zs`：錯誤集合與 HEAD 相同（3 個既有 MSVC-only lambda capture 錯誤），
+無新增語法問題。實機行為未測。
+
+## [2026-08-28l] Claude Code
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` — `do_step_sync_`：PWM 7% 的寫入點往後移到「4 顆都解
+  真空且縮回之後」
+- `user_lib/WASH_ROBOT.cpp` — `do_step_sync_rail_sweep_`：滾筒 `CH_BRUSH` 改成
+  `DEPLOY RIGHT` **之前**就開
+
+### 1. PWM 7% 的寫入點
+per user：要等腳都解真空、縮回之後才可以寫 7%。
+
+原本 `[2026-08-28i2]` 放在步驟 1 的最前面（`vacuum_valve_("feet", false)` 之前），
+也就是腳還吸在牆上時就有輸出。現在移到 `pusher_two_stage_retract_` 成功、
+`check_abort_` 之後，緊接在並行 arm INIT 之前。
+
+新的時序：
+`解真空 -> 等 4 顆釋放 -> 兩段式縮回 -> [PWM 7%] -> arm INIT 並行 + 吊機移動
+-> IMU 校平 -> [PWM 5%] -> 抽真空 -> 伸出`
+
+關閉點（步驟 3.5）與 `fail()` 的 abort 收尾都沒動。
+
+### 2. 滾筒提前到 DEPLOY RIGHT 之前
+per user。原本是 `DEPLOY RIGHT` 回 OK 之後才 `controlRelay(CH_BRUSH, true)`，
+現在改成送 DEPLOY 之前就開，讓滾筒在手臂貼上玻璃之前已經在轉，而不是「先壓上去
+再起轉」。
+
+⚠ `arm_cmd_("DEPLOY ...", 30)` 是阻塞呼叫（最長 30 秒），所以滾筒實際會比原本早
+轉這段時間；DEPLOY 若失敗，`else` 分支立刻 `controlRelay(CH_BRUSH, false)`，維持
+原本「deploy 失敗 = no brush」的語意，不讓它空轉整段掃動。其餘關閉點不變
+（換刮刀側時關、abort 收尾無條件關）。
+
+`CH_BRUSH` 常數值是 **15**（2026-07-24 per user 由 5 改為 15，手臂實裝後的實際
+腳位）；CLAUDE.md 硬體表裡寫的 CH5 是舊值，本次未一併修正。
+
+### 驗證
+本機 `cl /Zs`：錯誤集合與 HEAD 相同（3 個既有 MSVC-only lambda capture 錯誤），
+無新增語法問題。實機行為未測。
+
+## [2026-08-28k] Claude Code
+### 修改檔案
+- `user_lib/WASH_ROBOT.cpp` — `do_step_sync_` 的「後退重吸」機制以 `#if 0` 停用，
+  改成沒吸好就回 `ERR side_unsealed` 停住不動
+- `user_lib/WASH_ROBOT.h` — `STEP_SYNC_BACKOFF_CM` 加註「目前無作用」
+
+### 原因
+per user：吸不好之後退回重吸的機制先註解掉，沒吸好就停住不動。
+
+**原行為**（2026-07-27 加的）：整側沒吸住 → 全部縮回 → 吊機往回退
+`STEP_SYNC_BACKOFF_CM`(10cm) → 重新抽真空伸出 → 再檢查，一路退到起點為止，
+全退完仍沒吸住才 `ERR side_unsealed_at_origin`。
+
+**新行為**：`group_seal_ok_` 任一側不過 → 印出未吸住的 slave → `evt_`
+`<tag>_side_unsealed` → `return fail("ERR side_unsealed")`，不再驅動吊機、
+不再重試。呼叫端（`cmd_step_down_sync` / `cmd_step_up_sync` / 自動循環迴圈）
+看到非 OK 就切 `State::Error` 並停止後續步伐 —— 也就是「停住不動」。
+
+停住時的實體狀態：推桿伸出但未吸住，機器靠鋼索吊著。這條路徑走 `fail()`，
+所以 PWM 占空比會一併寫回 5%（停止）——見 `[2026-08-28i2]`。
+
+**保留方式**：原碼整段包在 `#if 0` 內沒有刪除（本檔既有慣例，如 `_retired_*_v1_`）。
+要恢復就拿掉 `#if 0` / `#endif`，並刪掉上面那段「停住不動」的 return。
+`STEP_SYNC_BACKOFF_CM` 因此暫時是死常數，已在宣告處註明。
+
+### 未變動
+「每側 >=1 顆即算吸好」(`group_seal_ok_`) 的判準沒動；伸腳後的**原地**重試
+（`smart_extend_subset_` 對整側全裸的那一側再試一次）也沒動 —— 那段不移動吊機，
+不屬於「後退重吸」。只有需要移動吊機的退回迴圈被停掉。
+
+### 驗證
+本機 `cl /Zs`：錯誤集合與 HEAD 相同（3 個既有 MSVC-only lambda capture 錯誤），
+無新增語法問題。實機行為未測。
+
+## [2026-08-28j] Claude Code
+### 修改檔案
+- `cleaning_arm/main_api.cpp` — `lr_move_to_slot_impl` 的 `MAX_LOOPS` 100 → **150**
+
+### 🎯 DEPLOY LEFT 一直失敗、M1 完全沒伸出 —— 是 loop 預算差 2 個 tick
+user 問「為什麼 deploy left 失敗？m1 沒有下去」。M1 沒下去是**連鎖結果**：
+`cmd_deploy_sequence` 是三段式，Step 2 一 return，Step 3 的 `touch_wall_slot`
+就不會執行。
+```
+Step 1: go_home_slot(m1_)                       ← M1 先收回原點（log 看到了）
+Step 2: if (!lr_move_to_slot_impl(m2_, ...))    ← 卡在這，直接 return ERR
+            return "ERR DEPLOY: M2 slot move did not converge";
+Step 3: touch_wall_slot(m1_, ...)               ← 從未執行
+```
+
+**根因不是扭力不足，是 timeout。** 兩次 bench log 的數字幾乎完全相同：
+```
+pos=-0.547227  target=-0.6775  err=0.130273  start=0.508316
+pos=-0.541505  target=-0.6775  err=0.135995  start=0.50679
+```
+這種重現性不可能是機械卡住。實際算一遍（距離 1.1843 rad）：
+
+| 階段 | 條件 | 速度 | step/loop | loops |
+|------|------|------|-----------|-------|
+| 巡航 | `\|diff\| ≥ 0.15` | 0.8 rad/s | 0.016 | (1.1843−0.15)/0.016 = **64.6** |
+| creep | `\|diff\| < 0.15` | 0.20 rad/s | 0.004 | 0.15/0.004 = **37.5** |
+| | | | 合計 | **102.1** > `MAX_LOOPS`=100 |
+
+**差 2.1 個 loop。** 而且注意 `err(0.136) < CONV_TOL(0.15)` —— **馬達其實已經轉到位**，
+只是收斂條件同時要求 `cur_cmd == target`（命令軌跡走完），命令還差最後幾個 tick：
+```cpp
+if (cur_cmd == target && std::abs(Get_Position() - target) < CONV_TOL)
+```
+
+**為什麼會不夠**：2026-08-18 為修「M2 甩頭」加入的 creep 把最後 0.15 rad 速度砍到
+1/4，光那段就吃掉 37.5 個 loop（預算的三分之一以上），當時沒同步放大 `MAX_LOOPS`。
+
+**150 的依據**：最壞情況從 RIGHT 端走到 LEFT 端（half_range=0.7275 時距離 1.305 rad）
+需 `(1.305−0.15)/0.016 + 37.5 = 109.7` loops，取 150 留約 35% 餘裕；真卡死時代價只是
+多等 1 秒。已在註解寫明：日後改 `M2_CREEP_ZONE` / `M2_CREEP_SPEED` / `speed_rad_s` /
+`lr_half_range` 都要用同一條算式重算。
+
+### ⚠ 沒有加大 M2 扭力（user 原本要求，經分析後未執行）
+user 先要求「稍微加大 M2 的力量」，但上面的算式顯示馬達推得動（實際位置已進容差），
+是計時器先到 —— 加扭力不會有幫助。而且：
+- `MIT_KP` 現為 31.0，**32.0 有暴衝紀錄**（衝到 2.27 rad、tau −21 Nm），註解明確
+  要求不再往上
+- `FRICTION_TAU` 現為 4.0，是 1.5→2.3→2.8→3.0→4.0 一路為「M2 轉不過去」加上來的，
+  但註解已記載那些轉不過去有一部分其實是 `half_range` 假觸發害 target 算錯、**不是
+  扭力不足**，修對後這些扭力就過剩了，並造成「硬轉動的聲音」（過剩推力硬頂機構）
+
+同一個誤判模式（把控制邏輯問題當成扭力不足）在這個檔案已出現過至少兩次，故先修
+timeout。若改完仍到不了位，下一步才動 `FRICTION_TAU`（固定 feedforward、不隨誤差
+放大，比 `MIT_KP` 安全）4.0 → 4.5 小步加。
+
+### 驗證
+`cl /Zs` 對 `cleaning_arm/main_api.cpp`：11 errors，與 HEAD 完全相同 —— 全部落在
+`user_lib/damiao.h`（廠商 header 用 `or` 這個 alternative operator，MSVC 預設不支援、
+GCC 支援），非本次改動引入。
+
 ---
 
 ## [2026-08-28i] Claude Code
@@ -716,6 +1173,53 @@ DEPLOY RIGHT(滾筒) + CH_BRUSH on → settle → 0→17 → CH_BRUSH off
 註解本來就記載這個判斷），與上面「估太短會被打斷」的情況相反。
 
 ---
+
+## [2026-08-28i2] Claude Code  ← 編號補記：與上方 i（滑台 EST_MS）為不同批改動，先後獨立
+### 修改檔案
+- `user_lib/WASH_ROBOT.h` — 新增 `PWM_STEP_CH` / `PWM_STEP_MOVE_DUTY_PCT(7.0)` /
+  `PWM_STEP_OFF_DUTY_PCT(5.0)` 三個常數 + `pwm_set_duty_only_()` 宣告
+- `user_lib/WASH_ROBOT.cpp` — 新增 `pwm_set_duty_only_()`；`do_step_sync_` 內
+  三個掛鉤（開啟 / 關閉 / abort 收尾）
+
+### 同步步伐加入 PWM 占空比切換（per user）
+需求：ZDT 解真空 + 收腳時把占空比寫 7.0%，吊機移動全程維持開啟；到定位後、
+**ZDT 伸出之前**寫回 5.0%（=關掉），確定關掉才可以開始抽真空 + 伸出。
+
+加在 `do_step_sync_`（同步走法），因為需求描述的時序「4 顆一起解真空收腳 → 吊機
+移動 → 一起伸出」正是這支的流程。`step_up_sync` / `step_down_sync` 兩個方向、
+自動循環的同步分支、深度避障的步進迴圈都走這裡，一次涵蓋。
+
+**⚠ 未涵蓋**：交替走法 `do_step_down_`/`do_step_up_`（cycle_group_）與
+`do_cross_obstacle_` 沒有加 —— 它們是一次只放一側、每步有多段吊機移動，
+「何時開/何時關」的語意跟這個需求對不上，要加需要另外定義。
+
+### 只寫占空比
+新 helper `pwm_set_duty_only_()` 只呼叫 `QX_DO24::setPWM_Duty()` 一個寫入，
+頻率與控制字完全不碰（per user「只需寫入占空位就好，其他不動」）。面板的
+`cmd_pwm_set` 是 Freq -> Duty -> Control 三個都寫，兩者共用同一個 driver method，
+所以安全限制（占空比鎖 5~10%、頻率鎖 50Hz）一樣由 driver 強制。
+通道用 1（面板預設值、也是 bench 用廠商工具驗過的那一路）。
+
+⚠ 因為不寫頻率：5~10% 對應「停止~全速」只有在頻率已經是 50Hz 時才成立，而模組
+每次上電會還原成 1000Hz。開機後若沒先用面板寫過一次（或 `pwm save` 過），這裡寫
+的 7% 不是預期的轉速。面板的 `freq_ok` 欄位就是看這個。
+
+### 三個掛鉤的失敗處理刻意不對稱
+| 位置 | 失敗處理 | 理由 |
+|------|---------|------|
+| 步驟 1 前（寫 7%） | 印 warning，步伐照常走 | 沒開起來不會讓機器進入危險狀態 |
+| 步驟 3.5（寫 5%，伸腳前） | `try_or_pause_` 擋住 | 「該關沒關卻去伸腳」才是真正的風險，per user 要求「確保關掉後才可以開始」 |
+| `fail` lambda（abort 收尾） | 印 warning | 見下 |
+
+`fail` 是 `do_step_sync_` 所有提早返回的唯一出口，順手在那裡補寫 5%。否則步伐在
+「收腳 -> 吊機移動」中間 abort / 失敗時，輸出會停在 7% 一直開著，而後續動作
+（手動伸腳、救援收繩）不會經過步驟 3.5 的關閉點。這一項是需求之外主動加的安全
+收尾，若不需要可以拿掉（只影響 abort 路徑）。
+
+### 驗證
+本機 `cl /Zs` 語法檢查：錯誤集合與 HEAD 完全相同（3 個既有的 MSVC-only
+`CRANE_METER_SANITY_MAX_CM` lambda capture 錯誤，GCC 不會報），無新增語法問題。
+實機行為未測。
 
 ## [2026-08-28h] Claude Code
 ### 修改檔案

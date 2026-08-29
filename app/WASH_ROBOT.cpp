@@ -7323,6 +7323,28 @@ std::string WashRobot::crane_abs_target_cmd_(const std::string& move_group,
 }
 
 // [策略1 2026-07-09] IMU fine-level the follower side to the datum. See header.
+// [2026-08-28] IMU 健康判定 —— 取代原本「瞬間讀一次 imu_.read_error」的寫法。
+//
+// WT901BC_TTL 的 read_error 是**逐封包**旗標：checksum 錯一包就 true，下一包
+// 正常就清回 false（WT901BC_TTL.cpp:47/75/95），另外連續 500ms 沒有有效封包也會
+// 設 true。裝置以 115200 持續串流，偶發一包壞掉很正常 —— 在某個瞬間抓到 true
+// 完全不能代表「IMU 不能用」。
+//
+// bench 症狀（2026-08-28）：`[step_sync_imu] IMU read_error mid-pass — stop`
+// —— 整步的水平校正被一個瞬時旗標取消，同一步吊機回報左右差 2cm 就這樣留著
+// 累積到下一步。
+//
+// 這裡改成掃一個視窗（預設 6 × 50ms = 300ms，跟 read_roll_avg 的取樣窗一致）：
+// 只要期間有**任何一次**讀到正常就當作可用，全部都壞才算真的不可用。
+bool WashRobot::imu_persistently_bad_(int samples, int gap_ms) {
+    if (samples < 1) samples = 1;
+    for (int k = 0; k < samples; ++k) {
+        if (!imu_.read_error.load()) return false;   // 有一次好的就夠了
+        if (k < samples - 1) sleep_ms_(gap_ms);
+    }
+    return true;
+}
+
 void WashRobot::follower_imu_level_(const std::string& move_group) {
     // Runtime mode: meter (原本方法, 方案B only) skips the IMU trim entirely; the
     // coarse measured descent already ran in pre_cycle.
@@ -7330,8 +7352,10 @@ void WashRobot::follower_imu_level_(const std::string& move_group) {
     constexpr double DEG2RAD = 0.017453292519943295;
 
     // IMU must be healthy — else fall back to the coarse measured descent alone.
-    if (imu_.read_error.load()) {
-        std::cout << "[imu_level] " << move_group << " skip — IMU read_error (coarse meter only)\n";
+    // [2026-08-28] 同 do_sync_imu_roll_correct_ 的修正：交替走法這條路徑有一模一樣
+    // 的瞬時旗標問題，一併改用視窗判定。
+    if (imu_persistently_bad_()) {
+        std::cout << "[imu_level] " << move_group << " skip — IMU 持續讀不到 (coarse meter only)\n";
         evt_("imu_level_skip_imu_error " + move_group);
         return;
     }
@@ -7356,8 +7380,8 @@ void WashRobot::follower_imu_level_(const std::string& move_group) {
 
     for (int pass = 0; pass < FOLLOWER_IMU_MAX_PASSES; ++pass) {
         if (check_abort_()) return;
-        if (imu_.read_error.load()) {
-            std::cout << "[imu_level] " << move_group << " IMU read_error mid-trim — stop (non-fatal)\n";
+        if (imu_persistently_bad_()) {
+            std::cout << "[imu_level] " << move_group << " IMU 持續讀不到 mid-trim — stop (non-fatal)\n";
             evt_("imu_level_abort_imu_error " + move_group);
             return;
         }
@@ -7422,8 +7446,10 @@ void WashRobot::follower_imu_level_(const std::string& move_group) {
 void WashRobot::do_sync_imu_roll_correct_() {
     constexpr double DEG2RAD = 0.017453292519943295;
 
-    if (imu_.read_error.load()) {
-        std::cout << "[step_sync_imu] skip — IMU read_error (no correction this step)\n";
+    // [2026-08-28] 改用視窗判定，不再瞬間取樣一次就放棄（見 imu_persistently_bad_）。
+    if (imu_persistently_bad_()) {
+        std::cout << "[step_sync_imu] skip — IMU 持續讀不到（300ms 內每次取樣都是 "
+                     "read_error），本步不做校正\n";
         evt_("step_sync_imu_skip_error");
         return;
     }
@@ -7442,8 +7468,10 @@ void WashRobot::do_sync_imu_roll_correct_() {
 
     for (int pass = 0; pass < FOLLOWER_IMU_MAX_PASSES; ++pass) {
         if (check_abort_()) return;
-        if (imu_.read_error.load()) {
-            std::cout << "[step_sync_imu] IMU read_error mid-pass — stop (non-fatal)\n";
+        // [2026-08-28] 同上：瞬時 read_error 不足以判定 IMU 壞掉。原本這行讓整段
+        // 校正被一包壞封包取消（bench 2026-08-28 實際發生過）。
+        if (imu_persistently_bad_()) {
+            std::cout << "[step_sync_imu] IMU 持續讀不到 mid-pass — stop (non-fatal)\n";
             evt_("step_sync_imu_abort_error");
             return;
         }
@@ -8826,17 +8854,34 @@ void WashRobot::do_step_sync_rail_sweep_(const char* tag, bool init_ok, bool for
         oss_brush << "DEPLOY " << DM2J_ARM_STEP_SWEEP_WALL_MM << " RIGHT";   // RIGHT = 滾筒側
         // [2026-08-28] 保留回覆內容 —— 原本只印 "failed"，查不出是逾時、M2 轉不到位
         // 還是 motor_api 根本沒回。
+        // [2026-08-28 per user] 滾筒 (CH_BRUSH) 的開關窗口就是「DEPLOY RIGHT 到
+        // DEPLOY LEFT」：這裡在送 DEPLOY RIGHT **之前**開（deploy 過程中就要轉，
+        // 不是等回 OK 才開，避免手臂先壓上玻璃才起轉），一路轉過靜置 + 第一趟
+        // 滑台掃動，直到下面換刮刀側、送 DEPLOY LEFT 之前才關。
+        // DEPLOY RIGHT 失敗時**不**提早關 —— 關閉點只有 DEPLOY LEFT 那一個
+        // （abort 收尾另有無條件關閉，見下）。
+        //
+        // [2026-08-28] 檢查回傳值並留 log（PQW driver 沿用本專案慣例 true=失敗）。
+        // 先前這裡是裸呼叫，寫入失敗或打錯通道時 log 一個字都沒有 —— 2026-08-28
+        // 「滾筒不轉」查了半天才發現是通道號錯（15 應為 5），就是因為沒有這行。
+        // ⚠ PQW 韌體的 echo 檢查不可靠（只驗長度不驗內容），所以這裡回 OK 也不等於
+        //   繼電器真的切了；它只能抓「完全沒回應／回覆太短」這類硬失敗。
+        if (pqw_.controlRelay(CH_BRUSH, true))
+            std::cerr << "[" << tag << "] 滾筒 relay CH" << CH_BRUSH
+                      << " ON 寫入失敗（PQW 無回應）—— 滾筒可能不會轉\n";
+
         const std::string rep_brush = arm_cmd_(oss_brush.str(), 30);
         deployed = (rep_brush.rfind("OK", 0) == 0);
         if (deployed) {
-            pqw_.controlRelay(CH_BRUSH, true);
             // [2026-07-24 per user] 滾筒 deploy 後靜置再讓 DM2J 滑台開始移動，給滾筒
             // 轉起來/貼牆穩定的時間，避免滑台一動滾筒還沒轉穩。
             // [2026-08-28 per user] 2500 → DM2J_ARM_DEPLOY_SETTLE_MS(3500)，並抽成常數
             // （原本兩處各自寫死，容易改一處漏一處）。
             sleep_ms_(DM2J_ARM_DEPLOY_SETTLE_MS);
         } else {
-            std::cerr << "[" << tag << "] arm deploy RIGHT (brush) failed — rail sweep only, no brush"
+            // [2026-08-28 per user] 這裡刻意不關滾筒：開關窗口定義為 DEPLOY RIGHT
+            // 到 DEPLOY LEFT，DEPLOY RIGHT 失敗不改變關閉點（下面換刮刀側時才關）。
+            std::cerr << "[" << tag << "] arm deploy RIGHT (brush) failed — rail sweep continues"
                       << " (motor_api 回覆: " << rep_brush << ")\n";
         }
     }
@@ -8862,7 +8907,13 @@ void WashRobot::do_step_sync_rail_sweep_(const char* tag, bool init_ok, bool for
         // 滾筒(濕刷+CH_BRUSH)沒道理繼續轉。跟原本收尾才關（PARK 前）分開，提早到
         // 切換的當下就關，不要等到整段結束。
         // [2026-08-26 per user] 刮刀側 RIGHT → LEFT（見上方對調說明）。
-        pqw_.controlRelay(CH_BRUSH, false);
+        // [2026-08-28 per user] 這是滾筒唯一的正常關閉點（abort 收尾另有無條件關）：
+        // 開在 DEPLOY RIGHT 之前、關在 DEPLOY LEFT 之前，中間全程轉。
+        // [2026-08-28] 同 ON 那側：檢查回傳值。關不掉比開不起來嚴重（滾筒會一直
+        // 轉到下一次有人關它為止），所以這裡用 ERR 等級的字眼。
+        if (pqw_.controlRelay(CH_BRUSH, false))
+            std::cerr << "[" << tag << "] ⚠ 滾筒 relay CH" << CH_BRUSH
+                      << " OFF 寫入失敗（PQW 無回應）—— 滾筒可能仍在轉，請手動關\n";
         std::ostringstream oss_squeegee;
         oss_squeegee << "DEPLOY " << DM2J_ARM_STEP_SWEEP_WALL_MM << " LEFT";   // LEFT = 刮刀側
         if (arm_cmd_(oss_squeegee.str(), 30).rfind("OK", 0) != 0) {
@@ -8921,7 +8972,13 @@ std::string WashRobot::do_step_sync_(bool up) {
     const int cm = step_cm_.load();
     const char* tag = up ? "step_up_sync" : "step_down_sync";
 
-    auto fail = [this](const std::string& msg) -> std::string {
+    // [2026-08-28] 所有提早返回都經過這裡，所以順手把 PWM 占空比寫回 5%（=停止）。
+    // 否則步伐在「收腳 -> 吊機移動」中間 abort/失敗時，輸出會停在 7% 一直開著，
+    // 而接下來的動作（手動伸腳、救援收繩）不會經過步驟 3.5 那個關閉點。
+    // 還沒開啟就走到這裡時寫 5% 是無害的 no-op（5% 本來就是停止值）。
+    auto fail = [this, tag](const std::string& msg) -> std::string {
+        if (pwm_set_duty_only_(PWM_STEP_OFF_DUTY_PCT, "step_abort_off"))
+            std::cerr << "[" << tag << "] PWM 5% 寫入失敗（abort 收尾）— 輸出可能仍開著" << "\n";
         motion_active_ = false;
         return msg;
     };
@@ -8943,6 +9000,27 @@ std::string WashRobot::do_step_sync_(bool up) {
 
     if (try_or_pause_([this, &all_slaves]() { return vacuum_wait_release_(all_slaves, RETURN_VACUUM_RELEASE_MS); },
                        std::string(tag) + "_vacuum_release")) return fail("ERR aborted\n");
+    if (check_abort_()) return fail("ERR aborted\n");
+
+    // [2026-08-28 per user] PWM 占空比寫 7%。位置：4 顆都已經**解真空並確認釋放**
+    // 之後、ZDT **收腳之前**。（沿革：最初放在解真空之前 → 08-28 per user 改到收腳
+    // 之後 → 同日 per user 再往前挪到收腳之前，也就是現在這裡。腳已經不吸在牆上，
+    // 但推桿還沒開始縮。）
+    // 從這裡一路開著，涵蓋收腳 + 整段吊機移動 + IMU 校平，到定位後、伸腳之前才在
+    // 步驟 3.5 寫回 5%（=關掉）。
+    // 只寫占空比，頻率與控制字不動（理由見 pwm_set_duty_only_ 的註解）。
+    // 失敗不擋步伐：沒開起來不會讓機器進入危險狀態。真正有安全意義的是「該關沒關」
+    // —— 那一側在步驟 3.5 用 try_or_pause_ 擋住，不讓它帶著輸出去伸腳。
+    if (pwm_set_duty_only_(PWM_STEP_MOVE_DUTY_PCT, "step_move_on"))
+        std::cerr << "[" << tag << "] PWM " << PWM_STEP_MOVE_DUTY_PCT
+                  << "% 寫入失敗 — 步伐照常繼續\n";
+
+    // [2026-08-28 per user] 寫完 7% 靜置 PWM_STEP_ON_SETTLE_MS 再讓機構動。跟著
+    // 寫入點一起搬過來 —— 這段等待的用意是「輸出起來/負載轉穩之前不要動」，所以
+    // 貼著寫入走，現在擋在收腳之前（吊機移動更在其後，仍然等滿）。
+    // 寫入失敗時也照等 —— 失敗可能只是回覆掉了、輸出其實已經起來，這 300ms 對
+    // 步伐總時間無足輕重，不值得為它多分一條路徑。
+    sleep_ms_(PWM_STEP_ON_SETTLE_MS);
     if (check_abort_()) return fail("ERR aborted\n");
 
     if (try_or_pause_([this, &all_slaves]() { return pusher_two_stage_retract_(all_slaves); },
@@ -8992,11 +9070,27 @@ std::string WashRobot::do_step_sync_(bool up) {
     }
     if (check_abort_()) return fail("ERR aborted\n");
 
+    // [2026-08-28 per user] 吊機放/收繩結束後靜置 CRANE_MOVE_SETTLE_MS。
+    // crane_cmd_ 回 OK 只代表吊機端的停止指令送完了，機體還在晃、鋼索還在彈；
+    // 緊接著就讀 IMU / 動推桿並不理想。放在這裡（不是塞進 do_sync_imu_roll_correct_）
+    // 是因為它屬於「吊機動作剛結束」的收尾，就算之後 IMU 校正被跳過也該等。
+    sleep_ms_(CRANE_MOVE_SETTLE_MS);
+    if (check_abort_()) return fail("ERR aborted\n");
+
     // 3. IMU differential roll correction — non-fatal, residual tilt just
     //    carries to next step if it can't converge.
     // [2026-08-04 per user] 恢復——2026-07-24 那次暫時註解掉是做實驗用，這次
     // 使用者確認實驗結束、要恢復正常水平微調。
     do_sync_imu_roll_correct_();
+    if (check_abort_()) return fail("ERR aborted\n");
+
+    // 3.5 [2026-08-28 per user] 到定位了 —— 伸腳「之前」先把 PWM 占空比寫回 5%
+    //     (=停止)。per user：確定關掉之後才可以開始抽真空 + 伸出推桿，所以這裡用
+    //     try_or_pause_ 而不是像步驟 1 開啟時那樣忽略失敗 —— 寫不進去就停下來讓
+    //     使用者處理，不要在輸出還開著的狀態下伸腳。位置刻意排在步驟 4（抽真空）
+    //     之前而不是跟它並排：順序本身就是這個需求的重點。
+    if (try_or_pause_([this]() { return pwm_set_duty_only_(PWM_STEP_OFF_DUTY_PCT, "step_move_off"); },
+                       std::string(tag) + "_pwm_off")) return fail("ERR aborted\n");
     if (check_abort_()) return fail("ERR aborted\n");
 
     // 4. Vacuum back on, both channels (same grouped call as step 1).
@@ -9067,10 +9161,14 @@ std::string WashRobot::do_step_sync_(bool up) {
         // 實體碰撞風險是划算的。
         // 尾端那個 fut_rail_sweep.wait() 保留不動 —— future 已 ready 時它是
         // no-op，而它仍要負責覆蓋「沒有進重試」的正常路徑。
+        // [2026-08-28 per user] 原地補伸已停用（見下方 #if 0），這裡仍然等掃動結束
+        // 才往下走：接下來若判定停住不動，手臂應該已經 PARK 好、上滑台也停了，
+        // 不要在手臂還貼著玻璃的狀態下把錯誤丟出去讓操作者去動機器。
+        // 等待總長不變 —— 函式尾端的 RAII join 本來就會等同樣久。
         if (fut_rail_sweep.valid()) {
-            std::cout << "[" << tag << "] 等待清洗掃動結束（含手臂 PARK）再重試伸腳\n";
+            std::cout << "[" << tag << "] 等待清洗掃動結束（含手臂 PARK）\n";
             fut_rail_sweep.wait();
-            std::cout << "[" << tag << "] 掃動已結束，開始重試\n";
+            std::cout << "[" << tag << "] 掃動已結束\n";
         }
 
         std::vector<int> right_fails, left_fails;
@@ -9103,12 +9201,32 @@ std::string WashRobot::do_step_sync_(bool up) {
             std::cout << "\n";
         }
 
+        // [2026-08-28 per user] 原地補伸停用 —— 「這種已經掃完的就不用再補伸了」。
+        //
+        // 第一次伸出時 disable_seal 已經把該側推到底（bench log：iter 2 打到
+        // `WALL I=1242mA ... endpoint, not obstacle`，或提早判定
+        // `at wall + vacuum can't seal — weak_seal early`）。那已經是「推到牆、
+        // 真空還是吸不起來」的結論，再 smart_extend_subset_ 一次只是拿更大的電流
+        // 把同一顆杯子往玻璃上再頂一輪（log 實測第二輪推到 1242/1503mA），
+        // 對密封沒有幫助，只是多壓一次玻璃與推桿。
+        //
+        // 這也跟 2026-08-28 那次「後退重吸機制停用、沒吸好就停住不動」
+        // （見本檔上方 #if 0 與 changelog [2026-08-28k]）方向一致：v2 現在的態度是
+        // 吸不好就交給人判斷，不再自動補救。停用後，未密封的情況直接落到下面的
+        // group_seal_ok_ 判斷 —— 整側全裸就停住不動回 ERR，每側至少 1 顆就照舊繼續。
+#if 0  // 要恢復原地補伸：把這個 #if 0 / #endif 拿掉即可（right_fully_bare /
+       // left_fully_bare 仍在上面計算，不需要一併復原）。
         if (right_fully_bare &&
             try_or_pause_([this, &right_fails]() { return smart_extend_subset_("right", right_fails); },
                            std::string(tag) + "_right_retry")) return fail("ERR aborted\n");
         if (left_fully_bare &&
             try_or_pause_([this, &left_fails]() { return smart_extend_subset_("left", left_fails); },
                            std::string(tag) + "_left_retry")) return fail("ERR aborted\n");
+#endif
+        if (right_fully_bare || left_fully_bare) {
+            std::cout << "[" << tag << "] 整側全裸但原地補伸已停用 —— 不再補推，"
+                         "直接進密封判定\n";
+        }
 
         // [2026-07-23 fix] Per-side ≥1 sealed is the v2 convention (2026-07-08
         // per user, same rule do_step_down_/up_'s cycle_group_ and pre-flight
@@ -9120,6 +9238,31 @@ std::string WashRobot::do_step_sync_(bool up) {
         bool right_ok = group_seal_ok_("right", right_unsealed);
         bool left_ok  = group_seal_ok_("left",  left_unsealed);
         if (!right_ok || !left_ok) {
+            // [2026-08-28 per user] 後退重吸機制停用 —— 整組沒吸好就「停住不動」。
+            //
+            // 原本的行為（保留在下面 #if 0 內，隨時可以打開）是：整側沒吸住就全縮
+            // 回、吊機往回退 STEP_SYNC_BACKOFF_CM、重新抽真空伸出、再檢查，一路退到
+            // 起點為止。per user 現在不要這個自動補救 —— 沒吸好就停在原地等人判斷，
+            // 不要讓機器在沒有任何一側吸住的狀態下再去驅動吊機。
+            //
+            // 停住的方式是回 ERR：呼叫端 (cmd_step_down_sync / cmd_step_up_sync /
+            // 自動循環迴圈) 看到非 OK 就會把狀態切到 State::Error 並停止後續步伐。
+            // 這條路徑走的是 fail()，所以 PWM 占空比也會一併寫回 5%（停止）。
+            // 此刻推桿是伸出但未吸住的狀態，機器靠鋼索吊著，不做任何額外動作。
+            {
+                const std::string bad = (!right_ok && !left_ok) ? "both"
+                                      : (!right_ok ? "right" : "left");
+                std::cout << "[" << tag << "] " << bad << " unsealed after in-place retry"
+                          << " — 停住不動（後退重吸已停用），unsealed:";
+                for (int sl : right_unsealed) std::cout << " " << sl;
+                for (int sl : left_unsealed)  std::cout << " " << sl;
+                std::cout << "\n";
+                evt_(std::string(tag) + "_side_unsealed side=" + bad);
+                return fail("ERR side_unsealed\n");
+            }
+
+#if 0  // [2026-08-28 per user] 後退重吸機制（保留原碼，未編譯）。要恢復就把這個
+       // #if 0 / #endif 拿掉，並刪掉上面那段「停住不動」的 return。
             // [2026-07-27 per user] Instead of failing outright, retreat the
             // crane back toward the pre-step position in STEP_SYNC_BACKOFF_CM
             // increments — full retract all 4 (unsealed, safe to retract) →
@@ -9206,6 +9349,7 @@ std::string WashRobot::do_step_sync_(bool up) {
                 evt_(msg);
                 return fail("ERR side_unsealed_at_origin\n");
             }
+#endif  // [2026-08-28] end 後退重吸機制
         }
         const size_t partial_count = right_unsealed.size() + left_unsealed.size();
         if (partial_count > 0) {
@@ -11595,6 +11739,35 @@ std::string WashRobot::cmd_run_script(const std::string& csv, bool up, const std
     set_state_(State::Running);
 
     motion_active_ = true;
+
+    // [2026-08-28 per user] 第一步「走」之前先清洗一次起始位置。
+    //
+    // 為什麼需要：清洗是綁在步伐尾段的（do_step_sync_ 步驟 5 伸腳時才並行發動
+    // do_step_sync_rail_sweep_），所以每一步洗的都是「移動後」那一格。沒有這段
+    // pre-sweep 的話，機器出發前所在的那一格永遠不會被洗到。
+    //
+    // 這等同 v1 舊 pipeline 的 "iter 1 — launching pre-feet sweep"（現保留在
+    // _retired_cmd_run_script_v1_sweep_ 的 #if 0 內），v2 重寫時沒跟著復活。
+    //
+    // 行為刻意跟步伐內建的那段一致：同一個 do_step_sync_rail_sweep_、同樣受
+    // STEP_SYNC_ARM_CLEAN_ENABLED 管、失敗一律非致命（清洗從來不擋步伐）。
+    // 差別只在 INIT 這裡是同步跑（沒有吊機移動可以並行掩蓋那 ~10s）。
+    if (STEP_SYNC_ARM_CLEAN_ENABLED) {
+        std::lock_guard<std::mutex> lk(motion_mtx_);
+        std::cout << "[run_script] pre-step clean sweep — 先洗起始位置再開始走\n";
+        evt_("script_pre_sweep_start");
+        const bool pre_init_ok = (arm_cmd_("INIT", 60).rfind("OK", 0) == 0);
+        arm_calibrated_.store(pre_init_ok);
+        if (!pre_init_ok)
+            std::cerr << "[run_script] pre-step arm INIT failed — rail sweep only, no brush\n";
+        do_step_sync_rail_sweep_("run_script_pre", pre_init_ok);
+        evt_("script_pre_sweep_done");
+    } else {
+        std::cout << "[run_script] pre-step clean sweep 跳過"
+                     "（STEP_SYNC_ARM_CLEAN_ENABLED=false）\n";
+    }
+    if (check_abort_()) { motion_active_ = false; set_state_(State::Error); return "ERR aborted\n"; }
+
     for (int i = 1; i <= N; ++i) {
         if (abort_flag.load()) { motion_active_ = false; set_state_(State::Error); return "ERR aborted\n"; }
         const int  cm_i    = steps[i - 1].cm;
@@ -12265,6 +12438,50 @@ std::string WashRobot::cmd_water_pump(bool on) {
 }
 
 //=========== QX-DO24 PWM output (cli_22_ slave 6) ===========
+
+// [2026-08-28 per user] 步伐用的占空比切換 —— 只寫「占空比」一個暫存器。
+//
+// 跟面板 (cmd_pwm_set) 走同一條 driver 路徑（QX_DO24::setPWM_Duty，driver 是
+// true=成功 的反向慣例，見 QX_DO24.h 頂端 banner），差別只在面板連寫
+// Freq -> Duty -> Control 三個，這裡刻意只寫中間那個：per user「只需寫入占空位
+// 就好，其他不動」。頻率鎖 50Hz 與控制字 65535 都維持面板/保存值，這條路徑不去
+// 動它們 —— 也因此 5~10% 的「停止/全速」對應只有在頻率已經是 50Hz 時才成立。
+//
+// 回傳沿用本檔慣例：true = 失敗、false = 成功。
+// PWM_ENABLED=false 時視為成功並跳過：模組整個沒被驅動 = 本來就沒在輸出，沒有
+// 東西需要關；讓它回失敗只會把步伐卡在一個不存在的裝置上。
+bool WashRobot::pwm_set_duty_only_(double duty_pct, const char* why) {
+    if (!PWM_ENABLED) {
+        std::cout << "[pwm_step] skip (" << why << " duty=" << duty_pct
+                  << "%) — PWM_ENABLED=false" << "\n";
+        return false;
+    }
+    // [2026-08-28 per user] 重試 PWM_STEP_WRITE_TRIES 次。bench 上看過同一步裡
+    // 開啟寫入 timeout、關閉寫入卻成功 —— 是偶發掉包不是接線問題，單次就放棄
+    // 太脆弱。每次之間隔 PWM_STEP_WRITE_RETRY_MS，讓 gateway 的半雙工 RS485
+    // 有時間把上一筆（可能遲到的）回覆吐完，下一次 atomic transaction 的 drain
+    // 才不會又撞上它。
+    for (int attempt = 1; attempt <= PWM_STEP_WRITE_TRIES; ++attempt) {
+        if (pwm_.setPWM_Duty(PWM_STEP_CH - 1, duty_pct)) {          // driver API 是 0-based
+            std::cout << "[pwm_step] " << why << " -> ch" << PWM_STEP_CH << " duty="
+                      << std::fixed << std::setprecision(1) << duty_pct << "% OK"
+                      << (attempt > 1 ? " (第 " + std::to_string(attempt) + " 次才成功)" : "")
+                      << "\n";
+            return false;
+        }
+        if (attempt < PWM_STEP_WRITE_TRIES) {
+            std::cout << "[pwm_step] " << why << " 第 " << attempt << "/"
+                      << PWM_STEP_WRITE_TRIES << " 次寫入失敗，" << PWM_STEP_WRITE_RETRY_MS
+                      << "ms 後重試\n";
+            sleep_ms_(PWM_STEP_WRITE_RETRY_MS);
+        }
+    }
+    std::cerr << "[pwm_step] " << why << " -> ch" << PWM_STEP_CH << " duty="
+              << std::fixed << std::setprecision(1) << duty_pct << "% FAILED ("
+              << PWM_STEP_WRITE_TRIES << " 次全滅)\n";
+    return true;
+}
+
 //
 // ⚠ QX_DO24 uses the INVERTED return convention (true = success) — see the
 //   banner at the top of QX_DO24.h. The checks below follow the driver.
