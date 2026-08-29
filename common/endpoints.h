@@ -76,6 +76,12 @@ inline int port(const char* name, int fallback) {
 	return (int)n;
 }
 
+// 裝置路徑（序列埠）。與 host() 同一套環境變數規則，分開命名只是為了讓呼叫端
+// 讀起來不像在講網路位址 —— IMU 走的是 /dev/ttyUSB0，不是 IP。
+inline std::string path(const char* name, const char* fallback) {
+	return host(name, fallback);
+}
+
 }  // namespace ep
 
 #endif  // FCV_COMMON_ENDPOINTS_H

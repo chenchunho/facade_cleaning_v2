@@ -9,15 +9,16 @@
 ping
 status
 get_settings
-zdt_pusher 5
-zdt_pusher 6
-zdt_pusher 7
-zdt_pusher 8
+zdt_pusher 5 extend
+zdt_pusher 6 extend
+zdt_pusher 7 extend
+zdt_pusher 8 extend
 # cli_22_（JC100 真空 5-8 / QX-DO24 9 / DY500 10,11 / XKC 13）
-vacuum
+vacuum right on
+vacuum right off
 water_level
 pwm status
 # 跨行程（吊機 :5002）—— 由本體主動連出去
-crane_attached
+crane_attached on
 # 收尾
 status

@@ -1,4 +1,5 @@
-# settings —— 改執行期設定與模式。不寫檔案，所以可重現。
+# settings ——（已移除 move / wheels / dm2j_group：分派器回 ERR removed_in_v2）
+# 改執行期設定與模式。不寫檔案，所以可重現。
 # ⚠️ 它會改變後續行為，所以在一份比對裡順序必須固定；但兩個版本跑同一份腳本
 #    就仍然是確定性的。
 imu_guard on
@@ -9,12 +10,8 @@ set_first_step left
 set_first_step right
 set_follower_mode imu
 set_follower_mode meter
-wheels on
-wheels off
 water_inlet on
 water_inlet off
 zdt_release_stall 5
-dm2j_group 14
-move 14 3
 arm_clean_sweep_dry
 get_settings

@@ -53,6 +53,34 @@ def reg_value(slave: int, addr: int, i: int) -> int:
     return ((slave << 8) ^ (addr + i) ^ 0x2A5A) & 0x7FFF | 0x0100
 
 
+def zdt_status_payload() -> bytes:
+    """ZDT 3.7.2 bulk read（FC 0x04 / Reg 0x0043 / Qty 0x0010）的合理回覆。
+
+    🔴 為什麼需要這個特例：泛用的確定性亂值會讓 `pos_reached` 位元永遠不成立，
+       於是每一個運動指令都等滿內部 15 秒逾時才回來 —— **motion 路徑只測到
+       逾時分支，而且一輪要跑好幾分鐘**。要讓「運動完成」這條主線被走到，
+       假從站就得回答得像個到位的馬達。
+       📌 這是「泛用假值」不夠用的第一個案例：值本身不影響等價性結論，
+          但**值會決定程式走哪條路徑**，而沒被走到的路徑 diff 永遠是綠的。
+
+    欄位順序見 user_lib/ZDT_motor_control.cpp 的 get_system_status()。
+    """
+    import struct as _s
+    r = []
+    r.append(0x2010)                 # reg1: [byte count, param count] — 不解析
+    r.append(24000)                  # reg2: 匯流排電壓 mV
+    r.append(300)                    # reg3: 相電流 mA（低，不觸發障礙物判定）
+    r.append(0)                      # reg4: 線性化編碼器
+    r += [0, 0, 0]                   # reg5-7: 目標位置 sign + u32
+    r += [0, 0]                      # reg8-9: 實際速度 sign + u16（0 = 停住）
+    r += [0, 0, 0]                   # reg10-12: 實際位置 sign + u32
+    r += [0, 0, 0]                   # reg13-15: 位置誤差 sign + u32
+    # reg16: 高位=home flags（bit0 encoder_ready / bit1 calibration_ready）
+    #        低位=motor flags（bit0 is_enabled / bit1 pos_reached）
+    r.append((0x03 << 8) | 0x03)
+    return b''.join(_s.pack('>H', v) for v in r)
+
+
 def read_payload(slave: int, addr: int, qty: int) -> bytes:
     out = bytearray()
     for i in range(qty):
@@ -60,7 +88,7 @@ def read_payload(slave: int, addr: int, qty: int) -> bytes:
     return bytes(out)
 
 
-def build_reply(req: bytes, proto: str):
+def build_reply(req: bytes, proto: str, jc100=None):
     """依請求組出一個健康從站會送的回覆。回 None = 這個請求不回應（廣播）。"""
     if proto == 'rtu':
         slave, fc = req[0], req[1]
@@ -77,7 +105,15 @@ def build_reply(req: bytes, proto: str):
 
     if fc in (0x03, 0x04):                  # read holding / input registers
         addr, qty = struct.unpack('>HH', body[2:6])
-        payload = read_payload(slave, addr, qty)
+        if fc == 0x04 and addr == 0x0043 and qty == 0x0010:
+            payload = zdt_status_payload()
+        elif jc100 and slave in jc100 and fc == 0x03 and addr == 0x0001 and qty == 1:
+            # JC-100 真空壓力，0.1 kPa 有號。回 -60.0 kPa（門檻是 -45）＝「吸住了」。
+            # 🔴 與 ZDT 狀態同一個理由：泛用假值會讓 disable_seal 一直重試等密封，
+            #    於是只測到重試/逾時分支，成功路徑永遠沒被走過。
+            payload = struct.pack('>h', -600)
+        else:
+            payload = read_payload(slave, addr, qty)
         pdu = bytes([slave, fc, len(payload)]) + payload
     elif fc == 0x01:                        # read coils
         addr, qty = struct.unpack('>HH', body[2:6])
@@ -138,7 +174,7 @@ class Handler(socketserver.BaseRequestHandler):
                 if need is None or len(buf) < need:
                     break
                 req, buf = buf[:need], buf[need:]
-                reply = build_reply(req, self.server.proto)
+                reply = build_reply(req, self.server.proto, self.server.jc100)
                 if reply is not None:
                     try:
                         self.request.sendall(reply)
@@ -157,10 +193,14 @@ def main():
     ap.add_argument('--proto', choices=('rtu', 'tcp'), default='rtu',
                     help='rtu = RTU over USR gateway :4001；tcp = MBAP（X518 :502）')
     ap.add_argument('--host', default='127.0.0.1')
+    ap.add_argument('--jc100', default='',
+                    help='這條 bus 上的 JC-100 真空表 slave（逗號分隔）。'
+                         '刻意做成參數而不是猜：.20 上的 ZDT 也用 5-8，靠 bus 區分。')
     a = ap.parse_args()
 
     srv = Server((a.host, a.port), Handler)
     srv.proto = a.proto
+    srv.jc100 = {int(x) for x in a.jc100.split(',') if x.strip()}
     # 唯一一行輸出，而且送 stderr —— 這支工具的 stdout 必須是乾淨的，
     # 免得混進被比對的軌跡裡。
     print(f'[fake_bus] {a.proto} on {a.host}:{a.port}', file=sys.stderr, flush=True)

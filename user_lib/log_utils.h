@@ -93,15 +93,32 @@ inline bool hex_log_enabled() {
 // hex dump helper. Gated by BOTH `debug_mode` (driver-level master switch) AND
 // ::user_lib_log::hex_log_enabled() (env USER_LIB_HEX_LOG=1, default OFF).
 // `note` is a short string such as "TX" / "RX".
+// 🔴 [2026-08-29] 改為「先組完整行、再一次寫出」。
+//    原本是每個位元組一次 fprintf（一行 hex ＝ 幾十次呼叫），而 driver 的
+//    log 來自多條背景執行緒 —— 兩條訊息會**互相插進對方中間**，產生像
+//        RX 05 03 00 16
+//        TX 01 00 0C 05 01 D4 00 0D 00 00 5D 4E
+//    這種既不是 TX 也不是 RX 的殘骸。這不只影響工具：**真機上的 log 一直
+//    是這樣被打亂的**，而追 bug 時看到半行 hex 會直接把人帶往錯誤方向。
+//    一次 fwrite 不保證原子，但把「幾十次呼叫」壓成一次，交錯窗口小到
+//    實務上消失。輸出內容與原本逐字相同。
+//
+// ⚠️ 兩個巨集衛生陷阱，都是這次現踩的：
+//    ① **不能用 `_line.data()`** —— 巨集參數就叫 `data`，展開後會變成
+//       `_line.buf()` 之類（呼叫端傳什麼變數名就變成什麼）。改用 `c_str()`。
+//    ② **巨集內不能放 `//` 註解** —— 它會連同行尾的 `\` 一起被吃掉，巨集就
+//       在那一行斷掉，錯誤訊息會指向下面幾十行外的地方。說明只能寫在巨集外。
 #define LOG_HEX(tag, note, data, len) do {                                  \
     if (debug_mode && ::user_lib_log::hex_log_enabled()) {                  \
-        std::fprintf(stderr, "[%s] [DBG] [%s] %s ",                         \
-                     ::user_lib_log::now_ts().c_str(),                      \
-                     std::string(tag).c_str(),                              \
-                     (note));                                               \
-        for (int _i = 0; _i < (int)(len); ++_i)                             \
-            std::fprintf(stderr, "%02X ", (unsigned char)(data)[_i]);       \
-        std::fputc('\n', stderr);                                           \
+        std::string _l = "[" + ::user_lib_log::now_ts() + "] [DBG] ["       \
+                       + std::string(tag) + "] " + (note) + " ";            \
+        char _b[4];                                                         \
+        for (int _i = 0; _i < (int)(len); ++_i) {                           \
+            std::snprintf(_b, sizeof(_b), "%02X", (unsigned char)(data)[_i]); \
+            _l += _b; _l += ' ';                                            \
+        }                                                                   \
+        _l += '\n';                                                         \
+        std::fwrite(_l.c_str(), 1, _l.size(), stderr);                      \
     }                                                                       \
 } while (0)
 

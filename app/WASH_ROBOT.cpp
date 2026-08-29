@@ -113,11 +113,18 @@ bool WashRobot::init() {
     // ⚠ 注意：檔案裡還有數十處註解沿用舊配置在描述 bus 競爭（例如「cli_22_ bus
     // 有 JC100/PQW 競爭」）。PQW 已不在 cli_22_，那些敘述關於 PQW 的部分已過時；
     // JC100 的部分仍然成立。真正的競爭關係以本段為準。
-    if (!cli_20_.connectToServer(ep::host("USR20", IP_485_1), ep::port("USR20", PORT_485))) {
-        std::cerr << "[WashRobot] connect " << IP_485_1 << " fail\n"; return true;
+    // [2026-08-29] 端點先解析成區域變數再用：連線與訊息必須引用**同一個值**。
+    // 原本訊息印的是編譯期常數，而連線走的是解析後的端點 —— 一旦有 override，
+    // 「連 X 失敗」會指著一個根本沒被連過的位址。本專案最常踩的就是這個形狀。
+    const std::string ep_usr20 = ep::host("USR20", IP_485_1);
+    const int         pt_usr20 = ep::port("USR20", PORT_485);
+    if (!cli_20_.connectToServer(ep_usr20, pt_usr20)) {
+        std::cerr << "[WashRobot] connect " << ep_usr20 << ":" << pt_usr20 << " fail\n"; return true;
     }
-    if (!cli_22_.connectToServer(ep::host("USR22", IP_485_3), ep::port("USR22", PORT_485))) {
-        std::cerr << "[WashRobot] connect " << IP_485_3 << " fail\n"; return true;
+    const std::string ep_usr22 = ep::host("USR22", IP_485_3);
+    const int         pt_usr22 = ep::port("USR22", PORT_485);
+    if (!cli_22_.connectToServer(ep_usr22, pt_usr22)) {
+        std::cerr << "[WashRobot] connect " << ep_usr22 << ":" << pt_usr22 << " fail\n"; return true;
     }
     std::cout << "[OK] USR .20 (ZDT) / .22 (sensors+PQW) connected\n";
 
@@ -232,10 +239,12 @@ bool WashRobot::init() {
     weight_comm_ok_[1].store(false);
 
     // Crane (lazy — don't fail boot if crane is down)
+    const std::string ep_crane = ep::host("CRANE", CRANE_IP);
+    const int         pt_crane = ep::port("CRANE", CRANE_PORT);
     if (crane_connect_if_needed_())
-        std::cerr << "[WARN] crane " << CRANE_IP << ":" << CRANE_PORT << " not yet reachable\n";
+        std::cerr << "[WARN] crane " << ep_crane << ":" << pt_crane << " not yet reachable\n";
     else
-        std::cout << "[OK] crane " << CRANE_IP << ":" << CRANE_PORT << "\n";
+        std::cout << "[OK] crane " << ep_crane << ":" << pt_crane << "\n";
 
     // [2026-06-03] Arm (lazy — same pattern as crane). Required to bootstrap
     // TCP_client.reconnectLoop() background thread — startMonitor() only fires
@@ -248,10 +257,12 @@ bool WashRobot::init() {
     // only quiets the log). Remove once the arm is actually installed and its
     // connection health is worth watching again.
     arm_cli_.set_quiet_reconnect_log(true);
-    if (!arm_cli_.connectToServer(ep::host("ARM", ARM_IP), ep::port("ARM", ARM_PORT)))
-        std::cerr << "[WARN] arm " << ARM_IP << ":" << ARM_PORT << " not yet reachable\n";
+    const std::string ep_arm = ep::host("ARM", ARM_IP);
+    const int         pt_arm = ep::port("ARM", ARM_PORT);
+    if (!arm_cli_.connectToServer(ep_arm, pt_arm))
+        std::cerr << "[WARN] arm " << ep_arm << ":" << pt_arm << " not yet reachable\n";
     else
-        std::cout << "[OK] arm " << ARM_IP << ":" << ARM_PORT << "\n";
+        std::cout << "[OK] arm " << ep_arm << ":" << pt_arm << "\n";
 
     // [2026-07-20] Depth camera (D435i) obstacle-detection service — same
     // lazy-connect pattern as arm_cli_ (don't fail boot if the python service
@@ -264,14 +275,17 @@ bool WashRobot::init() {
     // 而該功能的 GUI 已於 2026-08-26 全數移除。保留連線本身（不刪 connectToServer）
     // 是為了將來要用 depth avoid 時不必再改；只是不再吵。
     depth_cli_.set_quiet_reconnect_log(true);
-    if (!depth_cli_.connectToServer(ep::host("DEPTHCAM", DEPTH_CAM_IP), ep::port("DEPTHCAM", DEPTH_CAM_PORT)))
-        std::cerr << "[WARN] depth_cam " << DEPTH_CAM_IP << ":" << DEPTH_CAM_PORT << " not yet reachable\n";
+    const std::string ep_depth = ep::host("DEPTHCAM", DEPTH_CAM_IP);
+    const int         pt_depth = ep::port("DEPTHCAM", DEPTH_CAM_PORT);
+    if (!depth_cli_.connectToServer(ep_depth, pt_depth))
+        std::cerr << "[WARN] depth_cam " << ep_depth << ":" << pt_depth << " not yet reachable\n";
     else
-        std::cout << "[OK] depth_cam " << DEPTH_CAM_IP << ":" << DEPTH_CAM_PORT << "\n";
+        std::cout << "[OK] depth_cam " << ep_depth << ":" << pt_depth << "\n";
 
     // IMU (Serial_port::init returns true = success, unlike project convention)
-    if (!imu_serial_.init(IMU_PORT, IMU_BAUD)) {
-        std::cerr << "[FATAL] IMU serial " << IMU_PORT << " open fail\n"; return true;
+    const std::string ep_imu = ep::path("IMU", IMU_PORT);
+    if (!imu_serial_.init(ep_imu, IMU_BAUD)) {
+        std::cerr << "[FATAL] IMU serial " << ep_imu << " open fail\n"; return true;
     }
     imu_.init(&imu_serial_, dbg);   // [TEST MODE] default dbg=true; WR_DRIVER_DEBUG=0 disables
     sleep_ms_(500);

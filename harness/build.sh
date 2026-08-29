@@ -14,10 +14,13 @@ SRC="${1:?用法: build.sh <原始碼樹> <輸出目錄>}"
 OUT="${2:?用法: build.sh <原始碼樹> <輸出目錄>}"
 JOBS="${JOBS:-4}"
 
-command -v g++ >/dev/null || {
-  echo "ERROR: 找不到 g++。本機需要一次安裝：sudo apt install -y g++" >&2
-  exit 127
-}
+# 優先用本機能裝到的最新 g++ —— Pi 是 14.2，越新越接近。
+# 可用 CXX= 覆寫（例如刻意用舊版重現某個問題）。
+CXX="${CXX:-}"
+if [[ -z "$CXX" ]]; then
+  for c in g++-12 g++-11 g++-10 g++; do command -v "$c" >/dev/null && { CXX="$c"; break; }; done
+fi
+[[ -n "$CXX" ]] || { echo "ERROR: 找不到 g++。sudo apt install -y g++-10" >&2; exit 127; }
 
 SRC="$(cd "$SRC" && pwd)"
 mkdir -p "$OUT"
@@ -43,7 +46,7 @@ fi
 #    標準函式庫 libstdc++ 9/10 vs 14 —— 傳遞性 include 被大量移除
 CXXFLAGS="-std=c++17 -O1 -g0 -pthread -funsigned-char $INC"
 
-echo "[build] $SRC -> $OUT  ($(g++ --version | head -1))"
+echo "[build] $SRC -> $OUT  ($($CXX --version | head -1))"
 
 SRCS=(
   "$SRC/facade_cleaning_v2/main.cpp"
@@ -59,7 +62,7 @@ done
 
 mkdir -p "$OUT/obj"
 printf '%s\n' "${SRCS[@]}" | xargs -P"$JOBS" -I{} \
-  sh -c 'g++ '"$CXXFLAGS"' -c "$1" -o "'"$OUT"'/obj/$(basename "$1" .cpp).o"' _ {}
-g++ -pthread -o "$OUT/facade_cleaning_v2.out" "$OUT"/obj/*.o
+  sh -c "$CXX"' '"$CXXFLAGS"' -c "$1" -o "'"$OUT"'/obj/$(basename "$1" .cpp).o"' _ {}
+"$CXX" -pthread -o "$OUT/facade_cleaning_v2.out" "$OUT"/obj/*.o
 
 echo "[build] OK: $OUT/facade_cleaning_v2.out"
