@@ -4768,9 +4768,11 @@ bool WashRobot::pusher_move_many_(const std::vector<int>& slaves, int pulse, int
         }
     }
     // NOTE: trigger_sync_move() is a Modbus BROADCAST (slave addr 0x00) — per
-    // Modbus spec, broadcasts get no response. Driver impl returns true (error)
-    // on empty response, which is unreliable for broadcasts. We ignore return
-    // value here and trust the send. (TODO: fix in user_lib/ZDT_motor_control.)
+    // Modbus spec, broadcasts get no response. [2026-08-29] The driver used to
+    // report that missing reply as an error; it now returns false (success) when
+    // the send succeeds, so the return value is finally meaningful. Still not
+    // checked here on purpose: a broadcast cannot confirm the slaves acted on it,
+    // so real error detection stays with the poll loop below.
     if (!slaves.empty()) Z_(slaves.front()).trigger_sync_move();
 
     // Parallel poll all slaves in a single loop: one iteration polls every
@@ -5269,9 +5271,11 @@ bool WashRobot::pusher_extend_with_vacuum_stop_(const std::vector<int>& slaves,
         }
     }
     // NOTE: trigger_sync_move() is a Modbus BROADCAST (slave addr 0x00) — per
-    // Modbus spec, broadcasts get no response. Driver impl returns true (error)
-    // on empty response, which is unreliable for broadcasts. We ignore return
-    // value here and trust the send. (TODO: fix in user_lib/ZDT_motor_control.)
+    // Modbus spec, broadcasts get no response. [2026-08-29] The driver used to
+    // report that missing reply as an error; it now returns false (success) when
+    // the send succeeds, so the return value is finally meaningful. Still not
+    // checked here on purpose: a broadcast cannot confirm the slaves acted on it,
+    // so real error detection stays with the poll loop below.
     if (!slaves.empty()) Z_(slaves.front()).trigger_sync_move();
 
     const int    timeout_ms          = 15000;

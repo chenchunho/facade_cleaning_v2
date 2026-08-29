@@ -1282,10 +1282,11 @@ static bool zdt_group_move_sync(ZDT_motor_control* drvs, const std::vector<int>&
     }
 
     // Broadcast trigger — every queued slave executes simultaneously.
-    // Note: Modbus broadcast (slave 0) has NO reply per spec. trigger_sync_move()
-    // returns true (=error per convention) on empty reply, which is actually expected
-    // success here. We ignore the return value; real error detection is the poll
-    // loop timeout below.
+    // Note: Modbus broadcast (slave 0) has NO reply per spec. [2026-08-29] The
+    // driver used to return true (=error) on that expected empty reply; it now
+    // returns false (success) when the send succeeds. We still ignore the return
+    // value — a broadcast cannot confirm the slaves acted on it; real error
+    // detection is the poll loop timeout below.
     drvs[queued[0]].trigger_sync_move();
 
     // Settle-detection tuning. Three independent "stopped" checks (any one triggers

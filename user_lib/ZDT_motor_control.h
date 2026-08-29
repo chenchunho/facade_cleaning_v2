@@ -60,7 +60,10 @@ public:
 	bool motion_control_pos_mode(int dir, int acc_rpm, int rpm, int pulse, int mode, int sync, int retry);  // 3.2.11 位置模式 Emm (Reg 0x00FD)
 	bool motion_control_pos_mode_nowait(int dir, int acc_rpm, int rpm, int pulse, int mode, int sync, int retry);
 	bool emergency_stop(bool sync);              // 3.2.12 立即停止 (Reg 0x00FE)
-	bool trigger_sync_move();                    // 3.2.13 觸發多機同步運動 (Reg 0x00FF, 廣播)
+	// 3.2.13 觸發多機同步運動 (Reg 0x00FF, 廣播)
+	// 廣播 (slave 0x00) 依 Modbus 規範不會有回覆 → 回傳值只反映「送出成功與否」，
+	// 無法確認從站是否真的動了。要確認實際完成，呼叫端仍須自行輪詢各從站狀態。
+	bool trigger_sync_move();
 
 	// --- 原點回零命令 (3.3) ---
 	bool set_home_zero_position(bool store);     // 3.3.1 設置單圈回零零點位置 (Reg 0x0093)

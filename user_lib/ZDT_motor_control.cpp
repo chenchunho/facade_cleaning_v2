@@ -604,10 +604,36 @@ bool ZDT_motor_control::trigger_sync_move() {
 	cmd.push_back((uint8_t)(crc & 0xFF));
 	cmd.push_back((uint8_t)(crc >> 8));
 	LOG_HEX(_log_tag, "TX trigger_sync", cmd.data(), (int)cmd.size());
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
+	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) {
+		LOG_ERR(_log_tag, "trigger_sync: send failed");
+		return true;   // error — the only failure this function can actually detect
+	}
+
+	// [2026-08-29] This used to end with `return resp.empty();`, which made a
+	// broadcast ALWAYS report failure: slave address 0x00 is a Modbus broadcast
+	// and per spec no slave answers it, so readEcho() times out every single
+	// time. Field symptom was body extend working (the motors really moved)
+	// while the log printed "trigger_sync_move FAIL" on every step; all 11 call
+	// sites in app/WASH_ROBOT.cpp had already been made to ignore the return
+	// value, which is what kept it merely noisy instead of breaking the gait.
+	// A successful send is the whole of what "success" can mean here.
+	//
+	// The read below is kept, but it is a DRAIN, not a verdict: a late reply to
+	// the PREVIOUS transaction would otherwise still be sitting in the socket
+	// buffer and get mis-read as the next command's reply. Anything it returns
+	// is discarded.
+	//
+	// The 200ms is deliberately left unchanged. It is not needed for the drain
+	// itself, but it has been in every gait cycle since this driver was written
+	// and no one has measured what the timing looks like without it — shortening
+	// it is a timing change to a motion loop, which belongs in its own change
+	// with a machine to verify it on, not smuggled into a return-value fix.
 	auto resp = readEcho(200);
-	LOG_HEX(_log_tag, "RX trigger_sync", resp.data(), (int)resp.size());
-	return resp.empty();
+	if (!resp.empty())
+		LOG_HEX(_log_tag, "RX trigger_sync (unexpected, discarded)",
+		        resp.data(), (int)resp.size());
+
+	return false;  // no error
 }
 
 bool ZDT_motor_control::set_home_zero_position(bool store) {
