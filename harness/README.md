@@ -52,6 +52,7 @@ sudo apt install -y g++          # 只需一次；本機目前沒有
 | `normalize.py` | 剝時間戳、只留 hex dump、依裝置分組 |
 | `compare.sh` | 兩個 commit 各建各跑，兩個判準都比 |
 | `negative_control.sh` | 注入缺陷，證明工具會紅 |
+| `prove_noop.sh` | **證明一次改動對編譯器不存在**（`cl /EP` 預處理逐位元比對）。比 `compare.sh` 更強也更便宜 —— 涵蓋每一行、不需要 g++、不需要跑任何東西。但語意真的變了就一定紅，抽函式那種改動用不上 |
 | `cmds/*.txt` | 指令腳本 |
 
 ## 🔴 這套東西證明不了什麼
