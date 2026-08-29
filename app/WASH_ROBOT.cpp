@@ -292,7 +292,7 @@ bool WashRobot::init() {
     if (imu_.read_error.load())
         std::cerr << "[WARN] IMU read error on startup\n";
     else
-        std::cout << "[OK] IMU " << IMU_PORT
+        std::cout << "[OK] IMU " << ep_imu
                   << " roll=" << imu_.z << " pitch=" << imu_.x << "\n";
 
     // Start background threads

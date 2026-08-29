@@ -45,6 +45,20 @@ else
   RC=1
 fi
 
+# 🔴 綠燈必須附上「實際走到了什麼」。
+#    2026-08-30 踩過：寫了一份 rail.txt 想驗上滑台的換算差異，兩個判準都 ✅，
+#    但 DM2J:14 **一筆交易都沒有** —— arm_sweep 兩側都回 ERR aborted，
+#    上滑台根本沒被驅動。那是零覆蓋造成的假綠燈，而它跟真的等價長得一模一樣。
+echo
+echo "########## 實際走到的裝置（🔴 綠燈只在這張表涵蓋的範圍內有意義）"
+paste <(grep '^#####' "$WORK/base/trace.norm" | sed 's/##### //') \
+      <(grep '^#####' "$WORK/cand/trace.norm" | sed 's/##### //') \
+  | awk -F'\t' '{printf "  base %-24s cand %-24s\n", $1, $2}'
+echo "  指令：$(grep -c . "$WORK/base/run/replies.txt") 條，"\
+     "其中回 OK $(grep -cP '\tOK' "$WORK/base/run/replies.txt" || true) 條"\
+     "／ERR $(grep -cP '\tERR' "$WORK/base/run/replies.txt" || true) 條"
+echo "  ⚠️ 回 ERR 的指令等於沒走到那條路徑 —— 它的 diff 永遠是綠的。"
+
 echo
 if [[ "${RC:-0}" == 0 ]]; then
   echo "✅ 等價（就這份指令腳本的覆蓋範圍而言）"
