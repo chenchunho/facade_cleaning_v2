@@ -53,7 +53,38 @@ sudo apt install -y g++          # 只需一次；本機目前沒有
 | `compare.sh` | 兩個 commit 各建各跑，兩個判準都比 |
 | `negative_control.sh` | 注入缺陷，證明工具會紅 |
 | `prove_noop.sh` | **證明一次改動對編譯器不存在**（`cl /EP` 預處理逐位元比對）。比 `compare.sh` 更強也更便宜 —— 涵蓋每一行、不需要 g++、不需要跑任何東西。但語意真的變了就一定紅，抽函式那種改動用不上 |
-| `cmds/*.txt` | 指令腳本 |
+| `cmds/*.txt` | 指令腳本，見下節 |
+
+## 指令腳本與覆蓋率
+
+🔴 **覆蓋率是這套驗證最弱的一環，所以要把它量出來、而不是感覺它。**
+分派器（`facade_cleaning_v2/main.cpp`，權威來源，**不是 runbook §C1**）共 **81 個指令**。
+
+| 腳本 | 條數 | 性質 |
+|---|---|---|
+| `readonly.txt` | 12 | 只查詢、不改狀態。永遠可安全重跑，順序無關 |
+| `motion.txt` | 34 | **會驅動馬達**。對假從站安全，🔴 **絕不可對著真機跑**。順序有意義 |
+| `settings.txt` | 17 | 改執行期設定與模式。不寫檔案，可重現 |
+| `smoke.txt` | 13 | 快速冒煙，`readonly` 的子集 |
+
+**目前覆蓋 45/81 ＝ 55%**（擴充前是 8/81 ＝ 9%）。
+
+### 🔴 永久排除的（不是漏掉，是刻意）
+
+| 指令 | 為什麼排除 |
+|---|---|
+| `save_script` `save_settings` `delete_script` `load_script` | **寫檔案** → 兩次執行的起始狀態不同，可重現性直接沒了 |
+| `shutdown` | 會終止行程，後面的指令全部收不到回覆 |
+| `confirm_balance` `continue` `resume` `pause` `skip` `recover` | **要先處在特定狀態**才有意義，單獨送只會拿到 ERR；要測得先設計一段有狀態的腳本 |
+| `balance_calibrate_*` | 同上，而且是多步驟互動流程 |
+| `run` `run_saved` `run_script` `step_down*` `step_up*` `cross_obstacle_*` | **整趟步態**，一次數十秒到數分鐘。值得做，但要獨立的長時腳本與更長的逾時 |
+| `obstacle_*` `depth_avoid_*` `run_avoid` `run_depth_avoid` `arm_clean_sweep` | 攝影機路線。後端仍活著（見待辦），但實體相機未接，跑起來只會走 timeout 分支 |
+
+### ⚠️ 覆蓋率的意義要講清楚
+
+**55% 不代表「55% 的正確性」。** 它代表：**腳本沒送到的那 36 個指令，
+相關的重構改動不會出現在軌跡裡，而 `compare.sh` 依然會顯示綠燈。**
+每次擴大重構範圍時，先問一句「這次改的東西，現有腳本碰得到嗎」。
 
 ## 🔴 這套東西證明不了什麼
 

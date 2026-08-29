@@ -1,0 +1,14 @@
+# readonly —— 只查詢、不改變狀態、不動馬達。
+# 這一份應該永遠可以安全重跑，順序無關。
+ping
+status
+get_settings
+arm_status
+water_level
+pwm status
+list_scripts
+balance_calibrate_status
+crane_attached
+arm_attached
+wheels_attached
+status

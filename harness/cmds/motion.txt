@@ -1,0 +1,40 @@
+# motion —— 會驅動馬達的指令。對著假從站是安全的，對著真機**不是**。
+# 🔴 這份腳本永遠不要在接著真機的程式上跑。
+#
+# 排在 readonly 之後單獨跑，因為它會改變狀態機 —— 順序有意義，不可打亂。
+init
+imu_zero
+zdt_zero
+dm2j_zero
+pusher 5 3
+zdt_pusher 5
+zdt_pusher 6
+zdt_pusher 7
+zdt_pusher 8
+zdt_enable 5
+zdt_disable 5
+vacuum right on
+vacuum right off
+pump on
+pump off
+brush on
+brush off
+water_pump on
+water_pump off
+attach
+detach
+arm_init
+arm_deploy
+arm_sweep
+arm_park
+step_down_sync 5
+step_up_sync 5
+realign
+return_home
+status
+# 🔴 emergency_stop 放最後：它會讓狀態機進入需要人工復歸的狀態，
+#    後面的指令全部會回 ERR，那不是差異、是設計。
+emergency_stop
+status
+reset
+status
