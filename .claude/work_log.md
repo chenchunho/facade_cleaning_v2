@@ -1,5 +1,107 @@
 # Work Log
 
+## 2026-08-29 — 📌 交接：同步步伐 PWM 輸出 + 清潔恢復 + 自動補救全面停用（下次接手先讀這條）
+
+> **規範權威：** `.claude/changelog.md` `[2026-08-28f]` ~ `[2026-08-28u]` 共 13 條（逐筆有檔案+行為+理由）。本節只整理「現在是什麼狀態、還缺什麼」。
+> 本輪只動 `user_lib/WASH_ROBOT.{h,cpp}`、`Crane_control_PI/main.cpp`、`web_backend/public/{index.html,app.js}`，沒有新增檔案、沒有動任何 driver class 的 public API。
+
+### 一句話
+
+同步步伐（`do_step_sync_`）這一輪加了 PWM 輸出控制、恢復了內建清洗、並把**所有自動補救機制全部停用**——現在吸不好就停住等人，不再自己退回重試或補推。
+
+---
+
+### A. 同步步伐現在長這樣（改動最集中的地方）
+
+```
+解真空 -> 等 4 顆釋放 -> [PWM 占空比 7%] -> 靜置 300ms -> 兩段式收腳
+-> arm INIT 並行 + 吊機左右同步放/收繩 -> 靜置 300ms
+-> IMU 差動校平（內部再等 800ms）-> [PWM 占空比 5% = 關] -> 抽真空
+-> 4 顆同時伸出 ┬-> 清洗（DEPLOY RIGHT 滾筒 -> 滑台 0->17 -> DEPLOY LEFT 刮刀 -> 滑台 ->0 -> PARK）
+                └-> (並行)
+```
+
+**PWM（QX-DO24, cli_22_ slave 9, 通道 1）**
+- 只寫「占空比」一個暫存器，頻率與控制字完全不碰（`pwm_set_duty_only_()`）；**不會寫 flash**，唯一寫 flash 的入口仍是面板的「保存參數」按鈕
+- 7% = 運轉、5% = 停止（driver 強制鎖 5~10%）
+- 開啟失敗只印 warning 不擋步伐；**關閉失敗會用 `try_or_pause_` 擋住**——「該關沒關就去伸腳」是唯一有安全意義的那一側
+- `fail()`（所有提早返回的唯一出口）會補寫 5%，避免步伐中途 abort 時輸出一直開著
+- bench 遇過偶發 `[QX:9] no reply (timeout)`（同一步稍後的寫入卻成功）→ 已加最多 3 次重試、間隔 120ms。**根因未查明**，重試是止血
+
+**清洗恢復**
+- `STEP_SYNC_ARM_CLEAN_ENABLED` false → **true**（上滑台 DM2J:14 已接上，user 確認）
+- `CH_BRUSH` **15 → 5**（實體確認接在 CH5；2026-07-24 那次改成 15 是錯的，導致「流程照跑但滾筒不轉」查了很久）
+- 滾筒開關窗口 = **DEPLOY RIGHT 之前開、DEPLOY LEFT 之前關**，中間全程轉；DEPLOY RIGHT 失敗不改變關閉點
+- 貼牆距離三個常數統一 **380 → 400mm**
+
+### B. 自動補救全部停用（安全語意改變，務必知道）
+
+v2 現在的態度是**吸不好就交給人判斷**。兩個機制先後停用，原碼都用 `#if 0` 保留在原地：
+
+| 機制 | 原行為 | 現在 |
+|---|---|---|
+| 後退重吸（`[2026-08-28k]`）| 整側沒吸住 → 全縮回 → 吊機退 10cm → 重吸 → 一路退到起點 | 直接回 `ERR side_unsealed`，**停住不動** |
+| 原地補伸（`[2026-08-28t]`）| 整側全裸 → 對該側再 `smart_extend_subset_` 一次 | 不補推，直接進 `group_seal_ok_` 判定 |
+
+停用補伸的理由來自 bench log：第一次伸出時 `disable_seal` 已經打到 `WALL I=1242mA ... endpoint`，結論是「推到牆、真空還是吸不起來」，再推一輪只是用更大電流頂玻璃。
+
+**停住時的實體狀態**：推桿伸出但未吸住，機器靠鋼索吊著；PWM 已寫回 5%；手臂已 PARK（停住之前會先等清洗掃動結束）。呼叫端會切 `State::Error` 並停止後續步伐。
+
+「每側 ≥1 顆即算吸好」(`group_seal_ok_`) 的判準沒有改變。
+
+### C. IMU 校正失效的根因（已修）
+
+bench log `[step_sync_imu] IMU read_error mid-pass — stop`：整步水平校正被取消，同一步吊機回報左右差 2cm 就這樣累積下去。
+
+**根因**：`WT901BC_TTL::read_error` 是**逐封包**旗標——checksum 錯一包設 true、下一包正常就清回 false。裝置 115200 持續串流，偶發壞一包很正常。但兩處 gate 都是**瞬間讀一次**就判定 IMU 不可用。同函式內的 `read_roll_avg` 早就做對了（6 樣本、跳過壞的、全壞才 fallback），gate 反而比它嚴格。
+
+**修法**：新增 `imu_persistently_bad_(samples=6, gap_ms=50)`，掃 300ms 視窗，期間有任何一次正常就當可用。`do_sync_imu_roll_correct_`（sync）與 `follower_imu_level_`（alt）兩條路徑都改了。
+
+### D. 其他
+
+- `cmd_run_script`：迴圈開始前先清洗一次（`run_script_pre`）——清洗綁在步伐尾段，沒有這段的話**起始位置那一格永遠不會被洗到**。按下 run 之後會先原地不動約 30 秒才開始走，那是在洗第一格，不是當機
+- `STEP_CM_MAX` 80 → **100**（per user：script 要能到 100cm）。⚠ 這是共用上限，手動單步 / 自動循環 / 深度避障 clamp 一起被放寬
+- 前端 `parseScriptCsv` 的 5..50 → 5..100（原本前端 50、後端 80 本來就不一致）
+- crane `UP_STOP_TOTAL_KG_DEFAULT` 50 → **70**（UP hold 的左右總和門檻）
+
+---
+
+### ⚠ 下次接手要做的事
+
+**1. 重新編譯 + 部署（本輪改動全部未實機驗證）**
+
+| 程式 | 要不要編 | 原因 |
+|---|---|---|
+| `facade_cleaning_v2/`（washrobot @ .100）| ✅ 一定要 | 全 repo 唯一 `#include "WASH_ROBOT.h"`，本輪改動幾乎都在這 |
+| `cleaning_arm/motor_api`（:9527）| ✅ 要 | `main_api.cpp` 的 `MAX_LOOPS` 100→150（`[2026-08-28j]`）。`cd cleaning_arm && ./compile.sh` |
+| `Crane_control_PI`（@ .101）| ⚠️ 看上次編譯時間 | 只有 `UP_STOP_TOTAL_KG_DEFAULT` 一項 |
+| `web_backend/` | ❌ 不用編 | 靜態檔；重開 node server + 瀏覽器硬重新整理（否則吃到快取舊 `app.js`，script 上限還是卡 50）|
+| `Linux_test/` | ⚠️ 只有要用 bench 工具時 | 不 include `WASH_ROBOT.h`，本輪改動與它無關 |
+
+本機只做過 `cl /Zs` 語法檢查（方法見本檔 2026-08-28 那條），錯誤集合與 HEAD 相同=無新增語法問題。**語法對 ≠ 行為對。**
+
+**2. 上機第一輪要盯的 log**
+
+- `[pwm_step] step_move_on -> ch1 duty=7.0% OK`——沒有這行就是 PWM 沒起來（看有沒有「第 N 次才成功」或「3 次全滅」）
+- 滾筒有沒有真的轉。⚠ PQW 韌體的 echo 只驗長度不驗內容，**寫入回 OK 不代表繼電器真的切了**，通道錯更是完全抓不到——只能看實體 LED
+- `[DM2J:14] writeMulti no response` 應該要消失（上滑台已接上）
+- `arm deploy RIGHT (brush) failed`——DEPLOY 失敗會**靜默降級**成「只掃滑台、不開刷」，看起來正常但沒在清洗
+
+**3. 已知未解**
+
+- **`DEPLOY 400` 兩側 bench 都失敗過**：LEFT `err=0.293 rad`、RIGHT 觸發 `[M1 SAFETY] vel>0.4` 緊急煞車。牆距從 380 加大到 400 後 M1 外擺更多、重力力矩更大，這個症狀可能更明顯。要修是動 `cleaning_arm/main_api.cpp` 的 touch_wall 收尾（重力前饋 / kp / 速限），不是牆距數字
+- **`ROLL PANIC -150.9°`**：不可能是真實姿態。可能是 `read_roll_avg` 在 `n==0` 時 fallback 讀到壞的原始 `imu_.z`，也可能是角度在 ±180 繞回。本輪修的 gate 會讓更多樣本被採用、**可能**連帶減少，但沒有加任何離群值剔除
+- **`ERR meter_left_read_fail`（吊機左計米器）**：老問題（見 memory `project_v2_crane_meter_read_fail_OPEN`），workaround 是重開 crane 程式。本輪查出**為什麼一直查不到根因**——`meter_read_robust()` 的 hard-fail 路徑 `return {false,0,true}` 之前一行 log 都沒有，而 `meter_left.init(cli_M, ..., false)` 讓 SD76 driver 的 LOG_ERR 也關著，兩層都靜默。另外**單一次讀取失敗就會 `valid=false`**，沒有連續失敗容忍，一個掉幀就足以擋掉整個 `pay_out`。建議修法（尚未實作，需動 `Crane_control_PI/main.cpp`）：hard-fail 路徑加 rate-limited log + 連續 N 次才 invalidate + 回覆字串帶連線狀態
+- **script 的 `n`（不刷洗）旗標在 v2 仍然無作用**——只影響 log 的 `mode=transit` 字樣與統計，實際每步都會清洗。GUI 輸入框提示「n=不刷洗」目前是假的
+- **文件落後**：`CLAUDE.md` 硬體表的 PQW 通道表仍是 v1 的 8CH 分區描述；`Linux_test` menu 5 畫面上那張 channel map 也是舊的（寫 CH6 水箱泵浦、CH16 破真空）。現行 map 是 **CH1 閥 / CH2 泵浦 / CH5 滾筒 / CH6 破真空 / CH14 水泵**。這次「滾筒不轉」某種程度就是這些過期文件養出來的
+
+**4. 這一輪的取捨（不是疏漏，改之前先看理由）**
+
+- PWM 只寫占空比、不寫頻率/控制字——per user 明確要求。代價：5~10% 對應「停止~全速」只在頻率已是 50Hz 時成立
+- 交替走法 `do_step_down_`/`do_step_up_` 與 `do_cross_obstacle_` **沒有**加 PWM 控制，也沒有 pre-sweep——它們一次只放一側、每步有多段吊機移動，語意對不上，要加需另外定義
+- 吊機移動後的靜置有兩段（`CRANE_MOVE_SETTLE_MS` 300 + `FOLLOWER_IMU_SETTLE_MS` 800 = 1.1s），刻意不合併：一個是「動作結束收尾」、一個是「取樣前靜置」
+
+
 ## 2026-08-28 — 開發環境：本機可以在 commit 前做 C++ 語法檢查
 
 > **規範權威：** 無（環境筆記，非設計決策）。這台開發機的既有工具，不是新增依賴。

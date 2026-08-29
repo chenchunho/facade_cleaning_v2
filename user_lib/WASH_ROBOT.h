@@ -449,7 +449,12 @@ private:
     static constexpr int CH_VALVE_RIGHT  = 1;  // VT307 全部吸盤（原右腳專用，現為唯一一顆閥）
     static constexpr int CH_PUMP         = 2;  // dp0105 vacuum pump (always ON while running)
     static constexpr int CH_VALVE_LEFT   = CH_VALVE_RIGHT;  // 2026-08-27: 3 → 同 CH1（單閥）
-    static constexpr int CH_BRUSH        = 15; // arm roller brush motor (2026-07-24 per user: 5→15, arm now physically installed)
+    // [2026-08-28 per user] 15 → 5，實體確認滾筒接在 CH5。2026-07-24 那次
+    // 「5→15，arm now physically installed」是錯的 —— 依此送出的 controlRelay(15)
+    // 打到沒接東西的繼電器，bench 現象就是「清洗流程照跑但滾筒不轉」，而且
+    // do_step_sync_rail_sweep_ 當時沒檢查回傳值，log 完全看不出來。
+    // CH5 目前沒有其他用途（1=閥 2=泵浦 6=破真空 14=水泵），不撞號。
+    static constexpr int CH_BRUSH        = 5;  // arm roller brush motor
     // [2026-08-27 per user] 水泵 CH6 → CH14，讓位給破真空閥（user 指定破真空接 CH6）。
     // ⚠ 這個讓位是強制的，不是整理：清洗流程的滾筒段會主動
     // pqw_set_relay_verified_(CH_WATER_PUMP, true)（見 sweep_with_tool 的 water_on
@@ -509,6 +514,34 @@ private:
     //   要到第一個指令才看得出來。
     static constexpr bool PWM_ENABLED = true;
     static constexpr int  PWM_SLAVE   = 9;   // 2026-08-28 per user: 6→9（模組端已改）
+
+    // [2026-08-28 per user] 同步步伐（do_step_sync_）內建的 PWM 占空比切換：
+    //   解真空 + 收腳 → 寫 7.0%，整個吊機移動期間都維持開啟
+    //   到定位、伸腳「之前」 → 寫回 5.0%（=停止），確定關掉才允許抽真空 + 伸出
+    // ⚠ 只寫「占空比」一個暫存器，頻率與控制字完全不碰（per user 明確要求
+    //   「只需寫入占空位就好，其他不動」）——面板 cmd_pwm_set 是 Freq/Duty/Control
+    //   三個都寫，這條路徑刻意只用中間那個，見 pwm_set_duty_only_()。
+    // 通道跟面板預設一致（通道 1，也是 bench 用廠商工具驗證過的那一路）。
+    static constexpr int    PWM_STEP_CH            = 1;
+    static constexpr double PWM_STEP_MOVE_DUTY_PCT = 7.0;   // 收腳 + 吊機移動期間
+    static constexpr double PWM_STEP_OFF_DUTY_PCT  = 5.0;   // 5% = 停止（伸腳前必寫）
+    // [2026-08-28 per user] 寫完 7% 之後、吊機開始移動之前的靜置時間。給輸出
+    // 起來/負載轉穩的緩衝，不要寫完就立刻讓吊機動。只在「開啟」那一側等；
+    // 關閉（伸腳前寫 5%）不等 —— 那邊要的是「確定關掉」，靠 try_or_pause_ 擋。
+    static constexpr int    PWM_STEP_ON_SETTLE_MS  = 300;
+    // [2026-08-28 per user] 同步步伐：吊機放/收繩結束之後的靜置。crane_cmd_ 回
+    // OK 只代表變頻器停止指令送完，機體還在晃/繩還在彈；讓它先安定一下再往下走。
+    // 與 FOLLOWER_IMU_SETTLE_MS(800) 疊加 —— 後者是 do_sync_imu_roll_correct_
+    // 內部讀 roll 之前自己的靜置，兩段目的不同（這段是「動作剛結束」，那段是
+    // 「取樣前」），刻意不合併。
+    static constexpr int    CRANE_MOVE_SETTLE_MS   = 300;
+    // [2026-08-28 per user] 步伐的 PWM 寫入重試。bench 觀察到同一次 step 裡
+    // 「開啟」那次 `[QX:9] no reply (timeout)`、稍後「關閉」那次卻成功 —— 模組
+    // 接線/slave ID 都對，是偶發掉包。單次失敗就放棄太脆弱，重試 2 次。
+    // 只作用在步伐路徑（pwm_set_duty_only_）；面板 cmd_pwm_set 維持單次，
+    // 那邊失敗會直接回錯誤字串給操作者，由人決定要不要再按一次。
+    static constexpr int    PWM_STEP_WRITE_TRIES   = 3;    // 初次 + 2 次重試
+    static constexpr int    PWM_STEP_WRITE_RETRY_MS = 120; // 每次重試之間
 
     // ZDT pusher slave IDs — [v2] 4 cups only: right{1,2} / left{3,4}
     //   right foot: upper = slave 1, lower = slave 2   (valve CH1)
@@ -645,13 +678,19 @@ private:
     // Step parameters
     static constexpr int STEP_CM_DEFAULT  = 30;   // initial value of step_cm_ (settable via cmd_set_step_cm)
     static constexpr int STEP_CM_MIN      = 5;
-    static constexpr int STEP_CM_MAX      = 80;
+    // [2026-08-28 per user] 80 → 100，script 要能寫到 100cm。這個上限是共用的：
+    // script (parse_script_csv_)、手動單步 (cmd_step_down/up)、自動循環、深度
+    // 避障的建議步距 clamp 全部吃它，所以放寬到 100 等於那幾條路徑也一起放寬。
+    // 執行期仍可用設定面板的 step_cm_max 調整（範圍 5..100，見 apply 的邊界）。
+    static constexpr int STEP_CM_MAX      = 100;
     static constexpr int STEP_MARGIN_CM   = 10;   // crane extra slack before feet move (2026-05-27: 15→10 提速)
     // [2026-07-27 per user] do_step_sync_ backoff-retry: if a whole side is
     // still unsealed after the in-place per-side retry, retreat the crane
     // toward the pre-step position in this many cm per attempt (full 4-cup
     // retract → crane back → re-extend → recheck), until sealed or fully
     // backed off to the original position (see do_step_sync_ for the loop).
+    // [2026-08-28 per user] 後退重吸機制已停用（do_step_sync_ 內以 #if 0 保留原碼，
+    // 沒吸好改成停住不動），因此這個常數目前沒有任何作用。恢復該機制時才會再生效。
     static constexpr int STEP_SYNC_BACKOFF_CM = 10;
     static constexpr int TOTAL_DISTANCE_CM = 30;  // TODO: set actual building height
 
@@ -1588,6 +1627,16 @@ private:
     // all 4 cups together → do_step_sync_rail_sweep_() (2026-07-23: small DM2J:14
     // rail-only sweep, no arm/brush). See .cpp for the explicit zero-anchor-
     // during-move safety note.
+    // [2026-08-28 per user] 步伐用的 PWM 占空比寫入 —— 只寫占空比，不碰頻率/控制字。
+    // 回傳沿用本檔慣例：true = 失敗、false = 成功。見 .cpp 的實作註解。
+    bool pwm_set_duty_only_(double duty_pct, const char* why);
+
+    // [2026-08-28] IMU 是否「持續」讀不到 —— 在一個取樣視窗內每一次都看到
+    // read_error 才算真的壞。WT901 的 read_error 是逐封包旗標（一個 checksum
+    // 錯就 true、下一個好封包就 false，見 WT901BC_TTL.cpp），瞬間取樣一次
+    // 判定不了裝置好壞。回傳 true = 真的不可用。
+    bool imu_persistently_bad_(int samples = 6, int gap_ms = 50);
+
     std::string do_step_sync_(bool up);
 
     // [2026-07-23 per user] Small 上滑台 (DM2J:14 only, no arm/motor_api, no

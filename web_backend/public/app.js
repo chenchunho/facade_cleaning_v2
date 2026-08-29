@@ -1382,8 +1382,11 @@ function parseScriptCsv(csv) {
         }
         const cm = parseInt(head, 10);
 
-        if (cm < 5 || cm > 50)
-            return { ok: false, err: `token #${i+1} cm=${cm} 超出 5..50` };
+        // [2026-08-28 per user] 上限 50 → 100，對齊後端的 STEP_CM_MIN..STEP_CM_MAX
+        // (5..100)。這裡只是前端預覽的即時檢查，真正的把關在 parse_script_csv_；
+        // 兩邊不一致的話會出現「預覽說 OK、送出被拒」或反過來，所以要一起改。
+        if (cm < 5 || cm > 100)
+            return { ok: false, err: `token #${i+1} cm=${cm} 超出 5..100` };
         if (count < 1 || count > 1000)
             return { ok: false, err: `token #${i+1} count=${count} 超出 1..1000` };
         for (let k = 0; k < count; ++k) {

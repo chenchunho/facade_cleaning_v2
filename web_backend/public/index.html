@@ -220,9 +220,9 @@
       <button data-tgt="washrobot" data-cmd="water_pump off">OFF</button>
     </div>
     <div class="row">
-      <!-- [2026-08-27] CH5 → CH15：CH_BRUSH 在 2026-07-24 手臂實裝時就改成 15 了
-           （見 WASH_ROBOT.h「5→15, arm now physically installed」），GUI 標籤漏改。 -->
-      <span class="label">刷洗滾筒 (CH15):</span>
+      <!-- [2026-08-28 per user] CH15 → CH5：實體確認滾筒接在 CH5，WASH_ROBOT.h 的
+           CH_BRUSH 已改回 5（2026-07-24 那次 5→15 是錯的）。標籤跟著回來。 -->
+      <span class="label">刷洗滾筒 (CH5):</span>
       <button data-tgt="washrobot" data-cmd="brush on">ON</button>
       <button data-tgt="washrobot" data-cmd="brush off">OFF</button>
     </div>
