@@ -35,7 +35,7 @@
 | 優先度 | 項目 | 涉及檔案 | 現況 | 來源與原始日期 |
 |---|---|---|---|---|
 | ✅ | ~~重連的非阻塞 connect 少了 `getsockopt(SO_ERROR)` → 連到沒人聽的埠也判定成功~~ | `transport/TCP_client.cpp` | **已修（本分支 `-drv4`）** —— 雙向斷言實機驗證：吊機關→假成功 0 次、吊機開→正常連上。🔴 **`refactor/app-layer` 上仍未修**（那條分支要保持功能等價） | work_log 2026-08-28（實機驗證） |
-| 🟡 | `init()` 印 `VFD left/right (MH300)` 是**寫死字串**，在 `#if CRANE_VFD_IS_SE3` 之外 → 旗標是 1（實際跑 SE3）卻印 MH300，會把人導去查錯的 driver | `Crane_control_PI/main.cpp:4215,4234` | **未修** ✔ | work_log 2026-08-28（實機驗證） |
+| ✅ | ~~`init()` 印 `VFD left/right (MH300)` 是**寫死字串**，在 `#if CRANE_VFD_IS_SE3` 之外 → 旗標是 1（實際跑 SE3）卻印 MH300，會把人導去查錯的 driver~~ | `Crane_control_PI/main.cpp:4298,4300,4317,4319` | **已修（`f4e0d02`）**：四處都改吃 `CRANE_VFD_NAME` 巨集，隨 `#if` 一起切換。🔴 **未實機驗證**（改於 14:41，16:30 機器讓出前有過一次重編，但是否涵蓋本檔未經確認——不宣稱編譯狀態） | work_log 2026-08-28（實機驗證）｜2026-08-29 複查原始碼確認 |
 | ✅ | ~~上滑台 cm↔pulse 換算錯 7.7 倍（皮帶軸 7.731 cm/圈，程式假設 1）→ 每次掃動下 131cm 指令、滑台只有 50cm，一路撞到底~~ | `user_lib/DM2J_RS570.*`、`app/WASH_ROBOT.*` | **已修（本分支 `-drv5`）**：換算層修正 + 行程守衛，實機量測指令 17→實際 17cm。🔴 **`refactor/app-layer` 上仍未修** | work_log 2026-08-28（實機量測） |
 | 🔴🔴 | **`ARM_SWEEP_DECEL_MASK_MS` 的減速遮罩從來沒有生效過** —— 它錨定在 `est_ms` 結尾，而 est_ms(4500) 比真實運動(553ms)長 8 倍，遮罩窗口(3500~4500ms)與真正的減速(528~553ms)**完全沒有交集**。changelog 顯示他們為假警報吃過苦（M2 path 最後被實質 disable），**其中一道保護一直是壞的而沒人知道** | `app/WASH_ROBOT.h`、`app/WASH_ROBOT.cpp:2504` | **已記錄未修** ✔ | work_log 2026-08-28 |
 | 🔴 | **`*_EST_MS` 與 `ARM_SWEEP_DECEL_MASK_MS` 是耦合的，天真調小會關掉障礙偵測**：`est_ms ≤ MASK` 時 `elapsed > 負數` 恆為真 → 整趟偵測全程關閉且無任何訊息。實測導程重算：17cm @ 250rpm 真實運動 **553ms**，現值 4500/3900 是 7~8 倍餘裕。🔴 **三方取捨（偵測覆蓋率／週期時間／運動被截斷）需使用者決定**，已把算式與對照表寫進常數註解 | `app/WASH_ROBOT.h` | **待決定** ✔ | work_log 2026-08-28 |
@@ -44,23 +44,23 @@
 | 🟡 | `PUSHER_EXTEND_*` 常數的註解標的公分現在是對的（本來就用 3000），但**「12.0 cm」等標示仍未逐一複查**；另 `zdt_pusher extend` 實際走的是 `disable_seal` 尋封序列（可達 47994 脈衝／16cm），**不是預設的 36000** —— 文件與 GUI 說明都沒講 | `app/WASH_ROBOT.h`、runbook | **未修** ✔ | work_log 2026-08-28 |
 | ✅ | ~~左右歸屬與實體不符（RF={5,6}/LF={7,8}），**交替步伐因此不可用**~~ | `app/WASH_ROBOT.{h,cpp}` | **已修（`[2026-08-28p]`）**：右={5上,7下}／左={6上,8下}，31 處使用點自動跟著正確。🔴 **尚未實機驗證**，第一次跑交替步伐要有人在旁邊 | work_log 2026-08-28 per user |
 | 🟡 | `group_seal_ok_` 的「4 顆有 2 顆吸住就算 OK」是為了繞過「分側判準算不準」而採用的（2026-08-28）。**歸屬修好後那個前提消失** → 是否改回「每側各 ≥1」需使用者決定 | `app/WASH_ROBOT.h` | **待決定** ✔ | work_log 2026-08-28 |
-| 🔴 | `readRegister()` 不驗 reply CRC、不驗 byteCount → 壞掉的 Modbus reply 被當有效值往上傳（bench 已造成實體損害，詳見下方） | `user_lib/SD76_length_meters.cpp` | **未修** ✔ | mailbox 2026-05-14 |
+| ✅ | ~~`readRegister()` 不驗 reply CRC、不驗 byteCount → 壞掉的 Modbus reply 被當有效值往上傳（bench 已造成實體損害，詳見下方）~~ | `user_lib/SD76_length_meters.cpp:153-171` | **已修（`1a15588`，driver 稽核那一輪）**：三道依序做完——`byteCount == count*2` → 幀長 `≥ 3+byteCount+2` → CRC 比對，且**先夾 byteCount 再拿它當長度用**（harness 實測 `byteCount=0xFF` 會 segfault）。🔴 **尚未實機驗證**；應用層 `meter_loop` 的 >30cm 跳變 filter 保留不動 | mailbox 2026-05-14｜2026-08-29 複查原始碼確認 |
 | 🔴 | 🔮 **eth 串接之後要回頭改 `WASH_ROBOT.h` 的 `CRANE_IP`**：目前是 bench 用的 WiFi `192.168.5.17`（註解顯示已改過三次）。串上 eth 之後**它仍然會走 WiFi**——有線路徑就在旁邊卻沒被用到，而且完全不會有訊息告訴你。機器吊在半空中時控制流量跑在 WiFi 上，是實質風險 | `app/WASH_ROBOT.h:414` | **待處理（等 eth 串接）** | work_log 2026-08-28 per user |
 | 🔴 | **所有上滑台 RPM 常數都是在錯誤的線速度認知下挑的**。以「1cm/rev」算時以為 250rpm=4.17cm/s、1000rpm=16.7cm/s；用實測導程 7.731 換算，實際是 **32.2 / 128.8 cm/s**。**2026-08-28 實機已發生失步**（使用者回報，手動調回）。→ `ARM_SWEEP_RPM=1000`（129cm/s）幾乎確定過快，`DM2J_ARM_STEP_SWEEP_RPM=250` 也要重新評估；ACC/DEC=100 同樣是在錯誤前提下挑的 | `app/WASH_ROBOT.h` | **未修** ✔ | work_log 2026-08-28（實機失步） |
 | 🟡 | **USR 網關 `_pt`（串口打包時間）設為 0＝自動** → 115200 下字元間隔僅約 0.3ms，是「回覆被切成兩個 TCP 段」的結構性根源（`[2026-08-28b]` 的分片問題）。**改成 5ms 可從根本解決**，代價每筆交易 ≤5ms（`status` 讀 4 顆 → +20ms）。⚠️ 影響 bus 上所有裝置，且目前量到的失敗是 `no reply` 不是 `too short` —— **先記錄、之後再改**（per user 2026-08-28）。後台 `http://192.168.1.22/system.shtml`，admin/admin | 網關 `.20` / `.22` | **待改** ✔ | work_log 2026-08-28 |
-| 🔴 | `web_backend/server.js` 的 **`CRANE_IP` 預設值寫錯**：`192.168.1.101`，吊機實際是 `192.168.1.10`（`.101` 沒有任何機器回應）。⚠️ 同一行的 `WROBOT_IP = 192.168.1.100` **是對的、不要動**（見上一列：eth 尚未串接而已）。照預設啟動 GUI 連不到吊機，**畫面不會說是 IP 錯** | `web_backend/server.js:25` | **未修** ✔（08-28 啟動時實測，以環境變數繞過） | work_log 2026-08-28 |
+| ✅ | ~~`web_backend/server.js` 的 **`CRANE_IP` 預設值寫錯**：`192.168.1.101`，吊機實際是 `192.168.1.10`~~ | `web_backend/server.js` config 區 | **已修（`f4e0d02`）**：預設值改 `192.168.1.10`，並在原地留註解說明「這與有線/WiFi 無關，串上 eth 之後照樣會錯」。⚠️ 同區的 `WROBOT_IP = 192.168.1.100` **是對的、刻意不動**（eth 尚未串接，bench 期間用環境變數覆蓋）。🔴 **未在 Pi 上實跑驗證**（且 Pi 上的 `web_ver2` 落後 repo，見下方該列） | work_log 2026-08-28｜2026-08-29 複查原始碼確認 |
 | 🟡 | 兩台 Pi 都沒有 `tmux`／`screen` → runbook §A「一鍵啟動」`scripts/crane.sh`／`wr.sh` **在這兩台跑不起來**。替代方案 `~/bringup/run_bg.sh`（FIFO 背景啟動）已放兩台 | `scripts/*.sh`、`.claude/runbook.md` §A | **未修** ✔ | work_log 2026-08-28 |
-| 🔴 | 緊急收繩按鈕實際上**沒有張力保護**，跟 `motion_flow.md` §8 的安全性描述相反 | `Crane_control_PI/main.cpp` `cmd_manual()` | **未修** ✔ | ONBOARDING §6 |
+| 🟡 | 緊急收繩按鈕**沒有張力保護**，跟 `motion_flow.md` §8 的安全性描述相反 | `Crane_control_PI/main.cpp` `hold_loop()`:1786、`cmd_manual()` | **部分處理（`b1234ad`）**：`hold_loop()` 新增 `any_manual_motion()` 分支，緊急收繩期間**補上張力警示與廣播**（此前該路徑張力既不檢查也不回報）。🔴 **刻意不呼叫 `hold_all_off()`** —— §8 明訂緊急模式由操作員眼睛判定，自動停止會擋住救援；規格表已就地更正（`2b16601`）。⚠️ **警示的可信度受限於 DSZL 刻度未校正**（見下方 🔴🔴 那列）：「有出現」值得信，「沒出現」不代表安全。🔴 尚未編譯驗證 | ONBOARDING §6｜2026-08-29 複查原始碼確認 |
 | ✅ | ~~`cmd_side_measured()` 進場沒重置 `abort_flag` → 被 stop 過一次後所有 v2 step 指令永久回 `ERR aborted`~~ | `Crane_control_PI/main.cpp` | **已修（`[2026-08-28s]`）**：補上 `abort_flag = false;`，位置與姊妹函式一致（`try_lock` 之後，避免被拒絕的重疊指令清掉他人的 abort）。⚠️ 尚未編譯 | ONBOARDING §1 ＋ work_log 2026-07-15 |
 | 🔴🔴 | **DSZL-107 刻度未校正，而且右側的「正負號」是假設的** —— 量值：`DSZL_SCALE_DEFAULT=-0.01` 只是 driver 預設，原始碼註解自己說要「掛已知重量後重算」但從沒做。🔴 **正負號只在左側量過**（`right untested but assumed same wiring`），而 `tension_safety_check_values` **只檢查過高**（過低已於 2026-05-08 移除）→ **若右側接線相反，右側超載讀成大負值、永遠不觸發，整條保護在那一側失效**。⚠️ 2026-08-28 新增的緊急收繩張力警示也建立在這上面。📌 掛已知重量到兩側各量一次即可同時解決量值與正負號，**不需要讓機器動** | `Crane_control_PI/main.cpp`、`user_lib/DSZL_107.cpp` | **未修** ✔ | work_log 2026-05-07 ＋ 2026-08-28（升級） |
 | 🟡 | `tension_safety_check_values` 的註解寫「motion_flow.md §6.5 needs corresponding spec update **(mailbox to Jim)**」—— ⚰️ mailbox 已於 2026-08-27 退休成墓碑檔，**那個待辦丟進了沒人再看的信箱**。規格表該列已於 2026-08-28 就地更正 | `Crane_control_PI/main.cpp`、`.claude/motion_flow.md` | **已更正規格** ✔ | work_log 2026-08-28 |
 | 🔴 | 安全盤點高優先兩項未做：`cmd_hold` 與 motion 互斥、左右繩長差超標 abort | `Crane_control_PI/main.cpp` | **未修** ✔（原始碼註解仍留 TODO） | work_log 2026-05-08 |
 | 🟡 | `trigger_sync_move()` 是 Modbus 廣播（slave 0x00）不會有回應，卻以 `return resp.empty();` 收尾 → 廣播成功也永遠回報失敗 | `user_lib/ZDT_motor_control.cpp:506` | **未修** ✔ | mailbox 2026-04-30 |
-| 🟡 | `send(sock, buf, len, 0)` 沒帶 `MSG_NOSIGNAL`，Linux 下對已關閉對端寫入會 SIGPIPE 殺 process（目前靠各 `main.cpp` 的 `signal(SIGPIPE, SIG_IGN)` 擋著） | `user_lib/TCP_client.cpp`（2 處）、`user_lib/TCP_server.cpp`（1 處） | **未修** ✔ | mailbox 2026-04-22 |
+| ✅ | ~~`send(sock, buf, len, 0)` 沒帶 `MSG_NOSIGNAL`，Linux 下對已關閉對端寫入會 SIGPIPE 殺 process~~ | `transport/TCP_client.cpp:53`、`transport/TCP_server.cpp:21`（**檔案已於分層重構搬離 `user_lib/`**） | **已修（`9e1ad1b`，分支 `fix/msg-nosignal` 已併入）**：兩檔各定義 `constexpr int SEND_FLAGS = MSG_NOSIGNAL` 供所有 `send()` 共用。🔴 **合併 main 時 `sendAndReceiveQuiet` 曾帶著 `send(...,0)` 繞過這道防線**（`[2026-08-28j]` 已修）——**新增送出路徑一律用 `SEND_FLAGS`，不要再寫字面 0** | mailbox 2026-04-22｜2026-08-29 複查原始碼確認 |
 | 🟡 | `CLV900_inverter` 缺 null-client 防護：跳過 `init()` 時 `client == nullptr`，`sendModbus` 直接 null-deref segfault（應用層已用 `g_dev_clv900` 守起來，driver 本身沒守） | `user_lib/CLV900_inverter.cpp` | **未修** ✔ | mailbox 2026-05-14 |
-| 🟡 | `TCP_client` 缺 `SO_ERROR` 驗證 → 影響 reconnect 的邊界 case | `user_lib/TCP_client.cpp` | **未修** ✔（全檔無 `SO_ERROR`） | work_log 2026-06-09 |
+| ✅ | ~~`TCP_client` 缺 `SO_ERROR` 驗證 → 影響 reconnect 的邊界 case~~ ⚠️ **本列與表格第一列是同一件事**（2026-06-09 與 2026-08-28 各記了一次），2026-08-29 合併確認 | `transport/TCP_client.cpp:208,214` | **已修（`56bfa5c`／`ce8ba81`）** — 詳見表格第一列（含雙向斷言實機驗證） | work_log 2026-06-09｜2026-08-29 判為重複列 |
 | 🟡 | MH300 實機必驗清單未跑：方向映射、電流 scale、2101H run bit、fault code | `Crane_control_PI/main.cpp`（`VFD_DIR_*` 巨集）、`.claude/mh300_migration_plan.md` | **未修** ✔（註解仍寫 `RE-VERIFY on MH300`） | work_log 2026-07-07 |
-| 🟡 | 5 個 `.vcxproj.user` 被 git 追蹤 → 不同 bench 的 Remote Target 互相覆蓋（Connection Manager 顯示空白） | `Crane_control_PI/`、`Linux_test/`、`cleaning_arm/`、`facade_cleaning_v2/`、`windows_test/` | **未修** ✔（仍 tracked，`.gitignore` 未加） | work_log 2026-07-15 |
+| 🟡 | **4 個 `.vcxproj.user` 被 git 追蹤** → 不同 bench 的 Remote Target 互相覆蓋（Connection Manager 顯示空白）。⚠️ 原記 5 個，`windows_test/` 已於 `a69f82f` 整個移除 → 實際 4 個 | `Crane_control_PI/`、`Linux_test/`、`cleaning_arm/`、`facade_cleaning_v2/` | **未修** ✔（仍 tracked；🔴 `.gitignore` **存在**且已有 12 條規則，只是沒加這一條——原記「`.gitignore` 未加」易被讀成整個檔不存在） | work_log 2026-07-15｜2026-08-29 複查確認 |
 | 🟡 | 沒有 hot re-init：裝置 flag 只在啟動時設一次，硬體中途修好要重開 crane | `Crane_control_PI/main.cpp` | **未修** | work_log 2026-05-08 |
 | 🟡 | 沒有任何機制偵測「M2 被重新安裝過」；重裝後若位置落在 ±1.5 rad 內，INIT 會**靜默**移到錯的 CENTER | `cleaning_arm/main_api.cpp:1992-2028` | **未修** | work_log 2026-08-17 |
 | 🟡 | `LR_CALIBRATE` 自動雙向尋邊不可靠（假觸發撞牆、或衝很遠都撞不到），目前只能走手動流程 | `cleaning_arm/main_api.cpp` | **未修** | work_log 2026-08-17 |
@@ -301,6 +301,64 @@ threshold 再實作」：① `cmd_hold` 與 motion 互斥（避免 hold 跟 moti
 | 🟢 | 空壓機與電動缸電流重疊 | 空壓機啟動與電動缸同動時的電流重疊 | **暫緩**；症狀為電動缸偶發失步或抱閘異響，實機測試時可能浮現 | 設計彙整 §6 暫緩項目 |
 | 🟢 | 空壓機振動干擾姿態 | 空壓機振動對陀螺儀姿態判斷的干擾 | **暫緩**，實機測試時可能浮現 | 設計彙整 §6 暫緩項目 |
 | 🟢 | 儲氣筒壓力未讀 | Pi 未讀取儲氣筒壓力，假設氣壓恆定可用 | **暫緩**，實機測試時可能浮現 | 設計彙整 §6 暫緩項目 |
+
+---
+
+## 2026-08-29 — 待辦總表校準：這張「單一權威」自己落後於程式碼 7 列
+
+### 機器狀態
+兩台 Pi 仍在 main 分支的人手上（08-28 16:30 讓出）。本段全部是無硬體工作，
+**沒有連線任何 Pi、沒有編譯、沒有部署**。
+
+### 起因
+接手時照 `CLAUDE.md` 的順序讀待辦總表，抽查其中幾條標「**未修** ✔」的高優先項時，
+打開原始碼發現東西已經在那裡了。逐條回查之後：**80 列裡有 7 列與程式碼不符。**
+
+### 七列的分佈（三種不同的過期方式）
+
+| 類型 | 列 | 實況 |
+|---|---|---|
+| **已修但仍標未修** | SD76 `readRegister()` 不驗 CRC | `1a15588` 已補三道檢查（byteCount → 幀長 → CRC），且**先夾 byteCount 再拿它當長度用** |
+| | `send()` 沒帶 `MSG_NOSIGNAL` | `9e1ad1b` 已在兩檔各定義 `SEND_FLAGS` |
+| | `server.js` `CRANE_IP` 預設值寫錯 | `f4e0d02` 已改 `.10` 並在原地留下理由 |
+| | `init()` 印寫死的 `MH300` | `f4e0d02` 已改吃 `CRANE_VFD_NAME` |
+| **檔案路徑過期** | 上述 `MSG_NOSIGNAL` 那列、`SO_ERROR` 那列 | 仍寫 `user_lib/TCP_client.cpp`，但分層重構已把它搬到 `transport/`，**該路徑現在根本不存在** |
+| **重複列** | `TCP_client` 缺 `SO_ERROR` | 與表格第一列是同一件事，2026-06-09 與 2026-08-28 各記了一次 |
+| **數字過期** | 5 個 `.vcxproj.user` 被追蹤 | 實際 4 個（`windows_test/` 已於 `a69f82f` 整個移除）；且原文「`.gitignore` 未加」易被讀成整個檔不存在——**它存在，有 12 條規則，只是沒加這一條** |
+
+另有一列由「未修」改為「**部分處理**」：緊急收繩張力保護。`b1234ad` 已在 `hold_loop()`
+補上警示與廣播（此前該路徑張力既不檢查也不回報），但**刻意不呼叫 `hold_all_off()`**
+——§8 明訂緊急模式由操作員眼睛判定，自動停止會擋住救援。**這不是「修好了」，是「換了一種
+不完整」**，所以留在表上而非劃掉。
+
+### 📌 這次的通則：**單一權威清單本身也會落後於它描述的東西**
+
+本專案已經記過「同一件事寫在兩個地方，遲早分岔」（`zdt_pusher` 範圍無交集那次）。
+這次分岔的兩處是 **程式碼** 與 **描述程式碼的那張表** —— 而表被明文指定為「單一權威」，
+**正因為它是權威，沒有人會去懷疑它。**
+
+🔴 **危害是雙向的，而且反向那個更貴**：
+- 正向：去修一個已經修好的東西（浪費，但會當場發現）
+- **反向：表上一列寫著「已修 ✔」而實際沒修，就永遠不會有人再去看它** ——
+  這一輪抽查的是「未修」那半邊，**「已修」那半邊還沒有人查過**
+
+📌 **做法上的修正**：`✔` 這個記號原本的定義是「這次有實際比對原始碼」，但它**不帶日期**，
+所以看不出是哪一次比對的。這次校準過的列一律在來源欄補上 `｜2026-08-29 複查原始碼確認`。
+
+### 抽查過但**確認仍然未修**的（表上狀態正確，不用重查）
+- `run_depth_avoid` / `depth_avoid_continue` / `depth_avoid_stop` 三個指令仍 dispatch 到真實實作
+  （`facade_cleaning_v2/main.cpp:184-192`），前端已無 UI → **後端仍能自行改走 cross 步伐**
+- `trigger_sync_move()` 仍以 `return resp.empty();` 收尾（`ZDT_motor_control.cpp:611`）。
+  廣播（slave `0x00`）本來就不會有回應 → **永遠回報 error**。
+  ⚠️ 目前無害只因為四個呼叫端**都不接回傳值**；哪天有人加上 `if (trigger_sync_move()) …`
+  就會整條同步移動全滅，而它看起來完全像是正確的錯誤處理
+- `CLV900_inverter` 仍無 null-client 防護（`:32` 直接 `client->connectToServer`）
+- 上滑台零點仍是 `0x0021`「設當前位置為零」而非 homing；`home_start()` 仍無人呼叫
+- `ARM_SWEEP_DECEL_MASK_MS` 遮罩仍未生效（`5560318` 只是把成因寫進註解，未改行為）
+
+### 待完成
+- 🔴 **表格「已修 ✔」那半邊尚未複查** —— 本輪只抽查了「未修」側
+- 本輪所有校準都是文件變更，**未動任何程式碼**
 
 ---
 
