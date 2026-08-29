@@ -896,9 +896,30 @@ private:
     // 原本是兩處寫死的 sleep_ms_(2500)（2026-07-24 per user 2000→2500），
     // 抽成常數以免又發生「改了一處漏另一處」。per user 再加長：2500 → 3500。
     static constexpr int    DM2J_ARM_DEPLOY_SETTLE_MS = 3500;
-    // [2026-07-24 per user] LEFT/RIGHT deploy wall_mm for this sync-step sweep
-    // — separate from ARM_CLEAN_WALL_MM(330) used by the continuous sweep engine.
-    static constexpr int    DM2J_ARM_STEP_SWEEP_WALL_MM = 400;   // 2026-08-28 per user: 380→400；2026-07-27 per user: 360→380
+    // ── 手臂牆距的共同起點（2026-08-29 建立）────────────────────────────
+    // 三個「手臂牆距」常數的共同預設值：
+    //   DM2J_ARM_STEP_SWEEP_WALL_MM（步伐內建掃動）
+    //   ARM_CLEAN_WALL_MM          （連續掃動引擎）
+    //   ARM_ROPE_PROTECT_WALL_MM   （繩索保護）
+    //
+    // 🔴 它們**是可以獨立調的**，而且歷史上真的分開調過：2026-07-24 建立
+    //    DM2J_ARM_STEP_SWEEP_WALL_MM 時就是為了跟當時 330 的 ARM_CLEAN_WALL_MM 分開。
+    //    但最近兩輪（2026-07-27 的 360→380、2026-08-28 的 380→400）三個是**一起**改的
+    //    —— 實務上已經變成同一個旋鈕。
+    //
+    // 所以做法是「共同起點 + 可個別覆寫」而不是合併成一個常數：
+    //   改這裡 → 三個一起動（符合最近的實際用法，不會再漏掉某一個）
+    //   要讓某一個不同 → 把它的初始值換成字面值，**並在該處寫明為什麼分開**
+    //
+    // 📌 2026-08-29 順帶更正：下面原本的註解寫著「— separate from
+    //    ARM_CLEAN_WALL_MM(330)」，那在 2026-07-24 寫下時是對的，但那個常數
+    //    後來一路調到 400，註解卻沒跟著動 —— 讀的人會以為兩者現在差 70mm。
+    static constexpr int ARM_WALL_MM_DEFAULT = 400;  // 2026-08-28 per user: 380→400；2026-07-27: 360→380
+
+    // [2026-07-24 per user] LEFT/RIGHT deploy wall_mm for this sync-step sweep.
+    // 建立時刻意與 ARM_CLEAN_WALL_MM 分開（當時 330 vs 360）；2026-08-29 起兩者
+    // 同源於 ARM_WALL_MM_DEFAULT，要再分開就把這行換成字面值並寫明理由。
+    static constexpr int    DM2J_ARM_STEP_SWEEP_WALL_MM = ARM_WALL_MM_DEFAULT;
 
     // 2026-05-26: Fire-and-forget sweep (avoid cli_22_ contention from PR_move_cm's
     // status poll fighting JC100 pressure reads during disable_seal). PR_move_cm_nowait
@@ -983,7 +1004,9 @@ private:
     static constexpr float ARM_SWEEP_M2_RATE_THRESHOLD_NM    = 100.0f; // 實質 disable
 
     // Cleaning sweep at the end of each step_up / step_down (2026-05-21 per user)
-    static constexpr int ARM_CLEAN_WALL_MM = 400;  // DEPLOY wall distance (fixed); 2026-08-28 per user: 380→400；2026-07-27 per user: 360→380；2026-07-24: 330→360 per user，手臂已實機裝上；2026-06-02: 350→330 試「上貼下不貼」是不是 M1 過度外擺造成；2026-05-27: 300→350 拉大讓 M1 往前推更多（靠刮刀座彈性吸收過壓）
+    // DEPLOY wall distance (fixed)。2026-08-29 起同源於 ARM_WALL_MM_DEFAULT。
+    // 沿革：2026-08-28 per user 380→400；2026-07-27 per user 360→380；2026-07-24 330→360 per user，手臂已實機裝上；2026-06-02 350→330 試「上貼下不貼」是不是 M1 過度外擺造成；2026-05-27 300→350 拉大讓 M1 往前推更多（靠刮刀座彈性吸收過壓）
+    static constexpr int ARM_CLEAN_WALL_MM = ARM_WALL_MM_DEFAULT;
     static constexpr int ARM_CLEAN_ROUNDS  = 1;    // wet+dry rounds per step
 
     // Vacuum
@@ -1134,7 +1157,13 @@ private:
     static constexpr double OBSTACLE_REGRESS_MARGIN_CM   = 0.3;
     // DISABLE_POS_ERROR_LIMIT_DEG: 2026-05-18 起 obstacle 路徑 A 拿掉 pos_error
     // AND 條件、改純電流判定 → 此常數目前未使用。保留供未來若要恢復 pos_err gate。
-    static constexpr double DISABLE_POS_ERROR_LIMIT_DEG  = 5.0;     // (currently unused)
+    //
+    // 🔴 [2026-08-29] 補上「所以現在是什麼狀態」——原註解只說了這個常數沒被用，
+    //    沒說**後果**：obstacle 偵測目前**純靠相電流**（DISABLE_PHASE_CURRENT_LIMIT_MA），
+    //    位置誤差那一道閘**不存在**。這不是缺陷（是 2026-05-18 的刻意決定），
+    //    但讀的人若只掃過常數名稱，很容易以為「有 pos_error 保護」。
+    //    ⚠️ 保留這個常數本身沒有成本，但它讓「安全常數群」看起來比實際多一道。
+    static constexpr double DISABLE_POS_ERROR_LIMIT_DEG  = 5.0;     // ⛔ 未使用，見上方
     static constexpr int    PUSHER_RPM_DISABLE_SLOW      = 50;   // Phase 2 慢速 RPM
     static constexpr int    PHASE1_BUFFER_PULSES         = 3000; // 4500→3000 (2026-05-18): Phase 1 快伸到 preset-1.0cm（原 1.5cm）。把 0.5cm 從慢 phase 搬到快 phase 加速伸腳。配 INCR 3000 → iter 0 剛好推到 preset、iter 1 = preset+1cm
     static constexpr int    DISABLE_PRE_DISABLE_DELAY_MS = 100;  // push 完到 disable EN 之間的緩衝（讓 cup 在馬達 holding 下接觸牆面）(2026-05-28: 200→100，實機觀察 stable 訊息瞬間印，200ms 過保守)
@@ -1584,7 +1613,10 @@ private:
     // is tagged for batch deletion.
     // ============================================================
     static constexpr bool ARM_ROPE_PROTECTION       = true;
-    static constexpr int  ARM_ROPE_PROTECT_WALL_MM  = 400;   // 2026-08-28 per user: 380→400，跟 ARM_CLEAN_WALL_MM 統一；2026-07-27 per user: 360→380；2026-07-24: 250→360 per user；2026-05-22: 300→250 per user
+    // 2026-08-29 起同源於 ARM_WALL_MM_DEFAULT（原註解的「跟 ARM_CLEAN_WALL_MM 統一」
+    // 是人工同步的意圖，現在有共同起點了）。
+    // 沿革：2026-08-28 per user 380→400；2026-07-27 per user 360→380；2026-07-24 250→360 per user；2026-05-22 300→250 per user
+    static constexpr int  ARM_ROPE_PROTECT_WALL_MM  = ARM_WALL_MM_DEFAULT;
     enum class ArmStowState { Unknown, Center, Parked };
     // [2026-08-28] cmd_attach 的部分密封顆數，用來讓回傳字串帶出這個資訊
     // （原本只走 console + EVT，回覆是乾淨的 "OK attached"）。

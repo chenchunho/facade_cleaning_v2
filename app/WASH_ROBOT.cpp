@@ -1303,27 +1303,26 @@ bool WashRobot::load_settings_file_(const std::string& path) {
 // constants in WASH_ROBOT.h (STEP_CM_MIN, IMU_HYSTERESIS_DEG, etc.) remain
 // compile-time constexpr.
 // ====================================================================
-#define ARM_CLEAN_WALL_MM              (settings_.arm_clean_wall_mm.load())
-#define PUSHER_EXTEND_FEET_PULSE       (settings_.pusher_extend_feet_pulse.load())
-#define PUSHER_EXTEND_FEET_PULSE_LOWER (settings_.pusher_extend_feet_pulse_lower.load())
-#define PUSHER_EXTEND_BODY_PULSE       (settings_.pusher_extend_body_pulse.load())
-#define PUSHER_EXTEND_BODY_PULSE_SHORT (settings_.pusher_extend_body_pulse_short.load())
-#define VACUUM_SEAL_DEEP_KPA           (settings_.vacuum_seal_deep_kpa.load())
-#define REALIGN_THRESHOLD_CM           (settings_.realign_threshold_cm.load())
-#define REALIGN_THRESHOLD_MEAN_CM      (settings_.realign_threshold_mean_cm.load())
-#define ROPE_WEIGHT_LIMIT_KG_PER_SENSOR_ATTACHED (settings_.rope_weight_limit_attached.load())
-#define ROPE_WEIGHT_LIMIT_KG_PER_SENSOR_HANGING  (settings_.rope_weight_limit_hanging.load())
-#define STEP_CM_DEFAULT                (settings_.step_cm_default.load())
-#define STEP_CM_MAX                    (settings_.step_cm_max.load())
-#define VACUUM_PLATEAU_MS              (settings_.vacuum_plateau_ms.load())
-#define VACUUM_BACKUP_CM               (settings_.vacuum_backup_cm.load())
-#define RETRACT_SLOW_PEEL_CM           (settings_.retract_slow_peel_cm.load())
-#define DISABLE_RETRY_MAX_ITERS        (settings_.disable_retry_max_iters.load())
-#define PUSHER_RPM_DISABLE_SLOW        (settings_.pusher_rpm_disable_slow.load())
-#define DISABLE_PHASE_CURRENT_LIMIT_MA (settings_.disable_phase_current_limit_ma.load())
-#define STEP_MARGIN_CM                 (settings_.step_margin_cm.load())
-#define IMU_ASK_DEG                    (settings_.imu_ask_deg.load())
-#define ARM_DEPLOY_POS_TOL_RAD         (settings_.arm_deploy_pos_tol_rad.load())
+// [2026-08-29] 這裡原本有 21 個「與 static constexpr 同名」的 #define，
+// 把常數名稱在本行之後重新定義成 settings_.xxx.load()。其中包含安全互鎖
+// （ROPE_WEIGHT_LIMIT_* 繩重上限、DISABLE_PHASE_CURRENT_LIMIT_MA 撞障礙物電流保險）。
+//
+// 🔴 問題不在它會壞，而在**同一個識別字在檔案前後半是兩個不同的東西**：
+//    本行之前拿到編譯期預設值，之後拿到操作者可調的現值。從 WASH_ROBOT.h
+//    讀到 `static constexpr double ... = 40.0;` 完全看不出這件事。
+//    當時沒有 bug——前半的用法正好都合理需要預設值（初始化 settings、印
+//    「現值:預設值」）——但任何人在本行之前新增引用，會**靜默拿到預設值而非現值**，
+//    而安全門檻讀到預設值是錯的那個方向。編譯器不會警告、執行期沒有訊號。
+//
+// 改法：巨集全部移除，要現值的地方明寫 (settings_.xxx.load())。
+// 之後常數名稱**在任何位置都只有一個意思**（編譯期預設值），歧義消失。
+// 📌 預處理輸出逐位元不變——寫下去的正是巨集原本展開的內容，已用
+//    harness/prove_noop.sh 驗證。
+//
+// ⚠️ PUSHER_EXTEND_BODY_PULSE_SHORT 的巨集一處都沒被用到：那個 setting 可設定、
+//    會出現在 status、會存檔，但沒有任何程式碼讀它（v1 body 推桿殘留，v2 已無）。
+//    操作者改了會看到值變了，機器完全不理。刻意不動——移除可設定的 key 會改變
+//    指令介面＝功能改變，不是整理。已入待辦。
 
 bool WashRobot::save_settings_file_(const std::string& path) const {
     std::ofstream f(path);
@@ -1841,8 +1840,8 @@ bool WashRobot::verify_arm_deploy_(const std::string& slot, int wall_mm) {
     std::cout << "[arm_protect] verify_deploy " << slot << " wall=" << wall_mm
               << " M1 actual=" << std::fixed << std::setprecision(3) << actual_rad
               << " expected=" << expected_rad
-              << " delta=" << delta << " rad (tol=" << ARM_DEPLOY_POS_TOL_RAD << ")\n";
-    if (delta > ARM_DEPLOY_POS_TOL_RAD) {
+              << " delta=" << delta << " rad (tol=" << (settings_.arm_deploy_pos_tol_rad.load()) << ")\n";
+    if (delta > (settings_.arm_deploy_pos_tol_rad.load())) {
         std::cerr << "[arm_protect] DEPLOY " << slot << " hit obstacle — M1 stopped "
                   << (delta * ARM_M1_LENGTH_MM) << " mm short of expected wall\n";
         return true;
@@ -2643,13 +2642,13 @@ double WashRobot::rope_weight_limit_per_sensor_kg_() const {
         case State::Paused:
         case State::PausedOnError:
         case State::Balancing:
-            return ROPE_WEIGHT_LIMIT_KG_PER_SENSOR_ATTACHED;
+            return (settings_.rope_weight_limit_attached.load());
         case State::Idle:
         case State::Ready:
         case State::ReturningHome:
         case State::Error:
         default:
-            return ROPE_WEIGHT_LIMIT_KG_PER_SENSOR_HANGING;
+            return (settings_.rope_weight_limit_hanging.load());
     }
 }
 
@@ -3067,7 +3066,7 @@ void WashRobot::imu_monitor_loop_() {
         }
 
         // --- ASK threshold ---
-        if (avg >= IMU_ASK_DEG && avg < IMU_EMERGENCY_DEG) {
+        if (avg >= (settings_.imu_ask_deg.load()) && avg < IMU_EMERGENCY_DEG) {
             over_ask_ms += SAMPLE_MS;
             if (over_ask_ms >= SUSTAIN_MS && !ask_sent) {
                 ask_sent        = true;
@@ -3087,7 +3086,7 @@ void WashRobot::imu_monitor_loop_() {
             }
         } else {
             over_ask_ms = 0;
-            if (avg < IMU_ASK_DEG - IMU_HYSTERESIS_DEG) {
+            if (avg < (settings_.imu_ask_deg.load()) - IMU_HYSTERESIS_DEG) {
                 if (ask_sent) {
                     std::lock_guard<std::mutex> lk(state_mtx_);
                     if (state_.load() == State::WaitingConfirm)
@@ -3843,11 +3842,11 @@ bool WashRobot::pusher_extend_with_disable_seal_(const std::vector<int>& slaves,
         sleep_ms_(200);
         int fresh_p = read_pressure_(slaves[i]);
         int errf    = M_(slaves[i]).error_flag;
-        if (!errf && fresh_p <= VACUUM_SEAL_DEEP_KPA) {
+        if (!errf && fresh_p <= (settings_.vacuum_seal_deep_kpa.load())) {
             done[i] = true;
             std::cout << "[disable_seal:" << slaves[i]
                       << "] RESCUED (group-frozen) — pulse=" << final_pulse[i]
-                      << " fresh_p=" << fresh_p << "kPa <= " << VACUUM_SEAL_DEEP_KPA
+                      << " fresh_p=" << fresh_p << "kPa <= " << (settings_.vacuum_seal_deep_kpa.load())
                       << " → SEAL not weak_seal\n";
         } else {
             weak_seal[i] = true;
@@ -3925,11 +3924,11 @@ bool WashRobot::pusher_extend_with_disable_seal_(const std::vector<int>& slaves,
     // (going straight to WAIT_SEAL vacuum check). Saves the ~1s iter 0 slow push
     // for cups already at the wall + reduces cumulative wall-press stress on cup.
     for (size_t i = 0; i < N; ++i) {
-        if (phase1_peak_I[i] >= DISABLE_PHASE_CURRENT_LIMIT_MA) {
+        if (phase1_peak_I[i] >= (settings_.disable_phase_current_limit_ma.load())) {
             endpoint_stalled[i] = true;
             std::cout << "[disable_seal:" << slaves[i] << "] Phase 1 already at wall"
                       << " (peakI=" << phase1_peak_I[i] << "mA >= "
-                      << DISABLE_PHASE_CURRENT_LIMIT_MA
+                      << (settings_.disable_phase_current_limit_ma.load())
                       << ") — skip iter 0 push, wait vacuum only\n";
         }
     }
@@ -3961,7 +3960,7 @@ bool WashRobot::pusher_extend_with_disable_seal_(const std::vector<int>& slaves,
     // 沒推到位 / disable 期間 encoder 飄走，下次 push 會把馬達拉回到設計位置。
     // [2026-07-14] max_iters override (0 = use DISABLE_RETRY_MAX_ITERS). feet_topup_
     // passes a small cap so the 2nd-cup top-up gives up fast → shorter switch gap.
-    const int MAX_ITERS = (max_iters > 0) ? max_iters : DISABLE_RETRY_MAX_ITERS;
+    const int MAX_ITERS = (max_iters > 0) ? max_iters : (settings_.disable_retry_max_iters.load());
     const int INCR_PULSE = DISABLE_RETRY_INCR_PULSE;
     const int wait_seal_ms = VACUUM_DEEPEN_TIMEOUT_MS;
 
@@ -3999,7 +3998,7 @@ bool WashRobot::pusher_extend_with_disable_seal_(const std::vector<int>& slaves,
             if (done[i]) continue;
             int p = read_pressure_(slaves[i]);
             const bool p_ok = (M_(slaves[i]).error_flag == 0);
-            if (p_ok && p <= VACUUM_SEAL_DEEP_KPA) {
+            if (p_ok && p <= (settings_.vacuum_seal_deep_kpa.load())) {
                 if (Z_(slaves[i]).get_system_status() == false) {
                     final_pulse[i] = deg_to_pulse(Z_(slaves[i]).status.real_pos);
                 }
@@ -4070,7 +4069,7 @@ bool WashRobot::pusher_extend_with_disable_seal_(const std::vector<int>& slaves,
             // Bump intended target by INCR_PULSE — next iter will advance by another INCR_PULSE.
             intended_target[i] += INCR_PULSE;
             if (Z_(slaves[i]).motion_control_pos_mode_nowait(
-                    /*fwd*/0, acc, PUSHER_RPM_DISABLE_SLOW,
+                    /*fwd*/0, acc, (settings_.pusher_rpm_disable_slow.load()),
                     intended_target[i], /*absolute*/1, /*sync*/1, /*retry*/2)) {
                 // pos_mode FAIL — print status diagnostic to identify cause
                 // (EN bit / stall_flag / position-error / phase-current).
@@ -4163,7 +4162,7 @@ bool WashRobot::pusher_extend_with_disable_seal_(const std::vector<int>& slaves,
                 //   (2) position gate — jammed far short of preset = obstacle;
                 //       jammed near preset (and not regressed) = pressed the
                 //       WALL (intended endpoint), defer.
-                if (st.phase_current > DISABLE_PHASE_CURRENT_LIMIT_MA) {
+                if (st.phase_current > (settings_.disable_phase_current_limit_ma.load())) {
                     const uint16_t trig_I = st.phase_current;   // capture before re-read
                     Z_(s).emergency_stop(false);
                     sleep_ms_(30);
@@ -4358,7 +4357,7 @@ bool WashRobot::pusher_extend_with_disable_seal_(const std::vector<int>& slaves,
                 last_raw_p[i] = p;
                 if (M_(slaves[i]).error_flag != 0) { read_err_cnt[i]++; continue; }
                 read_ok_cnt[i]++;
-                if (p <= VACUUM_SEAL_DEEP_KPA) {
+                if (p <= (settings_.vacuum_seal_deep_kpa.load())) {
                     Z_(slaves[i]).motion_control_driver_EN(true);
                     sleep_ms_(50);
                     if (Z_(slaves[i]).get_system_status() == false) {
@@ -4396,7 +4395,7 @@ bool WashRobot::pusher_extend_with_disable_seal_(const std::vector<int>& slaves,
                     bool fast_skip = (!endpoint_stalled[i]
                                        && wait_e >= VACUUM_NO_CONTACT_FAST_MS
                                        && best_p[i] >= VACUUM_NO_CONTACT_KPA);
-                    bool slow_plateau = (wait_e - last_improve_ms[i] >= VACUUM_PLATEAU_MS);
+                    bool slow_plateau = (wait_e - last_improve_ms[i] >= (settings_.vacuum_plateau_ms.load()));
                     if (fast_skip || slow_plateau) {
                         plateaued[i] = true;
                         const char* reason = fast_skip ? "no contact" : "no progress";
@@ -4432,11 +4431,11 @@ bool WashRobot::pusher_extend_with_disable_seal_(const std::vector<int>& slaves,
                             sleep_ms_(200);
                             int fresh_p = read_pressure_(slaves[i]);
                             int errf    = M_(slaves[i]).error_flag;
-                            if (!errf && fresh_p <= VACUUM_SEAL_DEEP_KPA) {
+                            if (!errf && fresh_p <= (settings_.vacuum_seal_deep_kpa.load())) {
                                 done[i] = true;
                                 std::cout << "[disable_seal:" << slaves[i] << "] iter " << iter
                                           << " RESCUED at wall — fresh_p=" << fresh_p
-                                          << "kPa <= " << VACUUM_SEAL_DEEP_KPA
+                                          << "kPa <= " << (settings_.vacuum_seal_deep_kpa.load())
                                           << " → SEAL not weak_seal (polling missed it,"
                                           " likely cli_22_ stale read)\n";
                             } else {
@@ -4490,12 +4489,12 @@ bool WashRobot::pusher_extend_with_disable_seal_(const std::vector<int>& slaves,
             sleep_ms_(200);
             int fresh_p = read_pressure_(slaves[i]);
             int errf    = M_(slaves[i]).error_flag;
-            if (!errf && fresh_p <= VACUUM_SEAL_DEEP_KPA) {
+            if (!errf && fresh_p <= (settings_.vacuum_seal_deep_kpa.load())) {
                 done[i] = true;
                 std::cout << "[disable_seal:" << slaves[i]
                           << "] RESCUED MAX_ITERS — pulse=" << final_pulse[i]
                           << " fresh_p=" << fresh_p << "kPa <= "
-                          << VACUUM_SEAL_DEEP_KPA
+                          << (settings_.vacuum_seal_deep_kpa.load())
                           << " → SEAL not weak_seal (polling missed it,"
                           " likely cli_22_ stale read or slow JC100 response)\n";
             } else {
@@ -4648,8 +4647,8 @@ int WashRobot::group_valve_ch_(const std::string& group) {
 // 📌 這裡吃的是 RF1/LF1（上）與 RF2/LF2（下），所以 2026-08-28 修正左右歸屬時
 //    這段一行都不用改 —— 結構本來就對，錯的只有常數的值。
 int WashRobot::preset_extend_pulse_for_slave_(int slave) const {
-    if (slave == ZDT_RF1 || slave == ZDT_LF1) return PUSHER_EXTEND_FEET_PULSE;          // upper = 5,6
-    if (slave == ZDT_RF2 || slave == ZDT_LF2) return PUSHER_EXTEND_FEET_PULSE_LOWER;    // lower = 7,8
+    if (slave == ZDT_RF1 || slave == ZDT_LF1) return (settings_.pusher_extend_feet_pulse.load());          // upper = 5,6
+    if (slave == ZDT_RF2 || slave == ZDT_LF2) return (settings_.pusher_extend_feet_pulse_lower.load());    // lower = 7,8
     return PUSHER_EXTEND_PULSE;   // fallback
 }
 
@@ -5968,7 +5967,7 @@ std::string WashRobot::do_step_down_(bool skip_cleaning_sweep,
         // VACUUM_BACKUP_CM is a settings_.<...>.load() macro (non-static member →
         // needs `this`); resolve it here (run_side's [&] holds this) so the inner
         // lambdas capture plain doubles and don't touch settings_ without `this`.
-        const double vac_backup_cm    = VACUUM_BACKUP_CM;
+        const double vac_backup_cm    = (settings_.vacuum_backup_cm.load());
         const double rescue_backup_cm = OBSTACLE_RESCUE_BACKUP_CM;
         auto backup = [backup_cm, vac_backup_cm]   (bool dry_run) { return backup_cm(vac_backup_cm,    "",        dry_run); };
         auto rescue = [backup_cm, rescue_backup_cm](bool dry_run) { return backup_cm(rescue_backup_cm, "_rescue", dry_run); };
@@ -6090,9 +6089,9 @@ std::string WashRobot::do_step_down_(bool skip_cleaning_sweep,
     // cmd_arm_clean_sweep's comment on why pressure_poll_loop_ must skip JC100
     // reads during it) and is only cleared after it returns.
     if (!skip_cleaning_sweep) {
-        std::cout << "[step_down] start cleaning sweep (wall_mm=" << ARM_CLEAN_WALL_MM
+        std::cout << "[step_down] start cleaning sweep (wall_mm=" << (settings_.arm_clean_wall_mm.load())
                   << " rounds=" << ARM_CLEAN_ROUNDS << ")\n";
-        std::string clean_reply = do_arm_clean_sweep_(ARM_CLEAN_WALL_MM, ARM_CLEAN_ROUNDS);
+        std::string clean_reply = do_arm_clean_sweep_((settings_.arm_clean_wall_mm.load()), ARM_CLEAN_ROUNDS);
         motion_active_ = false;
         if (clean_reply.rfind("OK", 0) != 0) {
             std::cout << "[step_down] cleaning sweep FAIL: " << clean_reply;
@@ -6114,10 +6113,10 @@ std::string WashRobot::cmd_step_down(int cm) {
     // DISABLE STATUS CHECK
     //if (cur != State::Attached) return state_violation_(cur);
     if (cm > 0) {
-        if (cm < STEP_CM_MIN || cm > STEP_CM_MAX) {
+        if (cm < STEP_CM_MIN || cm > (settings_.step_cm_max.load())) {
             std::ostringstream oss;
             oss << "ERR step_cm_out_of_range " << cm
-                << " (allowed " << STEP_CM_MIN << ".." << STEP_CM_MAX << ")\n";
+                << " (allowed " << STEP_CM_MIN << ".." << (settings_.step_cm_max.load()) << ")\n";
             return oss.str();
         }
         step_cm_.store(cm);
@@ -6161,10 +6160,10 @@ std::string WashRobot::cmd_step_down(int cm) {
 std::string WashRobot::cmd_step_down_with_sweep(int cm) {
     StepInProgressGuard _sip_guard{step_in_progress_};
     if (cm > 0) {
-        if (cm < STEP_CM_MIN || cm > STEP_CM_MAX) {
+        if (cm < STEP_CM_MIN || cm > (settings_.step_cm_max.load())) {
             std::ostringstream oss;
             oss << "ERR step_cm_out_of_range " << cm
-                << " (allowed " << STEP_CM_MIN << ".." << STEP_CM_MAX << ")\n";
+                << " (allowed " << STEP_CM_MIN << ".." << (settings_.step_cm_max.load()) << ")\n";
             return oss.str();
         }
         step_cm_.store(cm);
@@ -6178,7 +6177,7 @@ std::string WashRobot::cmd_step_down_with_sweep(int cm) {
     std::atomic<bool> sweep_keep_going{true};
 
     auto fut_sweep = std::async(std::launch::async, [this, &sweep_keep_going]() -> std::string {
-        return do_arm_clean_sweep_continuous_(ARM_CLEAN_WALL_MM, sweep_keep_going);
+        return do_arm_clean_sweep_continuous_((settings_.arm_clean_wall_mm.load()), sweep_keep_going);
     });
 
     struct SweepJoin {
@@ -6348,7 +6347,7 @@ std::string WashRobot::do_step_up_(bool skip_cleaning_sweep,
         // VACUUM_BACKUP_CM is a settings_.<...>.load() macro (non-static member →
         // needs `this`); resolve it here (run_side's [&] holds this) so the inner
         // lambdas capture plain doubles and don't touch settings_ without `this`.
-        const double vac_backup_cm    = VACUUM_BACKUP_CM;
+        const double vac_backup_cm    = (settings_.vacuum_backup_cm.load());
         const double rescue_backup_cm = OBSTACLE_RESCUE_BACKUP_CM;
         auto backup = [backup_cm, vac_backup_cm]   (bool dry_run) { return backup_cm(vac_backup_cm,    "",        dry_run); };
         auto rescue = [backup_cm, rescue_backup_cm](bool dry_run) { return backup_cm(rescue_backup_cm, "_rescue", dry_run); };
@@ -6454,9 +6453,9 @@ std::string WashRobot::do_step_up_(bool skip_cleaning_sweep,
     // do_step_down_ (see its comment for why motion_active_ stays true through
     // the sweep call).
     if (!skip_cleaning_sweep) {
-        std::cout << "[step_up] start cleaning sweep (wall_mm=" << ARM_CLEAN_WALL_MM
+        std::cout << "[step_up] start cleaning sweep (wall_mm=" << (settings_.arm_clean_wall_mm.load())
                   << " rounds=" << ARM_CLEAN_ROUNDS << ")\n";
-        std::string clean_reply = do_arm_clean_sweep_(ARM_CLEAN_WALL_MM, ARM_CLEAN_ROUNDS);
+        std::string clean_reply = do_arm_clean_sweep_((settings_.arm_clean_wall_mm.load()), ARM_CLEAN_ROUNDS);
         motion_active_ = false;
         if (clean_reply.rfind("OK", 0) != 0) {
             std::cout << "[step_up] cleaning sweep FAIL: " << clean_reply;
@@ -6614,7 +6613,7 @@ std::string WashRobot::do_cross_obstacle_(bool up) {
             cumulative_backup_cm += mv_cm;
             return "";
         };
-        const double vac_backup_cm    = VACUUM_BACKUP_CM;
+        const double vac_backup_cm    = (settings_.vacuum_backup_cm.load());
         const double rescue_backup_cm = OBSTACLE_RESCUE_BACKUP_CM;
         auto backup = [backup_cm, vac_backup_cm]   (bool dry_run) { return backup_cm(vac_backup_cm,    "",        dry_run); };
         auto rescue = [backup_cm, rescue_backup_cm](bool dry_run) { return backup_cm(rescue_backup_cm, "_rescue", dry_run); };
@@ -7241,9 +7240,9 @@ std::string WashRobot::do_feet_realign_(bool apply_threshold, bool caller_holds_
             sum_abs += d_cm; ++n;
         }
         const double mean_abs = (n > 0) ? sum_abs / n : 0.0;
-        if (max_abs <= REALIGN_THRESHOLD_CM && mean_abs <= REALIGN_THRESHOLD_MEAN_CM) {
-            std::cout << "[realign] threshold not met (max=" << max_abs << "cm<=" << REALIGN_THRESHOLD_CM
-                      << ", mean=" << mean_abs << "cm<=" << REALIGN_THRESHOLD_MEAN_CM << ") — skip\n";
+        if (max_abs <= (settings_.realign_threshold_cm.load()) && mean_abs <= (settings_.realign_threshold_mean_cm.load())) {
+            std::cout << "[realign] threshold not met (max=" << max_abs << "cm<=" << (settings_.realign_threshold_cm.load())
+                      << ", mean=" << mean_abs << "cm<=" << (settings_.realign_threshold_mean_cm.load()) << ") — skip\n";
             if (!caller_holds_lock) motion_active_ = false;
             return "";   // no motion
         }
@@ -7471,10 +7470,10 @@ std::string WashRobot::cmd_step_up(int cm) {
     // DISABLE STATUS CHECK
     // if (cur != State::Attached) return state_violation_(cur);
     if (cm > 0) {
-        if (cm < STEP_CM_MIN || cm > STEP_CM_MAX) {
+        if (cm < STEP_CM_MIN || cm > (settings_.step_cm_max.load())) {
             std::ostringstream oss;
             oss << "ERR step_cm_out_of_range " << cm
-                << " (allowed " << STEP_CM_MIN << ".." << STEP_CM_MAX << ")\n";
+                << " (allowed " << STEP_CM_MIN << ".." << (settings_.step_cm_max.load()) << ")\n";
             return oss.str();
         }
         step_cm_.store(cm);
@@ -7510,10 +7509,10 @@ std::string WashRobot::cmd_step_up(int cm) {
 std::string WashRobot::cmd_cross_obstacle_down(int cm) {
     StepInProgressGuard _sip_guard{step_in_progress_};
     if (cm > 0) {
-        if (cm < STEP_CM_MIN || cm > STEP_CM_MAX) {
+        if (cm < STEP_CM_MIN || cm > (settings_.step_cm_max.load())) {
             std::ostringstream oss;
             oss << "ERR step_cm_out_of_range " << cm
-                << " (allowed " << STEP_CM_MIN << ".." << STEP_CM_MAX << ")\n";
+                << " (allowed " << STEP_CM_MIN << ".." << (settings_.step_cm_max.load()) << ")\n";
             return oss.str();
         }
         step_cm_.store(cm);
@@ -7536,10 +7535,10 @@ std::string WashRobot::cmd_cross_obstacle_down(int cm) {
 std::string WashRobot::cmd_cross_obstacle_up(int cm) {
     StepInProgressGuard _sip_guard{step_in_progress_};
     if (cm > 0) {
-        if (cm < STEP_CM_MIN || cm > STEP_CM_MAX) {
+        if (cm < STEP_CM_MIN || cm > (settings_.step_cm_max.load())) {
             std::ostringstream oss;
             oss << "ERR step_cm_out_of_range " << cm
-                << " (allowed " << STEP_CM_MIN << ".." << STEP_CM_MAX << ")\n";
+                << " (allowed " << STEP_CM_MIN << ".." << (settings_.step_cm_max.load()) << ")\n";
             return oss.str();
         }
         step_cm_.store(cm);
@@ -7566,10 +7565,10 @@ std::string WashRobot::cmd_cross_obstacle_up(int cm) {
 std::string WashRobot::cmd_step_down_sync(int cm) {
     StepInProgressGuard _sip_guard{step_in_progress_};
     if (cm > 0) {
-        if (cm < STEP_CM_MIN || cm > STEP_CM_MAX) {
+        if (cm < STEP_CM_MIN || cm > (settings_.step_cm_max.load())) {
             std::ostringstream oss;
             oss << "ERR step_cm_out_of_range " << cm
-                << " (allowed " << STEP_CM_MIN << ".." << STEP_CM_MAX << ")\n";
+                << " (allowed " << STEP_CM_MIN << ".." << (settings_.step_cm_max.load()) << ")\n";
             return oss.str();
         }
         step_cm_.store(cm);
@@ -7592,10 +7591,10 @@ std::string WashRobot::cmd_step_down_sync(int cm) {
 std::string WashRobot::cmd_step_up_sync(int cm) {
     StepInProgressGuard _sip_guard{step_in_progress_};
     if (cm > 0) {
-        if (cm < STEP_CM_MIN || cm > STEP_CM_MAX) {
+        if (cm < STEP_CM_MIN || cm > (settings_.step_cm_max.load())) {
             std::ostringstream oss;
             oss << "ERR step_cm_out_of_range " << cm
-                << " (allowed " << STEP_CM_MIN << ".." << STEP_CM_MAX << ")\n";
+                << " (allowed " << STEP_CM_MIN << ".." << (settings_.step_cm_max.load()) << ")\n";
             return oss.str();
         }
         step_cm_.store(cm);
@@ -7622,10 +7621,10 @@ std::string WashRobot::cmd_step_up_sync(int cm) {
 std::string WashRobot::cmd_step_up_with_sweep(int cm) {
     StepInProgressGuard _sip_guard{step_in_progress_};
     if (cm > 0) {
-        if (cm < STEP_CM_MIN || cm > STEP_CM_MAX) {
+        if (cm < STEP_CM_MIN || cm > (settings_.step_cm_max.load())) {
             std::ostringstream oss;
             oss << "ERR step_cm_out_of_range " << cm
-                << " (allowed " << STEP_CM_MIN << ".." << STEP_CM_MAX << ")\n";
+                << " (allowed " << STEP_CM_MIN << ".." << (settings_.step_cm_max.load()) << ")\n";
             return oss.str();
         }
         step_cm_.store(cm);
@@ -7641,7 +7640,7 @@ std::string WashRobot::cmd_step_up_with_sweep(int cm) {
 
     // Launch 背景 sweep
     auto fut_sweep = std::async(std::launch::async, [this, &sweep_keep_going]() -> std::string {
-        return do_arm_clean_sweep_continuous_(ARM_CLEAN_WALL_MM, sweep_keep_going);
+        return do_arm_clean_sweep_continuous_((settings_.arm_clean_wall_mm.load()), sweep_keep_going);
     });
 
     // RAII guard：任何 return 路徑都保證 sweep 收尾。先設 keep_going=false，再 wait。
@@ -7698,10 +7697,10 @@ std::string WashRobot::cmd_step_up_with_sweep(int cm) {
 std::string WashRobot::cmd_step_up_sweep_after_feet(int cm) {
     StepInProgressGuard _sip_guard{step_in_progress_};
     if (cm > 0) {
-        if (cm < STEP_CM_MIN || cm > STEP_CM_MAX) {
+        if (cm < STEP_CM_MIN || cm > (settings_.step_cm_max.load())) {
             std::ostringstream oss;
             oss << "ERR step_cm_out_of_range " << cm
-                << " (allowed " << STEP_CM_MIN << ".." << STEP_CM_MAX << ")\n";
+                << " (allowed " << STEP_CM_MIN << ".." << (settings_.step_cm_max.load()) << ")\n";
             return oss.str();
         }
         step_cm_.store(cm);
@@ -7731,7 +7730,7 @@ std::string WashRobot::cmd_step_up_sweep_after_feet(int cm) {
     auto after_feet_hook = [this, &sweep_keep_going, &fut_sweep]() {
         std::cout << "[step_up+sweep_af] feet rail done → launching 1-round sweep (continuous, max_rounds=1)\n";
         fut_sweep = std::async(std::launch::async, [this, &sweep_keep_going]() -> std::string {
-            return do_arm_clean_sweep_continuous_(ARM_CLEAN_WALL_MM, sweep_keep_going, /*max_rounds=*/1);
+            return do_arm_clean_sweep_continuous_((settings_.arm_clean_wall_mm.load()), sweep_keep_going, /*max_rounds=*/1);
         });
     };
 
@@ -7773,10 +7772,10 @@ std::string WashRobot::cmd_step_up_sweep_after_feet(int cm) {
 std::string WashRobot::cmd_step_down_sweep_after_feet(int cm) {
     StepInProgressGuard _sip_guard{step_in_progress_};
     if (cm > 0) {
-        if (cm < STEP_CM_MIN || cm > STEP_CM_MAX) {
+        if (cm < STEP_CM_MIN || cm > (settings_.step_cm_max.load())) {
             std::ostringstream oss;
             oss << "ERR step_cm_out_of_range " << cm
-                << " (allowed " << STEP_CM_MIN << ".." << STEP_CM_MAX << ")\n";
+                << " (allowed " << STEP_CM_MIN << ".." << (settings_.step_cm_max.load()) << ")\n";
             return oss.str();
         }
         step_cm_.store(cm);
@@ -7802,7 +7801,7 @@ std::string WashRobot::cmd_step_down_sweep_after_feet(int cm) {
     auto after_feet_hook = [this, &sweep_keep_going, &fut_sweep]() {
         std::cout << "[step_down+sweep_af] feet rail home → launching 1-round sweep (continuous, max_rounds=1)\n";
         fut_sweep = std::async(std::launch::async, [this, &sweep_keep_going]() -> std::string {
-            return do_arm_clean_sweep_continuous_(ARM_CLEAN_WALL_MM, sweep_keep_going, /*max_rounds=*/1);
+            return do_arm_clean_sweep_continuous_((settings_.arm_clean_wall_mm.load()), sweep_keep_going, /*max_rounds=*/1);
         });
     };
 
@@ -7852,10 +7851,10 @@ std::string WashRobot::cmd_step_down_sweep_after_feet(int cm) {
 std::string WashRobot::cmd_step_up_sweep_before_after(int cm) {
     StepInProgressGuard _sip_guard{step_in_progress_};
     if (cm > 0) {
-        if (cm < STEP_CM_MIN || cm > STEP_CM_MAX) {
+        if (cm < STEP_CM_MIN || cm > (settings_.step_cm_max.load())) {
             std::ostringstream oss;
             oss << "ERR step_cm_out_of_range " << cm
-                << " (allowed " << STEP_CM_MIN << ".." << STEP_CM_MAX << ")\n";
+                << " (allowed " << STEP_CM_MIN << ".." << (settings_.step_cm_max.load()) << ")\n";
             return oss.str();
         }
         step_cm_.store(cm);
@@ -7882,7 +7881,7 @@ std::string WashRobot::cmd_step_up_sweep_before_after(int cm) {
     auto launch_round = [this, &sweep_keep_going]() {
         sweep_keep_going.store(true);
         return std::async(std::launch::async, [this, &sweep_keep_going]() -> std::string {
-            return do_arm_clean_sweep_continuous_(ARM_CLEAN_WALL_MM, sweep_keep_going, /*max_rounds=*/1);
+            return do_arm_clean_sweep_continuous_((settings_.arm_clean_wall_mm.load()), sweep_keep_going, /*max_rounds=*/1);
         });
     };
 
@@ -7939,10 +7938,10 @@ std::string WashRobot::cmd_step_up_sweep_before_after(int cm) {
 std::string WashRobot::cmd_step_down_sweep_before_after(int cm) {
     StepInProgressGuard _sip_guard{step_in_progress_};
     if (cm > 0) {
-        if (cm < STEP_CM_MIN || cm > STEP_CM_MAX) {
+        if (cm < STEP_CM_MIN || cm > (settings_.step_cm_max.load())) {
             std::ostringstream oss;
             oss << "ERR step_cm_out_of_range " << cm
-                << " (allowed " << STEP_CM_MIN << ".." << STEP_CM_MAX << ")\n";
+                << " (allowed " << STEP_CM_MIN << ".." << (settings_.step_cm_max.load()) << ")\n";
             return oss.str();
         }
         step_cm_.store(cm);
@@ -7968,7 +7967,7 @@ std::string WashRobot::cmd_step_down_sweep_before_after(int cm) {
     auto launch_round = [this, &sweep_keep_going]() {
         sweep_keep_going.store(true);
         return std::async(std::launch::async, [this, &sweep_keep_going]() -> std::string {
-            return do_arm_clean_sweep_continuous_(ARM_CLEAN_WALL_MM, sweep_keep_going, /*max_rounds=*/1);
+            return do_arm_clean_sweep_continuous_((settings_.arm_clean_wall_mm.load()), sweep_keep_going, /*max_rounds=*/1);
         });
     };
 
@@ -8050,10 +8049,10 @@ std::string WashRobot::cmd_run(int steps, int cm, const std::string& direction, 
                   << " — sweep deferred (arm not installed in v2), running plain step\n";
 
     if (cm > 0) {
-        if (cm < STEP_CM_MIN || cm > STEP_CM_MAX) {
+        if (cm < STEP_CM_MIN || cm > (settings_.step_cm_max.load())) {
             std::ostringstream oss;
             oss << "ERR step_cm_out_of_range " << cm
-                << " (allowed " << STEP_CM_MIN << ".." << STEP_CM_MAX << ")\n";
+                << " (allowed " << STEP_CM_MIN << ".." << (settings_.step_cm_max.load()) << ")\n";
             return oss.str();
         }
         step_cm_.store(cm);
@@ -8183,11 +8182,11 @@ bool WashRobot::parse_script_csv_(const std::string& csv,
             return false;
         }
 
-        if (cm < STEP_CM_MIN || cm > STEP_CM_MAX) {
+        if (cm < STEP_CM_MIN || cm > (settings_.step_cm_max.load())) {
             err = "step_cm_out_of_range pos=" + std::to_string(token_idx)
                 + " cm=" + std::to_string(cm)
                 + " (allowed " + std::to_string(STEP_CM_MIN) + ".."
-                + std::to_string(STEP_CM_MAX) + ")";
+                + std::to_string((settings_.step_cm_max.load())) + ")";
             out.clear();
             return false;
         }
