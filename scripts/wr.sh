@@ -2,7 +2,7 @@
 # scripts/wr.sh — washrobot Pi bench launcher (tmux)
 #
 # Usage:
-#   ./scripts/wr.sh start    # 全開（main + depth + 一個空 shell；cam1/cam2 暫時註解掉，見下方）
+#   ./scripts/wr.sh start    # 全開（main + depth + 一個空 shell；cam1/cam2 永久不接，見下方）
 #   ./scripts/wr.sh attach   # 進去看 log
 #   ./scripts/wr.sh stop     # 全關
 #   ./scripts/wr.sh status   # 看哪些 window 在跑
@@ -47,9 +47,10 @@ case "${1:-attach}" in
             echo "(override: WR_BIN=/path/to/binary $0 start)" >&2
             exit 1
         fi
-        # [2026-07-21] cam1(.110)/cam2(.111) 暫時沒接實體攝影機，先跳過檢查 +
-        # 不開 window。之後接回去時把下面這段跟 start 區塊裡的 cam1/cam2
-        # tmux new-window 一起取消註解即可。
+        # [2026-07-21] cam1(.110)/cam2(.111) 沒接實體攝影機，先跳過檢查 + 不開 window。
+        # [2026-08-29] 原註解寫「之後接回去時一起取消註解即可」——那與決策相反：
+        # 2026-08-27c 已決定攝影機介面永久移除，cam1/cam2 不會再接回來。
+        # 這兩段保留只為記錄它們曾經怎麼啟動，不是待辦。
         # if [[ ! -f "$WR_CAM" ]]; then
         #     echo "ERROR: frame_capture.py not found: $WR_CAM" >&2
         #     echo "(override: WR_CAM=/path/to/frame_capture.py $0 start)" >&2
@@ -61,7 +62,7 @@ case "${1:-attach}" in
             exit 1
         fi
         tmux new-session -d -s "$SESSION" -n main "$WR_BIN"
-        # cam1/cam2 暫時沒接攝影機，先不開（見上面的檢查也一併註解掉了）
+        # cam1/cam2 永久不接（2026-08-27c 決策），見上方檢查區的說明。
         # tmux new-window  -t "$SESSION"    -n cam1 \
         #     "python3 $WR_CAM --url '$CAM1_URL' --cam-id cam1 --http-port 5004 --out /tmp/cam1_latest.jpg"
         # tmux new-window  -t "$SESSION"    -n cam2 \
