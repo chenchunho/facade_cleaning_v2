@@ -119,6 +119,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **新增 class（新硬體驅動）＝架構變動**：牽涉拓樸、slave ID 配置、初始化流程，要一併更新本檔的架構圖與裝置驅動表
 - **設計 API 之前，先把「我需要的行為是什麼」寫清楚**（要達成什麼動作、時序與錯誤條件），再回頭決定介面長什麼樣 — 不要從「加一個 method」開始想
 
+#### 🔴 契約管了簽名，沒管**語意** — `init()` 的 bool 有兩種相反意思
+
+📌 **2026-08-29 由第一次跑起來的 `test_qx_do24` 揭露。**
+
+`user_lib/` 14 支 driver 的 `init()` 簽名全部是 `bool init(...)`，**但回傳語意有兩派**：
+
+| 語意 | driver | 數量 |
+|---|---|---|
+| **`false` = 成功**（Modbus 風格，`true` = error） | SE3 / MH300 / DM2J / SD76 / DSZL / DY500 / JC100 / PQW / XKC / ZDT / ZS_DIO / CLV900 | **12** |
+| **`true` = 成功**（一般 bool 風格） | **`QX_DO24`**（唯一活著的異類）、`DIHOOL_control`（全 repo 無呼叫端＝死碼） | 2 |
+
+🔴 **從 `.h` 看不出來是哪一派** —— 兩者的宣告逐字相同。呼叫端寫 `if (dev.init(...))`
+在 12 支上的意思是「失敗了」，在 QX_DO24 上的意思是「成功了」。
+
+**目前應用層沒有踩到**（2026-08-29 逐一查過）：SE3/MH300 的呼叫端寫
+`if (!vfd.init(...)) { OK } else { WARN }` ＝ 對；QX_DO24 的唯一呼叫端
+`app/WASH_ROBOT.cpp:204` **根本不檢查回傳值**。**唯一的受害者是那支從未被執行過的測試。**
+
+- 🔴 **新增 driver 一律用 `false` = 成功**（12 比 2，且吊機與本體的主線都在這一派）
+- 🔴 **新增 `QX_DO24` 的呼叫點時特別小心**，或先把它對齊多數派（語意變更，需先確認呼叫端）
+- 📌 **通則**：「簽名相同」不代表「可以照同一種方式呼叫」。介面契約若只釘型別、不釘
+  **成功／失敗的方向**，編譯器一個字都不會說 —— 而錯的那邊會安靜地永遠走錯分支
+
+⚠️ **不要用「函式最後一個 `return`」去判斷是哪一派** —— 2026-08-29 我這樣推，
+把 SE3 / MH300 誤歸成 `true`=成功（它們最後一個 return 是**失敗**路徑）。**逐支讀成功路徑。**
+
 ## Project Overview
 
 C++ 機器人控制系統，包含洗窗機器手臂（wash robot arm）與吊車升降系統（crane lift），目標平台為 Raspberry Pi（ARM/ARM64），透過 Visual Studio 的 "Visual C++ for Linux Development" 從 Windows 交叉編譯部署。

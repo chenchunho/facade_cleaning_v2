@@ -51,10 +51,11 @@
 | ✅ | ~~`web_backend/server.js` 的 **`CRANE_IP` 預設值寫錯**：`192.168.1.101`，吊機實際是 `192.168.1.10`~~ | `web_backend/server.js` config 區 | **已修（`f4e0d02`）**：預設值改 `192.168.1.10`，並在原地留註解說明「這與有線/WiFi 無關，串上 eth 之後照樣會錯」。⚠️ 同區的 `WROBOT_IP = 192.168.1.100` **是對的、刻意不動**（eth 尚未串接，bench 期間用環境變數覆蓋）。🔴 **未在 Pi 上實跑驗證**（且 Pi 上的 `web_ver2` 落後 repo，見下方該列） | work_log 2026-08-28｜2026-08-29 複查原始碼確認 |
 | 🟡 | 兩台 Pi 都沒有 `tmux`／`screen` → runbook §A「一鍵啟動」`scripts/crane.sh`／`wr.sh` **在這兩台跑不起來**。替代方案 `~/bringup/run_bg.sh`（FIFO 背景啟動）已放兩台 | `scripts/*.sh`、`.claude/runbook.md` §A | **未修** ✔ | work_log 2026-08-28 |
 | 🟡 | 緊急收繩按鈕**沒有張力保護**，跟 `motion_flow.md` §8 的安全性描述相反 | `Crane_control_PI/main.cpp` `hold_loop()`:1786、`cmd_manual()` | **部分處理（`b1234ad`）**：`hold_loop()` 新增 `any_manual_motion()` 分支，緊急收繩期間**補上張力警示與廣播**（此前該路徑張力既不檢查也不回報）。🔴 **刻意不呼叫 `hold_all_off()`** —— §8 明訂緊急模式由操作員眼睛判定，自動停止會擋住救援；規格表已就地更正（`2b16601`）。⚠️ **警示的可信度受限於 DSZL 刻度未校正**（見下方 🔴🔴 那列）：「有出現」值得信，「沒出現」不代表安全。🔴 尚未編譯驗證 | ONBOARDING §6｜2026-08-29 複查原始碼確認 |
-| ✅ | ~~`cmd_side_measured()` 進場沒重置 `abort_flag` → 被 stop 過一次後所有 v2 step 指令永久回 `ERR aborted`~~ | `Crane_control_PI/main.cpp` | **已修（`[2026-08-28s]`）**：補上 `abort_flag = false;`，位置與姊妹函式一致（`try_lock` 之後，避免被拒絕的重疊指令清掉他人的 abort）。⚠️ 尚未編譯 | ONBOARDING §1 ＋ work_log 2026-07-15 |
+| ✅ | ~~`cmd_side_measured()` 進場沒重置 `abort_flag` → 被 stop 過一次後所有 v2 step 指令永久回 `ERR aborted`~~ | `Crane_control_PI/main.cpp` | **已修（`[2026-08-28s]`）**：補上 `abort_flag = false;`，位置與姊妹函式一致（`try_lock` 之後，避免被拒絕的重疊指令清掉他人的 abort）。✅ **2026-08-29 已編譯通過**（吊機 Pi，`crane_control_PI.out.new`）；🔴 仍未實機執行驗證 | ONBOARDING §1 ＋ work_log 2026-07-15 |
 | 🔴🔴 | **DSZL-107 刻度未校正，而且右側的「正負號」是假設的** —— 量值：`DSZL_SCALE_DEFAULT=-0.01` 只是 driver 預設，原始碼註解自己說要「掛已知重量後重算」但從沒做。🔴 **正負號只在左側量過**（`right untested but assumed same wiring`），而 `tension_safety_check_values` **只檢查過高**（過低已於 2026-05-08 移除）→ **若右側接線相反，右側超載讀成大負值、永遠不觸發，整條保護在那一側失效**。⚠️ 2026-08-28 新增的緊急收繩張力警示也建立在這上面。📌 掛已知重量到兩側各量一次即可同時解決量值與正負號，**不需要讓機器動** | `Crane_control_PI/main.cpp`、`user_lib/DSZL_107.cpp` | **未修** ✔ | work_log 2026-05-07 ＋ 2026-08-28（升級） |
 | 🟡 | `tension_safety_check_values` 的註解寫「motion_flow.md §6.5 needs corresponding spec update **(mailbox to Jim)**」—— ⚰️ mailbox 已於 2026-08-27 退休成墓碑檔，**那個待辦丟進了沒人再看的信箱**。規格表該列已於 2026-08-28 就地更正 | `Crane_control_PI/main.cpp`、`.claude/motion_flow.md` | **已更正規格** ✔ | work_log 2026-08-28 |
 | 🔴 | 安全盤點高優先兩項未做：`cmd_hold` 與 motion 互斥、左右繩長差超標 abort | `Crane_control_PI/main.cpp` | **未修** ✔（原始碼註解仍留 TODO） | work_log 2026-05-08 |
+| 🟡 | **`QX_DO24::init()` 是 14 支 driver 裡唯一活著的「`true`=成功」異類**（其餘 12 支是 Modbus 風格 `false`=成功；`DIHOOL_control` 亦為 true 但全 repo 無呼叫端＝死碼）。`bool init(...)` 的宣告兩派逐字相同，**從 `.h` 看不出來**。✅ 應用層目前沒踩到（SE3/MH300 呼叫端寫 `if (!init())` 正確；QX 唯一呼叫端 `WASH_ROBOT.cpp:204` 不檢查回傳值），**唯一受害者是那支從未執行過的測試**。→ 是否把 QX_DO24 對齊多數派（語意變更）**待決定** | `user_lib/QX_DO24.cpp:32`、`CLAUDE.md` 介面契約節 | **已記錄待決** ✔ | work_log 2026-08-29（第一次跑 `test_qx_do24` 揭露） |
 | 🟡 | `trigger_sync_move()` 是 Modbus 廣播（slave 0x00）不會有回應，卻以 `return resp.empty();` 收尾 → 廣播成功也永遠回報失敗 | `user_lib/ZDT_motor_control.cpp:506` | **未修** ✔ | mailbox 2026-04-30 |
 | ✅ | ~~`send(sock, buf, len, 0)` 沒帶 `MSG_NOSIGNAL`，Linux 下對已關閉對端寫入會 SIGPIPE 殺 process~~ | `transport/TCP_client.cpp:53`、`transport/TCP_server.cpp:21`（**檔案已於分層重構搬離 `user_lib/`**） | **已修（`9e1ad1b`，分支 `fix/msg-nosignal` 已併入）**：兩檔各定義 `constexpr int SEND_FLAGS = MSG_NOSIGNAL` 供所有 `send()` 共用。🔴 **合併 main 時 `sendAndReceiveQuiet` 曾帶著 `send(...,0)` 繞過這道防線**（`[2026-08-28j]` 已修）——**新增送出路徑一律用 `SEND_FLAGS`，不要再寫字面 0** | mailbox 2026-04-22｜2026-08-29 複查原始碼確認 |
 | 🟡 | `CLV900_inverter` 缺 null-client 防護：跳過 `init()` 時 `client == nullptr`，`sendModbus` 直接 null-deref segfault（應用層已用 `g_dev_clv900` 守起來，driver 本身沒守） | `user_lib/CLV900_inverter.cpp` | **未修** ✔ | mailbox 2026-05-14 |
@@ -301,6 +302,90 @@ threshold 再實作」：① `cmd_hold` 與 motion 互斥（避免 hold 跟 moti
 | 🟢 | 空壓機與電動缸電流重疊 | 空壓機啟動與電動缸同動時的電流重疊 | **暫緩**；症狀為電動缸偶發失步或抱閘異響，實機測試時可能浮現 | 設計彙整 §6 暫緩項目 |
 | 🟢 | 空壓機振動干擾姿態 | 空壓機振動對陀螺儀姿態判斷的干擾 | **暫緩**，實機測試時可能浮現 | 設計彙整 §6 暫緩項目 |
 | 🟢 | 儲氣筒壓力未讀 | Pi 未讀取儲氣筒壓力，假設氣壓恆定可用 | **暫緩**，實機測試時可能浮現 | 設計彙整 §6 暫緩項目 |
+
+---
+
+## 2026-08-29（續）— 機器回來了：編譯交接後的六個 commit，兩支測試第一次跑起來就抓到缺陷
+
+### 機器狀態
+兩台 Pi 都空著（`who` 無他人 sshd、5001/5002/8080/9527 四埠全無佔用、無殘留行程）。
+本體 `192.168.5.26` 剛開機 11 分鐘、吊機 `192.168.5.17` up 20:34。
+🔴 **全程只寫 `~/bringup/`，`~/projects/` 一個字都沒動**（那是 VS 遠端建置落點，
+另一位開發者在 `main` 上迭代會重建它）。**沒有部署、沒有覆蓋任何現有二進位。**
+
+### 為什麼第一件事是編譯
+08-28 16:30 機器交出之後又做了 6 個 commit（`3c75351` ~ `5560318`），
+其中 5 個動了 C++，**一個都沒編過**。而 `3c75351` 改的是 `DM2J_RS570.h` 的
+public 簽名（16 個 `void` 改 `bool`）＝ `CLAUDE.md` 明訂的**跨模組契約**。
+
+### 建置結果（全部在 Pi 上，`~/bringup/`）
+
+| 目標 | 結果 | 產物 |
+|---|---|---|
+| 吊機 `crane_control_PI` | ✅ 通過（50.5s） | `crane_control_PI.out.new` md5 `416bd26b…`（與 08-28 那份不同＝確認不是舊二進位） |
+| 本體 `facade_cleaning_v2` | ✅ 通過（14 編譯單元 -P4） | `facade_cleaning_v2.out.new` md5 `e397710…` |
+| **`Linux_test`** | ✅ 通過 | `linux_test.out` —— **DM2J 簽名改動的契約另一端，runbook 的建置指令沒有涵蓋它** |
+| `test_dm2j` / `test_qx_do24` | ✅ 通過 | 兩支**從未編譯過**的測試（`7dec156` 自己記著這件事） |
+
+⚠️ **驗產物而不是驗管線**：兩支 build 我都接了 `| tail`，
+**離開碼是 `tail` 的**（本專案踩坑索引裡就有這一條），所以另外 `ls` + `md5sum`
+確認檔案時間戳與雜湊真的變了才算數。
+
+### 🔴 `test_qx_do24` 第一次執行：一個斷言都沒跑到
+
+```
+[FATAL] init failed
+```
+
+而假從站 log 顯示它**一個請求都沒收到**。查下去：`QX_DO24::init()` 是 Mode B
+（不發包），本來就不該有請求 —— 真因是**斷言寫反了**。
+`QX_DO24::init()` 回 **`true` = 成功**，測試卻寫 `if (pwm.init(...)) FATAL`，
+**把成功判成失敗**。
+
+📌 **這是踩坑索引裡「斷言本身寫錯會把成功判成失敗」的又一次**，
+但這次多了一層：**那支測試是 08-28 寫的，寫的當下機器已交出、無法編譯，
+所以錯誤活了一整天而看起來完全正確。**
+
+### 📌 順帶揭露一件更大的事：契約管了簽名，沒管語意
+
+`user_lib/` 14 支 driver 的 `init()` 簽名全部是 `bool init(...)`，**回傳語意卻有兩派**：
+
+- **`false` = 成功**（Modbus 風格）：SE3 / MH300 / DM2J / SD76 / DSZL / DY500 /
+  JC100 / PQW / XKC / ZDT / ZS_DIO / CLV900 —— **12 支**
+- **`true` = 成功**：**`QX_DO24`**（唯一活著的異類）、`DIHOOL_control`（無呼叫端＝死碼）
+
+🔴 **從 `.h` 看不出來** —— 兩派的宣告逐字相同。`if (dev.init(...))` 在 12 支上
+是「失敗了」，在 QX_DO24 上是「成功了」。
+
+✅ **應用層沒有踩到**（逐一查過）：SE3/MH300 寫 `if (!vfd.init(...)) { OK } else { WARN }`
+＝ 對；QX_DO24 的唯一呼叫端 `WASH_ROBOT.cpp:204` **不檢查回傳值**。
+**唯一的受害者就是那支從未跑起來的測試。**
+已寫進 `CLAUDE.md` 介面契約節，並在待辦表加一列（是否把 QX 對齊多數派待決）。
+
+### ⚠️ 我在這輪犯的錯（當場更正）
+用「函式最後一個 `return`」去推是哪一派，把 **SE3 / MH300 誤歸成 `true`=成功**
+—— 它們最後一個 return 是**失敗**路徑。而我差一點就把這個錯誤分類寫進
+`CLAUDE.md`（權威文件）和程式碼註解。
+📌 **與「更正也是一種主張」同型**：真正救回來的是「寫進權威文件前先逐支讀原始碼」，
+不是任何工具。⚠️ 一度還因此擔心現役吊機的 VFD 判斷是反的 —— 讀完整段才確認是對的。
+
+### 測試執行結果（假從站全在 `127.0.0.1`，**不碰真 485 匯流排**）
+
+| 測試 | 結果 | 關鍵正面斷言 |
+|---|---|---|
+| `test_qx_do24 normal` | ✅ 3/3 | req#1 `fc=0x10`、req#2 `fc=0x06` |
+| `test_qx_do24 recover` | ✅ 2/2 | **`recovered on attempt 3/3` 真的出現** —— 08-28 加的重試救援路徑**第一次被執行到**（當時實機測 15 次一次都沒失敗，計數是 0） |
+| `test_qx_do24 alldrop` | ✅ 2/2 | 全滅後 `last_fail_str() = no_reply_timeout`（不是 `OutOfRange`＝訊息不再張冠李戴） |
+| `test_dm2j` | ✅ 7/7 | 讀數比值 **7.7310 = 導程**；🔴 **被拒絕的 60cm／-5cm 完全沒出現在假從站 req# 序列**＝守衛確實在送出任何位元組**之前**就擋下，不是事後回報 |
+
+### 待完成
+- 🔴 **`.out.new` 尚未取代 `.out`** —— 是否上機部署是使用者的決定，本輪刻意不動
+- 🔴 **編譯通過 ≠ 行為正確**：吊機三個 commit（`abort_flag` 重置、緊急收繩張力警示）
+  與本體三個（DM2J 回傳值、`p_err`／`partial_seal`、遮罩註解）**都還沒實機執行過**
+- 🟡 `runbook.md` §1 的建置指令**不含 `Linux_test`**，而它是 `user_lib` 契約的另一端
+  → 建議補進去，否則簽名改動會再一次只驗到一半
+- 🟡 `runbook.md` 連線資訊那段仍寫「`server.js` 的 `CRANE_IP` 預設值**仍是 `.101`**（過期）」
+  —— 該值已於 `f4e0d02` 修好，**runbook 也落後了**（與今早待辦表校準同型）
 
 ---
 
