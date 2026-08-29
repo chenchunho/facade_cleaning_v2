@@ -200,18 +200,18 @@ ssh user@192.168.5.17 'who; ss -ltn | grep -E ":(5002|8080)"; ps -eo pid,etime,c
 ### 1. 建置（在 Pi 上，另開目錄，不碰現有部署）
 
 ```
-rsync -a --delete <repo>/{transport,user_lib,Crane_control_PI} user@192.168.5.17:~/bringup/
+rsync -a --delete <repo>/{common,transport,user_lib,Crane_control_PI} user@192.168.5.17:~/bringup/
 ```
 ```
-ssh user@192.168.5.17 'cd ~/bringup && g++ -std=c++17 -O2 -Itransport -Iuser_lib -o crane_control_PI.out Crane_control_PI/main.cpp transport/TCP_client.cpp transport/TCP_server.cpp user_lib/{CLV900_inverter,DSZL_107,DY_500_weight_sensor,PQW_IO_16O_RLY,MH300_inverter,SD76_length_meters,SE3_inverter}.cpp -lpthread'
+ssh user@192.168.5.17 'cd ~/bringup && g++ -std=c++17 -O2 -Icommon -Itransport -Iuser_lib -o crane_control_PI.out Crane_control_PI/main.cpp transport/TCP_client.cpp transport/TCP_server.cpp user_lib/{CLV900_inverter,DSZL_107,DY_500_weight_sensor,PQW_IO_16O_RLY,MH300_inverter,SD76_length_meters,SE3_inverter}.cpp -lpthread'
 ```
 
 本體（多一個 `app/`，14 個編譯單元、平行編約 25 秒）：
 ```
-rsync -a --delete <repo>/{app,transport,user_lib,facade_cleaning_v2} nexuni@192.168.5.26:~/bringup/
+rsync -a --delete <repo>/{app,common,transport,user_lib,facade_cleaning_v2} nexuni@192.168.5.26:~/bringup/
 ```
 ```
-ssh nexuni@192.168.5.26 'cd ~/bringup && mkdir -p obj && printf "%s\n" facade_cleaning_v2/main.cpp app/WASH_ROBOT.cpp transport/{Serial_port,TCP_client,TCP_server}.cpp user_lib/{DM2J_RS570,DY_500_weight_sensor,FrameAnalyzer,JC_100_METER,PQW_IO_16O_RLY,QX_DO24,WT901BC_TTL,XKC_Y25_RS485,ZDT_motor_control}.cpp | xargs -P4 -I{} sh -c "g++ -std=c++17 -O2 -Iapp -Itransport -Iuser_lib -c {} -o obj/\$(basename {} .cpp).o" && g++ -o facade_cleaning_v2.out obj/*.o -lpthread'
+ssh nexuni@192.168.5.26 'cd ~/bringup && mkdir -p obj && printf "%s\n" facade_cleaning_v2/main.cpp app/WASH_ROBOT.cpp transport/{Serial_port,TCP_client,TCP_server}.cpp user_lib/{DM2J_RS570,DY_500_weight_sensor,FrameAnalyzer,JC_100_METER,PQW_IO_16O_RLY,QX_DO24,WT901BC_TTL,XKC_Y25_RS485,ZDT_motor_control}.cpp | xargs -P4 -I{} sh -c "g++ -std=c++17 -O2 -Iapp -Icommon -Itransport -Iuser_lib -c {} -o obj/\$(basename {} .cpp).o" && g++ -o facade_cleaning_v2.out obj/*.o -lpthread'
 ```
 
 🔴 **第三個目標：`Linux_test`（2026-08-29 補）** —— 它與應用層一樣綁在 `user_lib/*.h` 的
@@ -221,7 +221,7 @@ public 簽名上，**上面兩條指令都沒有涵蓋它**。08-28 的 `3c75351
 rsync -a --delete <repo>/Linux_test nexuni@192.168.5.26:~/bringup/
 ```
 ```
-ssh nexuni@192.168.5.26 'cd ~/bringup && g++ -std=c++17 -O2 -Itransport -Iuser_lib -o linux_test.out Linux_test/main.cpp transport/{Serial_port,TCP_client,TCP_server}.cpp user_lib/{PQW_IO_16O_RLY,ZDT_motor_control,DM2J_RS570,WT901BC_TTL,JC_100_METER,XKC_Y25_RS485,SD76_length_meters,ZS_DIO_R_RLY,SE3_inverter,MH300_inverter,QX_DO24}.cpp -lpthread'
+ssh nexuni@192.168.5.26 'cd ~/bringup && g++ -std=c++17 -O2 -Icommon -Itransport -Iuser_lib -o linux_test.out Linux_test/main.cpp transport/{Serial_port,TCP_client,TCP_server}.cpp user_lib/{PQW_IO_16O_RLY,ZDT_motor_control,DM2J_RS570,WT901BC_TTL,JC_100_METER,XKC_Y25_RS485,SD76_length_meters,ZS_DIO_R_RLY,SE3_inverter,MH300_inverter,QX_DO24}.cpp -lpthread'
 ```
 📌 **假從站測試**（`Linux_test/fake_slaves/`）的建置指令在各 `test_*.cpp` 的檔頭，
 且**全程只連 `127.0.0.1`，不碰真 485 匯流排** —— 拿到機器時值得順手跑一輪。

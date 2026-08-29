@@ -5,6 +5,7 @@
 #endif
 
 #include "WASH_ROBOT.h"
+#include "endpoints.h"
 
 #include <iostream>
 #include <sstream>
@@ -112,10 +113,10 @@ bool WashRobot::init() {
     // ⚠ 注意：檔案裡還有數十處註解沿用舊配置在描述 bus 競爭（例如「cli_22_ bus
     // 有 JC100/PQW 競爭」）。PQW 已不在 cli_22_，那些敘述關於 PQW 的部分已過時；
     // JC100 的部分仍然成立。真正的競爭關係以本段為準。
-    if (!cli_20_.connectToServer(IP_485_1, PORT_485)) {
+    if (!cli_20_.connectToServer(ep::host("USR20", IP_485_1), ep::port("USR20", PORT_485))) {
         std::cerr << "[WashRobot] connect " << IP_485_1 << " fail\n"; return true;
     }
-    if (!cli_22_.connectToServer(IP_485_3, PORT_485)) {
+    if (!cli_22_.connectToServer(ep::host("USR22", IP_485_3), ep::port("USR22", PORT_485))) {
         std::cerr << "[WashRobot] connect " << IP_485_3 << " fail\n"; return true;
     }
     std::cout << "[OK] USR .20 (ZDT) / .22 (sensors+PQW) connected\n";
@@ -247,7 +248,7 @@ bool WashRobot::init() {
     // only quiets the log). Remove once the arm is actually installed and its
     // connection health is worth watching again.
     arm_cli_.set_quiet_reconnect_log(true);
-    if (!arm_cli_.connectToServer(ARM_IP, ARM_PORT))
+    if (!arm_cli_.connectToServer(ep::host("ARM", ARM_IP), ep::port("ARM", ARM_PORT)))
         std::cerr << "[WARN] arm " << ARM_IP << ":" << ARM_PORT << " not yet reachable\n";
     else
         std::cout << "[OK] arm " << ARM_IP << ":" << ARM_PORT << "\n";
@@ -263,7 +264,7 @@ bool WashRobot::init() {
     // 而該功能的 GUI 已於 2026-08-26 全數移除。保留連線本身（不刪 connectToServer）
     // 是為了將來要用 depth avoid 時不必再改；只是不再吵。
     depth_cli_.set_quiet_reconnect_log(true);
-    if (!depth_cli_.connectToServer(DEPTH_CAM_IP, DEPTH_CAM_PORT))
+    if (!depth_cli_.connectToServer(ep::host("DEPTHCAM", DEPTH_CAM_IP), ep::port("DEPTHCAM", DEPTH_CAM_PORT)))
         std::cerr << "[WARN] depth_cam " << DEPTH_CAM_IP << ":" << DEPTH_CAM_PORT << " not yet reachable\n";
     else
         std::cout << "[OK] depth_cam " << DEPTH_CAM_IP << ":" << DEPTH_CAM_PORT << "\n";
@@ -583,7 +584,7 @@ std::string WashRobot::state_violation_(State cur) const {
 
 bool WashRobot::crane_connect_if_needed_() {
     if (crane_cli_.isConnected()) return false;
-    return !crane_cli_.connectToServer(CRANE_IP, CRANE_PORT);
+    return !crane_cli_.connectToServer(ep::host("CRANE", CRANE_IP), ep::port("CRANE", CRANE_PORT));
 }
 
 std::string WashRobot::crane_cmd_(const std::string& line, int timeout_sec) {
@@ -3884,7 +3885,7 @@ double WashRobot::read_rope_weight_estop_() {
     {
         std::lock_guard<std::mutex> lk(crane_estop_mtx_);
         if (!crane_cli_estop_.isConnected()) {
-            if (!crane_cli_estop_.connectToServer(CRANE_IP, CRANE_PORT))
+            if (!crane_cli_estop_.connectToServer(ep::host("CRANE", CRANE_IP), ep::port("CRANE", CRANE_PORT)))
                 return -1.0;
         }
         const char* tx = "tension\n";
@@ -3996,7 +3997,7 @@ std::string WashRobot::crane_retract_safe_(int cm, int timeout_sec) {
                     // Use dedicated estop connection to avoid crane_mtx_ deadlock
                     std::lock_guard<std::mutex> elk(crane_estop_mtx_);
                     if (!crane_cli_estop_.isConnected())
-                        crane_cli_estop_.connectToServer(CRANE_IP, CRANE_PORT);
+                        crane_cli_estop_.connectToServer(ep::host("CRANE", CRANE_IP), ep::port("CRANE", CRANE_PORT));
                     if (crane_cli_estop_.isConnected()) {
                         const char* tx = "stop\n";
                         crane_cli_estop_.sendData(tx, 5, 500);

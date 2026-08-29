@@ -93,6 +93,7 @@
 
 #include "TCP_client.h"
 #include "TCP_server.h"
+#include "endpoints.h"
 #include "SD76_length_meters.h"
 #include "CLV900_inverter.h"
 #include "DSZL_107.h"
@@ -4251,7 +4252,7 @@ int main() {
     //      flag = false, devices on that gateway disabled accordingly) ----
     // 2026-05-15 physical-separation layout: each SE3 has its own USR (.30 / .31),
     // SD76 meters share dedicated sensing gateway (.34), DSZL each on .32 / .33.
-    if (cli_A.connectToServer(USR_A_IP, USR_PORT)) {
+    if (cli_A.connectToServer(ep::host("USR_A", USR_A_IP), ep::port("USR_A", USR_PORT))) {
         g_gw_a_ok = true;
         std::cout << "[OK]   USR_A (SE3 left)  @ " << USR_A_IP << ":" << USR_PORT << std::endl;
     } else {
@@ -4259,7 +4260,7 @@ int main() {
                   << " connect failed — left rope SE3 disabled" << std::endl;
     }
 
-    if (cli_B.connectToServer(USR_B_IP, USR_PORT)) {
+    if (cli_B.connectToServer(ep::host("USR_B", USR_B_IP), ep::port("USR_B", USR_PORT))) {
         g_gw_b_ok = true;
         std::cout << "[OK]   USR_B (SE3 right) @ " << USR_B_IP << ":" << USR_PORT << std::endl;
     } else {
@@ -4267,7 +4268,7 @@ int main() {
                   << " connect failed — right rope SE3 disabled" << std::endl;
     }
 
-    if (cli_M.connectToServer(USR_M_IP, USR_PORT)) {
+    if (cli_M.connectToServer(ep::host("USR_M", USR_M_IP), ep::port("USR_M", USR_PORT))) {
         g_gw_m_ok = true;
         std::cout << "[OK]   USR_M (SD76 meters) @ " << USR_M_IP << ":" << USR_PORT << std::endl;
     } else {
@@ -4275,7 +4276,7 @@ int main() {
                   << " connect failed — all SD76 length feedback disabled" << std::endl;
     }
 
-    if (cli_C.connectToServer(DSZL_LEFT_IP, DSZL_PORT)) {
+    if (cli_C.connectToServer(ep::host("DSZL_L", DSZL_LEFT_IP), ep::port("DSZL_L", DSZL_PORT))) {
         g_gw_c_ok = true;
         std::cout << "[OK]   DSZL left (X518)  @ " << DSZL_LEFT_IP << ":" << DSZL_PORT << std::endl;
     } else {
@@ -4283,7 +4284,7 @@ int main() {
                   << " connect failed — left tension monitoring disabled" << std::endl;
     }
 
-    if (cli_D.connectToServer(DSZL_RIGHT_IP, DSZL_PORT)) {
+    if (cli_D.connectToServer(ep::host("DSZL_R", DSZL_RIGHT_IP), ep::port("DSZL_R", DSZL_PORT))) {
         g_gw_d_ok = true;
         std::cout << "[OK]   DSZL right (X518) @ " << DSZL_RIGHT_IP << ":" << DSZL_PORT << std::endl;
     } else {

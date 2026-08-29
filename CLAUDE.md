@@ -48,6 +48,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `motion_flow.md` | **v1 規格**（已凍結） | 🟡 §2 硬體表已過期，保留作狀態機與指令協定的原始推導。📌 **2026-08-28 破例加過一次註記**（非規格變更）：§8 失效模式表說「張力過高→立即 crane stop」，同章「緊急收繩」段說「不會停」，**兩段互相矛盾**；逐行驗過程式碼後在表上加了除外註。凍結的意思是不再演進，不是「明知有誤導也不標」 |
 | `v2_app_redesign_plan.md` | **v2 規格 = 現行程式碼的權威** | 🟢 活的 |
 | `洗窗機器人設計彙整.md` | **v3 新架構設計**（沿用舊硬體改寫） | 🟢 活的，27 項待辦在 `work_log.md` |
+| `refactor_plan.md` | **程式架構重構計畫**：目標 6 層 + 安全橫切、等價性怎麼證明（黃金軌跡）、階段與完成判準 | 🟡 **進行中**（2026-08-29 建立）。🔴 成功判準是「與 `main-final` 功能效果相同」，而基準是 **main-final ＋ `runbook.md` §A2 塊三那 9 條預期差異** |
 | `mh300_migration_plan.md` | SE3 → Delta MH300 變頻器遷移 | 🟡 **進行中且未完成**。🔴 Phase 0 的 keypad 參數表是**唯一副本** |
 | `crane_balance_hold_plan.md` | 吊機平衡保持 | 🟡 **暫緩，但 2026-08-27 前提已反轉**（同步步伐放繩期間四顆吸盤全放、無錨定）→ 需重新評估 |
 | `step_speedup_phase1_plan.md` | 單 step 25-30s → 12-15s 加速 | 🟡 標「進行中」，含瓶頸量測表 |
