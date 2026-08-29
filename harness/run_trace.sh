@@ -35,6 +35,15 @@ start_bus 15034 rtu     # USR_M   — SD76 1,2,4 / PQW 12
 start_bus 15032 tcp     # X518    — DSZL left（原生 MBAP）
 start_bus 15033 tcp     # X518    — DSZL right
 
+# ── 假的吊機 / 手臂（行導向文字協定）──────────────────────────────────────
+# 沒有它們，crane_cmd_ / arm_cmd_ 會對連不上的位址無界重試，而關閉序列裡就有
+# 這些呼叫 → 程式被砍掉時跑到哪裡由時序決定，軌跡尾端就不確定。
+for pn in "15002 crane" "15527 arm" "15530 depthcam"; do
+  set -- $pn
+  python3 "$HERE/fake_text_server.py" --port "$1" --name "$2" 2>>"$OUT/fakes.log" &
+  PIDS+=($!)
+done
+
 # ── 假序列埠（IMU）──────────────────────────────────────────────────────────
 # 主程式在 IMU 開埠失敗時直接 FATAL，所以沒有這個東西整支起不來。
 PTYF="$OUT/imu_pty"
@@ -47,7 +56,7 @@ export FCV_EP_IMU_HOST="$(cat "$PTYF")"
 
 # 🔴 等埠真的開了才往下走。用 sleep 猜等待時間是這個 harness 最容易出現
 #    「偶爾紅一次」的來源，而間歇性失敗會讓人開始不信任綠燈。
-for p in 15020 15022 15030 15031 15032 15033 15034; do
+for p in 15020 15022 15030 15031 15032 15033 15034 15002 15527 15530; do
   for _ in $(seq 1 100); do
     (exec 3<>/dev/tcp/127.0.0.1/$p) 2>/dev/null && break
     sleep 0.05
@@ -111,6 +120,16 @@ while IFS= read -r line; do
     while IFS= read -r -t 1 _drain <&3; do :; done
   fi
 done <"$CMDS"
+
+# 🔴 收尾必須是確定性的：送 exit 讓程式自己走完關閉流程，等它真的結束。
+#    直接 kill 的話，「砍掉的那一刻程式跑到哪」由時序決定 —— 兩次執行的軌跡
+#    尾端就會不同，而那個差異看起來完全像行為差異。
+printf 'exit\n' >&3 || true
 exec 3<&- 3>&-
+for _ in $(seq 1 "${EXIT_WAIT_TICKS:-400}"); do kill -0 "$APP" 2>/dev/null || break; sleep 0.1; done
+if kill -0 "$APP" 2>/dev/null; then
+  echo "[run_trace] ⚠️ 程式在等待時間內沒有自行結束，強制終止 —— **這一輪的軌跡尾端不可信**" >&2
+  echo "TRUNCATED" > "$OUT/truncated"
+fi
 
 echo "[run_trace] trace.raw $(wc -l <"$OUT/trace.raw") 行 / replies $(wc -l <"$OUT/replies.txt") / events $(wc -l <"$OUT/events.txt")"

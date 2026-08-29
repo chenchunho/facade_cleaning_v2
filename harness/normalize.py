@@ -28,8 +28,14 @@ import re
 import sys
 
 # [14:32:01.123] [DBG] [DM2J:3] TX 03 03 00 5F 00 02 35 86
+# 🔴 用 search 不用 match：driver 的 log 行**會被應用層的輸出接在前面**。
+#    2026-08-30 實例：
+#      [water_inlet] off attempt 2/3 failed: [00:19:31.424] [DBG] [XKC:13] TX 0D 03 ...
+#    LOG_HEX 本身已是原子的，但應用層的 std::cerr << a << b << c 不是 ——
+#    兩者仍會在行首交錯。用 ^ 錨定會把這種行**靜默丟掉**，而丟掉的那一筆
+#    在 diff 上看起來就是「這一側少了一次交易」＝假的行為差異。
 LINE = re.compile(
-    r'^\[\d{2}:\d{2}:\d{2}\.\d{3}\]\s+'      # 時間戳 —— 丟掉
+    r'\[\d{2}:\d{2}:\d{2}\.\d{3}\]\s+'      # 時間戳 —— 丟掉
     r'\[(?P<lvl>[A-Z]+)\]\s+'
     r'\[(?P<dev>[^\]]+)\]\s+'
     r'(?P<rest>.*)$'
@@ -45,9 +51,15 @@ HEXDUMP = re.compile(r'^(?P<note>.*?)\s((?:[0-9A-F]{2}(?:\s|$))+)\s*$')
 
 def normalize(fp, keep_notes: bool):
     per_dev = collections.OrderedDict()
+    dropped = []
     for raw in fp:
-        m = LINE.match(raw.rstrip('\n'))
+        m = LINE.search(raw.rstrip('\n'))
         if not m:
+            # 完全不含 driver log 樣式的行（應用層訊息）本來就不該進比對。
+            # 但「看起來像 hex dump 卻沒被解析」必須被算出來 —— 靜默丟棄
+            # 會讓「這一側少一次交易」看起來像行為差異。
+            if re.search(r'\b(?:[0-9A-F]{2} ){3,}', raw):
+                dropped.append(raw.rstrip('\n')[:100])
             continue
         dev, rest = m.group('dev'), m.group('rest')
         h = HEXDUMP.match(rest)
@@ -63,6 +75,11 @@ def normalize(fp, keep_notes: bool):
             key = 'TX' if note.startswith('TX') else ('RX' if note.startswith('RX') else '??')
 
         per_dev.setdefault(dev, []).append(f'{key} {hexbytes}')
+    if dropped:
+        print(f'[normalize] 🔴 {len(dropped)} 行看起來像 hex dump 卻沒解析成功 —— '
+              f'這些會在 diff 上偽裝成行為差異：', file=sys.stderr)
+        for d in dropped[:5]:
+            print(f'  {d}', file=sys.stderr)
     return per_dev
 
 
