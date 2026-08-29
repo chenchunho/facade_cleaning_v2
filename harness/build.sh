@@ -34,7 +34,14 @@ else
 fi
 [[ -d "$SRC/common" ]] || INC="${INC/-I$SRC\/common /}"
 
-CXXFLAGS="-std=c++17 -O1 -g0 -pthread $INC"
+# -funsigned-char：目標機（aarch64）的 char 預設是**無號**，x86-64 是**有號**。
+# 這份程式碼有 15 處用裸 char 陣列裝位元組，任何拿 char 做數值比較的地方在
+# 兩個平台上會得到不同結果。加這個 flag 讓本機的 char 語意跟 Pi 一致。
+#
+# 🔴 它補不了另外兩個差異，見 README「本機建置證明不了什麼」：
+#    編譯器 g++ 9.3/10.5（本機）vs 14.2（Pi）—— 差 4~5 個大版本
+#    標準函式庫 libstdc++ 9/10 vs 14 —— 傳遞性 include 被大量移除
+CXXFLAGS="-std=c++17 -O1 -g0 -pthread -funsigned-char $INC"
 
 echo "[build] $SRC -> $OUT  ($(g++ --version | head -1))"
 
