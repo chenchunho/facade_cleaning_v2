@@ -34,9 +34,10 @@
 
 | 優先度 | 項目 | 涉及檔案 | 現況 | 來源與原始日期 |
 |---|---|---|---|---|
-| ✅ | ~~重連的非阻塞 connect 少了 `getsockopt(SO_ERROR)` → 連到沒人聽的埠也判定成功~~ | `transport/TCP_client.cpp` | **已修（本分支 `-drv4`）** —— 雙向斷言實機驗證：吊機關→假成功 0 次、吊機開→正常連上。🔴 **`refactor/app-layer` 上仍未修**（那條分支要保持功能等價） | work_log 2026-08-28（實機驗證） |
+| ✅ | ~~重連的非阻塞 connect 少了 `getsockopt(SO_ERROR)` → 連到沒人聽的埠也判定成功~~ | `transport/TCP_client.cpp` | **已修（本分支 `-drv4`）** —— 雙向斷言實機驗證：吊機關→假成功 0 次、吊機開→正常連上。⚠️ **原記「`refactor/app-layer` 上仍未修」是錯的**（2026-08-29 複查）：該修正已由 `56bfa5c` cherry-pick 進整理分支，兩條分支都有 | work_log 2026-08-28（實機驗證） |
 | ✅ | ~~`init()` 印 `VFD left/right (MH300)` 是**寫死字串**，在 `#if CRANE_VFD_IS_SE3` 之外 → 旗標是 1（實際跑 SE3）卻印 MH300，會把人導去查錯的 driver~~ | `Crane_control_PI/main.cpp:4298,4300,4317,4319` | **已修（`f4e0d02`）**：四處都改吃 `CRANE_VFD_NAME` 巨集，隨 `#if` 一起切換。🔴 **未實機驗證**（改於 14:41，16:30 機器讓出前有過一次重編，但是否涵蓋本檔未經確認——不宣稱編譯狀態） | work_log 2026-08-28（實機驗證）｜2026-08-29 複查原始碼確認 |
-| ✅ | ~~上滑台 cm↔pulse 換算錯 7.7 倍（皮帶軸 7.731 cm/圈，程式假設 1）→ 每次掃動下 131cm 指令、滑台只有 50cm，一路撞到底~~ | `user_lib/DM2J_RS570.*`、`app/WASH_ROBOT.*` | **已修（本分支 `-drv5`）**：換算層修正 + 行程守衛，實機量測指令 17→實際 17cm。🔴 **`refactor/app-layer` 上仍未修** | work_log 2026-08-28（實機量測） |
+| ✅ | ~~上滑台 cm↔pulse 換算錯 7.7 倍（皮帶軸 7.731 cm/圈，程式假設 1）→ 每次掃動下 131cm 指令、滑台只有 50cm，一路撞到底~~ | `user_lib/DM2J_RS570.*`、`app/WASH_ROBOT.*` | **已修（本分支 `-drv5`）**：換算層修正 + 行程守衛，實機量測指令 17→實際 17cm。⚠️ **原記「`refactor/app-layer` 上仍未修」是錯的**（2026-08-29 複查）：`9fa4fe1` 已 cherry-pick 進整理分支，兩條分支都有 | work_log 2026-08-28（實機量測） |
+| 🔴🔴 | **`refactor/app-layer` 已經不是「純整理、功能等價」了** —— 這是上機計畫的前提，而該前提在 2026-08-28 中午之後就失效了，沒有人被告知。相對 `origin/main`，整理分支現在帶著 **9 個刻意的行為改變**：`9e1ad1b` MSG_NOSIGNAL／`f4e0d02` server.js `CRANE_IP` + VFD 型號字串／`9fa4fe1` 上滑台 7.731 換算 + 行程守衛／`bb2dadb` `ARM_SWEEP_RPM` 1000→250／`9af86e4` QX_DO24 PWM 重試 + 回讀／`8c59eac` `zdt_pusher`/`disable`/`enable` 範圍分岔／`eb77d6c` `CUP_PULSE_PER_CM` 2857→3000／`8d4d2d5` 左右歸屬 RF/LF／`56bfa5c` `SO_ERROR`。🔴 **後果**：「上整理分支、不上 driver 分支，才分得清『行為變了』是搬家搬壞還是 driver 改的」——**這個區分已經不存在**。日誌裡「唯一實質改動是 `send()` 加 `MSG_NOSIGNAL`、9 支 driver 一行沒動」的結論停在 08-28 上午，**現在是錯的**（9 支 driver 仍沒動這半句仍成立）。📌 **下次上機前必須先決定**：(a) 接受整理分支帶行為改變照上、(b) 另開一條真正只有搬家的分支、(c) 直接上 `fix/driver-crc` 不再分兩段 | `git log origin/main..refactor/app-layer --no-merges -- '*.cpp' '*.h'` | **未決** ✔（2026-08-29 由「已修半邊校驗」帶出） | 2026-08-29 複查 |
 | 🔴🔴 | **`ARM_SWEEP_DECEL_MASK_MS` 的減速遮罩從來沒有生效過** —— 它錨定在 `est_ms` 結尾，而 est_ms(4500) 比真實運動(553ms)長 8 倍，遮罩窗口(3500~4500ms)與真正的減速(528~553ms)**完全沒有交集**。changelog 顯示他們為假警報吃過苦（M2 path 最後被實質 disable），**其中一道保護一直是壞的而沒人知道** | `app/WASH_ROBOT.h`、`app/WASH_ROBOT.cpp:2504` | **已記錄未修** ✔ | work_log 2026-08-28 |
 | 🔴 | **`*_EST_MS` 與 `ARM_SWEEP_DECEL_MASK_MS` 是耦合的，天真調小會關掉障礙偵測**：`est_ms ≤ MASK` 時 `elapsed > 負數` 恆為真 → 整趟偵測全程關閉且無任何訊息。實測導程重算：17cm @ 250rpm 真實運動 **553ms**，現值 4500/3900 是 7~8 倍餘裕。🔴 **三方取捨（偵測覆蓋率／週期時間／運動被截斷）需使用者決定**，已把算式與對照表寫進常數註解 | `app/WASH_ROBOT.h` | **待決定** ✔ | work_log 2026-08-28 |
 | 🟡 | **上滑台的「零點」是 `init` 當下的位置，不是機械原點** —— 🔴 **2026-08-29 per user：原本寫的「真解是啟用 homing」是錯的，這台沒有原點感測器**，`home_start()`（`0x0020`）沒有東西可觸發。實際的保護是**斷電煞車＋作業流程（斷電前一律先移回 0 點）**，所以開機時滑台就在左端硬限位 → `0x0021` 設當前為零**是對的做法，不是缺陷**。✅ 實機佐證：`0x1003` 的 **`HOME_DONE=0`**（從未回零）、方向實測 **正方向=往右／0 點=左端**（與 `WASH_ROBOT.h:624` 註解一致）。🟡 **殘餘風險**：異常斷電／停電來不及回 0 時，下次 init 會把當時位置當成零點，**座標系整個偏移且無人被告知** —— 這是流程保證而非機制保證。🔴 **待辦改為：改寫 `WASH_ROBOT.h:622-625` 的註解**（勿再指向 homing），並評估要不要加「開機時提示確認滑台在左端」 | `app/WASH_ROBOT.h:622-625`、`app/WASH_ROBOT.cpp:6912` | **待改註解** ✔ | work_log 2026-08-28（更正）｜2026-08-29 per user 推翻原「真解」 |
@@ -66,62 +67,62 @@
 | 🟡 | 沒有 hot re-init：裝置 flag 只在啟動時設一次，硬體中途修好要重開 crane | `Crane_control_PI/main.cpp` | **未修** | work_log 2026-05-08 |
 | 🟡 | 沒有任何機制偵測「M2 被重新安裝過」；重裝後若位置落在 ±1.5 rad 內，INIT 會**靜默**移到錯的 CENTER | `cleaning_arm/main_api.cpp:1992-2028` | **未修** | work_log 2026-08-17 |
 | 🟡 | `LR_CALIBRATE` 自動雙向尋邊不可靠（假觸發撞牆、或衝很遠都撞不到），目前只能走手動流程 | `cleaning_arm/main_api.cpp` | **未修** | work_log 2026-08-17 |
-| 🟡 | 同步步伐（`step_down_sync`/`step_up_sync`）沒有地面淨空 / 障礙檢查，完全信任使用者輸入的 cm | `user_lib/WASH_ROBOT.cpp` `do_step_sync_` | **未修** | work_log 2026-07-22 |
+| 🟡 | 同步步伐（`step_down_sync`/`step_up_sync`）沒有地面淨空 / 障礙檢查，完全信任使用者輸入的 cm | `app/WASH_ROBOT.cpp` `do_step_sync_` | **未修** | work_log 2026-07-22 |
 | 🟢 | 規範文件架構圖與程式碼脫節 —— **2026-08-28 已解**：`CLAUDE.md` `## Architecture` 全節由原始碼重建（v2 as-built）。`motion_flow.md` §2 **刻意維持 v1 不動**（它是已凍結的 v1 世代文件，見本檔文件世代表），不是遺漏 | `CLAUDE.md` `## Architecture` | **已修** ✔ | ONBOARDING §5 |
 | 🟡 | DSZL-107 熱修走路 B（RTU+CRC16 → Modbus TCP MBAP）的 review 沒做完，且當時說「規範文件未動、待 review 後一起更新」 | `user_lib/DSZL_107.{h,cpp}` | driver **已修** ✔（MBAP 已在 code）／文件 **未修** | mailbox 2026-05-08 |
 | 🟡 | SD76 SCAL/DP 校正 API 的公式假設（`display = pulse × SCAL × 10^(-DP)`）、是否需要 save_params、DP 上限行為都還沒 bench 驗證 | `user_lib/SD76_length_meters.cpp` | API **已修** ✔／驗證 **待查** | mailbox 2026-05-09 |
 | 🟡 | 新 driver `SE3_inverter` 的 review 與硬體驗證未結案：USR2 IP、SE3 keypad 預設（站號/波特率/控制源/watchdog）、方向約定、暫存器位址 | `user_lib/SE3_inverter.{h,cpp}` | **待查** | mailbox 2026-05-07 |
 | 🟡 | 新 driver `DSZL_107` 的 review 未結案：scale factor 實機校正、byte order（BE vs word-swap）驗證 | `user_lib/DSZL_107.{h,cpp}` | 應用層串接 **已修**／校正驗證 **待查** | mailbox 2026-05-06 |
 | 🟡 | crane 端偶發 `ERR meter_left_read_fail` + TCP 每 500ms reconnect，根因未知（已排除兩個假設），workaround 是重開 crane 程式 | `Crane_control_PI/main.cpp:1367` `meter_read_robust()` | **待查** | ONBOARDING §3 |
-| 🟡 | follower 側 IMU 校平疑似被切到 `meter` 模式導致機體歪斜；`follower_use_imu_==false` 的路徑**完全靜默**，一行 log 都不印 | `user_lib/WASH_ROBOT.cpp:6366`、`WASH_ROBOT.h:881` | **待查**（走法已全面改 sync，但後端 raw command 預設仍是 `alt`，仍走得到） | ONBOARDING §2 |
-| 🟡 | 2026-07 那整批改動**從未編譯 / 部署驗證**（本機無法 remote build）：TCP_client 殭屍連線修復要驗自癒、WASH_ROBOT 安裝幾何常數、同步步伐、partial-seal 判準、crane 端 `Crane_control_PI` 建議先單獨 build 綠燈；`1829964` 等 commit 仍在本機 main **未 push** | `user_lib/TCP_client.cpp`、`user_lib/WASH_ROBOT.{h,cpp}`、`Crane_control_PI/main.cpp`、`facade_cleaning_v2/main.cpp`、`web_backend/public/*` | **待查** | work_log 2026-07-07 / 07-15 / 07-21 / 07-22 / 07-23（7 筆合併） |
-| 🟡 | 同步步伐的 IMU 差動微調**方向**（sign convention）沒實機驗證過，第一次上機要小角度有人看著 | `user_lib/WASH_ROBOT.cpp` `do_step_sync_` | **待查** | work_log 2026-07-22 |
-| 🟡 | 水平校正整合（IMU roll ＋ 左右繩長差 tol）在 v2 step 收尾只留 TODO | `user_lib/WASH_ROBOT.cpp` | **待查** | work_log 2026-07-07 |
-| 🟡 | v1 舊 body 用 `#if 0` 包起來當 reference，說好 bench 驗證 v2 綠燈後再硬刪 — 還沒刪 | `user_lib/WASH_ROBOT.cpp` | **待查** | work_log 2026-07-07 |
-| 🟡 | Realign Layer 2（Phase 2 in_window 期間 cycle valve OFF/ON）設計討論完但未實作 | `user_lib/WASH_ROBOT.cpp` | **待查** | work_log 2026-06-02 |
-| 🟡 | `vacuum_check` 重複跑兩次浪費 30s／attach（提了 α + δ 兩方案，未選） | `user_lib/WASH_ROBOT.cpp` | **待查** | work_log 2026-06-09 |
-| 🟡 | `arm_cmd_` INIT recv timeout 真因沒查清楚（看起來是 motor_api 端會卡）；60s 是否要再拉長待決 | `user_lib/WASH_ROBOT.cpp`、`cleaning_arm/main_api.cpp` | **待查** | work_log 2026-06-09 |
-| 🟡 | Scripted run / Snowball 防護 A+B+C / Water inlet 防漏三批功能**全部沒實機驗證過** | `user_lib/WASH_ROBOT.{h,cpp}`、`web_backend/public/*` | **待查** | work_log 2026-06-09 |
-| 🟡 | 2026-06-02 那批 fix 的實機觀察清單未跑完：`wall_mm=330` 是否平貼、anchor vacuum check 會不會誤報、`cmd_recover` vacuum_check 的使用者處置、BAL `kp=1.0` 是否改善震盪、`cmd_status` 1Hz rate-limit 是否減半 JC100 timeout | `user_lib/WASH_ROBOT.{h,cpp}`、`Crane_control_PI/main.cpp` | **待查** | work_log 2026-06-02 |
+| 🟡 | follower 側 IMU 校平疑似被切到 `meter` 模式導致機體歪斜；`follower_use_imu_==false` 的路徑**完全靜默**，一行 log 都不印 | `app/WASH_ROBOT.cpp:6366`、`WASH_ROBOT.h:881` | **待查**（走法已全面改 sync，但後端 raw command 預設仍是 `alt`，仍走得到） | ONBOARDING §2 |
+| 🟡 | 2026-07 那整批改動**從未編譯 / 部署驗證**（本機無法 remote build）：TCP_client 殭屍連線修復要驗自癒、WASH_ROBOT 安裝幾何常數、同步步伐、partial-seal 判準、crane 端 `Crane_control_PI` 建議先單獨 build 綠燈；`1829964` 等 commit 仍在本機 main **未 push** | `transport/TCP_client.cpp`、`app/WASH_ROBOT.{h,cpp}`、`Crane_control_PI/main.cpp`、`facade_cleaning_v2/main.cpp`、`web_backend/public/*` | **待查** | work_log 2026-07-07 / 07-15 / 07-21 / 07-22 / 07-23（7 筆合併） |
+| 🟡 | 同步步伐的 IMU 差動微調**方向**（sign convention）沒實機驗證過，第一次上機要小角度有人看著 | `app/WASH_ROBOT.cpp` `do_step_sync_` | **待查** | work_log 2026-07-22 |
+| 🟡 | 水平校正整合（IMU roll ＋ 左右繩長差 tol）在 v2 step 收尾只留 TODO | `app/WASH_ROBOT.cpp` | **待查** | work_log 2026-07-07 |
+| 🟡 | v1 舊 body 用 `#if 0` 包起來當 reference，說好 bench 驗證 v2 綠燈後再硬刪 — 還沒刪 | `app/WASH_ROBOT.cpp` | **待查** | work_log 2026-07-07 |
+| 🟡 | Realign Layer 2（Phase 2 in_window 期間 cycle valve OFF/ON）設計討論完但未實作 | `app/WASH_ROBOT.cpp` | **待查** | work_log 2026-06-02 |
+| 🟡 | `vacuum_check` 重複跑兩次浪費 30s／attach（提了 α + δ 兩方案，未選） | `app/WASH_ROBOT.cpp` | **待查** | work_log 2026-06-09 |
+| 🟡 | `arm_cmd_` INIT recv timeout 真因沒查清楚（看起來是 motor_api 端會卡）；60s 是否要再拉長待決 | `app/WASH_ROBOT.cpp`、`cleaning_arm/main_api.cpp` | **待查** | work_log 2026-06-09 |
+| 🟡 | Scripted run / Snowball 防護 A+B+C / Water inlet 防漏三批功能**全部沒實機驗證過** | `app/WASH_ROBOT.{h,cpp}`、`web_backend/public/*` | **待查** | work_log 2026-06-09 |
+| 🟡 | 2026-06-02 那批 fix 的實機觀察清單未跑完：`wall_mm=330` 是否平貼、anchor vacuum check 會不會誤報、`cmd_recover` vacuum_check 的使用者處置、BAL `kp=1.0` 是否改善震盪、`cmd_status` 1Hz rate-limit 是否減半 JC100 timeout | `app/WASH_ROBOT.{h,cpp}`、`Crane_control_PI/main.cpp` | **待查** | work_log 2026-06-02 |
 | 🟡 | crane 端 placeholder 常數與未驗事項：4 個 gateway IP 對應、SE3 keypad 預設、CLV900 RPM↔Hz 公式（等馬達極數）、`UP_STOP_TOTAL_KG_DEFAULT=50` / `SE3_HOLD_HZ=20` 等 | `Crane_control_PI/main.cpp` | **待查**（拓樸 2026-08-27 又重配過，需重新對照） | work_log 2026-05-07 |
 | 🟢 | SD76 通訊模式 mode latch：DP 寫入被 firmware 吃掉（同類 SE3 H1000 / P.79 行為），driver 已 revert auto-DP、改成 preserve current DP。**未來方向**：找 SD76 對應的 unlock magic 才能完全自動化改 DP，目前只能面板操作 | `user_lib/SD76_length_meters.cpp` | **待查** | mailbox 2026-05-09 |
 | 🟢 | `SE3_inverter::readFaultCode()` 已加，但 bench 驗到 `0x1007`/`0x1008` 連續 ~10 次都 READ_FAIL — 位址是否正確待驗（三個可能原因見下方） | `user_lib/SE3_inverter.cpp:381` | method **已修** ✔／位址 **待查** | mailbox 2026-05-14 |
 | 🟢 | `DSZL_107::do_zero_ch1/2/all()` 目前不會自動 follow-up `save_params()`（刻意設計，避免連續校零磨損 flash），是否要加可選 `persist` 參數待決 | `user_lib/DSZL_107.cpp:304-306` | **待查** ✔ | mailbox 2026-05-08 |
-| 🟢 | `arm_sweep_monitor` SUSTAINED 0.2→0.4（防 false positive，代價是可能漏接弱接觸 obstacle）— 待 user 拍板 | `user_lib/WASH_ROBOT.cpp` | **待查** | work_log 2026-06-09 |
-| 🟢 | PQW CH6 verify fail「gave up after 3 retries」最後沒人 catch，downstream 沒擋住 — 要確認是不是真的有 propagation 問題 | `user_lib/WASH_ROBOT.cpp`、`user_lib/PQW_IO_16O_RLY.cpp` | **待查** | work_log 2026-06-02 |
+| 🟢 | `arm_sweep_monitor` SUSTAINED 0.2→0.4（防 false positive，代價是可能漏接弱接觸 obstacle）— 待 user 拍板 | `app/WASH_ROBOT.cpp` | **待查** | work_log 2026-06-09 |
+| 🟢 | PQW CH6 verify fail「gave up after 3 retries」最後沒人 catch，downstream 沒擋住 — 要確認是不是真的有 propagation 問題 | `app/WASH_ROBOT.cpp`、`user_lib/PQW_IO_16O_RLY.cpp` | **待查** | work_log 2026-06-02 |
 | 🟢 | `DM2J:14` writeMulti no response（cli_22_ contention 偶發，driver 自己 retry 成功）— 要不要監控連續失敗率 | `user_lib/DM2J_RS570.cpp` | **待查** | work_log 2026-06-02 |
 | 🟢 | arm M1 `verify_deploy` delta 漸增（RIGHT 從 0.797 漂到 0.910，delta −0.114 / tol 0.150，接近邊緣） | `cleaning_arm/main_api.cpp` | **待查** | work_log 2026-06-02 |
-| 🟢 | `cmd_recover` force escape（sensor 假報故障時 user 會卡死）— 設計討論完，暫不做，先看誤報率 | `user_lib/WASH_ROBOT.cpp` | **待查** | work_log 2026-06-02 |
+| 🟢 | `cmd_recover` force escape（sensor 假報故障時 user 會卡死）— 設計討論完，暫不做，先看誤報率 | `app/WASH_ROBOT.cpp` | **待查** | work_log 2026-06-02 |
 | 🟢 | Tool 物理裝歪：若 `ARM_CLEAN_WALL_MM=330` 還是不平貼 → 拆 tool mount 重裝 | 機械（非程式） | **待查** | work_log 2026-06-02 |
 | 🟢 | BAL 討論但未落地：機體重心本來偏 L，應追求「兩繩同步收放」而非「等張力」；kp 1.0 不夠可能要加 base offset | `Crane_control_PI/main.cpp` | **待查** | work_log 2026-06-02 |
-| 🟢 | 跨越障礙物步幅建議公式（`remaining + max_height + 20 + 5`）只驗過算式邏輯，沒驗過「照這個步幅走真的跨得過去」。跨障礙物按鈕本身仍保留 | `user_lib/WASH_ROBOT.{h,cpp}` | **待查**（深度相機這個**輸入來源**已移除） | work_log 2026-07-22~23 |
+| 🟢 | 跨越障礙物步幅建議公式（`remaining + max_height + 20 + 5`）只驗過算式邏輯，沒驗過「照這個步幅走真的跨得過去」。跨障礙物按鈕本身仍保留 | `app/WASH_ROBOT.{h,cpp}` | **待查**（深度相機這個**輸入來源**已移除） | work_log 2026-07-22~23 |
 | 🟢 | SE3 `sendModbus` recv timeout 300→150ms（worst case writeParam fail 500→350ms、8 retry wall time ~4.8s→~2.4s） | `user_lib/SE3_inverter.cpp:121` | **已修** ✔（已套用，review 請求作廢） | mailbox 2026-05-14 |
 | 🟢 | SE3 `invalidateCuModeCache()` 純 additive method（解 cold start `fine_adjust` 連按 3 次第三次才動） | `user_lib/SE3_inverter.cpp:297` | **已修** ✔ | mailbox 2026-05-13 |
 | 🟢 | SE3 `clearAlarm()` 純 additive method（H1101=H9696 變頻器復位，解通訊中斷後卡 OPT） | `user_lib/SE3_inverter.cpp:312` | **已修** ✔ | mailbox 2026-05-13 |
 | 🟢 | SD76 SCAL 是**除數**不是乘數（手冊寫 "Counter Multiplier" 但行為相反），driver 內部換算成 1/K | `user_lib/SD76_length_meters.cpp` | **已修** ✔ | mailbox 2026-05-09 |
-| 🟢 | `TCP_client` 加 `SO_KEEPALIVE` + `TCP_KEEPIDLE=10s`/`INTVL=3s`/`CNT=3`（dead connection 偵測 ~19s vs 預設 ~2hr） | `user_lib/TCP_client.cpp:24` `apply_keepalive()` | **已修** ✔ | mailbox 2026-05-08 |
+| 🟢 | `TCP_client` 加 `SO_KEEPALIVE` + `TCP_KEEPIDLE=10s`/`INTVL=3s`/`CNT=3`（dead connection 偵測 ~19s vs 預設 ~2hr） | `transport/TCP_client.cpp:24` `apply_keepalive()` | **已修** ✔ | mailbox 2026-05-08 |
 | 🟢 | `DSZL_107::save_params()`（寫 `0xA20=40` + 150ms sleep，解 X518 power-cycle 掉設定） | `user_lib/DSZL_107.cpp:314` | **已修** ✔ | mailbox 2026-05-08 |
 | 🟢 | `DM2J_RS570` 多處 bug：`read_status` 讀 2 reg 應讀 1、完工檢查查錯 word、`print_status` HOME_DONE mask、`motor_enable/disable/save_params` 只宣告沒實作 | `user_lib/DM2J_RS570.cpp` | **已修** ✔（mask 改 `0x0040`、`0x000F` enable、`0x2211→0x1801` save 都已落地） | work_log 2026-04-24 |
 | 🟢 | 清掉 `Linux_test` 的 `dm2j_manual_enable` helper（那段寫 `0x1111` 其實是 reset alarm 不是 enable） | `Linux_test/main.cpp` | **已修** ✔（符號已不存在） | work_log 2026-04-24 |
 | 🟢 | GUI 按鈕對應（右/左閥、單側繩、step） | `web_backend/public/*` | **已修**（2026-08-26~27 多輪 GUI 改版已重做） | work_log 2026-07-07 |
-| 🟢 | arm 清洗 sweep 因手臂未裝而 deferred | `user_lib/WASH_ROBOT.cpp` | **已修**（2026-07-24 手臂實裝後接回 `do_step_sync_rail_sweep_`） | work_log 2026-07-07 |
+| 🟢 | arm 清洗 sweep 因手臂未裝而 deferred | `app/WASH_ROBOT.cpp` | **已修**（2026-07-24 手臂實裝後接回 `do_step_sync_rail_sweep_`） | work_log 2026-07-07 |
 | 🟢 | `frame_capture/depth_cam_service.py` / `depth_reflection_bench.py` / `depth_cam_test_client.py` 三個檔 git untracked | `frame_capture/` | **已修** ✔（三個檔已進版控） | work_log 2026-07-22~23 |
-| 🟢 | D435i 深度相機**戶外強光**未測（曾是換相機決策的最大未知數） | `frame_capture/` | **已修（作廢）**：2026-08-26e 移除深度避障 GUI、2026-08-27c 攝影機介面永久移除 | ONBOARDING §4 |
-| 🟢 | `remaining_travel_cm` 用新常數（`LEAD_OFFSET=32cm`/`STANDOFF=56cm`）後沒重新實機驗證 | `user_lib/WASH_ROBOT.h` | **已修（作廢）**：攝影機路線已移除 | work_log 2026-07-22~23 |
-| 🟢 | 一般（非鏡面）窗戶場景的窗框辨識沒測過 | `frame_capture/obstacle_detector.py` | **已修（作廢）**：攝影機路線已移除 | work_log 2026-07-22~23 |
-| 🟢 | `scripts/wr.sh` 的 cam1/cam2 window 還註解著，攝影機接回去要取消註解 | `scripts/wr.sh` | **已修（作廢）**：攝影機永久不接 | work_log 2026-07-21 |
-| 🟢 | `camera_obstacle_plan.md` 還沒加 motion mode section | `.claude/camera_obstacle_plan.md` | **已修（作廢）**：攝影機路線已移除 | work_log 2026-06-02/03 |
+| 🟢 | D435i 深度相機**戶外強光**未測（曾是換相機決策的最大未知數） | `frame_capture/` | 🔴 **作廢理由不成立（2026-08-29 複查）**：移除的是 **GUI**，不是後端。`cmd_run_depth_avoid` / `depth_cam_cmd_` / `DEPTH_CAM_*` 仍在 `app/WASH_ROBOT.{h,cpp}` 活著。實體相機未接故不會跑，**但這是「沒接線」不是「已移除」** | ONBOARDING §4 |
+| 🟢 | `remaining_travel_cm` 用新常數（`LEAD_OFFSET=32cm`/`STANDOFF=56cm`）後沒重新實機驗證 | `app/WASH_ROBOT.h:296-297` | 🔴🔴 **誤標作廢，實為未驗證的活常數（2026-08-29 複查）**：`DEPTH_CAM_STANDOFF_CM=56.0` 與 `DEPTH_CAM_LEAD_OFFSET_CM=32.0` 都還在，且正是 🔴「`run_depth_avoid` 後端仍會自行改走 cross 步伐」那條待辦所用的算式輸入 → **恢復為未驗證** | work_log 2026-07-22~23 |
+| 🟢 | 一般（非鏡面）窗戶場景的窗框辨識沒測過 | `frame_capture/obstacle_detector.py` | 🔴 **作廢理由不成立（2026-08-29 複查）**：`obstacle_detector.py` 仍在版控，`FrameAnalyzer` 仍呼叫 `obstacle_combine.py`。實體相機未接故不會跑 | work_log 2026-07-22~23 |
+| 🟢 | `scripts/wr.sh` 的 cam1/cam2 window 還註解著，攝影機接回去要取消註解 | `scripts/wr.sh:50-52,64-68` | **已修** ✔（cam1/cam2 兩個 window 確實已註解）／⚠️ **但檔內註解與決策矛盾**：`:50-52` 仍寫「之後接回去時把下面這段一起取消註解即可」，而決策是**永久不接** → 註解待改 | work_log 2026-07-21 |
+| 🟢 | `camera_obstacle_plan.md` 還沒加 motion mode section | `.claude/archive/camera_obstacle_plan.md`（**已於 2026-08-29 複查時發現搬進 `archive/`**） | **已修（作廢）**：該計畫檔已封存，Phase 5 未實作 | work_log 2026-06-02/03 |
 | 🟢 | v1 現場未解 5 項：PQW 寫 relay 不成功、DM2J slave ENABLE bit 沒亮、ZDT slave 6 堵轉、推桿距離待細調、FrameAnalyzer C++ 沒寫 | v1 硬體 | **已修（多數作廢）**：v2 已無 DM2J 滑軌/輪組，吸盤 slave 2026-08-27 改 5-8，`user_lib/FrameAnalyzer.cpp` 已存在 | work_log 2026-04-23 |
 | 🔴 | `run_depth_avoid` 後端仍活著，且偵測到大障礙物時會**自行改走 `cross` 步伐**：`run_depth_avoid` / `depth_avoid_continue` / `depth_avoid_stop` 三個指令仍 dispatch 到真實實作，而同輩的 `obstacle_detect`/`run_avoid`/`obstacle_response` 早已硬關成 `ERR removed_in_v2`。前端已於 2026-08-27c 移除 → **現在完全沒有 UI 提示** | `facade_cleaning_v2/main.cpp:184-189` | **未修** ✔ | `camera_obstacle_plan.md` 稽核 2026-08-27（changelog 2026-08-26e） |
 | 🟡 | 🆕 **本體主程式自己也還在探測深度相機**：`init()` 印 `[WARN] depth_cam 127.0.0.1:9530 not yet reachable`（2026-08-29 實機）。既有待辦只記了 `scripts/wr.sh:67` 會**啟動** `depth_cam_service.py`，**漏了主程式端還在連它** —— 攝影機路線 2026-08-27 已永久移除。無害（只是一行 WARN），但**每次啟動都在報一個不存在的東西**，會稀釋真正的 WARN | `app/WASH_ROBOT.cpp`（depth_cam 連線初始化）、`facade_cleaning_v2/main.cpp` | **未修** ✔ | work_log 2026-08-29（實機 init） |
 | 🟡 | `scripts/wr.sh:67` 仍會啟動 `depth_cam_service.py`（depth window）。changelog `2026-08-26e` 結尾寫「可以把那個 window 註解掉——尚未變更，待 user 決定」，至今未決 | `scripts/wr.sh:67` | **未決** ✔ | `camera_obstacle_plan.md` 稽核 2026-08-27 |
 | 🔴 | MH300 keypad commissioning 參數表**是唯一副本**（只記在 plan 檔裡，沒有第二份）：站號 `09-00`=1/2、`09-01`=9.6、`09-04`=12（8N1 RTU，與 SD76 共用同一條 bus）、`00-20`=1（頻率來源 RS-485）、`00-21`=2（運轉來源 RS-485）、`07-00~04` DC brake／煞車截波（配 BR300W070-S 制動電阻）、`01-12`/`01-13` 加減速時間——**左右必須對齊，否則不同步停車** | `.claude/mh300_migration_plan.md` Phase 0 | **待用** | `mh300_migration_plan.md` Phase 0 |
 | 🔴 | SE3 `P.79` 切換程序與「`P.5` 必為 0」**是唯一副本**，而且 bench 目前**仍在跑 SE3**（`Crane_control_PI/main.cpp:116` `#define CRANE_VFD_IS_SE3 1`），不是已作廢的舊文件：改 `P.79` 前須先停馬達、解除 OPT，再 `P.79=3 → 2 → 6`（防 latch 卡住）；`P.5`（multi-speed）必須保持 0，否則多段速會覆蓋 H1002 頻率命令 | `.claude/se3_mode6_migration_plan.md` §1.1、`Crane_control_PI/main.cpp:116` | **有效** ✔ | `se3_mode6_migration_plan.md` §1.1 |
-| 🔴 | QX-DO24 PWM（螺旋槳 ESC 控制）目前停用，`PWM_SLAVE=6` 撞 JC100 真空計。停用註解的理由是「nothing in the automatic gait depends on it (web panel only)」——這對舊架構成立，**對新架構不成立**：新架構設計文件寫明貼附序列的第一步就是「先讓螺旋槳把機體壓穩」。同 bus 的 slave 1-8 已被吸盤佔滿（`Linux_test/main.cpp:891` feet `{1,2,3,4}` / body `{5,6,7,8}`）、10/11 為 DY-500（未安裝），需挑一個空號並對照 `cli_22_` 上所有裝置確認不撞號 | `user_lib/WASH_ROBOT.cpp:175-192`（`PWM_ENABLED`） | **未修（阻塞新架構）** ✔ | changelog 2026-08-27h ＋ 新架構設計 2026-08-27 |
+| 🔴 | QX-DO24 PWM（螺旋槳 ESC 控制）目前停用，`PWM_SLAVE=6` 撞 JC100 真空計。停用註解的理由是「nothing in the automatic gait depends on it (web panel only)」——這對舊架構成立，**對新架構不成立**：新架構設計文件寫明貼附序列的第一步就是「先讓螺旋槳把機體壓穩」。同 bus 的 slave 1-8 已被吸盤佔滿（`Linux_test/main.cpp:891` feet `{1,2,3,4}` / body `{5,6,7,8}`）、10/11 為 DY-500（未安裝），需挑一個空號並對照 `cli_22_` 上所有裝置確認不撞號 | `app/WASH_ROBOT.cpp:175-192`（`PWM_ENABLED`） | **未修（阻塞新架構）** ✔ | changelog 2026-08-27h ＋ 新架構設計 2026-08-27 |
 | 🟡 | **`SERIAL_PORT_H` guard 衝突：兩個不同的序列埠實作共用同一個 guard** | `user_lib/SerialPort.h`（322 行，cleaning_arm/damiao 用）與 `transport/Serial_port.h`（本專案用，WASH_ROBOT.h / WT901BC_TTL.h / Linux_test）。目前不爆只因使用者不重疊；**一旦同一編譯單元同時碰到兩者，第二個被 guard 靜默吃掉**，症狀是「class 莫名找不到」、錯誤訊息不指向真因。修正方向：guard 改唯一名稱或 `#pragma once`，動前先確認無別處拿此 guard 名做條件編譯。兩檔開頭皆已標註 | 未修 | 分層重構 2026-08-27 |
 | 🟡 | **Pi 上的 `web_ver2` 落後 repo 一個 commit** ⚠️ 原記「分岔 589 行 / 不是增量是另一個程式」是**誤判**，2026-08-28 更正 | Pi `~/projects/web_ver2/`（在**吊機** `raspberry-cran`，不是本體）四個檔全是 repo 內容的複本：`server.js`／`style.css` 與 commit `faf1d3f` **逐位元相同**、`app.js` 與 `a894ae1` 逐位元相同、`index.html` 與 HEAD 的差異**全部**是攝影機面板那一段。**沒有任何人手改過的內容，repo 仍是權威**，只是落後移除攝影機的 commit `e3c8820` | 待部署（🔴 **main 分支的人正在改這兩台，部署前先確認**） | 更正 2026-08-28（原：實機盤查 2026-08-27） |
 | 🔴 | **張力刻度仍是 placeholder，kg 讀值無意義** | 實機 `status` 讀到 `dsz_left_scale=-0.01 dsz_right_scale=-0.01`，即待辦既有的 DSZL placeholder。**2026-08-29 複測仍是 `-0.01`**，讀值 `tension_left=26.45 / right=16.85`（08-27 為 27.35/14.98）。**這是 `crane_balance_hold_plan` 重啟前提「張力可信」仍未達成的實證** | 未修 ✔ | 實機讀取 2026-08-27｜2026-08-29 複測 |
-| 🟡 | ~~**左右張力差 12.4 kg，且左側已越過收繩停止門檻**~~ **結論已過期（2026-08-29 複測）**：門檻實際是 `retract_tension_stop_kg=**50**`（08-27 記的 25 與現況不符），左側 26.45 **並未越過**；左右差也由 12.4 縮為 **9.6 kg**。🔴 **但根因沒變**——刻度仍是佔位值（上一列），所以「差 9.6kg」這個數字同樣不可信。**此列降為 🟡：可觀察，不可據以判斷** | 未修（根因在上一列） ✔ | 實機讀取 2026-08-27｜2026-08-29 複測更正 |
+| 🟡 | ~~**左右張力差 12.4 kg，且左側已越過收繩停止門檻**~~ **結論已過期（2026-08-29 複測）**：門檻實際是 `retract_tension_stop_kg=**50**`（08-27 記的 25 與現況不符），左側 26.45 **並未越過**；左右差也由 12.4 縮為 **9.6 kg**。🔴 **但根因沒變**——刻度仍是佔位值（上一列），所以「差 9.6kg」這個數字同樣不可信。**此列降為 🟡：可觀察，不可據以判斷** | `Crane_control_PI/main.cpp`（`retract_tension_stop_kg`）、`user_lib/DSZL_107.cpp` | 未修（根因在上一列） ✔ | 實機讀取 2026-08-27｜2026-08-29 複測更正 |
 | 🔴 | **VFD 故障碼顯示是壞的** ⚠️ **2026-08-29 複測：症狀變了，而原本的歸因很可能是錯的** | 08-27 記的是「left 報假警 `f1~f4=160/OPT`／right `ERR read_fail`」；**08-29 兩側都是 `ERR read_fail side=<left\|right>`**，keepalive 亦印 `fault_code=READ_FAIL`（tick 1 後自動 `0x2002 RESET`，tick 2 起 status 恢復 `0x0`）。🔴 **原歸因「`mh300_migration_plan` Phase 3-3 未完成、仍讀 SE3 的 H1007/H1008」站不住**——本機 `CRANE_VFD_IS_SE3 1`，**跑的就是 SE3，讀 SE3 位址本來就該是對的**。→ 真正的線索應是表格中 `SE3_inverter::readFaultCode()` 那列（`0x1007`/`0x1008` 位址待驗），**兩列講的很可能是同一件事**，下次一併查 | 未修；**歸因待重驗** ✔ | 實機讀取 2026-08-27｜2026-08-29 複測推翻歸因 |
 
 ---
@@ -306,6 +307,68 @@ threshold 再實作」：① `cmd_hold` 與 motion 互斥（避免 hold 跟 moti
 | 🟢 | 儲氣筒壓力未讀 | Pi 未讀取儲氣筒壓力，假設氣壓恆定可用 | **暫緩**，實機測試時可能浮現 | 設計彙整 §6 暫緩項目 |
 
 ---
+
+## 2026-08-29（續四）— 「已修 ✔」那半邊的校驗：32 條裡 8 條的記載是錯的
+
+**沒有機器可用，所以做的是純原始碼／版控的工作。** 08-29 上午的待辦總表校準只查了「未修」那半邊，
+當時就記著「**反向危害更貴：標已修而實際沒修的列，永遠不會有人再去看它**」。這次把 32 條標「已修」
+的全部打開比對原始碼。
+
+### 已完成
+
+**逐條比對 32 條「已修」→ 24 條屬實、8 條記載有誤。**
+
+✅ **屬實且已逐字看過原始碼的（24 條）**：`SO_ERROR`（`transport/TCP_client.cpp:208,214`）／
+`CRANE_VFD_NAME`（四處都吃巨集）／上滑台 7.731 換算層＋行程守衛／`CUP_PULSE_PER_CM=3000`／
+左右歸屬 `ZDT_RF1/2={5,7}`、`ZDT_LF1/2={6,8}`／SD76 `readRegister` 三道驗證（byteCount → 幀長 → CRC）／
+`server.js` `CRANE_IP=192.168.1.10`／`cmd_side_measured` 的 `abort_flag=false`（:2924）／
+`MSG_NOSIGNAL`（含合併帶進的 `sendAndReceiveQuiet` :495 也已補）／`apply_keepalive`／
+DSZL MBAP + `save_params(0xA20=40)`／SE3 `readFaultCode`/`invalidateCuModeCache`/`clearAlarm`/recv 150ms／
+SD76 SCAL 當除數／DM2J 四項（`0x0040` HOME_DONE mask、`0x000F` enable、`0x1801=0x2211` save、`read_status`）／
+`dm2j_manual_enable` 已不存在／`frame_capture` 三檔已進版控／`do_step_sync_rail_sweep_` 已接回／
+`CLAUDE.md ## Architecture` 已由原始碼重建。
+
+🔴 **① 三條「`refactor/app-layer` 上仍未修」的跨分支警語，全部是錯的**
+`SO_ERROR` 由 `56bfa5c`、上滑台 7.731 換算由 `9fa4fe1` **都已 cherry-pick 進整理分支**，
+左右歸屬 `8d4d2d5` 本來就在整理分支上。三條警語會讓人以為整理分支還會把滑台一路撞到底。
+
+🔴🔴 **② 由 ① 順藤摸出真正大的那條：整理分支已經不是「純整理、功能等價」**
+`git log origin/main..refactor/app-layer --no-merges -- '*.cpp' '*.h'` 列出 **9 個刻意的行為改變**
+（MSG_NOSIGNAL／`CRANE_IP`+VFD 型號／7.731 換算+行程守衛／`ARM_SWEEP_RPM` 1000→250／QX_DO24 PWM
+重試+回讀／`zdt_pusher` 範圍分岔／`CUP_PULSE_PER_CM`／左右歸屬／`SO_ERROR`）。
+**上機計畫的整個前提是「分開上機才分得清『行為變了』是搬家搬壞還是 driver 改的」——那個區分已經沒了。**
+日誌裡「唯一實質改動是 `send()` 加 `MSG_NOSIGNAL`」的結論停在 08-28 上午。已入表為 🔴🔴 待辦。
+
+🔴 **③ 四條攝影機列的「作廢」理由是假的**
+理由寫「攝影機路線已移除」，實際移除的是 **GUI**：`cmd_run_depth_avoid`、`depth_cam_cmd_`、
+`DEPTH_CAM_IP/PORT`、`FrameAnalyzer` 全都還活在 `app/WASH_ROBOT.{h,cpp}`。
+其中 `remaining_travel_cm` 那條**最不該被作廢**——`DEPTH_CAM_STANDOFF_CM=56.0` 與
+`DEPTH_CAM_LEAD_OFFSET_CM=32.0` 正是既有 🔴 待辦「`run_depth_avoid` 後端仍會自行改走 cross 步伐」
+所用算式的輸入，卻被標成「已作廢、不用管」。已恢復為未驗證。
+
+🔴 **④ 表格 19 列的檔案路徑在分層重構後已不存在**（`user_lib/WASH_ROBOT.*` → `app/`、
+`user_lib/TCP_client.cpp` → `transport/`）。08-29 上午只修到 2 列，是同一個坑的 9 倍規模。**已全數校正**
+（表格區才改；下方各日期條目的原文**刻意不動**，那是當時的紀錄）。
+順帶：`.claude/camera_obstacle_plan.md` 已搬進 `.claude/archive/`。
+
+⚠️ **⑤ `scripts/wr.sh` 的 cam1/cam2 確實已註解（記載屬實），但檔內註解與決策矛盾**：
+`:50-52` 仍寫「之後接回去時把下面這段一起取消註解即可」，而決策是**永久不接**。
+
+### 📌 這輪的通則
+
+**「已修」是一種會過期的狀態，而它過期時不會有任何訊息。**
+三條跨分支警語在寫下的當天是對的，cherry-pick 之後就變成錯的；四條攝影機列的作廢理由在
+「移除 GUI」那天看起來成立，但沒有人回頭確認後端。**與踩坑索引「政策反轉時舊斷言會把正確報成故障」
+互為鏡像**：那次是斷言沒跟著政策翻面，這次是結論沒跟著程式碼翻面。
+📌 **勾掉一列的當下要寫「憑什麼說它修好了」（commit / 檔案:行號），不是只寫「已修」**——
+這次能在半天內查完 32 條，靠的正是那些有寫 commit 號的列。
+
+### 待完成
+
+- 🔴 **上機前要決定整理分支怎麼處理**（(a) 接受帶行為改變照上／(b) 另開純搬家分支／(c) 直接上 `fix/driver-crc`）
+- 🟡 `scripts/wr.sh:50-52` 的註解改成「永久不接」
+- 🟡 本次只驗「程式碼有沒有那段」，**沒有編譯、沒有實機**——四條被翻回「未驗證」的攝影機列仍待實機
+
 
 ## 2026-08-29（續三）— 上滑台方向確認；homing 這條路確定放棄
 
