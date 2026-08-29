@@ -24,7 +24,7 @@
 
 - 兩台皆 **aarch64 / Debian 13 (trixie) / g++ 14.2**
 - 🔴 **帳號不是 `pi`**（2026-08-28 已全檔更正為 `nexuni@` / `user@`）
-- 🔴 **吊機有線是 `192.168.1.10` 不是 `.101`**（2026-08-28 全檔更正）。⚠️ `web_backend/server.js` 的 `CRANE_IP` 預設值**仍是 `.101`**（過期），現行程式實際走 `app/WASH_ROBOT.h` 的 `CRANE_IP = "192.168.5.17"`（WiFi）
+- 🔴 **吊機有線是 `192.168.1.10` 不是 `.101`**（2026-08-28 全檔更正）。✅ `web_backend/server.js` 的 `CRANE_IP` 預設值**已於 `f4e0d02` 改為 `.1.10`**（2026-08-29 複查確認；本行原本寫「仍是 `.101`」＝過期）。⚠️ 現行的兩支 C++ 走的是 `app/WASH_ROBOT.h` 的 `CRANE_IP = "192.168.5.17"`（WiFi）—— **eth 串接後要回頭改它**，見待辦總表
 - 📌 `192.168.5.26` 在 changelog／work_log 裡以 `[TEST MODE]` 出現過（`CRANE_IP` 曾被暫時改成它），
   **那不是筆誤，就是這台的 WiFi 位址**
 - ⚠️ **測試環境實體位於倉庫（新國街）**，與 `192.168.5.0/24` 的其他設備同網段。
@@ -173,6 +173,21 @@ rsync -a --delete <repo>/{app,transport,user_lib,facade_cleaning_v2} nexuni@192.
 ```
 ssh nexuni@192.168.5.26 'cd ~/bringup && mkdir -p obj && printf "%s\n" facade_cleaning_v2/main.cpp app/WASH_ROBOT.cpp transport/{Serial_port,TCP_client,TCP_server}.cpp user_lib/{DM2J_RS570,DY_500_weight_sensor,FrameAnalyzer,JC_100_METER,PQW_IO_16O_RLY,QX_DO24,WT901BC_TTL,XKC_Y25_RS485,ZDT_motor_control}.cpp | xargs -P4 -I{} sh -c "g++ -std=c++17 -O2 -Iapp -Itransport -Iuser_lib -c {} -o obj/\$(basename {} .cpp).o" && g++ -o facade_cleaning_v2.out obj/*.o -lpthread'
 ```
+
+🔴 **第三個目標：`Linux_test`（2026-08-29 補）** —— 它與應用層一樣綁在 `user_lib/*.h` 的
+public 簽名上，**上面兩條指令都沒有涵蓋它**。08-28 的 `3c75351` 把 `DM2J_RS570.h` 的
+16 個 `void` 改成 `bool`＝跨模組契約改動，**只編前兩支等於只驗到契約的一端**：
+```
+rsync -a --delete <repo>/Linux_test nexuni@192.168.5.26:~/bringup/
+```
+```
+ssh nexuni@192.168.5.26 'cd ~/bringup && g++ -std=c++17 -O2 -Itransport -Iuser_lib -o linux_test.out Linux_test/main.cpp transport/{Serial_port,TCP_client,TCP_server}.cpp user_lib/{PQW_IO_16O_RLY,ZDT_motor_control,DM2J_RS570,WT901BC_TTL,JC_100_METER,XKC_Y25_RS485,SD76_length_meters,ZS_DIO_R_RLY,SE3_inverter,MH300_inverter,QX_DO24}.cpp -lpthread'
+```
+📌 **假從站測試**（`Linux_test/fake_slaves/`）的建置指令在各 `test_*.cpp` 的檔頭，
+且**全程只連 `127.0.0.1`，不碰真 485 匯流排** —— 拿到機器時值得順手跑一輪。
+
+⚠️ **驗建置結果要看產物，不要看管線離開碼**：`g++ … 2>&1 | tail` 的離開碼是 `tail` 的
+（2026-08-29 差點誤判）。用 `ls -la` + `md5sum` 確認檔案時間戳與雜湊真的變了。
 
 ⚠️ **`~/bringup/` 是刻意跟 `~/projects/` 分開的**：`~/projects/` 是 Visual Studio 遠端建置的落點，
 另一位開發者在 `main` 上迭代時會重建並覆蓋它。
