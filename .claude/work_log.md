@@ -61,7 +61,7 @@
 | 🟡 | `trigger_sync_move()` 是 Modbus 廣播（slave 0x00）不會有回應，卻以 `return resp.empty();` 收尾 → 廣播成功也永遠回報失敗 | `user_lib/ZDT_motor_control.cpp:599`（宣告 `.h:63`） | ✅ **已修（2026-08-29）**：送出成功即 `return false`。`readEcho(200)` 保留但降格為**排空**（避免上一筆交易的遲到回覆被下一筆誤讀），結果丟棄；**200ms 刻意不動**——它在步態迴圈裡，縮短是計時改變、要有機器才驗得了。三處呼叫端註解（`app/WASH_ROBOT.cpp` ×2、`Linux_test/main.cpp` ×1）已同步，TODO 已移除。🔴 **未編譯**（本機無 cc1plus、Pi 不可達） | mailbox 2026-04-30｜2026-08-29 修 |
 | ✅ | ~~`send(sock, buf, len, 0)` 沒帶 `MSG_NOSIGNAL`，Linux 下對已關閉對端寫入會 SIGPIPE 殺 process~~ | `transport/TCP_client.cpp:53`、`transport/TCP_server.cpp:21`（**檔案已於分層重構搬離 `user_lib/`**） | **已修（`9e1ad1b`，分支 `fix/msg-nosignal` 已併入）**：兩檔各定義 `constexpr int SEND_FLAGS = MSG_NOSIGNAL` 供所有 `send()` 共用。🔴 **合併 main 時 `sendAndReceiveQuiet` 曾帶著 `send(...,0)` 繞過這道防線**（`[2026-08-28j]` 已修）——**新增送出路徑一律用 `SEND_FLAGS`，不要再寫字面 0** | mailbox 2026-04-22｜2026-08-29 複查原始碼確認 |
 | 🟡 | `CLV900_inverter` 缺 null-client 防護：跳過 `init()` 時 `client == nullptr`，`sendModbus` 直接 null-deref segfault（應用層已用 `g_dev_clv900` 守起來，driver 本身沒守） | `user_lib/CLV900_inverter.cpp:66` | ✅ **已修（2026-08-29）**：`sendModbus` 進場 `if (!client) { LOG_ERR; respLen=0; return true; }`，沿用 `DM2J_RS570::sendRecv` 的既有慣例。🔴 **未編譯**（同上）。⚠️ **但這條只關掉 12 支裡的 1 支**——見下方新增列 | mailbox 2026-05-14｜2026-08-29 修 |
-| 🔴 | 🆕 **null-client 這個洞是 12 支 driver 裡的 10 支，不是 CLV900 一支** —— 2026-08-29 修 CLV900 時順手掃全 `user_lib/`：建構子把 `client` 設為 `nullptr`、而傳輸函式沒有任何守衛的，有 **CLV900（已修）／DSZL_107／DY_500／JC_100／MH300／PQW_IO_16O_RLY／SD76／SE3／XKC_Y25／ZDT** 共 10 支；只有 `DM2J_RS570::sendRecv`（`if (!client) return true;`）與 `QX_DO24`（3 處）本來就守了。🔴 **CLV900 之所以被單獨開票，只是因為當時有人剛好踩到它，不是因為它特別** —— 若只結掉 CLV900 那列就把這件事當「已修」，剩下 9 支會連同「已經處理過了」的印象一起消失。**這正是本日上半場清掉的那種假結案。**📌 修法是同一行守衛（回傳值依各檔慣例：Modbus 系 `true`=錯、QX_DO24 系相反），零風險但 **10 檔未編譯的 C++ 改動要有機器才敢一次上** | `user_lib/*.cpp`（掃法：建構子 `client = nullptr` ∧ 傳輸函式無 `!client` 守衛） | **未修**（CLV900 以外 9 支）✔ | 2026-08-29 修 CLV900 時帶出 |
+| ✅ | ~~**null-client 守衛：12 支 driver 裡有 8 支的傳輸路徑沒守**~~ ⚠️ **原記「10 支」是錯的（2026-08-29 當日更正）**：那次用 grep pattern `!client\b` 判定，而 `!client->sendData(...)` 也會匹配，於是把 `JC_100_METER:57` 與 `XKC_Y25_RS485:70,180,214` （寫法是 `if (!client \|\| !client->isConnected())`）誤判成沒守，同時把 `DM2J_RS570` 誤判成守好了（它只守 `sendRecv`，六支 `read_*` 與 `recv_frame_` 是裸的）。**逐函式讀原始碼後實際是 8 支。**| `user_lib/`：ZDT(18)／DM2J(7)／PQW(5)／DY_500(3)／DSZL(2)／MH300(1)／SD76(1)／SE3(1)＝**38 處**，外加先前的 CLV900(1) | ✅ **已修（2026-08-29）**：守衛插在各函式進場，回傳值依各自慣例（Modbus 系 `true`=錯／`recv_frame_` 回 `-1`／回 vector 的回 `{}`／`close()` 直接 `return`）。本來就守好的是 `JC_100`／`XKC_Y25`／`QX_DO24`。🔴 **未編譯** | 2026-08-29 修 CLV900 時帶出，同日修完 |
 | ✅ | ~~`TCP_client` 缺 `SO_ERROR` 驗證 → 影響 reconnect 的邊界 case~~ ⚠️ **本列與表格第一列是同一件事**（2026-06-09 與 2026-08-28 各記了一次），2026-08-29 合併確認 | `transport/TCP_client.cpp:208,214` | **已修（`56bfa5c`／`ce8ba81`）** — 詳見表格第一列（含雙向斷言實機驗證） | work_log 2026-06-09｜2026-08-29 判為重複列 |
 | 🟡 | MH300 實機必驗清單未跑：方向映射、電流 scale、2101H run bit、fault code | `Crane_control_PI/main.cpp`（`VFD_DIR_*` 巨集）、`.claude/mh300_migration_plan.md` | **未修** ✔（註解仍寫 `RE-VERIFY on MH300`） | work_log 2026-07-07 |
 | 🟡 | **4 個 `.vcxproj.user` 被 git 追蹤** → 不同 bench 的 Remote Target 互相覆蓋（Connection Manager 顯示空白）。⚠️ 原記 5 個，`windows_test/` 已於 `a69f82f` 整個移除 → 實際 4 個 | `Crane_control_PI/`、`Linux_test/`、`cleaning_arm/`、`facade_cleaning_v2/` | ✅ **已修（2026-08-29）**：四個檔 `git rm --cached`（**留在本機**）＋ `.gitignore` 加 `*.vcxproj.user`。移除前已確認「哪個專案建置到哪台 Pi」**不是唯一副本**（`.claude/runbook.md:22-23` 與 `CLAUDE.md:263-264` 都有）。📌 真正的理由是內容含只在該台機器有意義的連線 handle（如 `-1125135748`），本來就不可共用 | work_log 2026-07-15｜2026-08-29 複查確認 |
@@ -111,7 +111,7 @@
 | 🟢 | D435i 深度相機**戶外強光**未測（曾是換相機決策的最大未知數） | `frame_capture/` | 🔴 **作廢理由不成立（2026-08-29 複查）**：移除的是 **GUI**，不是後端。`cmd_run_depth_avoid` / `depth_cam_cmd_` / `DEPTH_CAM_*` 仍在 `app/WASH_ROBOT.{h,cpp}` 活著。實體相機未接故不會跑，**但這是「沒接線」不是「已移除」** | ONBOARDING §4 |
 | 🟢 | `remaining_travel_cm` 用新常數（`LEAD_OFFSET=32cm`/`STANDOFF=56cm`）後沒重新實機驗證 | `app/WASH_ROBOT.h:296-297` | 🔴🔴 **誤標作廢，實為未驗證的活常數（2026-08-29 複查）**：`DEPTH_CAM_STANDOFF_CM=56.0` 與 `DEPTH_CAM_LEAD_OFFSET_CM=32.0` 都還在，且正是 🔴「`run_depth_avoid` 後端仍會自行改走 cross 步伐」那條待辦所用的算式輸入 → **恢復為未驗證** | work_log 2026-07-22~23 |
 | 🟢 | 一般（非鏡面）窗戶場景的窗框辨識沒測過 | `frame_capture/obstacle_detector.py` | 🔴 **作廢理由不成立（2026-08-29 複查）**：`obstacle_detector.py` 仍在版控，`FrameAnalyzer` 仍呼叫 `obstacle_combine.py`。實體相機未接故不會跑 | work_log 2026-07-22~23 |
-| 🟢 | `scripts/wr.sh` 的 cam1/cam2 window 還註解著，攝影機接回去要取消註解 | `scripts/wr.sh:50-52,64-68` | **已修** ✔（cam1/cam2 兩個 window 確實已註解）／⚠️ **但檔內註解與決策矛盾**：`:50-52` 仍寫「之後接回去時把下面這段一起取消註解即可」，而決策是**永久不接** → 註解待改 | work_log 2026-07-21 |
+| ✅ | ~~`scripts/wr.sh` 的 cam1/cam2 window 還註解著，攝影機接回去要取消註解~~ | `scripts/wr.sh:5,50-53,65` | ✅ **已修（2026-08-29）**：兩個 window 本來就已註解，這次修的是**與決策矛盾的註解文字**——原本三處（檔頭用法說明、檢查區、start 區）都寫「暫時／之後接回去時取消註解即可」，而 2026-08-27c 的決策是**永久移除**。已全部改成「永久不接」並註明保留兩段只為記錄它們曾經怎麼啟動、不是待辦。`bash -n` 通過。⚠️ **depth window（`:66`）刻意未動**——那條是既有的獨立待辦且標著「待 user 決定」，不是我可以順手拍板的 | work_log 2026-07-21｜2026-08-29 修 |
 | 🟢 | `camera_obstacle_plan.md` 還沒加 motion mode section | `.claude/archive/camera_obstacle_plan.md`（**已於 2026-08-29 複查時發現搬進 `archive/`**） | **已修（作廢）**：該計畫檔已封存，Phase 5 未實作 | work_log 2026-06-02/03 |
 | 🟢 | v1 現場未解 5 項：PQW 寫 relay 不成功、DM2J slave ENABLE bit 沒亮、ZDT slave 6 堵轉、推桿距離待細調、FrameAnalyzer C++ 沒寫 | v1 硬體 | **已修（多數作廢）**：v2 已無 DM2J 滑軌/輪組，吸盤 slave 2026-08-27 改 5-8，`user_lib/FrameAnalyzer.cpp` 已存在 | work_log 2026-04-23 |
 | 🔴 | `run_depth_avoid` 後端仍活著，且偵測到大障礙物時會**自行改走 `cross` 步伐**：`run_depth_avoid` / `depth_avoid_continue` / `depth_avoid_stop` 三個指令仍 dispatch 到真實實作，而同輩的 `obstacle_detect`/`run_avoid`/`obstacle_response` 早已硬關成 `ERR removed_in_v2`。前端已於 2026-08-27c 移除 → **現在完全沒有 UI 提示** | `facade_cleaning_v2/main.cpp:184-189` | **未修** ✔ | `camera_obstacle_plan.md` 稽核 2026-08-27（changelog 2026-08-26e） |
@@ -308,6 +308,62 @@ threshold 再實作」：① `cmd_hold` 與 motion 互斥（避免 hold 跟 moti
 | 🟢 | 儲氣筒壓力未讀 | Pi 未讀取儲氣筒壓力，假設氣壓恆定可用 | **暫緩**，實機測試時可能浮現 | 設計彙整 §6 暫緩項目 |
 
 ---
+
+## 2026-08-29（續六）— 掃完 null-client；順帶抓到我自己前一小時寫錯的數字
+
+**仍然沒有機器。** 續五說「剩下 9 支要有機器才敢一次上」，使用者指示「不用機器的都做」。
+
+### 🔴 先更正續五的一個錯誤：不是 10 支，是 8 支
+
+續五那次掃描用的 grep pattern 是 `!client\b`，**而 `!client->sendData(...)` 也會匹配這個 pattern**
+（`!client` 後面接 `-`，正好是 word boundary）。後果是雙向的：
+
+- **誤判成「沒守」**：`JC_100_METER:57` 與 `XKC_Y25_RS485:70,180,214` 其實守了，
+  只是寫法是 `if (!client || !client->isConnected())`
+- **誤判成「守好了」**：`DM2J_RS570` 只守了 `sendRecv`，六支 `read_*` 與 `recv_frame_` 是裸的
+
+逐函式讀原始碼之後，實際是 **8 支 driver、38 個進入點**。
+📌 **這是 memory 裡那條「稽核工具的輸出是待查清單，不是結論」的第 N 次應驗** ——
+而且我是在**已經因為同一件事寫了一整天日誌之後**又犯一次。第一版 pattern 甚至連
+「守衛」與「解參考」都分不開，數字卻被我直接寫進待辦表和 commit message。
+
+### 已完成
+
+**① null-client 守衛掃完 8 支 / 38 處**（+ 續五的 CLV900 = 39）
+
+| driver | 處數 | 守衛回傳 |
+|---|---|---|
+| `ZDT_motor_control` | 18 | 17 支 `bool` → `true`；`readEcho` → `{}` |
+| `DM2J_RS570` | 7 | `recv_frame_` → `-1`；6 支 `read_*` → `true` |
+| `PQW_IO_16O_RLY` | 5 | `readEcho`/`readAllStatus` → `{}`；`close()` → `return;` |
+| `DY_500_weight_sensor` | 3 | `true` |
+| `DSZL_107` | 2 | `true` |
+| `MH300` / `SD76` / `SE3` | 各 1 | `{ respLen = 0; return true; }` |
+
+本來就守好的三支：`JC_100_METER`／`XKC_Y25_RS485`／`QX_DO24`。
+
+⚠️ **`PQW_IO_16O_RLY.cpp` 的大括號計數本來就不平衡（35/34）**，不是這次造成的：
+`:217` 有一行 `if (id < 1 || id > 16){//relay_count) {` —— 註解裡那個 `{` 讓天真的計數器數不對。
+語法沒問題，**刻意不動它**（那是另一件事，不該夾帶）。
+
+**② `scripts/wr.sh` 的矛盾註解**（續四留下的）
+三處（檔頭用法說明、檢查區、start 區）都寫著「暫時／之後接回去時取消註解即可」，
+而 2026-08-27c 的決策是**永久移除**。已全部改成「永久不接」，並註明保留那兩段
+只為記錄它們曾經怎麼啟動、不是待辦。`bash -n` 通過（**這次是真的直譯器輸出，不是我自己 echo 的**）。
+⚠️ **depth window（`:66`）刻意沒動**——那是另一條標著「待 user 決定」的待辦，不是我可以順手拍板的。
+
+### 🔴 仍然：C++ 一行都沒編過
+
+39 處守衛全部未編譯（本機無 `cc1plus`、兩台 Pi 不可達）。做的是人工複核：
+38 個插入點逐一確認落在函式的開頭大括號之後、回傳型別與各函式簽名相符、
+八個檔的大括號 delta 平衡。**這不等於編得過。**
+
+### 待完成
+
+- 🔴 **有機器時第一件事：把 08-29 這一整串 commit 編一遍**（`runbook.md` §建置），三支二進位都要
+- 🔴 **上機前要決定整理分支怎麼處理**（續四的 🔴🔴，仍未決）
+- 🟡 `scripts/wr.sh:66` 的 depth window 要不要關掉 —— 待 user 決定
+
 
 ## 2026-08-29（續五）— 清三條純程式碼待辦；其中一條掃出它其實是 10 支的問題
 
