@@ -223,6 +223,60 @@ YAML 放不下 20 行理由。
 → **標定值**外部化並帶 provenance 欄位（來源／量測日期／方法／殘差）；
 **互鎖規則**留在程式碼裡當斷言，**不要外部化成一個可以被人改錯的數字**。
 
+### 7.1.1 🆕 225 個常數的分類盤點（2026-08-29，階段 4 的前置）
+
+| 類別 | 數量 | 外部化政策 |
+|---|---|---|
+| **安全互鎖** | **12** | 🔴 **不外部化**。留在程式碼裡當斷言 —— 一個可以被人改錯的數字不是保護 |
+| **機構標定** | **6** | ✅ 外部化到 `axis_profile`，**必須帶 provenance**（來源／量測日期／方法／殘差） |
+| **設備協定** | **25** | ✅ 外部化到 `device_profile`（slave、通道、端點） |
+| **流程參數** | 182 | ✅ 可外部化 |
+
+**12 個安全互鎖**：`IMU_EMERGENCY_DEG` 45°／三個 `*_WALL_MM` 400／`VACUUM_EARLY_STOP_KPA` −45／
+`DISABLE_PHASE_CURRENT_LIMIT_MA` 1200／`DISABLE_POS_ERROR_LIMIT_DEG` 5.0／
+`ROPE_WEIGHT_LIMIT_KG_PER_SENSOR_{ATTACHED,HANGING}` 40／80／`BAL_CAL_UP_STOP_TOTAL_KG` 100／
+`BAL_CAL_INNER_STALE_LIMIT` 60／`BAL_CAL_TENSION_MIN_KG` 10／`ARM_ROPE_PROTECT_WALL_MM` 400。
+
+**盤點順帶抓到三件事：**
+
+🔴 **① 三個 `*_WALL_MM` 都是 400，而且沒有任何機制保證它們一致。**
+`DM2J_ARM_STEP_SWEEP_WALL_MM`（`:901`）／`ARM_CLEAN_WALL_MM`（`:986`）／
+`ARM_ROPE_PROTECT_WALL_MM`（`:1587`），全檔 **0 個 `static_assert`**。
+**而且歷史上已經分岔過**：`:900` 的註解到現在還寫著
+`— separate from ARM_CLEAN_WALL_MM(330)`，但那個常數早就是 400 了。
+`:1587` 的註解寫「跟 `ARM_CLEAN_WALL_MM` 統一」—— 那是**人工同步的意圖，不是機制**。
+📌 依踩坑索引的結論：**修法不是把數字改對，是讓三邊吃同一個常數**（那只是把下次分岔往後推）。
+補 `static_assert` 是零成本的第二道防線。
+
+🟡 **② `DISABLE_POS_ERROR_LIMIT_DEG = 5.0` 宣告了但全專案沒有任何一處讀它**
+（`.h` 2 次＝宣告與註解，`.cpp` 0 次）。註解自己標著 `(currently unused)` 算誠實，
+但它擺在安全常數群裡，**會讓人以為「有這個保護」**。要嘛接上，要嘛刪掉。
+
+🔴 **③ 有 4 個常數被「同名的 `#define`」遮蔽 —— 同一個識別字在檔案前後半是不同的東西**
+
+```
+app/WASH_ROBOT.cpp:1308  #define PUSHER_EXTEND_FEET_PULSE_LOWER  (settings_....load())
+                  :1310  #define PUSHER_EXTEND_BODY_PULSE_SHORT  (settings_....load())
+                  :1314  #define ROPE_WEIGHT_LIMIT_KG_PER_SENSOR_ATTACHED (settings_....load())
+                  :1323  #define DISABLE_PHASE_CURRENT_LIMIT_MA  (settings_....load())
+```
+
+其中**兩個是安全互鎖**（撞障礙物電流保險、繩重上限）。
+從 `.h` 讀到 `static constexpr double ... = 40.0;` 會以為那就是生效的值；
+實際上 `#define` 之後同名的東西是**執行期可調的 settings**。
+
+✅ **今天沒有 bug**：`#define` 之前的兩處用法正好都合理需要預設值
+（`:75` 用常數初始化 settings、`:1198` 印「現值:預設值」）。**這個慣用法是刻意的。**
+
+🔴 **但它是埋著的地雷**：任何人在 `:1308` 之前新增引用這些名字的程式碼，
+**會靜默拿到編譯期預設值而不是操作者調過的現值** —— 而安全門檻讀到預設值而非現值，
+是錯的那個方向。編譯器不會警告，執行期也沒有訊號。
+📌 **階段 4 會正面撞上這個**：把「常數」搬進 config 時，這 4 個根本不是常數。
+建議在階段 4 之前先把這個慣用法換成明確的 `settings_.xxx.load()` 呼叫，
+讓「預設值」與「現值」在原始碼上長得不一樣。
+
+---
+
 ### 7.2 「合併乾淨 ≠ 語意接得上」在重構時同樣成立
 
 搬動程式碼時 git 只看文字。2026-08-28 的實例：對方新增的函式帶著 `send(..., 0)` 進來，
