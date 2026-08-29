@@ -66,6 +66,19 @@ uint16_t CLV900_inverter::crc16(const uint8_t* buf, int len)
 bool CLV900_inverter::sendModbus(const uint8_t* req, int reqLen,
 	uint8_t* resp, int& respLen)
 {
+	// [2026-08-29] Null-client guard. The constructor leaves `client` as nullptr
+	// and both init() overloads are what set it, so ANY call that reaches here
+	// on an un-init'd (or failed-init) instance dereferences nullptr and takes
+	// the whole process down with a segfault. Crane_control_PI already gates
+	// every CLV900 call behind g_dev_clv900, but that is the application layer
+	// remembering to be careful — the driver itself must not be a landmine for
+	// the next caller. Same convention as DM2J_RS570::sendRecv: true = error.
+	if (!client) {
+		LOG_ERR(_log_tag, "sendModbus called before init() — client is null");
+		respLen = 0;
+		return true;
+	}
+
 	LOG_HEX(_log_tag, "TX", req, reqLen);
 
 	// Atomic transaction — see TCP_client::sendAndReceive doc. CLV900 shares
