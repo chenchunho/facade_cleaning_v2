@@ -1505,21 +1505,24 @@ static MeterReadResult meter_read_robust(
 }
 
 static void meter_loop() {
-    int l_rej = 0, r_rej = 0, m_rej = 0;
-    uint64_t l_last_log = 0, r_last_log = 0, m_last_log = 0;
+    // [2026-08-30 重構階段 3] 左右兩塊原本是逐字重複的程式碼，收斂成對 RopeAxis
+    // 的迴圈。🔴 **順序必須維持左 → 右** —— 匯流排上的位元組序列是等價比對的
+    // 判準之一，換順序就不再等價（而且真機上會改變 bus 上的交易次序）。
+    // 📌 這才是這層的實際收益：「忘記替另一側也做一次」從結構上變成不可能。
+    RopeAxis* axes[2] = { &rope_left, &rope_right };
+    int       rej[2]  = { 0, 0 };
+    uint64_t  last[2] = { 0, 0 };
+    int m_rej = 0;
+    uint64_t m_last_log = 0;
     while (!g_meter_loop_stop.load()) {
-        if (g_dev_meter_left.load()) {
-            auto r = meter_read_robust(meter_left, g_length_left, g_length_left_valid,
-                                       "left", l_rej, l_last_log);
-            if (r.read_hard_fail) g_length_left_valid.store(false);
-            else if (r.accepted)  { g_length_left.store(r.value); g_length_left_valid.store(true); }
+        for (int i = 0; i < 2; ++i) {
+            RopeAxis& a = *axes[i];
+            if (!a.dev_meter.load()) continue;
+            auto r = meter_read_robust(a.meter, a.length, a.length_valid,
+                                       a.name, rej[i], last[i]);
+            if (r.read_hard_fail) a.length_valid.store(false);
+            else if (r.accepted)  { a.length.store(r.value); a.length_valid.store(true); }
             // else: reject, keep cache + valid
-        }
-        if (g_dev_meter_right.load()) {
-            auto r = meter_read_robust(meter_right, g_length_right, g_length_right_valid,
-                                       "right", r_rej, r_last_log);
-            if (r.read_hard_fail) g_length_right_valid.store(false);
-            else if (r.accepted)  { g_length_right.store(r.value); g_length_right_valid.store(true); }
         }
         if (g_dev_meter_middle.load()) {
             auto r = meter_read_robust(meter_middle, g_length_middle, g_length_middle_valid,
