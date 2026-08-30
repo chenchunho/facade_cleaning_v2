@@ -88,7 +88,7 @@ def read_payload(slave: int, addr: int, qty: int) -> bytes:
     return bytes(out)
 
 
-def build_reply(req: bytes, proto: str, jc100=None):
+def build_reply(req: bytes, proto: str, jc100=None, dm2j=None):
     """依請求組出一個健康從站會送的回覆。回 None = 這個請求不回應（廣播）。"""
     if proto == 'rtu':
         slave, fc = req[0], req[1]
@@ -107,6 +107,14 @@ def build_reply(req: bytes, proto: str, jc100=None):
         addr, qty = struct.unpack('>HH', body[2:6])
         if fc == 0x04 and addr == 0x0043 and qty == 0x0010:
             payload = zdt_status_payload()
+        elif dm2j and slave in dm2j and fc == 0x03 and addr == 0x1003 and qty == 1:
+            # DM2J 狀態暫存器（手冊 §5.3.2，單一 16-bit）：
+            #   Bit0=FAULT Bit1=ENABLE Bit2=RUN Bit4=CMD_DONE Bit5=PATH_DONE Bit6=HOME_DONE
+            # 回「已使能、沒在跑、指令完成、路徑完成、已回零、無故障」＝ 0x72。
+            # 🔴 與 ZDT/JC100 同一個理由：泛用亂值會讓 PR_move_cm 等不到完工，
+            #    arm_sweep 走 try_or_pause_ 直接 ERR aborted，**上滑台整條路徑
+            #    連碰都碰不到** —— 而那正是 7.731 換算差異所在的地方。
+            payload = struct.pack('>H', 0x0072)
         elif jc100 and slave in jc100 and fc == 0x03 and addr == 0x0001 and qty == 1:
             # JC-100 真空壓力，0.1 kPa 有號。回 -60.0 kPa（門檻是 -45）＝「吸住了」。
             # 🔴 與 ZDT 狀態同一個理由：泛用假值會讓 disable_seal 一直重試等密封，
@@ -174,7 +182,7 @@ class Handler(socketserver.BaseRequestHandler):
                 if need is None or len(buf) < need:
                     break
                 req, buf = buf[:need], buf[need:]
-                reply = build_reply(req, self.server.proto, self.server.jc100)
+                reply = build_reply(req, self.server.proto, self.server.jc100, self.server.dm2j)
                 if reply is not None:
                     try:
                         self.request.sendall(reply)
@@ -193,6 +201,8 @@ def main():
     ap.add_argument('--proto', choices=('rtu', 'tcp'), default='rtu',
                     help='rtu = RTU over USR gateway :4001；tcp = MBAP（X518 :502）')
     ap.add_argument('--host', default='127.0.0.1')
+    ap.add_argument('--dm2j', default='',
+                    help='這條 bus 上的 DM2J slave（逗號分隔）')
     ap.add_argument('--jc100', default='',
                     help='這條 bus 上的 JC-100 真空表 slave（逗號分隔）。'
                          '刻意做成參數而不是猜：.20 上的 ZDT 也用 5-8，靠 bus 區分。')
@@ -201,6 +211,7 @@ def main():
     srv = Server((a.host, a.port), Handler)
     srv.proto = a.proto
     srv.jc100 = {int(x) for x in a.jc100.split(',') if x.strip()}
+    srv.dm2j  = {int(x) for x in a.dm2j.split(',') if x.strip()}
     # 唯一一行輸出，而且送 stderr —— 這支工具的 stdout 必須是乾淨的，
     # 免得混進被比對的軌跡裡。
     print(f'[fake_bus] {a.proto} on {a.host}:{a.port}', file=sys.stderr, flush=True)

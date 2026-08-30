@@ -27,7 +27,7 @@ start_bus() {  # $1=port $2=proto [$3=額外參數]
   python3 "$HERE/fake_bus.py" --port "$1" --proto "$2" ${3:-} 2>>"$OUT/fakes.log" &
   PIDS+=($!)
 }
-start_bus 15020 rtu     # USR .20 — ZDT 5-8 / PQW 12 / DM2J 14
+start_bus 15020 rtu '--dm2j 14'         # USR .20 — ZDT 5-8 / PQW 12 / DM2J 14
 start_bus 15022 rtu '--jc100 5,6,7,8'   # USR .22 — JC100 5-8 / QX 9 / DY500 10,11 / XKC 13
 start_bus 15030 rtu     # USR_A   — SE3 left / CLV900
 start_bus 15031 rtu     # USR_B   — SE3 right
