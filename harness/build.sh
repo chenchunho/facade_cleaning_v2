@@ -29,7 +29,8 @@ OUT="$(cd "$OUT" && pwd)"
 # main-final 的樹是分層前的：WASH_ROBOT 在 user_lib/、沒有 app/ 也沒有 common/。
 # 兩種佈局都要能建，否則沒辦法跟 main-final 比。
 if [[ -d "$SRC/app" ]]; then
-  WR="app/WASH_ROBOT.cpp";  INC="-I$SRC/app -I$SRC/common -I$SRC/transport -I$SRC/user_lib"
+  WR="app/WASH_ROBOT.cpp"
+  INC="-I$SRC/app -I$SRC/command -I$SRC/common -I$SRC/transport -I$SRC/user_lib"
   TRANSPORT_DIR="transport"
 else
   WR="user_lib/WASH_ROBOT.cpp"; INC="-I$SRC/user_lib"
@@ -55,6 +56,9 @@ SRCS=(
   "$SRC/$TRANSPORT_DIR/TCP_server.cpp"
   "$SRC/$TRANSPORT_DIR/Serial_port.cpp"
 )
+# 指令層（2026-08-30 階段 2 抽出）。main-final 那棵樹沒有它，所以要判斷。
+[[ -f "$SRC/command/dispatcher.cpp" ]] && SRCS+=("$SRC/command/dispatcher.cpp")
+
 for d in DM2J_RS570 DY_500_weight_sensor FrameAnalyzer JC_100_METER PQW_IO_16O_RLY \
          QX_DO24 WT901BC_TTL XKC_Y25_RS485 ZDT_motor_control; do
   SRCS+=("$SRC/user_lib/$d.cpp")

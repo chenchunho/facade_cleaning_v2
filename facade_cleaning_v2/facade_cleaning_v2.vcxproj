@@ -85,6 +85,7 @@
     <ClCompile Include="..\transport\TCP_client.cpp" />
     <ClCompile Include="..\transport\TCP_server.cpp" />
     <ClCompile Include="..\app\WASH_ROBOT.cpp" />
+    <ClCompile Include="..\command\dispatcher.cpp" />
     <ClCompile Include="..\user_lib\WT901BC_TTL.cpp" />
     <ClCompile Include="..\user_lib\XKC_Y25_RS485.cpp" />
     <ClCompile Include="..\user_lib\ZDT_motor_control.cpp" />
@@ -108,7 +109,7 @@
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\app;..\common;..\transport;..\user_lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\app;..\command;..\common;..\transport;..\user_lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
   </ItemDefinitionGroup>
   <!-- Unconditional: std::thread requires pthread at link time. Applies to all configs. -->

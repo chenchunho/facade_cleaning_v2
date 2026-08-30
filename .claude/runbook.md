@@ -208,10 +208,10 @@ ssh user@192.168.5.17 'cd ~/bringup && g++ -std=c++17 -O2 -Icommon -Itransport -
 
 本體（多一個 `app/`，14 個編譯單元、平行編約 25 秒）：
 ```
-rsync -a --delete <repo>/{app,common,transport,user_lib,facade_cleaning_v2} nexuni@192.168.5.26:~/bringup/
+rsync -a --delete <repo>/{app,command,common,transport,user_lib,facade_cleaning_v2} nexuni@192.168.5.26:~/bringup/
 ```
 ```
-ssh nexuni@192.168.5.26 'cd ~/bringup && mkdir -p obj && printf "%s\n" facade_cleaning_v2/main.cpp app/WASH_ROBOT.cpp transport/{Serial_port,TCP_client,TCP_server}.cpp user_lib/{DM2J_RS570,DY_500_weight_sensor,FrameAnalyzer,JC_100_METER,PQW_IO_16O_RLY,QX_DO24,WT901BC_TTL,XKC_Y25_RS485,ZDT_motor_control}.cpp | xargs -P4 -I{} sh -c "g++ -std=c++17 -O2 -Iapp -Icommon -Itransport -Iuser_lib -c {} -o obj/\$(basename {} .cpp).o" && g++ -o facade_cleaning_v2.out obj/*.o -lpthread'
+ssh nexuni@192.168.5.26 'cd ~/bringup && mkdir -p obj && printf "%s\n" facade_cleaning_v2/main.cpp app/WASH_ROBOT.cpp command/dispatcher.cpp transport/{Serial_port,TCP_client,TCP_server}.cpp user_lib/{DM2J_RS570,DY_500_weight_sensor,FrameAnalyzer,JC_100_METER,PQW_IO_16O_RLY,QX_DO24,WT901BC_TTL,XKC_Y25_RS485,ZDT_motor_control}.cpp | xargs -P4 -I{} sh -c "g++ -std=c++17 -O2 -Iapp -Icommand -Icommon -Itransport -Iuser_lib -c {} -o obj/\$(basename {} .cpp).o" && g++ -o facade_cleaning_v2.out obj/*.o -lpthread'
 ```
 
 🔴 **第三個目標：`Linux_test`（2026-08-29 補）** —— 它與應用層一樣綁在 `user_lib/*.h` 的
