@@ -200,7 +200,7 @@ ssh user@192.168.5.17 'who; ss -ltn | grep -E ":(5002|8080)"; ps -eo pid,etime,c
 ### 1. 建置（在 Pi 上，另開目錄，不碰現有部署）
 
 ```
-rsync -a --delete <repo>/{common,transport,user_lib,Crane_control_PI} user@192.168.5.17:~/bringup/
+rsync -a --delete <repo>/{common,config,mechanism,transport,user_lib,Crane_control_PI} user@192.168.5.17:~/bringup/
 ```
 ```
 ssh user@192.168.5.17 'cd ~/bringup && g++ -std=c++17 -O2 -Icommon -Itransport -Iuser_lib -o crane_control_PI.out Crane_control_PI/main.cpp transport/TCP_client.cpp transport/TCP_server.cpp user_lib/{CLV900_inverter,DSZL_107,DY_500_weight_sensor,PQW_IO_16O_RLY,MH300_inverter,SD76_length_meters,SE3_inverter}.cpp -lpthread'
@@ -208,7 +208,7 @@ ssh user@192.168.5.17 'cd ~/bringup && g++ -std=c++17 -O2 -Icommon -Itransport -
 
 本體（多一個 `app/`，14 個編譯單元、平行編約 25 秒）：
 ```
-rsync -a --delete <repo>/{app,command,common,transport,user_lib,facade_cleaning_v2} nexuni@192.168.5.26:~/bringup/
+rsync -a --delete <repo>/{app,command,common,config,mechanism,transport,user_lib,facade_cleaning_v2} nexuni@192.168.5.26:~/bringup/
 ```
 ```
 ssh nexuni@192.168.5.26 'cd ~/bringup && mkdir -p obj && printf "%s\n" facade_cleaning_v2/main.cpp app/WASH_ROBOT.cpp command/dispatcher.cpp transport/{Serial_port,TCP_client,TCP_server}.cpp user_lib/{DM2J_RS570,DY_500_weight_sensor,FrameAnalyzer,JC_100_METER,PQW_IO_16O_RLY,QX_DO24,WT901BC_TTL,XKC_Y25_RS485,ZDT_motor_control}.cpp | xargs -P4 -I{} sh -c "g++ -std=c++17 -O2 -Iapp -Icommand -Icommon -Itransport -Iuser_lib -c {} -o obj/\$(basename {} .cpp).o" && g++ -o facade_cleaning_v2.out obj/*.o -lpthread'

@@ -6,6 +6,7 @@
 
 #include "WASH_ROBOT.h"
 #include "endpoints.h"
+#include "profile.h"
 
 #include <iostream>
 #include <sstream>
@@ -163,11 +164,20 @@ bool WashRobot::init() {
     }
     // [2026-08-28] 機構標定必須緊接在 init 之後、任何移動之前 —— 漏掉這兩行，
     // 每個 cm 指令就會走 7.7 倍並一路撞到行程底，而且不會有任何錯誤訊息。
-    D_(DM2J_ARM).set_lead_cm_per_rev(ARM_RAIL_LEAD_CM_PER_REV);
-    D_(DM2J_ARM).set_travel_limit_cm(0.0, ARM_RAIL_TRAVEL_MAX_CM);
+    // [2026-08-30 重構階段 4] 機構標定改由 axis_profile 提供，編譯進去的常數是
+    // fallback。設定檔不存在 → 行為逐位元不變（見 common/profile.h 的設計規則）。
+    // 🔴 注入與訊息必須用**同一個變數** —— 不然「印的值」與「實際生效的值」會分岔，
+    //    而那正是本專案最常踩的形狀（`[WARN] crane 192.168.5.17` 指著一個
+    //    根本沒被連過的位址）。
+    const double rail_lead   = profile::num("axis_profile", "ARM_RAIL_LEAD_CM_PER_REV",
+                                            ARM_RAIL_LEAD_CM_PER_REV);
+    const double rail_travel = profile::num("axis_profile", "ARM_RAIL_TRAVEL_MAX_CM",
+                                            ARM_RAIL_TRAVEL_MAX_CM);
+    D_(DM2J_ARM).set_lead_cm_per_rev(rail_lead);
+    D_(DM2J_ARM).set_travel_limit_cm(0.0, rail_travel);
     std::cout << "[OK] DM2J arm rail (slave " << DM2J_ARM << " @ cli_20_)"
-              << " lead=" << ARM_RAIL_LEAD_CM_PER_REV << " cm/rev"
-              << " travel<=" << ARM_RAIL_TRAVEL_MAX_CM << " cm\n";
+              << " lead=" << rail_lead << " cm/rev"
+              << " travel<=" << rail_travel << " cm\n";
 
     // ZDT slave 5..8 on cli_20_ ([v2] 4 cups: right{5,7} / left{6,8}，2026-08-28 修正)
     // [2026-08-27 per user] slave 1-4 → 5-8，見 WASH_ROBOT.h CUP_SLAVE_FIRST。
