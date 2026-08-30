@@ -371,19 +371,58 @@ threshold 再實作」：① `cmd_hold` 與 motion 互斥（避免 hold 跟 moti
 `abort_flag` 那個缺陷仍然中止。**修好那個缺陷會同時解鎖 ②。**
 ③④ 如預期：`rail.txt` 完全不碰推桿與步態。
 
+### ✅ 再推進：`init` 當前置之後，②也抓到了 → **4/9**
+
+`rail.txt` 改成 `init` + `arm_sweep`（基準軌跡從 31 → **89 筆**）：
+
+| 條 | 結果 |
+|---|---|
+| ① 上滑台 7.731 換算 | ✅ 抓到（位元組 2 行差異） |
+| ② `ARM_SWEEP_RPM` | ✅ **抓到**（位元組 4 行差異） |
+| ③ 左右歸屬 ／ ④ `CUP_PULSE_PER_CM` | ❌ 仍抓不到 |
+
+🔴 **關鍵是找到對的前置指令**：`cmd_init_impl_()`（`:5230`）**同時**做兩件事 ——
+重置 `abort_flag`（解鎖 `arm_sweep`）＋ 把狀態設成 `Ready`（解鎖 `attach`）。
+⚠️ `init` 本身回 `ERR imu_baseline_fail`，但 `abort_flag = false` 在**失敗之前**執行 ——
+所以 `arm_sweep` 拿到 `OK arm_sweep_done`、13 筆 DM2J TX。**副作用剛好是我們要的。**
+
+📌 順帶實測到 ① 的真實形狀：`PR_move_cm_nowait 17.000 cm -> 21989 pulses (lead=7.7310)`。
+反轉成 1.0 會變成 170000 脈衝 —— **而滑台只有 50cm**。這就是那個四個月沒人發現的缺陷。
+
+### 🔴 ③④ 為什麼仍抓不到（已查清，非猜測）
+
+- **③ 左右歸屬**：`ZDT_RF/LF` 是**步態**（`do_step_down_`/`do_step_up_`）與 `attach` 的分側判準用的。
+  `attach` 需要 `State::Ready`，而 `init` 因 IMU 基準線失敗沒走到 `set_state_(State::Ready)`（`:5326`）。
+- **④ `CUP_PULSE_PER_CM`**：只在**深層路徑**用到 —— `cm_to_pulses_for_slave_` 的三個呼叫點都在
+  seal 迴圈裡（障礙物回退邊界 `:4186/4190`、伸出上限 `cap` `:4723`）。
+  `zdt_pusher extend` 走 **preset 脈衝數**，除非移動逼近 cap，否則反轉不會有可觀察差異。
+  **這條天生難測**，不是腳本寫得不好。
+
+### 🐛 IMU 假序列埠：機制對了，但主程式收不到（未解）
+
+`fake_serial.py` 改成送**固定筆數**的有效 WT901 幀（`0x55 0x53` + 8 個 0 + checksum `0xA8`）。
+**單獨測試 PTY 完全正常**（讀到 220 bytes、幀正確），但主程式那側 `imu_take_baseline_`
+仍然 `n == 0`。已排除的：
+- ✅ PTY canonical 模式 —— 已 `tty.setraw()`，且 `Serial_port::init` 自己也清了 `ICANON`（`:262`）
+- ✅ `ISTRIP` 砍掉 checksum 高位元（`0xA8`）—— 8N1 走 `:250` 的 else 分支，`ISTRIP` 是清掉的
+- ✅ 寫入時機 —— 已改成延遲 3s 後分批寫，仍然無效
+
+🔴 **還沒找到真因。** 這是 ③ 的唯一阻擋點。
+
 ### 🔴 9 條預期差異的保護狀態盤點（誠實版）
 
 | 條 | 狀態 |
 |---|---|
 | ① 上滑台 7.731 換算 | ✅ `rail.txt` 抓得到 |
+| ② `ARM_SWEEP_RPM` | ✅ `rail.txt` 抓得到（`init` 當前置之後） |
 | ⑦ `zdt_pusher` 範圍分岔 | ✅ `compare.sh` vs `main-final` 驗到 |
-| ② `ARM_SWEEP_RPM` | ❌ 需先修 `cmd_arm_sweep` 的 `abort_flag` |
-| ③ 左右歸屬 ／ ④ `CUP_PULSE_PER_CM` | ❌ 需要**能跑步態**的腳本（`attach` 要能成功） |
+| ③ 左右歸屬 | ❌ 卡在 IMU 假序列埠（`attach` 需要 `Ready`） |
+| ④ `CUP_PULSE_PER_CM` | ❌ **天生難測** —— 只在 seal 迴圈的深層邊界用到 |
 | ⑤ driver 回覆驗證 | 🔴 **結構上這裡永遠測不到**（假從站永遠送好幀）→ 靠 `fake_slaves/` |
 | ⑥ `SO_ERROR` | ❌ 需要「有人監聽但不回應」的端點 |
 | ⑧ DM2J `void→bool` ／ ⑨ `abort_flag`/張力警示 | ❌ 需程式碼層反轉 |
 
-**＝ 2/9 在保護範圍內。** 這個數字比「✅ 等價」誠實得多，也是後續該追的指標。
+**＝ 4/9 在保護範圍內**（原本 2/9）。 這個數字比「✅ 等價」誠實得多，也是後續該追的指標。
 
 ### 待完成
 

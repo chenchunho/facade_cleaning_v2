@@ -12,7 +12,10 @@
    等價性比對的前提是「同樣的 TX 一定得到同樣的 RX」。只要假從站有一點隨機性
    （時間、亂數、計數器），兩次執行就會分岔，而那個分岔**看起來會跟重構搬壞
    一模一樣** —— 你會去查一個根本沒壞的東西。
-   因此：不使用亂數、不使用時鐘、不保存跨請求狀態。
+   因此：**不使用亂數、不使用時鐘**。
+   ⚠️ 2026-08-30 起有一項**跨請求狀態**（DM2J 的忙碌計數，見 dm2j_state），
+      但它是**請求計數驅動**而不是時間驅動 —— 同一串請求必然得到同一串回覆，
+      確定性仍然成立。**時間驅動的狀態才是毒藥。**
 
 📌 值是「合理的假值」不是真值。目的不是模擬機器，是讓兩個版本走過**同一條路徑**。
    只要兩邊看到相同的值，走到哪裡都可以比對；值本身對不對不影響等價性結論。
@@ -51,6 +54,36 @@ def rtu_frame(payload: bytes) -> bytes:
 
 def reg_value(slave: int, addr: int, i: int) -> int:
     return ((slave << 8) ^ (addr + i) ^ 0x2A5A) & 0x7FFF | 0x0100
+
+
+# DM2J 的忙碌狀態：slave -> 還要回報「忙碌」幾次。
+# 🔴 為什麼需要狀態：driver 的 PR_move_cm 分兩階段等 —— 先等 PATH_DONE(0x0020)
+#    **清除**（代表驅動器收下指令），再等它重新設起（完成）。回固定「已完成」
+#    的話第一階段永遠等不到，每個移動都耗滿 busy-wait 再重試，`arm_sweep` 直接逾時。
+# 🔴 為什麼仍是確定性的：轉移由**請求計數**驅動，不是時鐘。同一串請求 →
+#    同一串回覆。（若兩個版本發出的請求數不同，狀態就會分岔 —— 但那正是
+#    我們要偵測的差異本身，不是雜訊。）
+dm2j_state = {}
+dm2j_lock = threading.Lock()
+DM2J_BUSY_POLLS = 2      # 觸發後回報幾次「忙碌」才轉成完成
+
+
+def dm2j_status_payload(slave: int) -> bytes:
+    """DM2J 0x1003 狀態暫存器（手冊 §5.3.2，單一 16-bit）。
+
+    Bit0=FAULT Bit1=ENABLE Bit2=RUN Bit4=CMD_DONE Bit5=PATH_DONE Bit6=HOME_DONE
+    """
+    with dm2j_lock:
+        n = dm2j_state.get(slave, 0)
+        if n > 0:
+            dm2j_state[slave] = n - 1
+            return struct.pack('>H', 0x0046)   # ENABLE|RUN|HOME_DONE，PATH_DONE 清除
+    return struct.pack('>H', 0x0072)           # ENABLE|CMD_DONE|PATH_DONE|HOME_DONE
+
+
+def dm2j_trigger(slave: int) -> None:
+    with dm2j_lock:
+        dm2j_state[slave] = DM2J_BUSY_POLLS
 
 
 def zdt_status_payload() -> bytes:
@@ -108,13 +141,7 @@ def build_reply(req: bytes, proto: str, jc100=None, dm2j=None):
         if fc == 0x04 and addr == 0x0043 and qty == 0x0010:
             payload = zdt_status_payload()
         elif dm2j and slave in dm2j and fc == 0x03 and addr == 0x1003 and qty == 1:
-            # DM2J 狀態暫存器（手冊 §5.3.2，單一 16-bit）：
-            #   Bit0=FAULT Bit1=ENABLE Bit2=RUN Bit4=CMD_DONE Bit5=PATH_DONE Bit6=HOME_DONE
-            # 回「已使能、沒在跑、指令完成、路徑完成、已回零、無故障」＝ 0x72。
-            # 🔴 與 ZDT/JC100 同一個理由：泛用亂值會讓 PR_move_cm 等不到完工，
-            #    arm_sweep 走 try_or_pause_ 直接 ERR aborted，**上滑台整條路徑
-            #    連碰都碰不到** —— 而那正是 7.731 換算差異所在的地方。
-            payload = struct.pack('>H', 0x0072)
+            payload = dm2j_status_payload(slave)
         elif jc100 and slave in jc100 and fc == 0x03 and addr == 0x0001 and qty == 1:
             # JC-100 真空壓力，0.1 kPa 有號。回 -60.0 kPa（門檻是 -45）＝「吸住了」。
             # 🔴 與 ZDT 狀態同一個理由：泛用假值會讓 disable_seal 一直重試等密封，
@@ -128,6 +155,12 @@ def build_reply(req: bytes, proto: str, jc100=None, dm2j=None):
         bc = (qty + 7) // 8
         pdu = bytes([slave, fc, bc]) + bytes([(addr + i) & 0xFF | 0x01 for i in range(bc)])
     elif fc in (0x05, 0x06):                # write single — 回聲
+        # DM2J 的 PR 觸發：寫 0x6002。收到就進入「忙碌」，讓下一次狀態讀取
+        # 回報 PATH_DONE 已清除 —— driver 的第一階段等的就是這個。
+        if dm2j and slave in dm2j and fc == 0x06:
+            waddr = struct.unpack('>H', body[2:4])[0]
+            if waddr == 0x6002:
+                dm2j_trigger(slave)
         pdu = bytes([slave]) + body[1:6]
     elif fc == 0x10:                        # write multiple — slave/fc/addr/qty
         pdu = bytes([slave, fc]) + body[2:6]

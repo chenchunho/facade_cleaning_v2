@@ -2,17 +2,17 @@
 #
 # 🔴 存在的理由：smoke.txt 走到的預期差異第 7 條（分派器範圍分岔）在基準上是
 #    「指令根本不能執行」，它**遮蔽了所有下游的預期差異**。這份繞過它，去走
-#    上滑台那條路 —— 那裡有三條預期差異：
-#      ① 上滑台 cm↔pulse 換算 7.731（基準是 1.0 → 同一 cm 指令的脈衝差 7.7 倍）
+#    上滑台那條路 —— 那裡有兩條預期差異：
+#      ① 上滑台 cm↔pulse 換算 7.731（實測：17cm → 21989 脈衝；基準 1.0 會是 170000）
 #      ② ARM_SWEEP_RPM 1000→250
-#      ⑧ DM2J 16 個 void 改回傳 bool
 #
-# 🔴 第一行不是多餘的：`cmd_arm_sweep()` **進場沒有重置 abort_flag**，
-#    而 `cmd_arm_clean_sweep_dry()` 有（見 app/WASH_ROBOT.cpp:5539 的註解
-#    「比照 do_step_sync_：進入點清掉上一次殘留的 abort」）。
-#    少了這一行，`arm_sweep` 直接回 ERR aborted、DM2J 一筆交易都沒有 ——
-#    而 try_or_pause_ 的中止路徑**什麼都不印**，症狀是「沒反應」。
+# 🔴 第一行不是多餘的：`cmd_arm_sweep()` **進場沒有重置 abort_flag**，而
+#    `cmd_init_impl_()` 有（`app/WASH_ROBOT.cpp:5230`）。少了它，`arm_sweep`
+#    直接回 ERR aborted、DM2J 一筆交易都沒有 —— 而 `try_or_pause_` 的中止路徑
+#    **什麼都不印**，症狀是「沒反應」。
 #    ⚠️ 這是缺陷不是設定，已入待辦（與 08-28 修的 cmd_side_measured 同一族）。
-arm_clean_sweep_dry
+#    ⚠️ `init` 本身會回 ERR imu_baseline_fail（假 IMU 的資料還沒接通），
+#       但它在失敗**之前**已經重置了 abort_flag —— 這裡要的就是那個副作用。
+init
 arm_sweep
 status
