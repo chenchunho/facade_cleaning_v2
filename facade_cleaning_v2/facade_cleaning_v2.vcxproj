@@ -85,6 +85,7 @@
     <ClCompile Include="..\transport\TCP_client.cpp" />
     <ClCompile Include="..\transport\TCP_server.cpp" />
     <ClCompile Include="..\app\WASH_ROBOT.cpp" />
+    <ClCompile Include="..\app\wash_robot_commands.cpp" />
     <ClCompile Include="..\command\dispatcher.cpp" />
     <ClCompile Include="..\user_lib\WT901BC_TTL.cpp" />
     <ClCompile Include="..\user_lib\XKC_Y25_RS485.cpp" />

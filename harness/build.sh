@@ -58,6 +58,8 @@ SRCS=(
 )
 # 指令層（2026-08-30 階段 2 抽出）。main-final 那棵樹沒有它，所以要判斷。
 [[ -f "$SRC/command/dispatcher.cpp" ]] && SRCS+=("$SRC/command/dispatcher.cpp")
+# 階段 5：WASH_ROBOT.cpp 依語意分界切出的第二個 TU。
+[[ -f "$SRC/app/wash_robot_commands.cpp" ]] && SRCS+=("$SRC/app/wash_robot_commands.cpp")
 
 for d in DM2J_RS570 DY_500_weight_sensor FrameAnalyzer JC_100_METER PQW_IO_16O_RLY \
          QX_DO24 WT901BC_TTL XKC_Y25_RS485 ZDT_motor_control; do
