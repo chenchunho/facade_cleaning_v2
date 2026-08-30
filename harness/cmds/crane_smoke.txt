@@ -1,6 +1,20 @@
-# 吊機端冒煙腳本（:5002）—— USR_A / USR_B / USR_M / 兩台 X518 各碰一次
+# crane_smoke —— 吊機端（:5002）。指令清單取自 Crane_control_PI/main.cpp 的
+# 分派器（權威來源），不是 runbook。
+#
+# 🔴 這份存在的理由：階段 3（機構層／虛擬軸）要動的是吊機，而 harness 原本
+#    只跑洗窗本體 —— 動吊機而沒有驗證等於盲搬。
+#
+# 一條繩 = vfd（速度輸出）+ meter（位置回授）+ dsz（張力），三個裝置三條匯流排。
+# 這份要碰到全部三種，否則 RopeAxis 抽出來之後 diff 可能是綠的卻什麼都沒驗到。
 ping
 status
 tension
-meter
+read_meter_scale
+home_status
+vfd_fault
+zero_tension
+zero_meters
+set_motion_hz 30
+set_hold_hz 20
+set_tension_max_kg 100
 status

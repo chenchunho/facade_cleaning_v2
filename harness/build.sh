@@ -64,9 +64,29 @@ for d in DM2J_RS570 DY_500_weight_sensor FrameAnalyzer JC_100_METER PQW_IO_16O_R
   SRCS+=("$SRC/user_lib/$d.cpp")
 done
 
+# ── 吊機（Crane_control_PI）────────────────────────────────────────────────
+# 2026-08-30 階段 3 前置：不建吊機就沒辦法驗證吊機的重構。
+# 來源清單與 runbook §A2 的 g++ 指令一致（那是實機上實跑驗過的那條）。
+CRANE_SRCS=(
+  "$SRC/Crane_control_PI/main.cpp"
+  "$SRC/$TRANSPORT_DIR/TCP_client.cpp"
+  "$SRC/$TRANSPORT_DIR/TCP_server.cpp"
+)
+for d in CLV900_inverter DSZL_107 DY_500_weight_sensor PQW_IO_16O_RLY \
+         MH300_inverter SD76_length_meters SE3_inverter; do
+  CRANE_SRCS+=("$SRC/user_lib/$d.cpp")
+done
+
 mkdir -p "$OUT/obj"
 printf '%s\n' "${SRCS[@]}" | xargs -P"$JOBS" -I{} \
   sh -c "$CXX"' '"$CXXFLAGS"' -c "$1" -o "'"$OUT"'/obj/$(basename "$1" .cpp).o"' _ {}
 "$CXX" -pthread -o "$OUT/facade_cleaning_v2.out" "$OUT"/obj/*.o
 
-echo "[build] OK: $OUT/facade_cleaning_v2.out"
+# 吊機另外建（物件檔分開放，免得跟本體的同名檔互相覆蓋 ——
+# 兩邊都有 TCP_client.o，混在一起會拿到別人的）。
+mkdir -p "$OUT/obj_crane"
+printf '%s\n' "${CRANE_SRCS[@]}" | xargs -P"$JOBS" -I{} \
+  sh -c "$CXX"' '"$CXXFLAGS"' -c "$1" -o "'"$OUT"'/obj_crane/$(basename "$1" .cpp).o"' _ {}
+"$CXX" -pthread -o "$OUT/crane_control_PI.out" "$OUT"/obj_crane/*.o
+
+echo "[build] OK: $OUT/facade_cleaning_v2.out + crane_control_PI.out"

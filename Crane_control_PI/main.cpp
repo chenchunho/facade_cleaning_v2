@@ -4292,9 +4292,18 @@ int main() {
                   << " connect failed — right tension monitoring disabled" << std::endl;
     }
 
+    // [2026-08-30] driver hex log 的開關。本體（app/WASH_ROBOT.cpp:136）早就有
+    // WR_DRIVER_DEBUG，吊機這邊卻全部寫死 false —— 於是吊機在 harness 裡
+    // **一個 hex dump 都不會產生**，等價比對的判準 2 會變成空對空的假通過。
+    // 預設仍是 false（與原行為一致），只有明確設 CRANE_DRIVER_DEBUG=1 才打開。
+    const bool drv_dbg = [] {
+        const char* e = std::getenv("CRANE_DRIVER_DEBUG");
+        return e && e[0] == '1';
+    }();
+
     // ---- USR_A (.30) — SE3 left (+ future CLV900 middle if installed) ----
     if (g_gw_a_ok.load()) {
-        if (!vfd_left.init(cli_A, VFD_LEFT_SLAVE, false)) {
+        if (!vfd_left.init(cli_A, VFD_LEFT_SLAVE, drv_dbg)) {
             g_dev_vfd_left = true;
             std::cout << "[OK]   VFD left (" << CRANE_VFD_NAME << ")  USR_A slave " << VFD_LEFT_SLAVE << std::endl;
         } else {
@@ -4313,7 +4322,7 @@ int main() {
 
     // ---- USR_B (.31) — SE3 right ----
     if (g_gw_b_ok.load()) {
-        if (!vfd_right.init(cli_B, VFD_RIGHT_SLAVE, false)) {
+        if (!vfd_right.init(cli_B, VFD_RIGHT_SLAVE, drv_dbg)) {
             g_dev_vfd_right = true;
             std::cout << "[OK]   VFD right (" << CRANE_VFD_NAME << ") USR_B slave " << VFD_RIGHT_SLAVE << std::endl;
         } else {
@@ -4325,7 +4334,7 @@ int main() {
 
     // ---- USR_M (.34) — SD76 meters (sensing bus) ----
     if (g_gw_m_ok.load()) {
-        if (!meter_left.init(cli_M, METER_LEFT_SLAVE, false)) {
+        if (!meter_left.init(cli_M, METER_LEFT_SLAVE, drv_dbg)) {
             g_dev_meter_left = true;
             // SD76 may be in paused state from previous session (e.g. Linux_test
             // menu 9 'p' command) — paused state persists in flash, won't auto-
@@ -4337,7 +4346,7 @@ int main() {
         } else {
             std::cerr << "[WARN] SD76 left init failed — left auto-distance disabled" << std::endl;
         }
-        if (!meter_right.init(cli_M, METER_RIGHT_SLAVE, false)) {
+        if (!meter_right.init(cli_M, METER_RIGHT_SLAVE, drv_dbg)) {
             g_dev_meter_right = true;
             meter_right.resumeMeter();
             std::cout << "[OK]   SD76 right     USR_M slave " << METER_RIGHT_SLAVE << " (resumed)" << std::endl;
@@ -4371,7 +4380,7 @@ int main() {
 
     // ---- USR_C (.32): DSZL left ----
     if (g_gw_c_ok.load()) {
-        if (!dsz_left.init(cli_C, DSZL_LEFT_SLAVE, false)) {
+        if (!dsz_left.init(cli_C, DSZL_LEFT_SLAVE, drv_dbg)) {
             g_dev_dsz_left = true;
             std::cout << "[OK]   DSZL-107 left  USR_C slave " << DSZL_LEFT_SLAVE << std::endl;
         } else {
@@ -4381,7 +4390,7 @@ int main() {
 
     // ---- USR_D (.33): DSZL right ----
     if (g_gw_d_ok.load()) {
-        if (!dsz_right.init(cli_D, DSZL_RIGHT_SLAVE, false)) {
+        if (!dsz_right.init(cli_D, DSZL_RIGHT_SLAVE, drv_dbg)) {
             g_dev_dsz_right = true;
             std::cout << "[OK]   DSZL-107 right USR_D slave " << DSZL_RIGHT_SLAVE << std::endl;
         } else {

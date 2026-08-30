@@ -71,6 +71,19 @@ done
 #    normalize.py 對空輸入回 exit 2 就是為了擋這件事，呼叫端不要把 stderr 丟掉。
 export USER_LIB_HEX_LOG=1
 export WR_DRIVER_DEBUG=1
+export CRANE_DRIVER_DEBUG=1
+
+# 依二進位名稱決定要跑哪一支 —— 吊機用 :5002 與另一組端點。
+if [[ "$BIN" == *crane* ]]; then
+  CMD_PORT=5002
+  export FCV_EP_USR_A_HOST=127.0.0.1  FCV_EP_USR_A_PORT=15030
+  export FCV_EP_USR_B_HOST=127.0.0.1  FCV_EP_USR_B_PORT=15031
+  export FCV_EP_USR_M_HOST=127.0.0.1  FCV_EP_USR_M_PORT=15034
+  export FCV_EP_DSZL_L_HOST=127.0.0.1 FCV_EP_DSZL_L_PORT=15032
+  export FCV_EP_DSZL_R_HOST=127.0.0.1 FCV_EP_DSZL_R_PORT=15033
+else
+  CMD_PORT=5001
+fi
 
 export FCV_EP_USR20_HOST=127.0.0.1  FCV_EP_USR20_PORT=15020
 export FCV_EP_USR22_HOST=127.0.0.1  FCV_EP_USR22_PORT=15022
@@ -84,13 +97,13 @@ PIDS+=($APP)
 
 # 等主程式的指令埠（:5001）起來
 for _ in $(seq 1 200); do
-  (exec 3<>/dev/tcp/127.0.0.1/5001) 2>/dev/null && break
+  (exec 3<>/dev/tcp/127.0.0.1/$CMD_PORT) 2>/dev/null && break
   sleep 0.05
 done
 
 # ── 灌指令 ─────────────────────────────────────────────────────────────────
 : >"$OUT/replies.txt"; : >"$OUT/events.txt"
-exec 3<>/dev/tcp/127.0.0.1/5001
+exec 3<>/dev/tcp/127.0.0.1/$CMD_PORT
 while IFS= read -r line; do
   [[ -z "$line" || "$line" == \#* ]] && continue
   printf '%s\n' "$line" >&3

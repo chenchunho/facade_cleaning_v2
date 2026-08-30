@@ -109,6 +109,26 @@ sudo apt install -y g++          # 只需一次；本機目前沒有
 ⚠️ `qemu-user-static` 雖可在本機跑 aarch64 二進位，**不建議** ——
 qemu 的執行緒與計時行為跟真機不同，會讓 harness 出現**假差異**，那比沒有更糟。
 
+## 吊機（`Crane_control_PI`）
+
+2026-08-30 加入 —— 階段 3（機構層／虛擬軸）動的是吊機，而原本 harness 只跑洗窗本體，
+**動吊機而沒有驗證等於盲搬**。
+
+```bash
+./harness/run_trace.sh <build>/crane_control_PI.out harness/cmds/crane_smoke.txt out/
+```
+`run_trace.sh` 依二進位名稱自動切換（吊機用 `:5002` 與 `USR_A/B/M`、`DSZL_L/R` 端點）。
+
+⚠️ 吊機的 driver 原本全部寫死 `debug=false` → **一個 hex dump 都不會產生**，
+判準 2 會變成空對空的假通過。已加 `CRANE_DRIVER_DEBUG=1`（預設仍關，與原行為一致），
+對照本體早就有的 `WR_DRIVER_DEBUG`。
+
+⚠️ **已知限制：`DSZL:1` 是兩台裝置合成的一組** —— 左右兩台 X518 都是 slave 1，
+只是掛在不同匯流排上，而 `normalize.py` 依 `裝置:ID` 分組，看不出 bus。
+目前的腳本下兩次執行仍完全相同（指令序列把它們序列化了），但**這是潛在的
+非確定性來源**：若哪天兩者變成並行讀取，那一組的行序就會浮動。
+要修的話得讓 `_log_tag` 帶上 bus，那是 driver 層的改動。
+
 ## 🔴 這套東西證明不了什麼
 
 - **證明不了功能正確**，只證明兩個版本**行為相同**。功能正確要靠實機（`runbook.md` §A2）
