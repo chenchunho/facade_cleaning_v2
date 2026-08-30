@@ -187,6 +187,80 @@ JC-100 fast-fail、PWM 改 slave 9 啟用、上滑台搬 `.20`）**不在上表*
 baseline 已含。判讀時不要算到本分支頭上。
 
 
+### 🔴 那 9 條的逐條實機檢查表（2026-08-30 建立）
+
+> **上機時間貴，不該花在現場想怎麼驗。** 每條寫明：**看什麼／正常長什麼樣／
+> 不正常長什麼樣**。順序刻意由「不會動的」排到「會動的」——
+> 前面幾條沒過就不要往下走。
+>
+> 🔴 **全程要有第二個人在旁邊**，且手放在急停上。第 ③ 條是唯一一條「錯了會讓
+> 機器在貼牆狀態下放錯邊」的，它排在需要有人看著的位置。
+
+#### 階段 A — 開機就看得到（不動馬達）
+
+| # | 看什麼 | 正常 | 不正常 |
+|---|---|---|---|
+| ① | `init()` 印的上滑台標定 | `lead=7.731 cm/rev travel<=48 cm` | 印 `lead=1` → profile 沒載到或常數被改回 |
+| ⑦ | `zdt_pusher 5 extend` | 回 `OK`（或實際動作的回覆） | 回 `ERR usage:zdt_pusher_<1..4>` → 拿到舊版二進位 |
+| ⑨a | `cmd_side_measured` 在 `stop` 之後 | 送一次 `emergency_stop`／`reset`，再下 v2 step 指令 → 正常執行 | 永久回 `ERR aborted` → `abort_flag` 沒被重置 |
+| ⑥ | **吊機關機**時本體的重連訊息 | `reconnect success` **0 次**；只看到 reconnect failed | 吊機沒開卻印 `reconnect success` → `SO_ERROR` 修正沒進去 |
+
+⚠️ **⑨b 已知未修**：`cmd_arm_sweep()` 進場**沒有**重置 `abort_flag`（姊妹函式有）。
+所以任何一次 `stop`／`emergency_stop` 之後，`arm_sweep` 會**永久回 `ERR aborted`
+且完全沒有輸出**（`try_or_pause_` 的中止路徑不印任何東西）。
+🔴 **這不是這次上機要驗的東西，是要知道它會這樣** —— 遇到就先 `reset`／`init`。
+
+#### 階段 B — 動單一軸，拿尺量
+
+| # | 看什麼 | 正常 | 不正常 |
+|---|---|---|---|
+| ① | `arm_sweep` 的**實際位移** | 指令 17cm → **拿尺量到約 17cm**（08-28 最小平方殘差 ±0.15cm） | 走 7.7 倍（會直接撞到底）／行程守衛拒絕合法指令 |
+| ④ | 推桿行程 | 指令 16cm → 實際 16cm（08-28 實測 47994 脈衝 = 16cm） | 差約 5% → `CUP_PULSE_PER_CM` 還是 2857 |
+| ② | 掃動速度與失步 | 見下方專門段落 | 見下方 |
+
+🔴 **拿尺量兩次，不要看座標。** 驅動器只數脈衝 —— **失步時座標永遠顯示正確、
+一個字都不會說**。08-28 就是這樣讓「每個 cm 指令走 7.7 倍」隱形了四個月。
+
+🔴 **② 的驗法有陷阱**：`ARM_SWEEP_RPM` 250 在 08-28 **已實測失步**。
+而「回 0 點正確」對失步**沒有鑑別力** —— 上滑台的零點是**機械硬限位**，
+不管中途失步多少都會頂回同一位置。
+→ **參考點不能是限位本身**：在行程中段做一個記號，來回之後量那個記號。
+📌 使用者指定要試 **500rpm**（＝64.4 cm/s）；起點已建好但中途中止過。
+
+#### 階段 C — 交替步伐（🔴 最危險的一條）
+
+| # | 看什麼 | 正常 | 不正常 → **立即急停** |
+|---|---|---|---|
+| ③ | 放開一側時**另一側的兩顆是否都還吸著** | 放開右側 `{5,7}` 時，左側 `{6,8}` 兩顆都吸住 | 另一側只有一顆吸著、或吸的是 `{5,6}`／`{7,8}` 這種上下對 |
+
+🔴 **這條的修正依據只有 2026-08-28 使用者的口頭確認，程式從未在機器上跑過交替步伐。**
+`WASH_ROBOT.h` 的註解自己寫著「第一次跑 `do_step_down_`/`do_step_up_` 要有人在旁邊」。
+→ **先在低處、機器不吊在半空中的狀態下跑一次**。
+
+⚠️ 相關但獨立：`group_seal_ok_` 目前是「4 顆有 2 顆吸住就算 OK」。
+那是左右歸屬錯誤時期的權宜之計 —— **歸屬修好後那個前提消失**，
+是否改回「每側各 ≥1」**要使用者決定**（待辦表有這條）。
+
+#### 階段 D — 觀察，不是驗收
+
+| # | 看什麼 | 說明 |
+|---|---|---|
+| ⑤ | driver 回覆驗證上線後的**失敗率** | 壞幀由靜默吞掉變**明確失敗** → 步態中途失敗頻率**可能上升**。🔴 **那是把問題變可見，不是新故障。** 記下基線頻率即可 |
+| ⑧ | 上滑台寫入失敗是否被偵測到 | 正常運作時看不到差異。只有真的失敗時才有訊息 |
+| ⑨c | 緊急收繩的張力警示 | 超張力會**印警示但不會自動停**（刻意的，見 `b1234ad`）。確認警示有出現即可 |
+
+#### 🔴 這次上機**不驗**重構本身
+
+階段 1~5 的重構已由 `harness/compare.sh` 證明位元組等價，但那套工具有**已知天花板**：
+- 覆蓋 9 條預期差異裡的 **5 條**
+- **錯誤路徑結構上測不到**（假從站永遠送好幀）——⑤⑧ 兩條就是這一類
+
+→ 所以上機時若出現**清單外**的異常，嫌疑順序是：
+**(1) 這 9 條之一** → **(2) harness 沒覆蓋到的路徑** → (3) 重構搬壞。
+前兩者的機率高得多。
+
+---
+
 ### 0. 進場前確認（🔴 不要跳過）
 
 ```
@@ -203,7 +277,7 @@ ssh user@192.168.5.17 'who; ss -ltn | grep -E ":(5002|8080)"; ps -eo pid,etime,c
 rsync -a --delete <repo>/{common,config,mechanism,transport,user_lib,Crane_control_PI} user@192.168.5.17:~/bringup/
 ```
 ```
-ssh user@192.168.5.17 'cd ~/bringup && g++ -std=c++17 -O2 -Icommon -Itransport -Iuser_lib -o crane_control_PI.out Crane_control_PI/main.cpp transport/TCP_client.cpp transport/TCP_server.cpp user_lib/{CLV900_inverter,DSZL_107,DY_500_weight_sensor,PQW_IO_16O_RLY,MH300_inverter,SD76_length_meters,SE3_inverter}.cpp -lpthread'
+ssh user@192.168.5.17 'cd ~/bringup && g++ -std=c++17 -O2 -Icommon -Imechanism -Itransport -Iuser_lib -o crane_control_PI.out Crane_control_PI/main.cpp transport/TCP_client.cpp transport/TCP_server.cpp user_lib/{CLV900_inverter,DSZL_107,DY_500_weight_sensor,PQW_IO_16O_RLY,MH300_inverter,SD76_length_meters,SE3_inverter}.cpp -lpthread'
 ```
 
 本體（多一個 `app/`，14 個編譯單元、平行編約 25 秒）：
@@ -211,7 +285,7 @@ ssh user@192.168.5.17 'cd ~/bringup && g++ -std=c++17 -O2 -Icommon -Itransport -
 rsync -a --delete <repo>/{app,command,common,config,mechanism,transport,user_lib,facade_cleaning_v2} nexuni@192.168.5.26:~/bringup/
 ```
 ```
-ssh nexuni@192.168.5.26 'cd ~/bringup && mkdir -p obj && printf "%s\n" facade_cleaning_v2/main.cpp app/WASH_ROBOT.cpp app/wash_robot_commands.cpp command/dispatcher.cpp transport/{Serial_port,TCP_client,TCP_server}.cpp user_lib/{DM2J_RS570,DY_500_weight_sensor,FrameAnalyzer,JC_100_METER,PQW_IO_16O_RLY,QX_DO24,WT901BC_TTL,XKC_Y25_RS485,ZDT_motor_control}.cpp | xargs -P4 -I{} sh -c "g++ -std=c++17 -O2 -Iapp -Icommand -Icommon -Itransport -Iuser_lib -c {} -o obj/\$(basename {} .cpp).o" && g++ -o facade_cleaning_v2.out obj/*.o -lpthread'
+ssh nexuni@192.168.5.26 'cd ~/bringup && mkdir -p obj && printf "%s\n" facade_cleaning_v2/main.cpp app/WASH_ROBOT.cpp app/wash_robot_commands.cpp command/dispatcher.cpp transport/{Serial_port,TCP_client,TCP_server}.cpp user_lib/{DM2J_RS570,DY_500_weight_sensor,FrameAnalyzer,JC_100_METER,PQW_IO_16O_RLY,QX_DO24,WT901BC_TTL,XKC_Y25_RS485,ZDT_motor_control}.cpp | xargs -P4 -I{} sh -c "g++ -std=c++17 -O2 -Iapp -Icommand -Icommon -Imechanism -Itransport -Iuser_lib -c {} -o obj/\$(basename {} .cpp).o" && g++ -o facade_cleaning_v2.out obj/*.o -lpthread'
 ```
 
 🔴 **第三個目標：`Linux_test`（2026-08-29 補）** —— 它與應用層一樣綁在 `user_lib/*.h` 的
