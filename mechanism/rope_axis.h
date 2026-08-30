@@ -50,6 +50,20 @@ struct RopeAxisT {
     std::atomic<bool>&  dev_vfd;
     std::atomic<bool>&  dev_meter;
     std::atomic<bool>&  dev_tension;
+
+    // ── 這條軸的狀態 ────────────────────────────────────────────────────
+    // 🔴 裝置與它的狀態必須放在一起。重構前這些是 g_length_left/right、
+    //    g_vfd_left_fault/right_fault、g_manual_motion_left/right …
+    //    每加一個新狀態就多一對名字，而**每一個新功能都得記得左邊做一次、
+    //    右邊做一次**。放進軸之後，「側」是參數，忘記的可能性從結構上消失。
+    std::atomic<int32_t>& length;             // 位置回授（計米器讀值）
+    std::atomic<bool>&    length_valid;
+    std::atomic<bool>&    vfd_fault;
+    std::atomic<bool>&    manual_motion;
+    std::atomic<double>&  tension_scale;      // DSZL 刻度（🔴 仍是佔位值，見待辦）
+    std::atomic<double>&  meter_device_scale;
+    std::atomic<bool>&    meter_scale_valid;
+    std::atomic<int32_t>& meter_cal_baseline;
 };
 
 #endif  // FCV_MECHANISM_ROPE_AXIS_H

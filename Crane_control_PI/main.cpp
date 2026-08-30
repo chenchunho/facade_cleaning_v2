@@ -711,11 +711,17 @@ using RopeAxis = RopeAxisT<CraneVFD, SD76_length_meters, DSZL_107>;
 
 static RopeAxis rope_left {
     "left",  vfd_left,  meter_left,  dsz_left,
-    g_dev_vfd_left,  g_dev_meter_left,  g_dev_dsz_left
+    g_dev_vfd_left,  g_dev_meter_left,  g_dev_dsz_left,
+    g_length_left,  g_length_left_valid,  g_vfd_left_fault,  g_manual_motion_left,
+    g_dsz_left_scale,  g_meter_left_device_scale,  g_meter_left_scale_valid,
+    g_meter_left_cal_baseline
 };
 static RopeAxis rope_right {
     "right", vfd_right, meter_right, dsz_right,
-    g_dev_vfd_right, g_dev_meter_right, g_dev_dsz_right
+    g_dev_vfd_right, g_dev_meter_right, g_dev_dsz_right,
+    g_length_right, g_length_right_valid, g_vfd_right_fault, g_manual_motion_right,
+    g_dsz_right_scale, g_meter_right_device_scale, g_meter_right_scale_valid,
+    g_meter_right_cal_baseline
 };
 
 // 選邊。呼叫端寫 rope(side_left).vfd 而不是 side_left ? vfd_left : vfd_right。
@@ -2873,7 +2879,7 @@ static std::string cmd_manual(const std::string& dir, const std::string& onoff) 
     if ( side_left && !g_dev_vfd_left.load())  return "ERR vfd_left_unavailable\n";
     if (!side_left && !g_dev_vfd_right.load()) return "ERR vfd_right_unavailable\n";
 
-    std::atomic<bool>& manual_flag = side_left ? g_manual_motion_left : g_manual_motion_right;
+    std::atomic<bool>& manual_flag = rope(side_left).manual_motion;
 
     if (!on) {
         if (reliable_stop_one(*inv)) return "ERR vfd_stop_fail\n";
@@ -2911,9 +2917,9 @@ static std::string cmd_side_measured(const std::string& cmd, int cm) {
     else                             { side_left = false; is_retract = true;  } // retract_right
 
     CraneVFD&       inv       = rope(side_left).vfd;
-    std::atomic<int32_t>& len       = side_left ? g_length_left : g_length_right;
-    std::atomic<bool>&    len_valid = side_left ? g_length_left_valid : g_length_right_valid;
-    std::atomic<bool>&    fault     = side_left ? g_vfd_left_fault : g_vfd_right_fault;
+    std::atomic<int32_t>& len       = rope(side_left).length;
+    std::atomic<bool>&    len_valid = rope(side_left).length_valid;
+    std::atomic<bool>&    fault     = rope(side_left).vfd_fault;
     const bool  dev_ok   = rope(side_left).dev_vfd.load();
     const bool  meter_ok = rope(side_left).dev_meter.load();
     const char* side     = rope(side_left).name;
@@ -3667,6 +3673,11 @@ static std::string cmd_set_dsz_scale(const std::string& side, double scale) {
 // Resolve side string to (driver, displayed-cm cache, baseline atomic,
 // device-scale cache, scale-valid flag, dev flag).
 // Returns false (no error) on success; true on unknown side.
+// [2026-08-30 重構階段 3] 左右兩側改由 RopeAxis 提供 —— 原本這裡把七個欄位
+// 逐一手工對應到 _left / _right，那正是「機構層寫成命名慣例」的樣子。
+// 🔴 `middle` 保留為特例：中間絞盤**未安裝**，沒有對應的 RopeAxis 實例。
+//    刻意不為它硬造一個 —— 造了就得回答「未安裝的軸算不算一條軸」，
+//    而那個問題現在不需要答案。
 static bool resolve_meter_side(const std::string& side,
                                 SD76_length_meters*&   meter_out,
                                 std::atomic<int32_t>*& length_out,
@@ -3675,22 +3686,15 @@ static bool resolve_meter_side(const std::string& side,
                                 std::atomic<double>*&  dev_scale_out,
                                 std::atomic<bool>*&    dev_scale_valid_out,
                                 std::atomic<bool>*&    dev_out) {
-    if (side == "left") {
-        meter_out           = &meter_left;
-        length_out          = &g_length_left;
-        length_valid_out    = &g_length_left_valid;
-        baseline_out        = &g_meter_left_cal_baseline;
-        dev_scale_out       = &g_meter_left_device_scale;
-        dev_scale_valid_out = &g_meter_left_scale_valid;
-        dev_out             = &g_dev_meter_left;
-    } else if (side == "right") {
-        meter_out           = &meter_right;
-        length_out          = &g_length_right;
-        length_valid_out    = &g_length_right_valid;
-        baseline_out        = &g_meter_right_cal_baseline;
-        dev_scale_out       = &g_meter_right_device_scale;
-        dev_scale_valid_out = &g_meter_right_scale_valid;
-        dev_out             = &g_dev_meter_right;
+    if (side == "left" || side == "right") {
+        RopeAxis& r         = rope(side == "left");
+        meter_out           = &r.meter;
+        length_out          = &r.length;
+        length_valid_out    = &r.length_valid;
+        baseline_out        = &r.meter_cal_baseline;
+        dev_scale_out       = &r.meter_device_scale;
+        dev_scale_valid_out = &r.meter_scale_valid;
+        dev_out             = &r.dev_meter;
     } else if (side == "middle") {
         meter_out           = &meter_middle;
         length_out          = &g_length_middle;
