@@ -279,8 +279,8 @@ SE3 變頻器（USR_A/B，速度輸出）＋ SD76 計米器（USR_M，位置回�
 | **1** | 刪 18 塊 `#if 0` | ✅ **完成**：`prove_noop` 逐位元相同（比原訂的 trace diff 更強） | 否 |
 | **2** | 抽**指令層**（84 個 `cmd_*`） | ✅ **完成（2026-08-30）**：`main.cpp` 522→149 行，`compare.sh` 兩判準相同 | 否 |
 | **3** | **機構層／虛擬軸**（吊機繩） | 🟡 **第一增量完成**：`RopeAxis` 型別化 + 3 個選邊點，吊機 `compare.sh` 兩判準相同。**閉環搬遷未做** | 否 |
-| **4** | config 外部化（機構 profile 與 device profile **分兩份**） | trace diff = 0 | 否 |
-| **5** | 拆 `WASH_ROBOT.cpp` 成 sequence | trace diff = 0 | 否 |
+| **4** | config 外部化（機構 profile 與 device profile **分兩份**） | 🟡 **第一增量完成**：`common/profile.h` + `config/axis_profile.txt`（上滑台導程與行程，帶 provenance）。**device_profile 與 182 個流程參數未做** | 否 |
+| **5** | 拆 `WASH_ROBOT.cpp` 成 sequence | 🟡 **第一增量完成**：依既有分節切成兩個 TU，9,465 → 5,213 + 4,275。**進一步依 `do_*` 拆 sequence 未做** | 否 |
 
 ### 排序的理由
 
@@ -391,8 +391,24 @@ app/WASH_ROBOT.cpp:1308  #define PUSHER_EXTEND_FEET_PULSE_LOWER  (settings_....l
 **無任何清單外差異**。基準分支 `main-final-harness` = `main-final` + 端點注入 + log 原子性 |
 | 1 | ✅ **完成（2026-08-29）**：刪 18 塊 `#if 0`／3,993 行，`WASH_ROBOT.cpp` 13,435 → 9,442 行。**經 `prove_noop` 證明是 no-op**（非空行 110,433 = 110,433），負控制已驗 |
 | 2 | ✅ **完成（2026-08-30）**：指令層抽出，`main.cpp` 522 → 149 行 |
-| 3 | 🟡 **第一增量完成**：虛擬軸型別化；**閉環與其餘約 340 處成對識別字未搬** |
-| 4~5 | ⚪ 未開始 |
+| 3 | 🟡 **三個增量完成**（虛擬軸型別化 → 軸帶狀態 + `resolve_meter_side` 收斂 → `meter_loop` 左右重複收斂）。**閉環與其餘成對識別字未搬** |
+| 4 | 🟡 **第一增量完成**：`profile.h` + `axis_profile.txt`（帶 provenance）。**device_profile 與流程參數未做** |
+| 5 | 🟡 **第一增量完成**：依既有分節切成兩個 TU。**進一步拆 sequence 未做** |
+
+### 每個階段剩下的（下一輪接手先看這裡）
+
+**階段 3** — 閉環（VFD 出力 → SD76 讀位置 → 張力守衛）搬進 `RopeAxis`；
+其餘成對識別字（`hold_up`/`hold_down` 各 26-28 處、`g_dev_*` 74 處）收斂。
+
+**階段 4** — `device_profile`（25 個設備協定常數：slave、通道、端點）；
+182 個流程參數。🔴 **12 個安全互鎖一律不動**（理由見 `profile.h` 檔頭）。
+⚠️ `CUP_PULSE_PER_CM` 有 `constexpr` 使用點（`constexpr double FEET_PULSE_PER_CM = CUP_PULSE_PER_CM;`），
+外部化前要先處理那個相依。
+
+**階段 5** — `WASH_ROBOT.cpp` 仍有 5,213 行、`wash_robot_commands.cpp` 4,275 行。
+下一刀可以依 `do_*`（10 個流程）再切一層。
+🔴 **拆之前一定要先掃「跨檔案會斷的東西」**：file-static、匿名 namespace。
+這次只有兩個且都在前半，是運氣好；下一刀不見得。
 
 ### 階段 3 剩下的（下一個增量）
 1. 把閉環（VFD 出力 → SD76 讀位置 → 張力守衛）搬進 `RopeAxis`
