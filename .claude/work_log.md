@@ -355,6 +355,36 @@ threshold 再實作」：① `cmd_hold` 與 motion 互斥（避免 hold 跟 moti
 再懷疑 `arm_sweep_obstacle_pending_` 未初始化 —— **也在建構子裡**。
 兩次都差一點寫成結論。
 
+### 修好腳本後的最終結果：`rail.txt` 抓到 1/4
+
+`rail.txt` 加上 `arm_clean_sweep_dry` 前置之後重跑（基準軌跡 31 筆）：
+
+| 條 | `smoke.txt` | `rail.txt` |
+|---|---|---|
+| ① 上滑台 7.731 換算 | ❌ | ✅ **抓到**（位元組 6 行差異） |
+| ② `ARM_SWEEP_RPM` | ❌ | ❌ |
+| ③ 吸盤左右歸屬 | ❌ | ❌ |
+| ④ `CUP_PULSE_PER_CM` | ❌ | ❌ |
+
+📌 **② 抓不到本身有訊息**：`arm_clean_sweep_dry` 會掃上滑台（所以 ① 看得到），
+但 `ARM_SWEEP_RPM` **只有 `arm_sweep` 本身在用** —— 而 `arm_sweep` 因為
+`abort_flag` 那個缺陷仍然中止。**修好那個缺陷會同時解鎖 ②。**
+③④ 如預期：`rail.txt` 完全不碰推桿與步態。
+
+### 🔴 9 條預期差異的保護狀態盤點（誠實版）
+
+| 條 | 狀態 |
+|---|---|
+| ① 上滑台 7.731 換算 | ✅ `rail.txt` 抓得到 |
+| ⑦ `zdt_pusher` 範圍分岔 | ✅ `compare.sh` vs `main-final` 驗到 |
+| ② `ARM_SWEEP_RPM` | ❌ 需先修 `cmd_arm_sweep` 的 `abort_flag` |
+| ③ 左右歸屬 ／ ④ `CUP_PULSE_PER_CM` | ❌ 需要**能跑步態**的腳本（`attach` 要能成功） |
+| ⑤ driver 回覆驗證 | 🔴 **結構上這裡永遠測不到**（假從站永遠送好幀）→ 靠 `fake_slaves/` |
+| ⑥ `SO_ERROR` | ❌ 需要「有人監聽但不回應」的端點 |
+| ⑧ DM2J `void→bool` ／ ⑨ `abort_flag`/張力警示 | ❌ 需程式碼層反轉 |
+
+**＝ 2/9 在保護範圍內。** 這個數字比「✅ 等價」誠實得多，也是後續該追的指標。
+
 ### 待完成
 
 - 🔴 **`cmd_arm_sweep()` 補 `abort_flag = false`**（與姊妹函式一致）。
