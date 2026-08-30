@@ -168,28 +168,55 @@ msbuild facade_cleaning_v2.sln /p:Configuration=Debug /p:Platform=ARM64
 
 ## Repository Structure
 
-📌 **2026-08-27 起分層**：操作層 → 應用層 → 裝置層。上層呼叫下層，**下層不認識上層**。
+📌 **2026-08-27 起分層**，**2026-08-30 重構擴充為 6 層 + 1 橫切**
+（見 `.claude/refactor_plan.md`）。上層呼叫下層，**下層不認識上層**。
 
 ```
-web_backend/         # ── 操作層：Node.js server + 前端 GUI
-app/                 # ── 應用層：機器人編排（步態、狀態機、真空重試、校正）
-                     #    WASH_ROBOT.{h,cpp}
-user_lib/            # ── 裝置層：單一硬體的驅動
+web_backend/         # ── 介面層：Node.js server + 前端 GUI（獨立行程，在吊機那台）
+                     ↓ 文字協定
+command/             # ── 🆕 指令層：文字協定的解析、分派、FAST/SLOW 路由、參數驗證
+                     #    dispatcher.{h,cpp}
+                     #    🔴 存在理由：08-27 吸盤改號後 zdt_pusher 變成不可能成功——
+                     #       分派器收 1-4、應用層收 5-8，範圍驗證與被驗證的常數分居兩處
+                     ↓ 流程命令
+app/                 # ── 任務層：機器人編排（步態、狀態機、真空重試、校正）
+                     #    WASH_ROBOT.{h,cpp} + wash_robot_commands.cpp
+                     #    ⚠️ 2026-08-30 依原檔既有分節切成兩個 TU（5,213 + 4,275 行）
+                     ↓ 工程單位（cm / kg / 度）
+mechanism/           # ── 🆕 機構層：虛擬軸。rope_axis.h
+                     #    🔴 一條吊機繩 = SE3（速度輸出）+ SD76（位置回授）+ DSZL（力回授）
+                     #       ＝ 三個裝置、三條匯流排。參考架構的「一裝置一軸」在此不成立
+                     ↓ 裝置命令
+user_lib/            # ── 驅動層：單一硬體的驅動
                      #    ZDT / JC100 / SD76 / MH300 / SE3 / DSZL / PQW / QX_DO24 …
-transport/           # ── 傳輸層：裝置層之下，與硬體種類無關
+                     ↓ bytes
+transport/           # ── 傳輸層：與硬體種類無關
                      #    TCP_client / TCP_server / Serial_port
-facade_cleaning_v2/  # 洗窗本體主控 binary（main.cpp，薄；邏輯在 app/）
+
+common/              # 橫切支援：endpoints.h（端點注入）、profile.h（設定檔載入）
+config/              # 🆕 設定檔。axis_profile（機構標定，帶 provenance）
+                     #    🔴 不存在也完全正常——沒有它就走編譯進去的常數，行為逐位元相同
+                     #    🔴 12 個安全互鎖**不放這裡**，見 common/profile.h 檔頭
+
+facade_cleaning_v2/  # 洗窗本體主控 binary（main.cpp 149 行，薄；邏輯在 app/ 與 command/）
 Crane_control_PI/    # 吊機主控 binary
-                     #    ⚠️ 應用層尚未抽出，編排邏輯仍寫在 main.cpp（4,400+ 行）
+                     #    ⚠️ 應用層尚未抽出，編排邏輯仍寫在 main.cpp（4,500+ 行）
+                     #    🟡 機構層已接上（rope_left / rope_right），閉環尚未搬進去
 cleaning_arm/        # 手臂控制 binary
                      #    ⚠️ 自成一格：不使用 user_lib，自建 socket 層（main_api.{h,cpp}）
-Linux_test/          # bench 互動式硬體測試工具（含 probe_dm2j.cpp：上滑台機構標定/行程量測）
+                     #    📌 這是**刻意的服務邊界**，不是待重構的債（refactor_plan §3.4）
+Linux_test/          # bench 互動式硬體測試工具 + fake_slaves/（刻意送壞幀，測錯誤處理）
 frame_capture/       # Python 影像工具（相機路線已作廢，見 .claude/archive/）
-common/              # 橫向支援：endpoints.h（端點注入，讓程式可指向假從站）
 harness/             # 重構等價性驗證：假匯流排 + 軌跡比對（不需要機器）
+                     #    📌 與 fake_slaves/ 互補：這裡**永遠送好幀**測正常路徑，
+                     #       那裡送壞幀測錯誤處理。完整證明需要兩套一起跑
 scripts/             # tmux launcher：wr.sh / crane.sh / cams.sh
 tmp/                 # 暫存工作區（已 gitignore，不進版控）
 ```
+
+🔴 **安全層是橫切的監看 + 否決，不在呼叫路徑上**（吊機的 `hold_loop()` 是現成樣板）。
+放在呼叫路徑上的閘門遲早會被繞過 —— 2026-08-28 就有實例：合併帶進的
+`sendAndReceiveQuiet()` 繞過同期加的 `MSG_NOSIGNAL`，**git 一句話都沒說**。
 
 #### 根目錄完整盤點 —— 🔴 **新增檔案必須在這裡加一列**
 
@@ -204,6 +231,9 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 | `deploy_and_test.pdf` | 部署測試說明，由 `.claude/gen_deploy_pdf.py` 產生 | 🟡 產生腳本只能在 Windows 跑 |
 | `dm2j_manual_utf8.txt` | DM2J 手冊的**可讀**文字擷取（簡體中文） | 🟡 已被 `.claude/summaries/DM2J_RS_MODBUS_SUMMARY.md` 濃縮，保留作原文對照 |
 | `harness/` | **重構的等價性驗證**（2026-08-29 新增）：假匯流排 + 軌跡正規化 + 兩個版本比對。不需要機器 | 🟡 工具已完成並自我測試過；**尚未端到端跑過**（本機缺 `g++`） |
+| `command/` | 🆕 **指令層**（2026-08-30 階段 2）：`dispatcher.{h,cpp}`，由 `facade_cleaning_v2/main.cpp` 抽出的 373 行分派器 | 🟢 活的 |
+| `mechanism/` | 🆕 **機構層**（2026-08-30 階段 3）：`rope_axis.h`，吊機繩的虛擬軸（三裝置三匯流排） | 🟡 型別與狀態已就位，**閉環尚未搬進去** |
+| `config/` | 🆕 **設定檔**（2026-08-30 階段 4）：`axis_profile.txt`，機構標定 + provenance | 🟢 活的。🔴 **不存在也正常**——沒有它就走編譯進去的常數 |
 | `.vs/`（43 MB）／`tmp/` | VS 快取／暫存工作區 | ⚪ 已在 `.gitignore`，不進版控 |
 
 🗑️ **2026-08-28 已刪除 4 個檔（228 KB）**：`main_tmp.txt`（v1 時期 `main.cpp` 開頭註解的舊副本，
