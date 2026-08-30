@@ -13,6 +13,9 @@ CAND="${2:?用法: compare.sh <基準 commit> <受測 commit> [cmds.txt]}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 CMDS="${3:-$HERE/cmds/smoke.txt}"
+# TARGET=crane 改比吊機那支二進位（階段 3 用）。
+BINNAME="${TARGET:-wr}"
+[[ "$BINNAME" == crane ]] && BINNAME=crane_control_PI.out || BINNAME=facade_cleaning_v2.out
 WORK="${WORK:-$REPO/tmp/harness}"
 
 rm -rf "$WORK"; mkdir -p "$WORK"
@@ -23,7 +26,7 @@ for side in base:"$BASE" cand:"$CAND"; do
   mkdir -p "$WORK/$name/src"
   git -C "$REPO" archive "$rev" | tar -x -C "$WORK/$name/src"
   "$HERE/build.sh"     "$WORK/$name/src" "$WORK/$name/build"
-  "$HERE/run_trace.sh" "$WORK/$name/build/facade_cleaning_v2.out" "$CMDS" "$WORK/$name/run"
+  "$HERE/run_trace.sh" "$WORK/$name/build/$BINNAME" "$CMDS" "$WORK/$name/run"
   python3 "$HERE/normalize.py"         "$WORK/$name/run/trace.raw"   > "$WORK/$name/trace.norm"
   python3 "$HERE/normalize_replies.py" "$WORK/$name/run/replies.txt" > "$WORK/$name/replies.norm"
 done

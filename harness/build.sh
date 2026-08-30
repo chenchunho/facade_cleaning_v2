@@ -30,7 +30,7 @@ OUT="$(cd "$OUT" && pwd)"
 # 兩種佈局都要能建，否則沒辦法跟 main-final 比。
 if [[ -d "$SRC/app" ]]; then
   WR="app/WASH_ROBOT.cpp"
-  INC="-I$SRC/app -I$SRC/command -I$SRC/common -I$SRC/transport -I$SRC/user_lib"
+  INC="-I$SRC/app -I$SRC/command -I$SRC/common -I$SRC/mechanism -I$SRC/transport -I$SRC/user_lib"
   TRANSPORT_DIR="transport"
 else
   WR="user_lib/WASH_ROBOT.cpp"; INC="-I$SRC/user_lib"

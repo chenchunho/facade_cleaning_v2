@@ -93,6 +93,7 @@
 
 #include "TCP_client.h"
 #include "TCP_server.h"
+#include "rope_axis.h"
 #include "endpoints.h"
 #include "SD76_length_meters.h"
 #include "CLV900_inverter.h"
@@ -441,7 +442,8 @@ static DSZL_107           dsz_right;      // right tension (cli_D slave 1)
 // [2026-06-05] Water inlet ball valve relay, moved from washrobot to crane side.
 // On cli_M (.34) slave 12 CH4 — shares sensing bus with SD76 meters. Bus traffic
 // is mostly meter polling (~50-100ms) + occasional relay write (sweep flow).
-static PQW_IO_16O_RLY     pqw_water;      // water inlet ball valve (cli_M slave 12 CH4)
+static PQW_IO_16O_RLY     pqw_water;
+      // water inlet ball valve (cli_M slave 12 CH4)
 static TCP_server         cmd_server;
 
 static std::atomic<bool> abort_flag(false);
@@ -702,6 +704,22 @@ static std::atomic<bool> g_dev_clv900        {false};
 static std::atomic<bool> g_dev_dsz_left      {false};
 static std::atomic<bool> g_dev_dsz_right     {false};
 static std::atomic<bool> g_dev_pqw_water     {false};   // [2026-06-05] PQW water-inlet relay (cli_M slave 12)
+// ── 機構層：虛擬軸（2026-08-30 重構階段 3，見 mechanism/rope_axis.h）─────────
+// 一條繩 = 變頻器（速度輸出）+ 計米器（位置回授）+ 張力計（力回授），
+// 三個裝置、三條匯流排。這兩個實例把「側」從**名字的一部分**變成**參數**。
+using RopeAxis = RopeAxisT<CraneVFD, SD76_length_meters, DSZL_107>;
+
+static RopeAxis rope_left {
+    "left",  vfd_left,  meter_left,  dsz_left,
+    g_dev_vfd_left,  g_dev_meter_left,  g_dev_dsz_left
+};
+static RopeAxis rope_right {
+    "right", vfd_right, meter_right, dsz_right,
+    g_dev_vfd_right, g_dev_meter_right, g_dev_dsz_right
+};
+
+// 選邊。呼叫端寫 rope(side_left).vfd 而不是 side_left ? vfd_left : vfd_right。
+static inline RopeAxis& rope(bool left) { return left ? rope_left : rope_right; }
 
 // Build EVT device_state line reflecting current device flags. Broadcast at
 // startup (after init complete) and from cmd_status for fresh GUI sync.
@@ -2892,13 +2910,13 @@ static std::string cmd_side_measured(const std::string& cmd, int cm) {
     else if (cmd == "retract_left")  { side_left = true;  is_retract = true;  }
     else                             { side_left = false; is_retract = true;  } // retract_right
 
-    CraneVFD&       inv       = side_left ? vfd_left : vfd_right;
+    CraneVFD&       inv       = rope(side_left).vfd;
     std::atomic<int32_t>& len       = side_left ? g_length_left : g_length_right;
     std::atomic<bool>&    len_valid = side_left ? g_length_left_valid : g_length_right_valid;
     std::atomic<bool>&    fault     = side_left ? g_vfd_left_fault : g_vfd_right_fault;
-    const bool  dev_ok   = side_left ? g_dev_vfd_left.load()   : g_dev_vfd_right.load();
-    const bool  meter_ok = side_left ? g_dev_meter_left.load() : g_dev_meter_right.load();
-    const char* side     = side_left ? "left" : "right";
+    const bool  dev_ok   = rope(side_left).dev_vfd.load();
+    const bool  meter_ok = rope(side_left).dev_meter.load();
+    const char* side     = rope(side_left).name;
 
     if (!dev_ok)           return std::string("ERR vfd_")   + side + "_unavailable\n";
     if (!meter_ok)         return std::string("ERR meter_") + side + "_unavailable\n";
@@ -3952,8 +3970,10 @@ static std::string cmd_ping() {
 static std::string cmd_vfd_fault(const std::string& side) {
     CraneVFD* inv = nullptr;
     bool          available = false;
-    if (side == "left")  { inv = &vfd_left;  available = g_dev_vfd_left .load(); }
-    if (side == "right") { inv = &vfd_right; available = g_dev_vfd_right.load(); }
+    if (side == "left" || side == "right") {
+        RopeAxis& r = rope(side == "left");
+        inv = &r.vfd; available = r.dev_vfd.load();
+    }
     if (!inv)       return "ERR usage:vfd_fault_<left|right>\n";
     if (!available) return std::string("ERR vfd_") + side + "_unavailable\n";
 
