@@ -277,8 +277,8 @@ SE3 變頻器（USR_A/B，速度輸出）＋ SD76 計米器（USR_M，位置回�
 | **−1** | 🔴 **HEAD 上機跑一次**，對照 `runbook.md` §A2 | 差異 == 那 9 條 | **是** |
 | **0** | tag `main-final`；端點注入；假匯流排；指令腳本 + 正規化 + diff | ⚠️ **負控制先紅** | 否 |
 | **1** | 刪 18 塊 `#if 0` | ✅ **完成**：`prove_noop` 逐位元相同（比原訂的 trace diff 更強） | 否 |
-| **2** | 抽**指令層**（84 個 `cmd_*`） | trace diff = 0 | 否 |
-| **3** | **機構層／虛擬軸**（吊機繩） | trace diff = 0 | 否 |
+| **2** | 抽**指令層**（84 個 `cmd_*`） | ✅ **完成（2026-08-30）**：`main.cpp` 522→149 行，`compare.sh` 兩判準相同 | 否 |
+| **3** | **機構層／虛擬軸**（吊機繩） | 🟡 **第一增量完成**：`RopeAxis` 型別化 + 3 個選邊點，吊機 `compare.sh` 兩判準相同。**閉環搬遷未做** | 否 |
 | **4** | config 外部化（機構 profile 與 device profile **分兩份**） | trace diff = 0 | 否 |
 | **5** | 拆 `WASH_ROBOT.cpp` 成 sequence | trace diff = 0 | 否 |
 
@@ -390,4 +390,12 @@ app/WASH_ROBOT.cpp:1308  #define PUSHER_EXTEND_FEET_PULSE_LOWER  (settings_....l
 `readonly.txt` 兩個判準完全相同；`smoke.txt` 的差異 **100% 歸因於預期差異第 7 條**，
 **無任何清單外差異**。基準分支 `main-final-harness` = `main-final` + 端點注入 + log 原子性 |
 | 1 | ✅ **完成（2026-08-29）**：刪 18 塊 `#if 0`／3,993 行，`WASH_ROBOT.cpp` 13,435 → 9,442 行。**經 `prove_noop` 證明是 no-op**（非空行 110,433 = 110,433），負控制已驗 |
-| 2~5 | ⚪ 未開始 |
+| 2 | ✅ **完成（2026-08-30）**：指令層抽出，`main.cpp` 522 → 149 行 |
+| 3 | 🟡 **第一增量完成**：虛擬軸型別化；**閉環與其餘約 340 處成對識別字未搬** |
+| 4~5 | ⚪ 未開始 |
+
+### 階段 3 剩下的（下一個增量）
+1. 把閉環（VFD 出力 → SD76 讀位置 → 張力守衛）搬進 `RopeAxis`
+2. 其餘約 340 處 `_left`/`_right` 成對識別字收斂成 `rope(side).xxx`
+3. `resolve_meter_side()` 這類臨時 helper 退場
+🔴 **每一步都要單獨驗**：混在一起搬就證不了「行為沒變」。
