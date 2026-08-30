@@ -79,6 +79,7 @@ def main():
                 return
             left -= n
             time.sleep(0.05)
+        print(f'[fake_serial] wrote {a.frames} frames', file=sys.stderr, flush=True)
     threading.Thread(target=_feed, daemon=True).start()
 
     # master 必須持續開著，否則從端會收到 EOF/HUP，driver 那邊看起來像斷線。

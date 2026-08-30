@@ -1,0 +1,16 @@
+# full —— 目前覆蓋最廣的一份：init → attach → arm_sweep。
+#
+# 🔴 `init` 是所有東西的前置，它做兩件關鍵的事：
+#      重置 abort_flag（`app/WASH_ROBOT.cpp:5230`）→ 解鎖 arm_sweep
+#      設成 State::Ready（`:5326`）           → 解鎖 attach
+#    而 init 要成功需要 IMU 基準線（3 秒視窗內取到樣本），所以 harness 的假 IMU
+#    必須**按時間餵資料**而不是一次爆發送完 —— 見 fake_serial.py。
+#
+# 這份能走到的預期差異：
+#   ① 上滑台 7.731 換算   ✅ 抓得到
+#   ② ARM_SWEEP_RPM       ✅ 抓得到
+#   ③ 吸盤左右歸屬        ← attach 的分側判準會用到 ZDT_RF/LF
+init
+attach
+arm_sweep
+status

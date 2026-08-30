@@ -24,12 +24,13 @@ for side in base:"$BASE" cand:"$CAND"; do
   git -C "$REPO" archive "$rev" | tar -x -C "$WORK/$name/src"
   "$HERE/build.sh"     "$WORK/$name/src" "$WORK/$name/build"
   "$HERE/run_trace.sh" "$WORK/$name/build/facade_cleaning_v2.out" "$CMDS" "$WORK/$name/run"
-  python3 "$HERE/normalize.py" "$WORK/$name/run/trace.raw" > "$WORK/$name/trace.norm"
+  python3 "$HERE/normalize.py"         "$WORK/$name/run/trace.raw"   > "$WORK/$name/trace.norm"
+  python3 "$HERE/normalize_replies.py" "$WORK/$name/run/replies.txt" > "$WORK/$name/replies.norm"
 done
 
 echo
 echo "########## 判準 1：TCP 文字回覆（完全確定性）"
-if diff -u "$WORK/base/run/replies.txt" "$WORK/cand/run/replies.txt"; then
+if diff -u "$WORK/base/replies.norm" "$WORK/cand/replies.norm"; then
   echo "✅ 回覆完全相同"
 else
   echo "🔴 回覆有差異 —— 見上方"

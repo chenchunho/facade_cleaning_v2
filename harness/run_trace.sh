@@ -48,7 +48,7 @@ done
 # 主程式在 IMU 開埠失敗時直接 FATAL，所以沒有這個東西整支起不來。
 PTYF="$OUT/imu_pty"
 rm -f "$PTYF"
-python3 "$HERE/fake_serial.py" --path-file "$PTYF" 2>>"$OUT/fakes.log" &
+python3 "$HERE/fake_serial.py" --path-file "$PTYF" --delay 0.5 --frames 4000 2>>"$OUT/fakes.log" &
 PIDS+=($!)
 for _ in $(seq 1 100); do [[ -s "$PTYF" ]] && break; sleep 0.05; done
 [[ -s "$PTYF" ]] || { echo "ERROR: 假序列埠沒起來" >&2; exit 1; }

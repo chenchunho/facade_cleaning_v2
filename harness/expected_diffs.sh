@@ -39,6 +39,7 @@ git -C "$REPO" archive HEAD | tar -x -C "$WORK/ref/src"
 "$HERE/build.sh"     "$WORK/ref/src" "$WORK/ref/build" >/dev/null 2>&1 || { echo "🔴 基準建置失敗"; exit 1; }
 "$HERE/run_trace.sh" "$WORK/ref/build/facade_cleaning_v2.out" "$CMDS" "$WORK/ref/run" >/dev/null 2>&1
 python3 "$HERE/normalize.py" "$WORK/ref/run/trace.raw" > "$WORK/ref.norm" 2>/dev/null
+python3 "$HERE/normalize_replies.py" "$WORK/ref/run/replies.txt" > "$WORK/ref.rep" 2>/dev/null
 REFN=$(grep -c '^[TR]X' "$WORK/ref.norm" || true)
 echo "    基準軌跡 $REFN 筆"
 if [[ "$REFN" -eq 0 ]]; then
@@ -73,14 +74,15 @@ PY
     echo "🔴 $name：反轉版軌跡是空的 —— 這條測不了（不是覆蓋問題，是這輪跑壞了）"
     GAP=$((GAP+1)); continue
   fi
+  python3 "$HERE/normalize_replies.py" "$d/run/replies.txt" > "$d.rep" 2>/dev/null
   if diff -q "$WORK/ref.norm" "$d.norm" >/dev/null && \
-     diff -q "$WORK/ref/run/replies.txt" "$d/run/replies.txt" >/dev/null; then
+     diff -q "$WORK/ref.rep" "$d.rep" >/dev/null; then
     echo "⚠️  $name：**抓不到** —— 反轉了卻沒有任何差異（軌跡 $n 筆）"
     echo "        ＝ 覆蓋缺口。這條路徑沒被腳本走到，日後在那裡搬壞 diff 也是綠的。"
     GAP=$((GAP+1))
   else
     dn=$(diff "$WORK/ref.norm" "$d.norm" | grep -c '^[<>]' || true)
-    dr=$(diff "$WORK/ref/run/replies.txt" "$d/run/replies.txt" | grep -c '^[<>]' || true)
+    dr=$(diff "$WORK/ref.rep" "$d.rep" | grep -c '^[<>]' || true)
     echo "✅ $name：抓到（位元組 $dn 行差異／回覆 $dr 行差異）"
     PASS=$((PASS+1))
   fi
