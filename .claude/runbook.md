@@ -20,16 +20,29 @@
 | 機器 | hostname | 有線（正式） | WiFi（備援） | 帳號 |
 |---|---|---|---|---|
 | 洗窗本體 | `washrobot` | `192.168.1.100` | `192.168.5.26` | **`nexuni`** |
-| 吊機 | `raspberry-cran` | `192.168.1.10` | `192.168.5.17` | **`user`** |
+| 吊機 | `raspberry-cran` | `192.168.1.10` | **`192.168.5.25`**（2026-08-31 由 `.17` 漂到 `.25`，已登入 `hostname` 確認） | **`user`** |
 
 - 兩台皆 **aarch64 / Debian 13 (trixie) / g++ 14.2**
 - 🔴 **帳號不是 `pi`**（2026-08-28 已全檔更正為 `nexuni@` / `user@`）
 - 🔴 **吊機有線是 `192.168.1.10` 不是 `.101`**（2026-08-28 全檔更正）。✅ `web_backend/server.js` 的 `CRANE_IP` 預設值**已於 `f4e0d02` 改為 `.1.10`**（2026-08-29 複查確認；本行原本寫「仍是 `.101`」＝過期）。⚠️ 現行的兩支 C++ 走的是 `app/WASH_ROBOT.h` 的 `CRANE_IP = "192.168.5.17"`（WiFi）—— **eth 串接後要回頭改它**，見待辦總表
+- 🔴🔴 **吊機 WiFi IP 會漂，而 `CRANE_IP` 是編譯期常數（2026-08-31 踩到）**：`user_lib/WASH_ROBOT.h`
+  的 `CRANE_IP` 沒有任何 env 覆蓋（全檔只有 `WR_DRIVER_DEBUG` 一個 `getenv`）→ **IP 一漂就只能改碼重編**。
+  症狀極具誤導性：`init()` 會一路印到 `[--] DY-500 … polling disabled` 然後**整個停住約 2 分鐘**、
+  埠 5001 遲遲不開。原因是 `crane_connect_if_needed_()` 是 blocking `connect()`，
+  對**不存在的主機**（封包被丟棄、沒有 RST）會卡滿 TCP SYN timeout。
+  ⚠️ **runbook 原本寫的「連不到會 WARN 但不擋 boot」只在對方送 RST 時成立**（例如 `127.0.0.1` 的
+  arm／depth_cam，那兩個是瞬間 WARN）；主機整台不在時它**會擋 boot 兩分鐘**。
+  📌 **上機前先 `ping` 吊機確認 IP**，不要直接開跑然後對著卡住的 log 猜。
+- 🔴 **`~/.ssh/config` 的 `IdentityFile` 是列舉式的，新 IP 要手動加**（2026-08-31 踩到）：
+  金鑰 08-31 由 `id_ed25519` 更名為 `claudeuser` 之後 SSH 不再自動嘗試它，
+  該 `Host` 樣式沒列到的位址一律 `Permission denied (publickey,password)`
+  ——**看起來像帳號/金鑰壞了，其實只是位址沒登記**。`.25` 已補上。
 - 📌 `192.168.5.26` 在 changelog／work_log 裡以 `[TEST MODE]` 出現過（`CRANE_IP` 曾被暫時改成它），
   **那不是筆誤，就是這台的 WiFi 位址**
 - ⚠️ **測試環境實體位於倉庫（新國街）**，與 `192.168.5.0/24` 的其他設備同網段。
   這兩台是專案測試機，不納入 `remote_hosts/` 管理
-- 金鑰登入：Windows 端與 WSL 端用同一把 `id_ed25519`，已裝上兩台的 `authorized_keys`
+- 金鑰登入：Windows 端與 WSL 端用同一把 `~/.ssh/claudeuser`（**2026-08-31 由 `id_ed25519` 更名**，
+  內容未變、指紋 `SHA256:VDtxIH…z6E` 相同，兩台的 `authorized_keys` 不需更動），已裝上兩台
 
 > 🔴 **C++ 改動只能在 Pi 上驗證。** Visual Studio 的 "Visual C++ for Linux Development" 是把原始碼
 > 送到 Pi、用 **Pi 上的 g++** 編譯——建置不發生在 Windows。沒有 Pi 就無法驗證任何 C++ 改動。
@@ -135,8 +148,12 @@ http://192.168.1.10:8080
 > 🔴 **放棄分兩段的代價要講清楚**：上機若出現非預期行為，**不再能靠「哪一段出現的」來歸因**。
 > 取而代之的是下面那張清單——**上機前先讀一遍，知道哪些行為本來就會不一樣**。
 >
-> ⚠️ **本分支尚未含 `origin/main` 的 `6523b54`**（2026-08-29 10:52，對方的同步步伐 PWM +
-> 恢復內建清洗 + 停用自動補救）。要不要先合併進來是**上機前的獨立決定**，見本節末。
+> ✅ **已過期並更正（2026-08-31 複查）**：本節原本寫「本分支尚未含 `origin/main` 的 `6523b54`」，
+> 但 `6523b54` **早在 08-29 就由 `b5cb251` 合併進來了**（`git merge-base --is-ancestor` 確認）。
+> 本節末「要不要先合併」那段因此**只剩歷史意義，決定已經做了**。
+> 🔴 **真正的後果是：第 ⑧ 條的「重試套重試」現在是活的**——`6523b54` 的應用層
+> （`[QX:9] no reply` 最多 3 次、間隔 120ms）疊上本分支 `9af86e4` 的 driver 交易層重試，
+> 最壞 3×N 次、時序也跟著變。**上機時 ⑧ 要當成會發生的事來看，不是理論風險。**
 
 ### 本分支相對 `0d5f6bc` 的行為改變清單（🔴 上機要盯的就是這些）
 
@@ -231,7 +248,19 @@ baseline 已含。判讀時不要算到本分支頭上。
 
 | # | 看什麼 | 正常 | 不正常 → **立即急停** |
 |---|---|---|---|
-| ③ | 放開一側時**另一側的兩顆是否都還吸著** | 放開右側 `{5,7}` 時，左側 `{6,8}` 兩顆都吸住 | 另一側只有一顆吸著、或吸的是 `{5,6}`／`{7,8}` 這種上下對 |
+| ③ | **左右歸屬對應表**（2026-08-31 改用此法） | 逐組推吸盤：`{5,7}` = 右上+右下；`{6,8}` = 左上+左下 | 推出來的兩顆分屬實體左右兩側 → 歸屬沒改成功 |
+
+✅ **2026-08-31 已驗證通過,四顆全對**（5=右上／7=右下／6=左上／8=左下）。
+📌 **驗法改變了,不要再用跑交替步伐來驗歸屬**——歸屬是**對應關係問題**,逐組推吸盤就能單獨驗,
+且把「對應錯」與「真空時序/密封」分開;跑步伐會把兩者混在一起,任一邊出問題都可能被誤讀成另一邊。
+機器在地上、吸盤懸空即可進行,零風險。
+
+🔴🔴🔴 **原本這一列寫的「放開一側時另一側的兩顆是否都還吸著」問錯了問題**：
+**硬體上沒有分側真空**——真空幫浦一顆繼電器控 4 顆,三口二位閥也是一顆繼電器控 4 顆
+（per user 2026-08-31）。放開一側必然放開四顆。
+→ 詳見 `work_log.md` 同日「交替步伐架構上不可用」那節：
+`do_step_down_` 的 `pre_cycle` **先驗證錨定側吸牢、下一行就關掉唯一那顆閥**,
+`valve_ch` 是虛構的抽象。**在做出處置決定前,不要在懸吊狀態下呼叫 `step_down`/`step_up`（非 `_sync` 版）。**
 
 🔴 **這條的修正依據只有 2026-08-28 使用者的口頭確認，程式從未在機器上跑過交替步伐。**
 `WASH_ROBOT.h` 的註解自己寫著「第一次跑 `do_step_down_`/`do_step_up_` 要有人在旁邊」。
@@ -264,7 +293,7 @@ baseline 已含。判讀時不要算到本分支頭上。
 ### 0. 進場前確認（🔴 不要跳過）
 
 ```
-ssh user@192.168.5.17 'who; ss -ltn | grep -E ":(5002|8080)"; ps -eo pid,etime,comm | grep -E "crane|node"'
+ssh user@192.168.5.25 'who; ss -ltn | grep -E ":(5002|8080)"; ps -eo pid,etime,comm | grep -E "crane|node"'
 ```
 
 本體同理（`nexuni@192.168.5.26`、埠 `5001`）。
@@ -274,13 +303,13 @@ ssh user@192.168.5.17 'who; ss -ltn | grep -E ":(5002|8080)"; ps -eo pid,etime,c
 ### 1. 建置（在 Pi 上，另開目錄，不碰現有部署）
 
 ```
-rsync -a --delete <repo>/{common,config,mechanism,transport,user_lib,Crane_control_PI} user@192.168.5.17:~/bringup/
+rsync -a --delete <repo>/{common,config,mechanism,transport,user_lib,Crane_control_PI} user@192.168.5.25:~/bringup/
 ```
 ```
-ssh user@192.168.5.17 'cd ~/bringup && g++ -std=c++17 -O2 -Icommon -Imechanism -Itransport -Iuser_lib -o crane_control_PI.out Crane_control_PI/main.cpp transport/TCP_client.cpp transport/TCP_server.cpp user_lib/{CLV900_inverter,DSZL_107,DY_500_weight_sensor,PQW_IO_16O_RLY,MH300_inverter,SD76_length_meters,SE3_inverter}.cpp -lpthread'
+ssh user@192.168.5.25 'cd ~/bringup && g++ -std=c++17 -O2 -Icommon -Imechanism -Itransport -Iuser_lib -o crane_control_PI.out Crane_control_PI/main.cpp transport/TCP_client.cpp transport/TCP_server.cpp user_lib/{CLV900_inverter,DSZL_107,DY_500_weight_sensor,PQW_IO_16O_RLY,MH300_inverter,SD76_length_meters,SE3_inverter}.cpp -lpthread'
 ```
 
-本體（多一個 `app/`，14 個編譯單元、平行編約 25 秒）：
+本體（多一個 `app/`，**16 個編譯單元**（2026-08-31 更正：原寫 14，階段 2/5 之後多了 `command/dispatcher.cpp` 與 `app/wash_robot_commands.cpp`）、平行編約 25 秒）：
 ```
 rsync -a --delete <repo>/{app,command,common,config,mechanism,transport,user_lib,facade_cleaning_v2} nexuni@192.168.5.26:~/bringup/
 ```
@@ -474,6 +503,91 @@ rm -rf tmp/base && mkdir -p tmp/base && git archive <baseline-commit> | tar -x -
 - ❌ **不能**證明：GCC/ARM64 編得過（不同編譯器）、**連結得起來**（`/Zs` 不產 obj 也不 link）、
   **行為正確**。它取代不了 Pi 上的建置，只是把「等部署才知道」的迴圈從幾分鐘縮到幾秒
 
+
+## A4. 跑 `main` 分支（暫時測試用，2026-08-31 實跑通）
+
+> 🔴 **`main` 的目錄結構跟重構後的分支完全不同** —— 沒有 `app/`／`command/`／`mechanism/`／
+> `transport/`，所有 driver 平放在 `user_lib/`，`WASH_ROBOT.cpp` 也在裡面。
+> **A2 §1 那兩條建置指令套不到 `main`**（`-Iapp -Icommand …` 的 include 路徑都不存在）。
+> 權威來源清單看各 `.vcxproj` 的 `ClCompile`：本體 13 個 `user_lib` + `main.cpp` ＝ 14 個 TU；
+> 吊機 9 個 `user_lib` + `main.cpp`。
+
+> ✅ **2026-08-31 起兩台的建置已保留下來，之後要用不必重編**：
+> `nexuni@192.168.5.26:~/main_20260831/`（5.6M，`facade_cleaning_v2.out`，**`CRANE_IP` 已 patch 成 `.25`**）／
+> `user@192.168.5.25:~/main_20260831/`（3.5M，`crane_control_PI.out` + `web_backend/`）。
+> 兩台的 `launch.sh` 也都在。**直接跳到下面的「啟動順序」那三行即可。**
+> ⚠️ 只有一個前提要複查：**吊機 IP 是否還是 `.25`**（WiFi 會漂）。漂了就要改 `WASH_ROBOT.h` 重編本體。
+
+**建置**（各自在 Pi 上，另開 `~/main_20260831/`，不碰 `~/bringup` 也不碰 `~/projects`）：
+
+```
+# 本體（washrobot）
+rsync -a --delete <worktree>/{facade_cleaning_v2,user_lib} nexuni@192.168.5.26:~/main_20260831/
+ssh nexuni@192.168.5.26 'cd ~/main_20260831 && mkdir -p obj && printf "%s\n" facade_cleaning_v2/main.cpp user_lib/{WASH_ROBOT,DM2J_RS570,DY_500_weight_sensor,FrameAnalyzer,JC_100_METER,PQW_IO_16O_RLY,QX_DO24,Serial_port,TCP_client,TCP_server,WT901BC_TTL,XKC_Y25_RS485,ZDT_motor_control}.cpp | xargs -P4 -I{} sh -c "g++ -std=c++17 -O2 -Iuser_lib -c \$1 -o obj/\$(basename \$1 .cpp).o" _ {} && g++ -o facade_cleaning_v2.out obj/*.o -lpthread'
+
+# 吊機（crane）
+rsync -a --delete <worktree>/{Crane_control_PI,user_lib,web_backend} user@192.168.5.25:~/main_20260831/
+ssh user@192.168.5.25 'cd ~/main_20260831 && g++ -std=c++17 -O2 -Iuser_lib -o crane_control_PI.out Crane_control_PI/main.cpp user_lib/{CLV900_inverter,DSZL_107,DY_500_weight_sensor,PQW_IO_16O_RLY,MH300_inverter,SD76_length_meters,SE3_inverter,TCP_client,TCP_server}.cpp -lpthread'
+```
+
+🔴 **`CRANE_IP` 要先對**：`user_lib/WASH_ROBOT.h` 寫死吊機 IP、無 env 覆蓋，
+IP 漂掉就得先 `sed` 再編（見上方連線資訊那條踩坑）。
+
+### 🔴🔴 啟動：stdin 不能給 `/dev/null`
+
+兩支 `main()` 結尾都是 `while (std::getline(std::cin, line))` 的本地 console loop。
+**`< /dev/null` ＝ 立刻 EOF ＝ 跑完 `init` 後直接印 `[SHUTDOWN] stopping...` 退出**，
+而且因為 `init` 全部 `[OK]`，log 看起來像成功。**兩台 Pi 都沒有裝 `tmux`**
+（所以 `scripts/wr.sh`／`crane.sh` 這兩支 launcher 目前也跑不起來）。
+
+用 FIFO 當 stdin（`~/main_20260831/launch.sh`，兩台都有）：
+
+```
+bash ~/main_20260831/launch.sh <binary> <logfile> <fifo>
+```
+
+它做三件事：建 FIFO → 背景開一個 `sleep infinity > fifo` 當**常駐 writer**（reader 才不會收到 EOF）
+→ `setsid nohup stdbuf -oL -eL ./<binary> > log 2>&1 < fifo`。
+⚠️ **`stdbuf -oL` 不能省**：stdout 導向檔案是全緩衝，沒有它 log 會長時間停在 0 bytes，
+看起來像卡死（2026-08-31 就是這樣誤判了一輪）。
+⚠️ **redirection 順序**：`< fifo` 必須是最後一個 stdin 重導，尾巴再多寫一個 `< /dev/null` 會蓋掉它。
+
+事後要下本地 console 指令（`status` / `exit`）就寫進 FIFO：
+`ssh nexuni@192.168.5.26 'echo status > ~/main_20260831/wr_in; sleep 5; tail -5 ~/main_20260831/run.log'`
+
+**啟動順序**（吊機先）：
+
+```
+ssh user@192.168.5.25    'bash ~/main_20260831/launch.sh crane_control_PI.out crane.log crane_in'
+ssh user@192.168.5.25    'cd ~/main_20260831/web_backend && WROBOT_IP=192.168.5.26 CRANE_IP=127.0.0.1 setsid nohup node server.js > web.log 2>&1 < /dev/null &'
+ssh nexuni@192.168.5.26  'WR_DRIVER_DEBUG=0 bash ~/main_20260831/launch.sh facade_cleaning_v2.out run.log wr_in'
+```
+
+📌 `web_backend` 的三個 IP 全部吃環境變數（`WROBOT_IP`／`CRANE_IP`／`ARM_IP`），**不用改碼**；
+`main` 的預設值是 `192.168.1.100` / `192.168.1.101`（有線那組）。
+📌 它需要 `express` + `ws`，`main` 的 `web_backend/` 沒有 `node_modules`
+→ `ln -sfn ~/projects/web_ver2/node_modules ~/main_20260831/web_backend/node_modules`（免 npm install）。
+
+### 收尾（不要用 kill）
+
+兩支 C++ 都靠 console loop 的 `exit` 走**正規關機路徑**——本體跑 `cmd_shutdown()` + `stop()`，
+吊機 join 完四條執行緒後跑 `allMotionOff()`。`kill` 會跳過這些。
+
+```
+ssh nexuni@192.168.5.26 'echo exit > ~/main_20260831/wr_in'      # 本體先（它會對吊機下 water_inlet off）
+ssh user@192.168.5.25   'p=$(ps -eo pid,args | grep "node server.js" | grep -v grep | awk "{print \$1}"); kill $p'
+ssh user@192.168.5.25   'echo exit > ~/main_20260831/crane_in'
+```
+
+⚠️ **`[SHUTDOWN] stopping...` 印出來不等於已經結束**——本體約 5 秒、吊機約 10 秒才真正退出
+（在 join 執行緒）。**用 `ss -ltn` 確認埠關掉**，不要看到那行就以為停了。
+⚠️ 收完記得清 FIFO 的常駐 writer，否則會留一隻 `sleep infinity`：
+`for p in $(ps -eo pid,args | grep "sleep infinity" | grep -v grep | awk '{print $1}'); do kill $p; done`
+
+**驗收**：`ss -ltn` 看到 5002（吊機）／5001（本體）／8080（GUI）都 LISTEN；
+本體 log 出現 `[OK] crane <ip>:5002`（不是 WARN）；`status` 回 `crane_attached=on`。
+
+---
 
 ## B. Web GUI 面板（按鈕即送指令）
 

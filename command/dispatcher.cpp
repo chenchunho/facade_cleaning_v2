@@ -17,6 +17,29 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
     std::istringstream iss(line);
     std::string cmd; iss >> cmd;
 
+    // 🔴🔴 [2026-08-31] 交替步伐 / 跨障礙已停用 —— 硬體沒有分側真空（泵與閥各一顆
+    // 繼電器控 4 顆），這些路徑會在 group_seal_ok_ 確認錨定側吸牢之後，關掉**唯一**
+    // 那顆閥 → 四顆一起失去真空，而機器正吊在玻璃上。詳見 do_step_down_ 進場守衛。
+    //
+    // 📌 擋在**分派層**（而不是只靠 do_step_*_ 的守衛）的理由：cmd_step_* 會先
+    //    set_state_(State::Running) 才呼叫 do_step_*_，深層守衛回 ERR 會讓機器停在
+    //    State::Error，**把「指令被拒絕」偽裝成「動作失敗」**，要 reset 才能繼續，
+    //    而且會害人去查根本不存在的硬體故障。這裡擋掉則狀態機完全不被碰。
+    //    do_step_*_ / do_cross_obstacle_ 的守衛保留為第二道（涵蓋 run_script 直接呼叫）。
+    // ⚠️ 精確比對：*_sync 版本走 do_step_sync_，是安全的，不可以被這裡攔到。
+    if (cmd == "step_down" || cmd == "step_up" ||
+        cmd == "step_down_with_sweep"      || cmd == "step_up_with_sweep" ||
+        cmd == "step_down_sweep_after_feet"|| cmd == "step_up_sweep_after_feet" ||
+        cmd == "step_down_sweep_ba"        || cmd == "step_up_sweep_ba" ||
+        cmd == "cross_obstacle_down"       || cmd == "cross_obstacle_up") {
+        // 上行/下行的建議指令要跟著命令本身走。注意 cross_obstacle_up 的前綴不是
+        // "step_up"，用 find("_up") 才涵蓋得到（2026-08-31 第一版就漏了這個）。
+        const bool is_up = (cmd.find("_up") != std::string::npos);
+        return "ERR alt_gait_disabled_single_valve — use " +
+               std::string(is_up ? "step_up_sync" : "step_down_sync") +
+               " (see work_log 2026-08-31)\n";
+    }
+
     if (cmd == "init")           return robot.cmd_init();
     if (cmd == "attach")         return robot.cmd_attach();
     if (cmd == "detach")         return robot.cmd_detach();
@@ -176,7 +199,10 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
     if (cmd == "run") {
         int n = 0, cm = 0;
         std::string direction = "down";
-        std::string gait = "alt";       // [2026-07-23] "alt" (交替) | "sync" (同步)
+        // [2026-08-31] 預設 "alt" → "sync"。alt(交替步伐)已停用：硬體沒有分側真空
+        // (泵與閥各一顆繼電器控 4 顆)，交替步伐會在確認錨定側吸牢後關掉唯一那顆閥。
+        // 舊預設等於「run 10」這種最自然的下法就會走到危險路徑。
+        std::string gait = "sync";      // [2026-07-23] "alt" (交替，已停用) | "sync" (同步)
         iss >> n;
         if (iss.fail()) return "ERR usage:run_<steps>_[cm]_[down|up]_[alt|sync]\n";
         iss >> cm;                      // optional 2nd arg (default 0 = use step_cm_)
@@ -202,8 +228,11 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
         if      (csv.rfind("up ", 0)   == 0) { up = true;  csv = csv.substr(3); }
         else if (csv.rfind("down ", 0) == 0) { up = false; csv = csv.substr(5); }
         // [2026-07-23 per user] optional leading gait token (alt/sync), same
-        // prefix-strip pattern as direction above; default alt (backward-compat).
-        std::string gait = "alt";
+        // prefix-strip pattern as direction above.
+        // [2026-08-31] 預設由 "alt" 改為 "sync" —— alt 已停用（單閥、無分側真空，
+        // 見 do_step_down_ 進場守衛）。原本的「default alt (backward-compat)」等於
+        // 讓沒帶 gait token 的舊腳本一律走到危險路徑。
+        std::string gait = "sync";
         if      (csv.rfind("alt ", 0)  == 0) { gait = "alt";  csv = csv.substr(4); }
         else if (csv.rfind("sync ", 0) == 0) { gait = "sync"; csv = csv.substr(5); }
         size_t q = csv.find_first_not_of(" \t");

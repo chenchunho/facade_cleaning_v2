@@ -38,6 +38,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <atomic>   // LOG_ERR 的每呼叫點限流計數器（driver 由多條背景執行緒呼叫）
 #include <chrono>
 #include <ctime>
 #include <iomanip>
@@ -74,6 +75,14 @@ inline bool hex_log_enabled() {
     return v;
 }
 
+
+// Monotonic ms clock for LOG_ERR's rate limiter. steady_clock so a wall-clock
+// adjustment (NTP step) can't make the window misbehave.
+inline int64_t now_ms_mono() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
 } // namespace user_lib_log
 
 #define ULOG_IMPL(level, tag, ...) do {                                     \
@@ -85,7 +94,38 @@ inline bool hex_log_enabled() {
     std::fputc('\n', stderr);                                               \
 } while (0)
 
-#define LOG_ERR(tag, ...)  do { if (debug_mode) ULOG_IMPL("ERR", tag, __VA_ARGS__); } while (0)
+/* [2026-08-31] LOG_ERR 不再受 debug_mode 管 —— 改為「無條件 + 每呼叫點限流」。
+ *
+ * 為什麼改：driver 的回覆驗證（CRC / byteCount / 幀長 / slave 不符 / FC 不符）
+ * 五條拒絕路徑全部走 LOG_ERR，而 LOG_ERR 被 debug_mode 蓋住、預設關閉
+ * → **驗證的整個用意是「把問題變可見」，診斷訊息本身卻藏在預設關閉的旗標後面。**
+ * 2026-08-31 吊機兩側計米器同時 length=ERR，log 裡一個字都沒有，查不出是五條裡的哪一條。
+ *
+ * 限流而不是全開：計米器 250ms 輪詢，持續失敗就是每秒 4 行；137 個呼叫點全開會洗版。
+ * 規則沿用本專案既有慣例（meter_read_robust 的 reject_count<3 + 60s 重置）：
+ * 每個呼叫點在 LOG_ERR_WINDOW_MS 內印前 LOG_ERR_BURST 次，第 BURST+1 次印一行抑制通知，
+ * 之後靜音到窗口結束。debug_mode 為 true 時不限流（要看全部就開 driver debug）。
+ *
+ * static 放在 do-block 內：每個巨集展開點是各自獨立的區塊作用域，所以計數器是
+ * **per 呼叫點**而不是全域共用。atomic 是因為 driver 由多條背景執行緒呼叫。
+ */
+#define LOG_ERR_WINDOW_MS 60000
+#define LOG_ERR_BURST     3
+#define LOG_ERR(tag, ...)  do {                                             \
+    static std::atomic<int64_t>  _le_t0{0};                                 \
+    static std::atomic<unsigned> _le_n{0};                                  \
+    const int64_t _le_now = ::user_lib_log::now_ms_mono();                  \
+    if (_le_now - _le_t0.load(std::memory_order_relaxed) > LOG_ERR_WINDOW_MS) { \
+        _le_t0.store(_le_now, std::memory_order_relaxed);                   \
+        _le_n.store(0, std::memory_order_relaxed);                          \
+    }                                                                       \
+    const unsigned _le_k = _le_n.fetch_add(1, std::memory_order_relaxed) + 1; \
+    if (debug_mode || _le_k <= LOG_ERR_BURST) {                             \
+        ULOG_IMPL("ERR", tag, __VA_ARGS__);                                 \
+    } else if (_le_k == LOG_ERR_BURST + 1) {                                \
+        ULOG_IMPL("ERR", tag, "%s", "(同一處錯誤重複發生，本輪已抑制；開 driver debug 看全部)"); \
+    }                                                                       \
+} while (0)
 #define LOG_WRN(tag, ...)  do { if (debug_mode) ULOG_IMPL("WRN", tag, __VA_ARGS__); } while (0)
 #define LOG_INF(tag, ...)  do { if (debug_mode) ULOG_IMPL("INF", tag, __VA_ARGS__); } while (0)
 #define LOG_DBG(tag, ...)  do { if (debug_mode) ULOG_IMPL("DBG", tag, __VA_ARGS__); } while (0)

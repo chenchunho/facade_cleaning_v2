@@ -1260,7 +1260,7 @@ std::string WashRobot::cmd_set_setting(const std::string& key, const std::string
     else if (key == "rope_weight_limit_attached")     bad = apply_to_atomic_<double>(settings_.rope_weight_limit_attached,     value, 5.0,   200.0);
     else if (key == "rope_weight_limit_hanging")      bad = apply_to_atomic_<double>(settings_.rope_weight_limit_hanging,      value, 5.0,   200.0);
     else if (key == "step_cm_default")                bad = apply_to_atomic_<int>   (settings_.step_cm_default,                value, 5,     60);
-    else if (key == "step_cm_max")                    bad = apply_to_atomic_<int>   (settings_.step_cm_max,                    value, 5,     100);
+    else if (key == "step_cm_max")                    bad = apply_to_atomic_<int>   (settings_.step_cm_max,                    value, 5,     STEP_CM_MAX);   // [2026-08-31] 原本寫死 100 —— 與 STEP_CM_MAX 脫鉤，改常數改不動這裡（開機載入 settings.json 也走這條）
     else if (key == "vacuum_plateau_ms")              bad = apply_to_atomic_<int>   (settings_.vacuum_plateau_ms,              value, 200,   10000);
     else if (key == "vacuum_backup_cm")               bad = apply_to_atomic_<double>(settings_.vacuum_backup_cm,               value, 1.0,   50.0);
     else if (key == "retract_slow_peel_cm")           bad = apply_to_atomic_<double>(settings_.retract_slow_peel_cm,           value, 0.5,   10.0);

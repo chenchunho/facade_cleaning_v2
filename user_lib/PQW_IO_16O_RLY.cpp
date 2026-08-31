@@ -48,7 +48,41 @@ bool PQW_IO_16O_RLY::init(TCP_client& extClient, int ID, int total_relay, bool d
 
 	LOG_INF(_log_tag, "initialized with external TCP_client, slave_id=%d", (int)slave_id);
 
-	return false;
+	// [2026-08-31] Presence probe — mirrors SD76_length_meters' "Mode B probe".
+	//
+	// 🔴 Why this exists: before it, init() only assigned fields and returned
+	// success without ever touching the bus. TCP connect to the shared
+	// USR-TCP232 gateway succeeding (gateway alive) was reported as
+	// "[OK] PQW ... (water inlet ball valve)" even when the module was
+	// PHYSICALLY REMOVED — observed 2026-08-31 on the crane, where the module
+	// had just been unplugged to clear an RS485 fault and init still said OK.
+	// Downstream every set_water_inlet_() then fails silently while the boot
+	// log claims the valve is present.
+	//
+	// SD76 hit the identical trap on 2026-05-15 ("meters physically unplugged
+	// still showed [OK] resumed") and solved it with exactly this pattern.
+	//
+	// FC01 read-all is the natural probe: it is read-only (touches no relay),
+	// it is the same call the verify path already uses, and parseReadResponse()
+	// already returns an EMPTY vector for any unusable reply (short frame /
+	// wrong slave / bad CRC), so "empty" is an established failure signal here.
+	//
+	// ⚠️ Retried PROBE_TRIES times: the washrobot caller treats init failure as
+	// [FATAL] and aborts the whole boot, so a single transient bus hiccup at
+	// startup must not brick startup. The crane caller is non-fatal ([WARN] +
+	// device marked unavailable), which is the behaviour this probe is meant
+	// to enable there.
+	constexpr int PROBE_TRIES    = 3;
+	constexpr int PROBE_GAP_MS   = 120;
+	for (int attempt = 1; attempt <= PROBE_TRIES; ++attempt) {
+		const auto st = readAllStatus();
+		if ((int)st.size() >= relay_count) return false;   // answered — device is present
+		if (attempt < PROBE_TRIES)
+			std::this_thread::sleep_for(std::chrono::milliseconds(PROBE_GAP_MS));
+	}
+	LOG_ERR(_log_tag, "init presence probe failed after %d tries — device not on bus (slave %d)",
+	        PROBE_TRIES, (int)slave_id);
+	return true;
 }
 
 //=========== utility: Modbus CRC ===========

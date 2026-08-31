@@ -444,7 +444,7 @@ private:
     // [2026-08-03 per user] crane Pi 實際在 .27，不是 .26 — 這很可能就是那次
     // "reconnect failed + crane 端完全沒收到任何連線" 的真正原因（一直敲錯 IP 的門）。
     // [2026-08-26 per user] bench crane Pi 換到 .17。
-    static constexpr const char* CRANE_IP   = "192.168.5.17";   // [v2 2026-07-08] bench crane RPi (was 192.168.1.10); 2026-08-03: .26→.27; 2026-08-26: .27→.17
+    static constexpr const char* CRANE_IP   = "192.168.5.25";   // [v2 2026-07-08] bench crane RPi (was 192.168.1.10); 2026-08-03: .26→.27; 2026-08-26: .27→.17; 2026-08-31: .17→.25 (WiFi DHCP drift, confirmed by hostname login)
     static constexpr int         CRANE_PORT = 5002;
 
     // Cleaning arm — standalone damiao motor service on the same Pi.
@@ -711,8 +711,14 @@ private:
     // ⚠ 另注意：do_cross_obstacle_ 的 2×preset = 24 cm **已超出 20 cm 行程**。
     // 該功能的 GUI 入口已於 2026-08-26 移除，後端仍在——不要用 raw command 呼叫
     // cross_obstacle_*，否則推桿會直接撞底。
-    static constexpr int PUSHER_EXTEND_FEET_PULSE       = 36000;  // feet upper (slave 5,6) 12.0 cm ([2026-08-28] 原註解寫 5,7 —— 那是「右側」不是「上面」) (2026-08-27: 24300→36000 per user；2026-07-27: 統一兩顆都 8.1cm；慣例 3000 pulse=1cm)
-    static constexpr int PUSHER_EXTEND_FEET_PULSE_LOWER = 36000;  // feet lower (slave 7,8) 12.0 cm ([2026-08-28] 原註解寫 6,8 —— 那是「左側」不是「下面」) (2026-08-27: 24300→36000 per user，與 upper 保持一致)
+    // [2026-08-31 per user] 36000(12.0cm) → 30000(10.0cm)。使用者說明現行操作模式時
+    // 明確給的是「定點關閉風扇後**伸出推桿 10cm** 吸在玻璃面上」。
+    // 📌 這個值是 smart_extend 的**標稱密封目標**，不是 phase-1 目標：
+    //    phase1_targets = 本值 - PHASE1_BUFFER_PULSES（先快進到差 1cm 處），
+    //    之後每輪 +INCR_PULSE 往前爬找密封（2026-08-31 實測 slave 5 從 33000 爬到 45000）。
+    //    所以改小它＝改小「標稱貼合位置」，仍保有往前補伸的能力。
+    static constexpr int PUSHER_EXTEND_FEET_PULSE       = 30000;  // feet upper (slave 5,6) 10.0 cm ([2026-08-28] 原註解寫 5,7 —— 那是「右側」不是「上面」) (2026-08-31: 36000→30000 per user；2026-08-27: 24300→36000 per user；2026-07-27: 統一兩顆都 8.1cm；慣例 3000 pulse=1cm)
+    static constexpr int PUSHER_EXTEND_FEET_PULSE_LOWER = 30000;  // feet lower (slave 7,8) 10.0 cm ([2026-08-28] 原註解寫 6,8 —— 那是「左側」不是「下面」) (2026-08-31: 36000→30000 per user，與 upper 保持一致；2026-08-27: 24300→36000 per user)
     static constexpr int PUSHER_EXTEND_BODY_PULSE       = 34000;  // body upper (slave 5,6) ~11.3 cm (2026-05-28: 30000→36000 +6000=+2cm; 2026-05-28i: 36000→33000 -3000=-1cm，bench 顯示 36000+over 害 Phase 1 fast 700rpm 撞 wall peakI 1500mA+；2026-05-29: 33000→34000 +1000=+0.8cm，邊際提速 iter loop 收斂)
     static constexpr int PUSHER_EXTEND_BODY_PULSE_SHORT = 35400;  // body lower (slave 7,8) ~11.8 cm (2026-05-28: 29400→32400 +3000=+1cm；2026-05-28h: 32400→35400 +3000=+1cm，bench log body lower wall at 42798、SHORT 仍不夠導致 iter 0 plateau,加深一輪)
     static constexpr int PUSHER_RETRACT_PULSE      = 300;   // 收腳目標 (2026-07-14: 0→300 ≈0.1cm)。高速收到 0=機械原點會撞 hardstop「叩」一聲；停在原點前 0.1cm 避免撞擊。<FAKE-DONE 容差 50°(500pulse)、300pulse=30° 仍算收好
@@ -775,11 +781,22 @@ private:
     // Step parameters
     static constexpr int STEP_CM_DEFAULT  = 30;   // initial value of step_cm_ (settable via cmd_set_step_cm)
     static constexpr int STEP_CM_MIN      = 5;
-    // [2026-08-28 per user] 80 → 100，script 要能寫到 100cm。這個上限是共用的：
-    // script (parse_script_csv_)、手動單步 (cmd_step_down/up)、自動循環、深度
-    // 避障的建議步距 clamp 全部吃它，所以放寬到 100 等於那幾條路徑也一起放寬。
-    // 執行期仍可用設定面板的 step_cm_max 調整（範圍 5..100，見 apply 的邊界）。
-    static constexpr int STEP_CM_MAX      = 100;
+    // [2026-08-31 per user] 100 → 45。理由是**覆蓋率的物理上限**：手臂的清洗滾筒
+    // 高約 50cm 且垂直於地面，每個定點只能清到 50cm 的帶狀範圍 → **單步一旦超過
+    // 50cm，兩個定點之間就會留下一條沒清到的玻璃帶**，而這個守衛不會擋。
+    // 取 45 而非 50 是留 5cm 重疊：吊機定位本身有誤差（計米器 scale 0.5、減速滑行，
+    // 2026-08-31 實測 1cm 指令的實際走量明顯大於回報值），零重疊等於把誤差全押在
+    // 「剛好接上」。要改請連同這段理由一起改。
+    //
+    // 沿革：2026-08-28 per user 由 80 → 100（「script 要能寫到 100cm」）。該次放寬
+    // 未考慮滾筒高度，2026-08-31 使用者說明現行操作模式後降回。
+    //
+    // 🔴 這個上限是**共用**的：script (parse_script_csv_)、手動單步 (cmd_step_down/up)、
+    // 自動循環、深度避障的建議步距 clamp 全部吃它。
+    // 🔴 執行期的 settings_.step_cm_max 上界**必須跟著這個常數走**（cmd_set_setting
+    // 的 apply 邊界）——2026-08-31 之前那裡寫死 100，光改本常數改不動執行期路徑，
+    // 而開機載入 settings.json 也走同一條 apply，等於舊設定檔可以把上限帶回 100。
+    static constexpr int STEP_CM_MAX      = 45;
     static constexpr int STEP_MARGIN_CM   = 10;   // crane extra slack before feet move (2026-05-27: 15→10 提速)
     // [2026-07-27 per user] do_step_sync_ backoff-retry: if a whole side is
     // still unsealed after the in-place per-side retry, retreat the crane
@@ -1425,7 +1442,7 @@ private:
     std::set<int>          disabled_zdt_slaves_;
 
     // Per-step rail travel (cm). Settable per cmd_step_down / cmd_run call.
-    // Default STEP_CM_DEFAULT (30); valid range STEP_CM_MIN..STEP_CM_MAX (5..80).
+    // Default STEP_CM_DEFAULT (30); valid range STEP_CM_MIN..STEP_CM_MAX (5..45).
     std::atomic<int>     step_cm_;
 
     // [2026-06-01] Camera-based obstacle detection toggle. Default OFF — does

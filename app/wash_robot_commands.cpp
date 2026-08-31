@@ -683,6 +683,18 @@ std::string WashRobot::do_step_down_(bool skip_cleaning_sweep,
                                       std::function<void()> during_body_rail_hook,
                                       std::function<void()> after_body_rail_hook,
                                       bool right_first) {
+    // 🔴🔴 [2026-08-31] 停用：本函式假設「每側有獨立的真空閥」，而硬體沒有。
+    // 真空幫浦一顆繼電器控 4 顆吸盤，三口二位閥也是一顆繼電器控 4 顆（per user）。
+    // CH_VALVE_LEFT == CH_VALVE_RIGHT == 1，group_valve_ch_() 兩個 group 都回 1。
+    // → pre_cycle 先用 group_seal_ok_(anchor_group) 確認錨定側吸牢，
+    //   下一行 pqw_set_relay_verified_(valve_ch, false) 關的卻是**唯一那顆閥**
+    //   → 剛驗證過的錨定側跟著失去真空，而機器正吊在玻璃上。
+    //   relay 寫入會 verify 成功、log 一切正常。
+    // 而且現行操作模式根本沒有「交替」：移動＝吊機收放繩，行進間靠風扇（QX_DO24 PWM
+    // 5-10%）把本體壓在玻璃上，吸盤只在定點當錨 —— 那正是 do_step_sync_ 的流程。
+    // 📌 保留原碼未動，等改寫成單閥架構（或正式移除）時再處理。走 *_sync 版本。
+    return "ERR alt_gait_disabled_single_valve (use *_sync; see work_log 2026-08-31)\n";
+
     // [v2 2026-07-07] Descend one step. No DM2J rail — each side's crane rope
     // pays out `step_cm` while the OTHER side's 2 cups anchor the machine.
     // Robustness (per user 2026-07-07): each side runs through the SAME v1
@@ -1087,6 +1099,18 @@ std::string WashRobot::do_step_up_(bool skip_cleaning_sweep,
                                     std::function<void()> after_feet_rail_hook,
                                     std::function<void()> before_feet_rail_hook,
                                     bool right_first) {
+    // 🔴🔴 [2026-08-31] 停用：本函式假設「每側有獨立的真空閥」，而硬體沒有。
+    // 真空幫浦一顆繼電器控 4 顆吸盤，三口二位閥也是一顆繼電器控 4 顆（per user）。
+    // CH_VALVE_LEFT == CH_VALVE_RIGHT == 1，group_valve_ch_() 兩個 group 都回 1。
+    // → pre_cycle 先用 group_seal_ok_(anchor_group) 確認錨定側吸牢，
+    //   下一行 pqw_set_relay_verified_(valve_ch, false) 關的卻是**唯一那顆閥**
+    //   → 剛驗證過的錨定側跟著失去真空，而機器正吊在玻璃上。
+    //   relay 寫入會 verify 成功、log 一切正常。
+    // 而且現行操作模式根本沒有「交替」：移動＝吊機收放繩，行進間靠風扇（QX_DO24 PWM
+    // 5-10%）把本體壓在玻璃上，吸盤只在定點當錨 —— 那正是 do_step_sync_ 的流程。
+    // 📌 保留原碼未動，等改寫成單閥架構（或正式移除）時再處理。走 *_sync 版本。
+    return "ERR alt_gait_disabled_single_valve (use *_sync; see work_log 2026-08-31)\n";
+
     // [v2 2026-07-07] Ascend one step — mirror of do_step_down_ with the crane
     // RETRACTING each side's rope by `step_cm` instead of paying out. Same
     // cycle_group_ retry/backup engine (吸不好重吸); only the movement is crane
@@ -1330,9 +1354,28 @@ std::string WashRobot::do_step_up_(bool skip_cleaning_sweep,
 //     move B → B reseals at 2×preset. (No anchor re-extend — A already at 2×.)
 //   Phase 3: do_feet_realign_(force) → all 4 cups retract to normal preset while
 //     SEALED, leveled.
-// The anchor valve is NEVER toggled here, so the anchored cups keep holding
-// through the 2× stand-off (shared per-side valve stays ON).
+// 🔴🔴 [2026-08-31 更正] 這裡原本寫著：
+//   「The anchor valve is NEVER toggled here, so the anchored cups keep holding
+//     through the 2x stand-off (shared per-side valve stays ON).」
+//   **那句是錯的,而且它正好寫在唯一會出事的那行上方。** 原文用了 "shared" ——
+//   作者知道閥是共用的,卻推出相反的結論。pre_cycle 關的是「移動側」的 valve_ch,
+//   而因為閥共用,那**就是**錨定側的閥 → 四顆一起失去真空。
+//   本函式又是把身體撐離牆面到 2x 腳長的構型,最不穩定的時候發生。
+// 🔴 現行操作模式下也不需要它：跨障礙就是一般移動 —— 4 顆輪子(有避震器)貼住玻璃、
+//   開風扇、吊機放繩滑過去,沒有專屬動作(per user 2026-08-31)。
 std::string WashRobot::do_cross_obstacle_(bool up) {
+    // 🔴🔴 [2026-08-31] 停用：本函式假設「每側有獨立的真空閥」，而硬體沒有。
+    // 真空幫浦一顆繼電器控 4 顆吸盤，三口二位閥也是一顆繼電器控 4 顆（per user）。
+    // CH_VALVE_LEFT == CH_VALVE_RIGHT == 1，group_valve_ch_() 兩個 group 都回 1。
+    // → pre_cycle 先用 group_seal_ok_(anchor_group) 確認錨定側吸牢，
+    //   下一行 pqw_set_relay_verified_(valve_ch, false) 關的卻是**唯一那顆閥**
+    //   → 剛驗證過的錨定側跟著失去真空，而機器正吊在玻璃上。
+    //   relay 寫入會 verify 成功、log 一切正常。
+    // 而且現行操作模式根本沒有「交替」：移動＝吊機收放繩，行進間靠風扇（QX_DO24 PWM
+    // 5-10%）把本體壓在玻璃上，吸盤只在定點當錨 —— 那正是 do_step_sync_ 的流程。
+    // 📌 保留原碼未動，等改寫成單閥架構（或正式移除）時再處理。走 *_sync 版本。
+    return "ERR alt_gait_disabled_single_valve (use *_sync; see work_log 2026-08-31)\n";
+
     std::lock_guard<std::mutex> lk(motion_mtx_);
     abort_flag     = false;
     motion_active_ = true;
@@ -2878,6 +2921,9 @@ std::string WashRobot::cmd_run(int steps, int cm, const std::string& direction, 
     // a single step_down_sync/step_up_sync call).
     const bool use_sync = (gait == "sync");
     if (!use_sync && gait != "alt") return "ERR gait_must_be_alt|sync\n";
+    // [2026-08-31] alt 已停用 —— 在這裡就擋掉，不要跑到第一步才從 do_step_*_ 回錯。
+    // 理由見 do_step_down_ 進場的守衛（單閥、無分側真空）。
+    if (!use_sync) return "ERR alt_gait_disabled_single_valve (use gait=sync)\n";
     // [v2 2026-07-08] Arm-sweep pipeline STRIPPED. The cleaning arm isn't installed
     // in v2 and do_step_down_/up_ ignore the sweep hooks ((void)-cast), so the v1
     // continuous-sweep pipeline was dead code that also launched threads trying to
@@ -3082,6 +3128,9 @@ std::string WashRobot::cmd_run_script(const std::string& csv, bool up, const std
     // do_cross_obstacle_ (no sync variant exists for cross-obstacle).
     const bool use_sync = (gait == "sync");
     if (!use_sync && gait != "alt") return "ERR gait_must_be_alt|sync\n";
+    // [2026-08-31] alt 已停用 —— 在這裡就擋掉，不要跑到第一步才從 do_step_*_ 回錯。
+    // 理由見 do_step_down_ 進場的守衛（單閥、無分側真空）。
+    if (!use_sync) return "ERR alt_gait_disabled_single_valve (use gait=sync)\n";
 
     // [v2 2026-07-08] Arm-sweep pipeline STRIPPED (same as cmd_run — arm not
     // installed, do_step_down_ hooks void'd). Plain per-step loop; every scripted
