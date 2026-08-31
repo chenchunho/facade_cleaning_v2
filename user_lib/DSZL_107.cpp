@@ -58,7 +58,8 @@ bool DSZL_107::init(const std::string& ip, int port, int ID, bool debug)
 {
     slaveID    = (uint8_t)ID;
     debug_mode = debug;
-    _log_tag   = "DSZL:" + std::to_string(ID);
+    _log_tag   = "DSZL:" + std::to_string(ID)
+               + (_log_side.empty() ? "" : "@" + _log_side);   // [2026-08-31] 側別
     client     = &ownedClient;
     return !client->connectToServer(ip, port);
 }

@@ -446,6 +446,21 @@ private:
     // [2026-08-26 per user] bench crane Pi 換到 .17。
     static constexpr const char* CRANE_IP   = "192.168.5.25";   // [v2 2026-07-08] bench crane RPi (was 192.168.1.10); 2026-08-03: .26→.27; 2026-08-26: .27→.17; 2026-08-31: .17→.25 (WiFi DHCP drift, confirmed by hostname login)
     static constexpr int         CRANE_PORT = 5002;
+    // 🔮→✅ [2026-08-31] 有線位址。兩台 Pi 各有兩條路（有線 192.168.1.x / WiFi 192.168.5.x），
+    // 目前**刻意沒有串 eth**，所以上面的 CRANE_IP 是 WiFi 位址（已改過四次，因為 WiFi 會漂）。
+    //
+    // 原本這是一條伏筆待辦：「eth 串接之後要回頭改 CRANE_IP」——而它**不會有任何徵兆**，
+    // 串上線之後程式照樣走 WiFi，有線路徑就在旁邊沒被用到，log 完全正常。
+    // 風險是實質的：機器吊在半空中時控制流量跑在 WiFi 上；而 2026-08-31 正好示範了
+    // WiFi 位址會漂（.17 → .25，程式連不上、卡了兩分鐘）。有線位址不會漂。
+    //
+    // ✅ 改成開機自動選路（見 resolve_crane_ip_）：**先探測有線、通了就用，不通才退 WiFi**。
+    //    → 串接當天自動生效，不必記得回來改常數。
+    //    **把「要記得做的事」換成「自己會做對的事」。**
+    static constexpr const char* CRANE_IP_ETH = "192.168.1.10";   // 吊機有線（runbook §A 連線資訊）
+    // 探測逾時。同網段的 TCP 握手是毫秒級；設 300ms 已經很寬鬆，
+    // 而這是**沒串 eth 時每次開機的固定成本**，不能設大。
+    static constexpr int         CRANE_ETH_PROBE_MS = 300;
 
     // Cleaning arm — standalone damiao motor service on the same Pi.
     // TCP commands: INIT / DEPLOY <wall_mm> <LEFT|CENTER|RIGHT> / PARK / STATUS /
@@ -635,7 +650,17 @@ private:
     // 但實體上 5、6 分屬兩側、另兩顆還吸著，本來應該放行）。
     // ⚠ 已知取捨：這條規則擋不住「吸住的 2 顆剛好在同一側」的情況（例如 5、7），
     //   那時另一側整個懸空但仍會被判成 OK。等左右歸屬確認後應改回分側判準。
-    static constexpr int SEAL_MIN_CUPS_TOTAL = 2;
+    // [2026-08-28 → 2026-08-31] 已改回分側判準（見下方 SEAL_MIN_CUPS_PER_SIDE）。
+    // ⚠️ **本常數目前沒有任何程式碼在使用**，只被 group_seal_ok_ 的註解引用來說明沿革。
+    // 保留是為了讓「為什麼曾經退成總數判準」這段歷史看得見；要恢復總數判準時直接可用。
+    static constexpr int SEAL_MIN_CUPS_TOTAL = 2;   // [unused in code since 2026-08-31]
+    // 🔴 [2026-08-31] 改回分側：每一側至少 SEAL_MIN_CUPS_PER_SIDE 顆吸住。
+    // 上方 08-28 註解自己寫下的退場條件是「**左右歸屬確認後應改回分側判準**」——
+    // 該條件已於 2026-08-31 達成：實機逐組推吸盤驗證 right={5,7}=右上+右下、
+    // left={6,8}=左上+左下，四顆全對（使用者現場回報，見 work_log 同日）。
+    // 08-28 之所以退成「總數 ≥2」，是因為當時 right={5,6} 一邊各拿一顆、分側判準
+    // 算出來的答案本來就不對；歸屬修好後那個前提消失。
+    static constexpr int SEAL_MIN_CUPS_PER_SIDE = 1;
 
     // DM2J rail/arm slave IDs
     // 2026-05-26: 上滑台從 cli_20_ slave 5 搬到 cli_22_ slave 14，目的是讓
@@ -1940,6 +1965,17 @@ private:
     //=========== crane ===========
 
     bool        crane_connect_if_needed_();
+    // [2026-08-31] 開機決定 crane 走有線還是 WiFi，結果存進 crane_ip_resolved_。
+    // 🔴 `FCV_EP_CRANE_HOST` 覆蓋存在時**完全不探測**、直接照用 —— 那是等價性測試
+    //    （common/endpoints.h）的機制，它的設計規則是「沒設環境變數時行為必須位元等價」，
+    //    在它上面加探測會破壞測試前提。
+    void        resolve_crane_ip_();
+    std::string crane_ip_resolved_;   // 空字串 = 尚未解析（退回 CRANE_IP）
+    // 有界的 TCP 可達性探測（非阻塞 connect + select）。
+    // ⚠️ **不能用 connectToServer 來試** —— 它是無逾時的 blocking connect，
+    //    對不存在的主機會卡滿 TCP SYN timeout（2026-08-31 實測約兩分鐘）。
+    //    「先試有線」若用它實作，在沒串 eth 的現況下每次開機都會先卡兩分鐘。
+    static bool tcp_reachable_(const std::string& ip, int port, int timeout_ms);
     std::string crane_cmd_(const std::string& line, int timeout_sec = 60);    // 30 → 60 (2026-05-11): give fine_adjust 30s budget on top of main motion
 
     //=========== cleaning arm ===========
@@ -1979,7 +2015,25 @@ private:
     // fallback duration and polling-loop total duration scale to this instead
     // of the hardcoded 55cm/1000rpm estimate — do_step_sync_rail_sweep_ passes
     // its own much-shorter DM2J_ARM_STEP_SWEEP_EST_MS for its 10cm move.
-    void arm_monitor_during_sweep_(int est_ms = ARM_SWEEP_EST_MS);
+    // [2026-08-31] 第二參數 motion_ms = **真實運動時間**，減速遮罩改錨定在它，
+    // 不再錨定 est_ms（那是「監看多久」，兩者是不同的東西，混用產生了下面那個 bug）。
+    // <=0 表示呼叫端沒算 → 退回舊行為（錨定 est_ms），行為與修改前相同。
+    void arm_monitor_during_sweep_(int est_ms = ARM_SWEEP_EST_MS, int motion_ms = -1);
+
+    // [2026-08-31] 由行程/轉速/斜坡推算真實運動時間（ms）。導程用實測值。
+    // 用途：減速遮罩的錨點。**這是推算不是實測**，bench 有機會時應以 log 的
+    // "motion complete at t=Xms" 回頭校驗。
+    static int arm_rail_motion_ms_(double target_cm, double from_cm, int rpm, int acc, int dec) {
+        const double lead = ARM_RAIL_LEAD_CM_PER_REV;          // 實測 7.731（2026-08-28）
+        if (rpm <= 0 || lead <= 0.0) return -1;
+        double dist = target_cm - from_cm;
+        if (dist < 0.0) dist = -dist;   // 不用 std::fabs：本標頭未 include <cmath>
+        const double cm_s   = (double)rpm * lead / 60.0;        // 線速度
+        const double cruise = (cm_s > 0.0) ? dist / cm_s * 1000.0 : 0.0;
+        // acc/dec 單位是 ms/1000rpm → 實際斜坡 = rpm/1000 × 該值
+        const double ramp   = ((double)rpm / 1000.0) * (double)(acc + dec);
+        return (int)(cruise + ramp);
+    }
     // [2026-05-29] Post-sweep obstacle handler — for continuous sweep mode.
     // Background sweep can only set arm_sweep_obstacle_pending_ flag + stop slide
     // (can't safely call await_user_intervention_ from non-main thread). Main

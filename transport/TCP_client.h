@@ -107,6 +107,11 @@ private:
 	bool initialized = false;
 	bool debug_mode = false;
 	bool quiet_reconnect_log_ = false;
+	// [2026-08-31] 重連日誌限流用的狀態。見 reconnectLoop() 的說明。
+	// 只由 reconnectLoop 這一條執行緒讀寫，不需要同步。
+	int     reconn_fail_streak_   = 0;   // 目前這串連續失敗已經幾次（成功即歸零）
+	int64_t reconn_down_since_ms_ = 0;   // 這串失敗的起點（單調時鐘）
+	int64_t reconn_last_log_ms_   = 0;   // 上次印摘要的時間
 	std::atomic<bool> connected;
 
 	std::string last_ip;

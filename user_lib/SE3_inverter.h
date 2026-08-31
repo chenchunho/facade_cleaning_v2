@@ -97,6 +97,26 @@
 
 class SE3_inverter {
 public:
+    // 🔴 [2026-08-31] 側別標記 —— 讓 log 分得出左右。
+    //
+    // 問題：`_log_tag` 只由 slave id 組成（"SE3:1"），而本專案**左右兩顆的 slave 都是 1**
+    // （各自獨佔一條 USR gateway，所以號碼不必錯開）。結果 driver 層印出來的
+    // `[SE3:1] ... comm fail` **完全分不出是哪一顆**。
+    // 2026-08-31 `LOG_ERR` 脫離 debug_mode 之後這些訊息才看得見，卻卡在這裡——
+    // **看得見、但一半的診斷價值被標籤吃掉**（當晚查 VFD 寫入失敗時就卡在這個點）。
+    //
+    // 呼叫端在 init 之後呼叫一次即可，例如 set_log_side("L") → tag 變成 "SE3:1@L"。
+    // 📌 **冪等**：重複呼叫只會取代既有的 @suffix，不會累加。
+    // ⚠️ **要在 init() 之前呼叫**：init 內部就會印 log（例如 clearAlarm 失敗），
+    //    而那些正是最需要知道「是哪一顆」的訊息。側別存在 _log_side，由 init 併進 tag。
+    //    init 之後呼叫也有效（會就地改寫 tag），只是 init 期間那幾行會少了標記。
+    void set_log_side(const std::string& side) {
+        _log_side = side;
+        const size_t p = _log_tag.find('@');
+        if (p != std::string::npos) _log_tag.erase(p);
+        if (!_log_side.empty()) _log_tag += "@" + _log_side;
+    }
+
     SE3_inverter();
     ~SE3_inverter();
 
@@ -205,4 +225,5 @@ private:
     int         deviceID;
     bool        debug_mode;
     std::string _log_tag;
+    std::string _log_side;   // [2026-08-31] "L"/"R"，由 set_log_side 設定；init 會併進 _log_tag
 };

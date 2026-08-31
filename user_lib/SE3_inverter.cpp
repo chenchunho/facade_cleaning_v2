@@ -28,7 +28,8 @@ bool SE3_inverter::init(const std::string& ip, int port, int id, bool debug)
     owns       = true;
     deviceID   = id;
     debug_mode = debug;
-    _log_tag   = "SE3:" + std::to_string(id);
+    _log_tag   = "SE3:" + std::to_string(id)
+               + (_log_side.empty() ? "" : "@" + _log_side);   // [2026-08-31] 側別
     if (!client->connectToServer(ip, port)) {
         LOG_ERR(_log_tag, "connect failed %s:%d", ip.c_str(), port);
         return true;
@@ -42,7 +43,8 @@ bool SE3_inverter::init(TCP_client& extClient, int id, bool debug)
     owns       = false;
     deviceID   = id;
     debug_mode = debug;
-    _log_tag   = "SE3:" + std::to_string(id);
+    _log_tag   = "SE3:" + std::to_string(id)
+               + (_log_side.empty() ? "" : "@" + _log_side);   // [2026-08-31] 側別
 
     // Modbus probe: read status word (H1001) to verify the inverter actually
     // responds on the RS485 bus behind the shared TCP gateway. Without this
@@ -66,7 +68,34 @@ bool SE3_inverter::init(TCP_client& extClient, int id, bool debug)
             // caller doesn't start with SE3 in alarm state (would reject the
             // very first run cmd otherwise).
             if (st & 0x80) {
-                LOG_WRN(_log_tag, "init probe OK but FAULT bit set (status=0x%04X) — clearAlarm", st);
+                // [2026-08-31] 順便把故障碼讀出來一起印。
+                //
+                // 🔴 為什麼值得多讀這一筆：**開機時 b7 幾乎一定是 set**，而原因通常是
+                //    上一次程式關閉造成的 OPT（通訊逾時）——07-10=0 表示「通訊中斷即
+                //    報警 OPT + 空轉停車」，那是**安全正確的設定**（通訊斷了馬達必須停），
+                //    所以 keepalive 一停就必然留下 OPT。
+                //    只印 `FAULT bit set` 會讓每次開機看起來都像出事，而真正的故障
+                //    （OC / OV / OHT / SCP）反而混在裡面看不出來。
+                //
+                // ⚠️ **但故障歷史本身不可信**：2026-08-31 實測兩顆的 H1007/H1008
+                //    四個槽位**全部都是 160(OPT)** —— 例行關機把真實故障擠出歷史了。
+                //    所以這裡只能區分「這次是不是 OPT」，**不能**拿它證明「沒發生過真故障」。
+                uint16_t err12 = 0;
+                const bool got = !readParam(0x1007, err12);
+                const int  e1  = got ? (err12 >> 8) : -1;
+                if (e1 == 160) {
+                    LOG_WRN(_log_tag,
+                        "init: FAULT bit set (status=0x%04X), 最近異常=OPT(160) 通訊逾時 "
+                        "— 上次關機的預期殘留，clearAlarm 後繼續", st);
+                } else if (got) {
+                    LOG_ERR(_log_tag,
+                        "init: FAULT bit set (status=0x%04X), 最近異常碼=%d "
+                        "— **不是 OPT，可能是真故障**，查 H1007/H1008", st, e1);
+                } else {
+                    LOG_WRN(_log_tag,
+                        "init: FAULT bit set (status=0x%04X), 故障碼讀取失敗 "
+                        "— 無法判斷是 OPT 還是真故障", st);
+                }
                 clearAlarm();
             }
             return false;   // success

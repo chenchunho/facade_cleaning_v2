@@ -2,6 +2,11 @@
 #include "log_utils.h"
 #include <cstring>
 
+// [2026-08-31] 重連日誌限流參數。頭 RECONN_LOG_BURST 次照原樣逐次印（短暫抖動
+// 仍然完整可見），之後每 RECONN_SUMMARY_MS 一行摘要。狀態轉換（成功）不受限流。
+static constexpr int     RECONN_LOG_BURST  = 3;
+static constexpr int64_t RECONN_SUMMARY_MS = 30000;
+
 #ifndef _WIN32
 #include <netinet/tcp.h>   // TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT
 #endif
@@ -144,7 +149,16 @@ void TCP_client::reconnectLoop() {
 			// diagnosis doesn't depend on debug_mode being enabled at startup.
 			// quiet_reconnect_log_ is a separate, explicit per-instance opt-out
 			// (see header) — not gated by debug_mode.
-			if (!quiet_reconnect_log_) {
+			//
+			// 🔴 [2026-08-31] 但「無條件」在對端長時間離線時會洗版：每 500ms 兩行
+			//    （reconnecting + reconnect failed），實測吊機關機 45 秒 = 107 組，
+			//    把 log 裡其他訊息整個沖掉（2026-08-31 上機時親眼看到）。
+			//    ⚠️ 不採用 quiet_reconnect_log_ 的理由：arm / depth_cam 是「已知還沒裝、
+			//    永遠不會接上」＝純噪音；而**吊機離線是該被看見的事件**，靜音會把該看的也藏掉。
+			//    → 改為「保留狀態轉換、限流重複失敗」：頭幾次照印，之後每
+			//    RECONN_SUMMARY_MS 一行摘要（含累計次數與離線時長），恢復時一定印。
+			if (reconn_fail_streak_ == 0) reconn_down_since_ms_ = ::user_lib_log::now_ms_mono();
+			if (!quiet_reconnect_log_ && reconn_fail_streak_ < RECONN_LOG_BURST) {
 				std::fprintf(stderr,
 				    "[%s] [WRN] [%s] reconnecting %s:%d ...\n",
 				    ::user_lib_log::now_ts().c_str(),
@@ -234,12 +248,18 @@ void TCP_client::reconnectLoop() {
 				apply_keepalive(new_sock);
 				sock = new_sock;
 				connected = true;
+				// 狀態轉換一定印，而且帶上「斷了多久／試了幾次」——這兩個數字正是
+				// 被舊版洗版沖掉、事後最想知道的東西。
 				if (!quiet_reconnect_log_) {
+					const int64_t down_ms = ::user_lib_log::now_ms_mono() - reconn_down_since_ms_;
 					std::fprintf(stderr,
-					    "[%s] [INF] [%s] reconnect success\n",
+					    "[%s] [INF] [%s] reconnect success (斷線 %.1fs, 嘗試 %d 次)\n",
 					    ::user_lib_log::now_ts().c_str(),
-					    _log_tag.c_str());
+					    _log_tag.c_str(),
+					    down_ms / 1000.0, reconn_fail_streak_ + 1);
 				}
+				reconn_fail_streak_ = 0;
+				reconn_last_log_ms_ = 0;
 				LOG_INF(_log_tag, "Reconnect success");
 			}
 			else {
@@ -248,11 +268,26 @@ void TCP_client::reconnectLoop() {
 #else
 				::close(new_sock);
 #endif
+				++reconn_fail_streak_;
 				if (!quiet_reconnect_log_) {
-					std::fprintf(stderr,
-					    "[%s] [ERR] [%s] reconnect failed (will retry in 500ms)\n",
-					    ::user_lib_log::now_ts().c_str(),
-					    _log_tag.c_str());
+					const int64_t now = ::user_lib_log::now_ms_mono();
+					if (reconn_fail_streak_ <= RECONN_LOG_BURST) {
+						std::fprintf(stderr,
+						    "[%s] [ERR] [%s] reconnect failed (will retry in 500ms)\n",
+						    ::user_lib_log::now_ts().c_str(),
+						    _log_tag.c_str());
+						reconn_last_log_ms_ = now;
+					}
+					else if (now - reconn_last_log_ms_ >= RECONN_SUMMARY_MS) {
+						std::fprintf(stderr,
+						    "[%s] [ERR] [%s] 仍未連上 %s:%d — 已嘗試 %d 次 / 離線 %.0fs（每 %ds 回報一次）\n",
+						    ::user_lib_log::now_ts().c_str(),
+						    _log_tag.c_str(), last_ip.c_str(), last_port,
+						    reconn_fail_streak_,
+						    (now - reconn_down_since_ms_) / 1000.0,
+						    (int)(RECONN_SUMMARY_MS / 1000));
+						reconn_last_log_ms_ = now;
+					}
 				}
 			}
 			}

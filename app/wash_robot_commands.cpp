@@ -361,6 +361,26 @@ std::string WashRobot::cmd_arm_sweep() {
     State cur = state_.load();
     if (cur == State::Error) return state_violation_(cur);
     std::lock_guard<std::mutex> lk(motion_mtx_);
+
+    // [2026-08-31] 補上進入點的 abort 清除，與姊妹函式 cmd_arm_clean_sweep_dry 一致
+    // （cmd_side_measured 的同型修正是 28dfa30，2026-08-31 實機驗證＝檢查表 ⑨a）。
+    //
+    // ⚠️ **嚴重性更正（2026-08-31 實測）**：ONBOARDING §1 / runbook §A2「⑨b」宣稱
+    //    「任何一次 stop / emergency_stop 之後 arm_sweep 會**永久**回 ERR aborted，
+    //     只能重開主程式才能恢復」——**實測不成立**：
+    //      · 稽核全部 4 個設 abort_flag=true 的位置：cmd_emergency_stop 與
+    //        imu_monitor_loop_ **都同時 set_state_(State::Error)**；
+    //        cmd_shutdown / stop() 是收工路徑。
+    //      · cmd_reset **會清掉 abort_flag**，所以 Error → reset 就恢復了。
+    //      · 而且本函式開頭的 State::Error 檢查會**先**攔下來，abort_flag 這條走不到。
+    //    → 目前**沒有已知可達路徑**會讓 abort_flag 停在 true 而狀態不是 Error。
+    //
+    // 📌 那為什麼還是加？**防的是未來新增一條「設 abort_flag 但不進 Error」的路徑**——
+    //    姊妹函式都有這一行，只有這裡沒有，本身就是不一致；補上的成本是一行。
+    // 📌 位置比照姊妹函式：**取得 motion_mtx_ 之後**才清 —— 放在鎖之前的話，一個被拒絕的
+    //    重疊呼叫會清掉另一條執行緒正在進行中的 abort。
+    abort_flag = false;
+
     return do_arm_sweep_();
 }
 
@@ -3806,9 +3826,19 @@ std::string WashRobot::cmd_pwm_status() {
         oss << duty << "," << freq << "," << ctrl
             << "," << (((int)freq == pwm_.freqMinHz()) ? 1 : 0);
     }
+    // [2026-08-31] 補 active_ch —— 上面把四個通道平鋪出來，但**只有 PWM_STEP_CH 是活的**
+    // （per user 2026-08-31：左右兩顆風扇共用 CH1；CH2/3/4 沒接東西、不管）。
+    // 🔴 為什麼值得多印這一欄：CH3 的模組端殘留值是 duty=11%、ctrl=65535（持續輸出），
+    //    **超出本 driver 的 [duty_min, duty_max] = [5,10]**；CH4 是 50% / 1000Hz / ctrl=0。
+    //    這兩個值**不可能是本軟體寫的**（setPWM_Duty 會拒絕範圍外的值，且 pwm_set_duty_only_
+    //    只寫 PWM_STEP_CH），是廠商工具或改 slave 號（6→9）之前留下的模組端狀態。
+    //    2026-08-31 有人（Claude）因為看到 ch3=11 超出上限而以為是缺陷，追了一輪才確認無害。
+    //    ⚠️ 只**新增**欄位、不動既有欄位格式，避免打壞任何既有的解析。
     oss << " duty_min=" << pwm_.dutyMinPct()
         << " duty_max=" << pwm_.dutyMaxPct()
-        << " freq_lock=" << pwm_.freqMinHz() << "\n";
+        << " freq_lock=" << pwm_.freqMinHz()
+        << " active_ch=" << PWM_STEP_CH
+        << " (ch2-4 unused: module-side residue, not written by this software)\n";
     return oss.str();
 }
 

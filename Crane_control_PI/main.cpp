@@ -60,6 +60,7 @@
 //   set_up_stop_total_kg <kg>         # hold-mode 收繩 L+R 總和門檻
 //   set_tension_max_kg <kg>           # motion_rope 單側過載硬警報
 //   set_tension_diff_max_kg <kg>      # motion_rope 左右張力差硬警報
+//   set_length_diff_max_cm <cm>       # motion_rope 左右繩長差硬警報（2026-08-31 新增）
 //   set_retract_tension_stop_kg <kg>  # retract 收繩軟停張力（到了當完成、非錯誤）
 //   middle_set <rpm> <pay|retract|stop>
 //   zero_meters <ground|top>
@@ -607,6 +608,26 @@ static constexpr double BALANCE_KP_DEFAULT       = 1.0;   // Hz / cm
 // side at low motion speed). Per-side hz still clamped by hz_min/hz_max.
 static constexpr double BALANCE_TRIM_CAP_RATIO_DEFAULT = 0.5;
 static constexpr double BALANCE_DEADBAND_DEFAULT = 1.0;   // cm, |err| below = no trim
+
+// 🔴 [2026-08-31] 左右繩長差硬警報（ONBOARDING 安全盤點列為未修）。
+// motion_rope 每輪檢查**本次動作期間**左右的位移差
+// （|(cur_left-base_left) - (cur_right-base_right)|），超過此值即 abort 兩側。
+// 🔴 **不是兩個讀值的絕對差** —— 兩支 SD76 零點各自獨立，固定偏移屬正常
+//    （bench 實測靜止時就差 13cm）。
+// 安全原則與既有的 vfd fault 檢查一致：**一側卡住 = 兩側都停**
+// （單側繼續放/收 = 機器持續傾斜，而吊機結構承受不對稱載重）。
+//
+// ⚠️ **這個預設值需要使用者確認**：
+//   · 平衡迴圈的 deadband 是 1cm，且它會主動修正差值 → 差值能長到十幾 cm，
+//     表示平衡已經失效或某一側卡住，不是正常運作中的抖動。
+//   · **刻意不從傾角回推**：`FOLLOWER_SPAN_CM = 100.0` 在 WASH_ROBOT.h 標著
+//     「PLACEHOLDER, bench-cal」——拿未校正的跨距換算角度，會得到一個看起來
+//     很精確但沒有根據的門檻。**寧可用一個誠實的 cm 值。**
+//   · 15cm 是保守起手值：夠大所以正常運作不會誤觸，夠小所以真的卡住時來得及停。
+//     實機跑過幾輪之後應該依觀察到的正常差值分佈回頭調。
+// 📌 比照 tension_diff_max_kg 做成 runtime 可調（set_length_diff_max_cm）。
+static constexpr double LENGTH_DIFF_MAX_CM_DEFAULT = 15.0;
+static std::atomic<double> g_length_diff_max_cm {LENGTH_DIFF_MAX_CM_DEFAULT};
 static constexpr double BALANCE_HZ_MIN_DEFAULT       = 5.0;   // Hz, hard floor on per-side hz after trim (2→5 on 2026-05-15: avoid near-stall on slow side under aggressive cap)
 // Note: hz_max changed from absolute Hz (30) to **offset above base_hz** (default 5).
 // effective hz_max = base_hz + offset. base_hz comes from apply_balance_trim caller
@@ -2441,6 +2462,32 @@ static std::string motion_rope(int cm, bool is_retract) {
             std::chrono::steady_clock::now() - start).count();
         if (elapsed > MOTION_TIMEOUT_MS) { abort_reason = "timeout"; break; }
 
+        // 🔴 [2026-08-31] 左右繩長差硬警報。與下方 vfd fault 同一個安全原則：
+        // **一側卡住 = 兩側都停**。只有兩側計米器都有效時才判斷——meter 失效已由
+        // 上方的 meter-death 檢查處理，這裡不重複攔，也不能拿無效值來比。
+        // 📌 g_length_* **本身就是 cm**（全檔一致：例如 cmd_align_lengths 直接
+        //    `std::abs(g_length_left.load() - base_left) >= abs_cm`）。
+        //    device_scale 是錶內部的刻度、已經套用過，這裡**不可以再乘一次**。
+        //
+        // 🔴 **比的是「這次動作期間的相對位移差」，不是兩個讀值的絕對差**。
+        //    兩支 SD76 的零點是各自獨立的（各自 resume 自己的保存值），
+        //    它們之間的固定偏移是正常的、與繩長無關。
+        //    ⚠️ 第一版寫成 `|left - right|`，2026-08-31 上機當場打臉：
+        //    靜止不動時 left=-249 / right=-236 就已經差 13cm，而預設門檻是 15cm
+        //    ——**機器根本沒動就快要觸發了**。差值有意義的只有「相對於本次起點的變化」。
+        if (g_length_left_valid.load() && g_length_right_valid.load()) {
+            const int32_t movedL_signed = g_length_left .load() - base_left;
+            const int32_t movedR_signed = g_length_right.load() - base_right;
+            const int32_t diff_cm = std::abs(movedL_signed - movedR_signed);
+            if ((double)diff_cm > g_length_diff_max_cm.load()) {
+                std::ostringstream ss;
+                ss << "length_diff " << diff_cm << "cm > "
+                   << g_length_diff_max_cm.load() << "cm (本次動作的左右位移差)";
+                abort_reason = ss.str();
+                break;
+            }
+        }
+
         // SE3 fault detection: if either side is in fault (OPT alarm etc),
         // abort BOTH immediately. keepalive thread sets these atomics based
         // on status word b7. Safety principle: one rope stuck = abort both
@@ -2908,8 +2955,15 @@ static std::string cmd_manual(const std::string& dir, const std::string& onoff) 
 // timeout). Used by the v2 washrobot step: one side descends/ascends by cm
 // while the other 2 cups anchor the body.
 //   cmd ∈ {pay_out_left, pay_out_right, retract_left, retract_right}
-// NOTE: dispatch is serial (one command at a time), so no MotionScope mutual-
-// exclusion is needed here; GUI motion-active state is a TODO (see cmd_hold).
+// ⚠️ [2026-08-31 更正] 本註解原文是「dispatch is serial (one command at a time), so no
+// MotionScope mutual-exclusion is needed here」——**那個前提是錯的，而且本函式自己就是反例**：
+// 2026-07-14 已經在下面補了 try_lock(motion_mtx)，理由正是「dispatch 不是 serial」——
+// **多個 TCP 連線各有自己的執行緒**，washrobot 端逾時+重連會重送同一個指令，
+// 讓兩條執行緒同時驅動同一顆 VFD。
+// 📌 另註：`MotionScope` **不提供互斥**，它只設 motion_active 旗標；互斥靠 motion_mtx。
+//    （2026-08-31 稽核時一度把「有 MotionScope」當成「有互斥」，是錯的。）
+// ✅ 原文提到的「GUI motion-active state is a TODO (see cmd_hold)」已於 2026-08-31 處理：
+//    cmd_hold 的 "on" 路徑補上同樣的 try_lock（"off" 永遠放行，不擋停止路徑）。
 static std::string cmd_side_measured(const std::string& cmd, int cm) {
     if (cm <= 0) return "ERR expected_positive_cm\n";
 
@@ -2954,7 +3008,30 @@ static std::string cmd_side_measured(const std::string& cmd, int cm) {
     const int32_t base    = len.load();
     const bool    pay_out = !is_retract;
 
-    if (reliable_start_one(inv, g_vfd_motion_hz.load(), pay_out)) {
+    // 🔴 [2026-08-31] 短程直接以 fine_adjust_hz 起步，不要「先快、再靠一筆減速」。
+    //
+    // 舊行為：一律以 motion_hz 起步，再由下面的 slow-approach 在
+    // `moved >= cm - CMD_MEASURED_APPROACH_CM` 時寫一筆 fine_adjust_hz。
+    // 🔴 **當 cm <= CMD_MEASURED_APPROACH_CM(8) 時，那個條件第一輪就成立**
+    //    → 等於「用 50Hz 起步、立刻送一筆減速」。而那筆寫入**只要失敗一次**，
+    //    短程就整段跑在 motion_hz —— 重試來不及，因為 4cm 在 50Hz 下瞬間走完。
+    //
+    // 2026-08-31 bench 實證（同一輪三個指令，每個都恰好一次 SE3 寫入失敗）：
+    //   · retract_left 1  失敗的是 0x1000(停止，有 reliable_stop_one 重試) → **準確落點 1cm**
+    //   · retract_left 4  失敗的是 0x1002(減速到 5Hz)                      → **過衝到 10cm**
+    // → 差別不在重試有無，在**起步速度**。短程本來就不需要高速段。
+    //
+    // ⚠️ 這也是「過衝」的主因之一，先前一度全部歸因於 6mm 鋼索的彈性回縮
+    //    （減速時張力驟降、被拉伸的鋼索回彈，計米器量到的變化不全是捲筒轉動）。
+    //    **彈性是真的、且與速度正相關，但這一輪的大過衝是減速命令根本沒送到。**
+    const double start_hz = (cm <= CMD_MEASURED_APPROACH_CM)
+                          ? g_fine_adjust_hz.load()      // 短程：全程慢速，不依賴飛行中的寫入
+                          : g_vfd_motion_hz.load();
+    if (cm <= CMD_MEASURED_APPROACH_CM)
+        std::cout << "[side_measured] 短程 " << cm << "cm <= approach "
+                  << CMD_MEASURED_APPROACH_CM << "cm → 直接以 " << start_hz
+                  << "Hz 起步（不走高速段）\n";
+    if (reliable_start_one(inv, start_hz, pay_out)) {
         reliable_stop_one(inv);
         return "ERR vfd_start_fail\n";
     }
@@ -3253,6 +3330,7 @@ static std::string cmd_status() {
     oss << " up_stop_total_kg="<< g_up_stop_total_kg.load();
     oss << " tension_max_kg="  << g_tension_max_kg.load();
     oss << " tension_diff_max_kg=" << g_tension_diff_max_kg.load();
+    oss << " length_diff_max_cm=" << g_length_diff_max_cm.load();
     oss << " retract_tension_stop_kg=" << g_retract_tension_stop_kg.load();
     oss << " dsz_left_scale="  << g_dsz_left_scale.load();
     oss << " dsz_right_scale=" << g_dsz_right_scale.load();
@@ -3444,6 +3522,31 @@ static std::string cmd_hold(const std::string& dir, const std::string& onoff) {
     else {
         std::cout << "[cmd_hold] EXIT dir=" << dir << " result=ERR_BAD_ARG total=0ms\n";
         return "ERR expected_on_or_off\n";
+    }
+
+    // 🔴 [2026-08-31] motion 互斥（ONBOARDING 安全盤點列為未修）。
+    // 稽核六支會驅動 VFD 的指令：motion_rope / cmd_roll_correct / cmd_align_lengths /
+    // cmd_manual / cmd_side_measured **全部都有** try_lock(motion_mtx)，
+    // **只有 cmd_hold 沒有** → GUI 的 hold 可以在 motion_rope 或 cmd_side_measured
+    // 跑到一半時同時驅動同一顆 VFD，兩條執行緒對著同一個變頻器下命令。
+    //
+    // ⚠️ **只鎖 "on"，"off" 永遠放行**：`off` 是**解除**操作（釋放 flag + stopDecel）。
+    //    若因為 motion 持鎖而擋掉解除，等於「動作中無法放開 hold」——那比原本的問題更危險。
+    //    **永遠不要擋停止路徑。**
+    //
+    // 📌 用 try_lock 而不是等待：比照姊妹函式，重疊的指令直接拒絕而不是排隊，
+    //    否則 washrobot 端逾時重連重送的同一個指令會堆積。
+    // 🟡 **反向未做（獨立決定）**：hold 生效期間再啟動 motion 仍然可能——本鎖只在
+    //    cmd_hold 執行期間持有，返回後 hold 仍 active 但鎖已放開。要補的話是在
+    //    motion 各進入點加 `any_hold_active()` 檢查（該函式已存在，行 ~1372），
+    //    但那會讓「hold 著時不能下 motion」，是行為改變，應由使用者拍板。
+    std::unique_lock<std::mutex> hold_lock(motion_mtx, std::defer_lock);
+    if (on) {
+        hold_lock = std::unique_lock<std::mutex>(motion_mtx, std::try_to_lock);
+        if (!hold_lock.owns_lock()) {
+            std::cout << "[cmd_hold] EXIT dir=" << dir << " result=ERR_MOTION_BUSY total=0ms\n";
+            return "ERR motion_busy\n";
+        }
     }
 
     // Determine which sides this cmd affects (used for both device check and
@@ -3638,6 +3741,17 @@ static std::string cmd_set_tension_diff_max_kg(double kg) {
     if (kg <= 0 || kg > 500) return "ERR threshold_out_of_range\n";
     g_tension_diff_max_kg.store(kg);
     std::cout << "[crane] tension_diff_max_kg = " << kg << "\n";
+    return "OK\n";
+}
+
+// [2026-08-31] 左右繩長差硬警報的 runtime 調整（比照 set_tension_diff_max_kg）。
+// 上界 200cm：比任何合理的作業差值都大得多，純粹擋住打字錯誤（例如把 15 打成 150）。
+// 下界 > deadband(1cm)：低於平衡迴圈的死區會在正常修正過程中誤觸發。
+static std::string cmd_set_length_diff_max_cm(double cm) {
+    if (cm <= BALANCE_DEADBAND_DEFAULT || cm > 200)
+        return "ERR threshold_out_of_range\n";
+    g_length_diff_max_cm.store(cm);
+    std::cout << "[crane] length_diff_max_cm = " << cm << "\n";
     return "OK\n";
 }
 
@@ -4086,6 +4200,11 @@ static std::string dispatch(const std::string& line) {
         if (iss.fail()) return "ERR usage:set_tension_diff_max_kg_<kg>\n";
         return cmd_set_tension_diff_max_kg(kg);
     }
+    if (cmd == "set_length_diff_max_cm") {
+        double cm = 0; iss >> cm;
+        if (iss.fail()) return "ERR usage:set_length_diff_max_cm_<cm>\n";
+        return cmd_set_length_diff_max_cm(cm);
+    }
     if (cmd == "set_retract_tension_stop_kg") {
         double kg = 0; iss >> kg;
         if (iss.fail()) return "ERR usage:set_retract_tension_stop_kg_<kg>\n";
@@ -4330,6 +4449,9 @@ int main() {
 
     // ---- USR_A (.30) — SE3 left (+ future CLV900 middle if installed) ----
     if (g_gw_a_ok.load()) {
+        // [2026-08-31] 標記側別（**必須在 init 之前**：init 內部就會印 log，
+        //   例如 clearAlarm 失敗，而那正是最需要知道是哪一顆的訊息）。
+        vfd_left.set_log_side("L");
         if (!vfd_left.init(cli_A, VFD_LEFT_SLAVE, drv_dbg)) {
             g_dev_vfd_left = true;
             std::cout << "[OK]   VFD left (" << CRANE_VFD_NAME << ")  USR_A slave " << VFD_LEFT_SLAVE << std::endl;
@@ -4349,6 +4471,9 @@ int main() {
 
     // ---- USR_B (.31) — SE3 right ----
     if (g_gw_b_ok.load()) {
+        // [2026-08-31] 標記側別（**必須在 init 之前**：init 內部就會印 log，
+        //   例如 clearAlarm 失敗，而那正是最需要知道是哪一顆的訊息）。
+        vfd_right.set_log_side("R");
         if (!vfd_right.init(cli_B, VFD_RIGHT_SLAVE, drv_dbg)) {
             g_dev_vfd_right = true;
             std::cout << "[OK]   VFD right (" << CRANE_VFD_NAME << ") USR_B slave " << VFD_RIGHT_SLAVE << std::endl;
@@ -4407,6 +4532,9 @@ int main() {
 
     // ---- USR_C (.32): DSZL left ----
     if (g_gw_c_ok.load()) {
+        // [2026-08-31] 標記側別（**必須在 init 之前**：init 內部就會印 log，
+        //   例如 clearAlarm 失敗，而那正是最需要知道是哪一顆的訊息）。
+        dsz_left.set_log_side("L");
         if (!dsz_left.init(cli_C, DSZL_LEFT_SLAVE, drv_dbg)) {
             g_dev_dsz_left = true;
             std::cout << "[OK]   DSZL-107 left  USR_C slave " << DSZL_LEFT_SLAVE << std::endl;
@@ -4417,6 +4545,9 @@ int main() {
 
     // ---- USR_D (.33): DSZL right ----
     if (g_gw_d_ok.load()) {
+        // [2026-08-31] 標記側別（**必須在 init 之前**：init 內部就會印 log，
+        //   例如 clearAlarm 失敗，而那正是最需要知道是哪一顆的訊息）。
+        dsz_right.set_log_side("R");
         if (!dsz_right.init(cli_D, DSZL_RIGHT_SLAVE, drv_dbg)) {
             g_dev_dsz_right = true;
             std::cout << "[OK]   DSZL-107 right USR_D slave " << DSZL_RIGHT_SLAVE << std::endl;

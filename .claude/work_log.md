@@ -38,15 +38,15 @@
 | ✅ | ~~`init()` 印 `VFD left/right (MH300)` 是**寫死字串**，在 `#if CRANE_VFD_IS_SE3` 之外 → 旗標是 1（實際跑 SE3）卻印 MH300，會把人導去查錯的 driver~~ | `Crane_control_PI/main.cpp:4298,4300,4317,4319` | **已修（`f4e0d02`）**：四處都改吃 `CRANE_VFD_NAME` 巨集，隨 `#if` 一起切換。🔴 **未實機驗證**（改於 14:41，16:30 機器讓出前有過一次重編，但是否涵蓋本檔未經確認——不宣稱編譯狀態） | work_log 2026-08-28（實機驗證）｜2026-08-29 複查原始碼確認 |
 | ✅ | ~~上滑台 cm↔pulse 換算錯 7.7 倍（皮帶軸 7.731 cm/圈，程式假設 1）→ 每次掃動下 131cm 指令、滑台只有 50cm，一路撞到底~~ | `user_lib/DM2J_RS570.*`、`app/WASH_ROBOT.*` | **已修（本分支 `-drv5`）**：換算層修正 + 行程守衛，實機量測指令 17→實際 17cm。⚠️ **原記「`refactor/app-layer` 上仍未修」是錯的**（2026-08-29 複查）：`9fa4fe1` 已 cherry-pick 進整理分支，兩條分支都有 | work_log 2026-08-28（實機量測） |
 | ✅ | ~~**`refactor/app-layer` 已經不是「純整理、功能等價」了**——上機計畫的前提失效了卻沒有人被告知~~ 📌 **2026-08-29 使用者拍板：直接上 `fix/driver-crc`，不再分兩段。** 理由是要維持分兩段就得另開一條真正只有搬家的分支，代價大於收益。🔴 **代價已明確記錄**：上機若出現非預期行為，**不再能靠「哪一段出現的」來歸因** → 取而代之的是 `runbook.md` §A2 塊三那張「9 條刻意行為改變」清單，上機前先讀一遍。`runbook.md` §A2 已整段翻面（標題、前提、驗收判準——**舊判準「與 baseline 逐字一致」照用會整片報紅，而每一條紅都是設計好的**） | `.claude/runbook.md` §A2 | ✅ **已決並落文件（2026-08-29）** | 2026-08-29 複查帶出，同日拍板 |
-| 🔴🔴 | **`ARM_SWEEP_DECEL_MASK_MS` 的減速遮罩從來沒有生效過** —— 它錨定在 `est_ms` 結尾，而 est_ms(4500) 比真實運動(553ms)長 8 倍，遮罩窗口(3500~4500ms)與真正的減速(528~553ms)**完全沒有交集**。changelog 顯示他們為假警報吃過苦（M2 path 最後被實質 disable），**其中一道保護一直是壞的而沒人知道** | `app/WASH_ROBOT.h`、`app/WASH_ROBOT.cpp:2504` | **已記錄未修** ✔ | work_log 2026-08-28 |
-| 🔴 | **`*_EST_MS` 與 `ARM_SWEEP_DECEL_MASK_MS` 是耦合的，天真調小會關掉障礙偵測**：`est_ms ≤ MASK` 時 `elapsed > 負數` 恆為真 → 整趟偵測全程關閉且無任何訊息。實測導程重算：17cm @ 250rpm 真實運動 **553ms**，現值 4500/3900 是 7~8 倍餘裕。🔴 **三方取捨（偵測覆蓋率／週期時間／運動被截斷）需使用者決定**，已把算式與對照表寫進常數註解 | `app/WASH_ROBOT.h` | **待決定** ✔ | work_log 2026-08-28 |
+| ✅ | **`ARM_SWEEP_DECEL_MASK_MS` 的減速遮罩從來沒有生效過** —— 它錨定在 `est_ms` 結尾，而 est_ms(4500) 比真實運動(553ms)長 8 倍，遮罩窗口(3500~4500ms)與真正的減速(528~553ms)**完全沒有交集**。changelog 顯示他們為假警報吃過苦（M2 path 最後被實質 disable），**其中一道保護一直是壞的而沒人知道** | `app/WASH_ROBOT.h`、`app/WASH_ROBOT.cpp:2504` | **2026-08-31 已修**:遮罩改錨定新的 `motion_ms`(真實運動時間,由實測導程推算)而非 `est_ms`。根因是**同一個數字被當成兩種語意**(監看逾時 vs 動多久)。`motion_ms<=0` 退回舊行為。⚠️ 編譯過但**未實機驗證**(需實際掃動觀察 tau) | work_log 2026-08-28 |
+| ✅ | **`*_EST_MS` 與 `ARM_SWEEP_DECEL_MASK_MS` 是耦合的，天真調小會關掉障礙偵測**：`est_ms ≤ MASK` 時 `elapsed > 負數` 恆為真 → 整趟偵測全程關閉且無任何訊息。實測導程重算：17cm @ 250rpm 真實運動 **553ms**，現值 4500/3900 是 7~8 倍餘裕。🔴 **三方取捨（偵測覆蓋率／週期時間／運動被截斷）需使用者決定**，已把算式與對照表寫進常數註解 | `app/WASH_ROBOT.h` | **2026-08-31 已解耦**:遮罩不再錨定 `est_ms`,`est_ms` 純粹是監看逾時 → **調小 est_ms 不再會關掉障礙偵測**。原耦合(`est_ms ≤ MASK` → 條件恆真 → 全程關閉)已消失 | work_log 2026-08-28 |
 | 🟡 | **上滑台的「零點」是 `init` 當下的位置，不是機械原點** —— 🔴 **2026-08-29 per user：原本寫的「真解是啟用 homing」是錯的，這台沒有原點感測器**，`home_start()`（`0x0020`）沒有東西可觸發。實際的保護是**斷電煞車＋作業流程（斷電前一律先移回 0 點）**，所以開機時滑台就在左端硬限位 → `0x0021` 設當前為零**是對的做法，不是缺陷**。✅ 實機佐證：`0x1003` 的 **`HOME_DONE=0`**（從未回零）、方向實測 **正方向=往右／0 點=左端**（與 `WASH_ROBOT.h:624` 註解一致）。🟡 **殘餘風險**：異常斷電／停電來不及回 0 時，下次 init 會把當時位置當成零點，**座標系整個偏移且無人被告知** —— 這是流程保證而非機制保證。🔴 **待辦改為：改寫 `WASH_ROBOT.h:622-625` 的註解**（勿再指向 homing），並評估要不要加「開機時提示確認滑台在左端」 | `app/WASH_ROBOT.h:622-625`、`app/WASH_ROBOT.cpp:6912` | **待改註解** ✔ | work_log 2026-08-28（更正）｜2026-08-29 per user 推翻原「真解」 |
 | ✅ | ~~推桿 cm↔pulse 用 `20000/7 = 2857`，實測應為 **3000**（5% 系統誤差）~~ | `app/WASH_ROBOT.{h,cpp}` | **已修（`[2026-08-28n]`）**：新增 `CUP_PULSE_PER_CM = 3000.0`，兩處都改吃它。實機 47994 脈衝 = 16cm + 四條交叉驗證 | work_log 2026-08-28（實機量測） |
 | 🟡 | `PUSHER_EXTEND_*` 常數的註解標的公分現在是對的（本來就用 3000），但**「12.0 cm」等標示仍未逐一複查**；另 `zdt_pusher extend` 實際走的是 `disable_seal` 尋封序列（可達 47994 脈衝／16cm），**不是預設的 36000** —— 文件與 GUI 說明都沒講 | `app/WASH_ROBOT.h`、runbook | **未修** ✔ | work_log 2026-08-28 |
 | ✅ | ~~左右歸屬與實體不符（RF={5,6}/LF={7,8}），**交替步伐因此不可用**~~ | `app/WASH_ROBOT.{h,cpp}` | **已修（`[2026-08-28p]`）**：右={5上,7下}／左={6上,8下}，31 處使用點自動跟著正確。🔴 **尚未實機驗證**，第一次跑交替步伐要有人在旁邊 | work_log 2026-08-28 per user |
 | 🟡 | `group_seal_ok_` 的「4 顆有 2 顆吸住就算 OK」是為了繞過「分側判準算不準」而採用的（2026-08-28）。**歸屬修好後那個前提消失** → 是否改回「每側各 ≥1」需使用者決定 | `app/WASH_ROBOT.h` | **待決定** ✔ | work_log 2026-08-28 |
 | ✅ | ~~`readRegister()` 不驗 reply CRC、不驗 byteCount → 壞掉的 Modbus reply 被當有效值往上傳（bench 已造成實體損害，詳見下方）~~ | `user_lib/SD76_length_meters.cpp:153-171` | **已修（`1a15588`，driver 稽核那一輪）**：三道依序做完——`byteCount == count*2` → 幀長 `≥ 3+byteCount+2` → CRC 比對，且**先夾 byteCount 再拿它當長度用**（harness 實測 `byteCount=0xFF` 會 segfault）。🔴 **尚未實機驗證**；應用層 `meter_loop` 的 >30cm 跳變 filter 保留不動 | mailbox 2026-05-14｜2026-08-29 複查原始碼確認 |
-| 🔴 | 🔮 **eth 串接之後要回頭改 `WASH_ROBOT.h` 的 `CRANE_IP`**：目前是 bench 用的 WiFi `192.168.5.17`（註解顯示已改過三次）。串上 eth 之後**它仍然會走 WiFi**——有線路徑就在旁邊卻沒被用到，而且完全不會有訊息告訴你。機器吊在半空中時控制流量跑在 WiFi 上，是實質風險 | `app/WASH_ROBOT.h:414` | **待處理（等 eth 串接）** | work_log 2026-08-28 per user |
+| ✅ | 🔮 **eth 串接之後要回頭改 `WASH_ROBOT.h` 的 `CRANE_IP`**：目前是 bench 用的 WiFi **`192.168.5.25`**（2026-08-31 由 `.17` 漂過來，當日已改；註解顯示改過四次）。串上 eth 之後**它仍然會走 WiFi**——有線路徑就在旁邊卻沒被用到，而且完全不會有訊息告訴你。機器吊在半空中時控制流量跑在 WiFi 上，是實質風險 | `app/WASH_ROBOT.h:414` | **2026-08-31 已消除(改成不需要記得做)**:新增 `CRANE_IP_ETH` + `resolve_crane_ip_()`,開機**先探測有線(300ms 有界,非阻塞+SO_ERROR)、通了就用,不通退 WiFi**。🔴 刻意不用 `connectToServer` 探測(無逾時 blocking,沒串 eth 時會卡兩分鐘);🔴 刻意不放進 `ep::host`(會破壞等價測試的位元等價規則),覆蓋存在時不探測。三分支實機全驗 | work_log 2026-08-28 per user |
 | 🔴 | **所有上滑台 RPM 常數都是在錯誤的線速度認知下挑的**。以「1cm/rev」算時以為 250rpm=4.17cm/s、1000rpm=16.7cm/s；用實測導程 7.731 換算，實際是 **32.2 / 128.8 cm/s**。**2026-08-28 實機已發生失步**（使用者回報，手動調回）。→ `ARM_SWEEP_RPM=1000`（129cm/s）幾乎確定過快，`DM2J_ARM_STEP_SWEEP_RPM=250` 也要重新評估；ACC/DEC=100 同樣是在錯誤前提下挑的 | `app/WASH_ROBOT.h` | **未修** ✔ | work_log 2026-08-28（實機失步） |
 | 🟡 | **USR 網關 `_pt`（串口打包時間）設為 0＝自動** → 115200 下字元間隔僅約 0.3ms，是「回覆被切成兩個 TCP 段」的結構性根源（`[2026-08-28b]` 的分片問題）。**改成 5ms 可從根本解決**，代價每筆交易 ≤5ms（`status` 讀 4 顆 → +20ms）。⚠️ 影響 bus 上所有裝置，且目前量到的失敗是 `no reply` 不是 `too short` —— **先記錄、之後再改**（per user 2026-08-28）。後台 `http://192.168.1.22/system.shtml`，admin/admin | 網關 `.20` / `.22` | **待改** ✔ | work_log 2026-08-28 |
 | ✅ | ~~`web_backend/server.js` 的 **`CRANE_IP` 預設值寫錯**：`192.168.1.101`，吊機實際是 `192.168.1.10`~~ | `web_backend/server.js` config 區 | **已修（`f4e0d02`）**：預設值改 `192.168.1.10`，並在原地留註解說明「這與有線/WiFi 無關，串上 eth 之後照樣會錯」。⚠️ 同區的 `WROBOT_IP = 192.168.1.100` **是對的、刻意不動**（eth 尚未串接，bench 期間用環境變數覆蓋）。🔴 **未在 Pi 上實跑驗證**（且 Pi 上的 `web_ver2` 落後 repo，見下方該列） | work_log 2026-08-28｜2026-08-29 複查原始碼確認 |
@@ -55,7 +55,7 @@
 | ✅ | ~~`cmd_side_measured()` 進場沒重置 `abort_flag` → 被 stop 過一次後所有 v2 step 指令永久回 `ERR aborted`~~ | `Crane_control_PI/main.cpp` | **已修（`[2026-08-28s]`）**：補上 `abort_flag = false;`，位置與姊妹函式一致（`try_lock` 之後，避免被拒絕的重疊指令清掉他人的 abort）。✅ **2026-08-29 已編譯通過**（吊機 Pi，`crane_control_PI.out.new`）；🔴 仍未實機執行驗證 | ONBOARDING §1 ＋ work_log 2026-07-15 |
 | 🔴🔴 | **DSZL-107 刻度未校正，而且右側的「正負號」是假設的** —— 量值：`DSZL_SCALE_DEFAULT=-0.01` 只是 driver 預設，原始碼註解自己說要「掛已知重量後重算」但從沒做。🔴 **正負號只在左側量過**（`right untested but assumed same wiring`），而 `tension_safety_check_values` **只檢查過高**（過低已於 2026-05-08 移除）→ **若右側接線相反，右側超載讀成大負值、永遠不觸發，整條保護在那一側失效**。⚠️ 2026-08-28 新增的緊急收繩張力警示也建立在這上面。📌 掛已知重量到兩側各量一次即可同時解決量值與正負號，**不需要讓機器動** | `Crane_control_PI/main.cpp`、`user_lib/DSZL_107.cpp` | **未修** ✔ | work_log 2026-05-07 ＋ 2026-08-28（升級） |
 | 🟡 | `tension_safety_check_values` 的註解寫「motion_flow.md §6.5 needs corresponding spec update **(mailbox to Jim)**」—— ⚰️ mailbox 已於 2026-08-27 退休成墓碑檔，**那個待辦丟進了沒人再看的信箱**。規格表該列已於 2026-08-28 就地更正 | `Crane_control_PI/main.cpp`、`.claude/motion_flow.md` | **已更正規格** ✔ | work_log 2026-08-28 |
-| 🔴 | 安全盤點高優先兩項未做：`cmd_hold` 與 motion 互斥、左右繩長差超標 abort | `Crane_control_PI/main.cpp` | **未修** ✔（原始碼註解仍留 TODO） | work_log 2026-05-08 |
+| ✅ | 安全盤點高優先兩項未做：`cmd_hold` 與 motion 互斥、左右繩長差超標 abort | `Crane_control_PI/main.cpp` | **2026-08-31 兩項都完成並實機驗證**。① `cmd_hold` 補 `try_lock(motion_mtx)` —— 稽核六支驅動 VFD 的指令只有它沒有;**只鎖 `on`、`off` 永遠放行**(不擋停止路徑);`cmd_manual` 不加(刻意的原始旁路)。② 新增左右繩長差硬警報 + `set_length_diff_max_cm`,上下界負向對照已驗。🔴 **第一版寫成絕對差,上機當場打臉**(靜止就差 13cm、門檻 15cm)→ 改為本次動作期間的相對位移差。🟡 門檻 15cm 待確認;🟡 反向(hold 生效期間再啟動 motion)未做 | work_log 2026-05-08 |
 | 🟡 | 🆕 **`8320bf3` 新加的兩個「讓失敗看得見」欄位，出現路徑都還沒被執行到**：`status` 的 `p_err=`（只在壓力讀取失敗時附加）與 `cmd_attach` 的 `partial_seal=N`（只在部分密封時附加）。2026-08-29 實機連跑 8 次 `status`（32 筆 JC-100 讀取）**全部成功 → `p_err` 一次都沒出現**＝正確行為，但也代表**這條路徑仍未驗證**。`partial_seal` 需要真的 attach（會動作），未測。📌 **與 `recovered on attempt` 同型**：實作了、編譯了，但沒被執行過的路徑不算驗證過 | `app/WASH_ROBOT.cpp` `cmd_status`／`cmd_attach` | **待驗** ✔ | work_log 2026-08-29（實機） |
 | 🟡 | **`QX_DO24::init()` 是 14 支 driver 裡唯一活著的「`true`=成功」異類**（其餘 12 支是 Modbus 風格 `false`=成功；`DIHOOL_control` 亦為 true 但全 repo 無呼叫端＝死碼）。`bool init(...)` 的宣告兩派逐字相同，**從 `.h` 看不出來**。✅ 應用層目前沒踩到（SE3/MH300 呼叫端寫 `if (!init())` 正確；QX 唯一呼叫端 `WASH_ROBOT.cpp:204` 不檢查回傳值），**唯一受害者是那支從未執行過的測試**。→ 是否把 QX_DO24 對齊多數派（語意變更）**待決定** | `user_lib/QX_DO24.cpp:32`、`CLAUDE.md` 介面契約節 | **已記錄待決** ✔ | work_log 2026-08-29（第一次跑 `test_qx_do24` 揭露） |
 | 🟡 | `trigger_sync_move()` 是 Modbus 廣播（slave 0x00）不會有回應，卻以 `return resp.empty();` 收尾 → 廣播成功也永遠回報失敗 | `user_lib/ZDT_motor_control.cpp:599`（宣告 `.h:63`） | ✅ **已修（2026-08-29）**：送出成功即 `return false`。`readEcho(200)` 保留但降格為**排空**（避免上一筆交易的遲到回覆被下一筆誤讀），結果丟棄；**200ms 刻意不動**——它在步態迴圈裡，縮短是計時改變、要有機器才驗得了。三處呼叫端註解（`app/WASH_ROBOT.cpp` ×2、`Linux_test/main.cpp` ×1）已同步，TODO 已移除。🔴 **未編譯**（本機無 cc1plus、Pi 不可達） | mailbox 2026-04-30｜2026-08-29 修 |
@@ -114,17 +114,17 @@
 | ✅ | ~~`scripts/wr.sh` 的 cam1/cam2 window 還註解著，攝影機接回去要取消註解~~ | `scripts/wr.sh:5,50-53,65` | ✅ **已修（2026-08-29）**：兩個 window 本來就已註解，這次修的是**與決策矛盾的註解文字**——原本三處（檔頭用法說明、檢查區、start 區）都寫「暫時／之後接回去時取消註解即可」，而 2026-08-27c 的決策是**永久移除**。已全部改成「永久不接」並註明保留兩段只為記錄它們曾經怎麼啟動、不是待辦。`bash -n` 通過。⚠️ **depth window（`:66`）刻意未動**——那條是既有的獨立待辦且標著「待 user 決定」，不是我可以順手拍板的 | work_log 2026-07-21｜2026-08-29 修 |
 | 🟢 | `camera_obstacle_plan.md` 還沒加 motion mode section | `.claude/archive/camera_obstacle_plan.md`（**已於 2026-08-29 複查時發現搬進 `archive/`**） | **已修（作廢）**：該計畫檔已封存，Phase 5 未實作 | work_log 2026-06-02/03 |
 | 🟢 | v1 現場未解 5 項：PQW 寫 relay 不成功、DM2J slave ENABLE bit 沒亮、ZDT slave 6 堵轉、推桿距離待細調、FrameAnalyzer C++ 沒寫 | v1 硬體 | **已修（多數作廢）**：v2 已無 DM2J 滑軌/輪組，吸盤 slave 2026-08-27 改 5-8，`user_lib/FrameAnalyzer.cpp` 已存在 | work_log 2026-04-23 |
-| 🔴 | `run_depth_avoid` 後端仍活著，且偵測到大障礙物時會**自行改走 `cross` 步伐**：`run_depth_avoid` / `depth_avoid_continue` / `depth_avoid_stop` 三個指令仍 dispatch 到真實實作，而同輩的 `obstacle_detect`/`run_avoid`/`obstacle_response` 早已硬關成 `ERR removed_in_v2`。前端已於 2026-08-27c 移除 → **現在完全沒有 UI 提示** | `facade_cleaning_v2/main.cpp:184-189` | **未修** ✔ | `camera_obstacle_plan.md` 稽核 2026-08-27（changelog 2026-08-26e） |
+| ✅ | `run_depth_avoid` 後端仍活著，且偵測到大障礙物時會**自行改走 `cross` 步伐**：`run_depth_avoid` / `depth_avoid_continue` / `depth_avoid_stop` 三個指令仍 dispatch 到真實實作，而同輩的 `obstacle_detect`/`run_avoid`/`obstacle_response` 早已硬關成 `ERR removed_in_v2`。前端已於 2026-08-27c 移除 → **現在完全沒有 UI 提示** | `facade_cleaning_v2/main.cpp:184-189` | **2026-08-31 已處置**。📌 一般步伐**本來就已是 `do_step_sync_`**(2026-07-28 per user 改過),只有 auto-cross 分支走 `do_cross_obstacle_`。已停用該觸發:偵測到障礙改為**停下來說明原因**(`depth_avoid_obstacle_needs_manual`),不再跑到下一輪撞守衛回看不懂的 ERR。原碼保留 | `camera_obstacle_plan.md` 稽核 2026-08-27（changelog 2026-08-26e） |
 | 🟡 | 🆕 **本體主程式自己也還在探測深度相機**：`init()` 印 `[WARN] depth_cam 127.0.0.1:9530 not yet reachable`（2026-08-29 實機）。既有待辦只記了 `scripts/wr.sh:67` 會**啟動** `depth_cam_service.py`，**漏了主程式端還在連它** —— 攝影機路線 2026-08-27 已永久移除。無害（只是一行 WARN），但**每次啟動都在報一個不存在的東西**，會稀釋真正的 WARN | `app/WASH_ROBOT.cpp`（depth_cam 連線初始化）、`facade_cleaning_v2/main.cpp` | **未修** ✔ | work_log 2026-08-29（實機 init） |
 | 🟡 | `scripts/wr.sh:67` 仍會啟動 `depth_cam_service.py`（depth window）。changelog `2026-08-26e` 結尾寫「可以把那個 window 註解掉——尚未變更，待 user 決定」，至今未決 | `scripts/wr.sh:67` | **未決** ✔ | `camera_obstacle_plan.md` 稽核 2026-08-27 |
-| 🔴 | MH300 keypad commissioning 參數表**是唯一副本**（只記在 plan 檔裡，沒有第二份）：站號 `09-00`=1/2、`09-01`=9.6、`09-04`=12（8N1 RTU，與 SD76 共用同一條 bus）、`00-20`=1（頻率來源 RS-485）、`00-21`=2（運轉來源 RS-485）、`07-00~04` DC brake／煞車截波（配 BR300W070-S 制動電阻）、`01-12`/`01-13` 加減速時間——**左右必須對齊，否則不同步停車** | `.claude/mh300_migration_plan.md` Phase 0 | **待用** | `mh300_migration_plan.md` Phase 0 |
-| 🔴 | SE3 `P.79` 切換程序與「`P.5` 必為 0」**是唯一副本**，而且 bench 目前**仍在跑 SE3**（`Crane_control_PI/main.cpp:116` `#define CRANE_VFD_IS_SE3 1`），不是已作廢的舊文件：改 `P.79` 前須先停馬達、解除 OPT，再 `P.79=3 → 2 → 6`（防 latch 卡住）；`P.5`（multi-speed）必須保持 0，否則多段速會覆蓋 H1002 頻率命令 | `.claude/se3_mode6_migration_plan.md` §1.1、`Crane_control_PI/main.cpp:116` | **有效** ✔ | `se3_mode6_migration_plan.md` §1.1 |
-| 🔴 | QX-DO24 PWM（螺旋槳 ESC 控制）目前停用，`PWM_SLAVE=6` 撞 JC100 真空計。停用註解的理由是「nothing in the automatic gait depends on it (web panel only)」——這對舊架構成立，**對新架構不成立**：新架構設計文件寫明貼附序列的第一步就是「先讓螺旋槳把機體壓穩」。同 bus 的 slave 1-8 已被吸盤佔滿（`Linux_test/main.cpp:891` feet `{1,2,3,4}` / body `{5,6,7,8}`）、10/11 為 DY-500（未安裝），需挑一個空號並對照 `cli_22_` 上所有裝置確認不撞號 | `app/WASH_ROBOT.cpp:175-192`（`PWM_ENABLED`） | **未修（阻塞新架構）** ✔ | changelog 2026-08-27h ＋ 新架構設計 2026-08-27 |
+| ✅ | MH300 keypad commissioning 參數表**是唯一副本**（只記在 plan 檔裡，沒有第二份）：站號 `09-00`=1/2、`09-01`=9.6、`09-04`=12（8N1 RTU，與 SD76 共用同一條 bus）、`00-20`=1（頻率來源 RS-485）、`00-21`=2（運轉來源 RS-485）、`07-00~04` DC brake／煞車截波（配 BR300W070-S 制動電阻）、`01-12`/`01-13` 加減速時間——**左右必須對齊，否則不同步停車** | `.claude/summaries/MH300_INVERTER_MODBUS_SUMMARY.md`(新) | **2026-08-31 已解除單點失效**:新建 `.claude/summaries/MH300_INVERTER_MODBUS_SUMMARY.md`,keypad 參數表全數抄入,並補上**與 SE3 的關鍵邏輯差異**(B.B 在 `0x2002` 而非 run 的 `0x2000` → 現況「`stopDecel` 清 MRS」在 MH300 會讓急停後馬達被 base-block 卡死)。📌 遷移步驟仍在 `mh300_migration_plan.md`,但**實體換機需要的參數已不依賴計畫檔存活** | `mh300_migration_plan.md` Phase 0 |
+| ✅ | SE3 `P.79` 切換程序與「`P.5` 必為 0」**是唯一副本**，而且 bench 目前**仍在跑 SE3**（`Crane_control_PI/main.cpp:116` `#define CRANE_VFD_IS_SE3 1`），不是已作廢的舊文件：改 `P.79` 前須先停馬達、解除 OPT，再 `P.79=3 → 2 → 6`（防 latch 卡住）；`P.5`（multi-speed）必須保持 0，否則多段速會覆蓋 H1002 頻率命令 | `.claude/summaries/SE3_INVERTER_MODBUS_SUMMARY.md` | **2026-08-31 已解除單點失效**:抄入 `summaries/SE3_INVERTER_MODBUS_SUMMARY.md` 新增的「🔴 面板切換程序(P.79 / P.5)」一節 —— 改 P.79 前須停馬達+解 OPT、**`3 → 2 → 6` 逐步切換防 latch**、**`P.5` 必須保持 0**(>0 時多段速覆蓋 H1002,屬「寫入回報成功但沒作用」)。⚠️ 原始檔 `.claude/archive/se3_mode6_migration_plan.md` **已在 archive/**,正是會被清掉的位置 | `se3_mode6_migration_plan.md` §1.1 |
+| ✅ | ~~QX-DO24 PWM（螺旋槳 ESC 控制）目前停用，`PWM_SLAVE=6` 撞 JC100 真空計~~ **已解決** | `app/WASH_ROBOT.cpp:175-192`（`PWM_ENABLED`） | **2026-08-31 複查:本列已過期。** `PWM_SLAVE` 已於 08-28 改為 **9**（模組端同步改號）、`PWM_ENABLED` 現為 **true**，且 08-31 實機確認風扇確實受控（`step_move_on` 寫 7% 會轉、`step_abort_off` 寫回 5% 會停，使用者現場目視確認）。🔴 **左右兩顆風扇共用 CH1**（per user），`PWM_STEP_CH=1` 只寫一個通道是正確的 | changelog 2026-08-27h ＋ 新架構設計 2026-08-27 |
 | 🟡 | **`SERIAL_PORT_H` guard 衝突：兩個不同的序列埠實作共用同一個 guard** | `user_lib/SerialPort.h`（322 行，cleaning_arm/damiao 用）與 `transport/Serial_port.h`（本專案用，WASH_ROBOT.h / WT901BC_TTL.h / Linux_test）。目前不爆只因使用者不重疊；**一旦同一編譯單元同時碰到兩者，第二個被 guard 靜默吃掉**，症狀是「class 莫名找不到」、錯誤訊息不指向真因。修正方向：guard 改唯一名稱或 `#pragma once`，動前先確認無別處拿此 guard 名做條件編譯。兩檔開頭皆已標註 | 未修 | 分層重構 2026-08-27 |
 | 🟡 | **Pi 上的 `web_ver2` 落後 repo 一個 commit** ⚠️ 原記「分岔 589 行 / 不是增量是另一個程式」是**誤判**，2026-08-28 更正 | Pi `~/projects/web_ver2/`（在**吊機** `raspberry-cran`，不是本體）四個檔全是 repo 內容的複本：`server.js`／`style.css` 與 commit `faf1d3f` **逐位元相同**、`app.js` 與 `a894ae1` 逐位元相同、`index.html` 與 HEAD 的差異**全部**是攝影機面板那一段。**沒有任何人手改過的內容，repo 仍是權威**，只是落後移除攝影機的 commit `e3c8820` | 待部署（🔴 **main 分支的人正在改這兩台，部署前先確認**） | 更正 2026-08-28（原：實機盤查 2026-08-27） |
 | 🔴 | **張力刻度仍是 placeholder，kg 讀值無意義** | 實機 `status` 讀到 `dsz_left_scale=-0.01 dsz_right_scale=-0.01`，即待辦既有的 DSZL placeholder。**2026-08-29 複測仍是 `-0.01`**，讀值 `tension_left=26.45 / right=16.85`（08-27 為 27.35/14.98）。**這是 `crane_balance_hold_plan` 重啟前提「張力可信」仍未達成的實證** | 未修 ✔ | 實機讀取 2026-08-27｜2026-08-29 複測 |
 | 🟡 | ~~**左右張力差 12.4 kg，且左側已越過收繩停止門檻**~~ **結論已過期（2026-08-29 複測）**：門檻實際是 `retract_tension_stop_kg=**50**`（08-27 記的 25 與現況不符），左側 26.45 **並未越過**；左右差也由 12.4 縮為 **9.6 kg**。🔴 **但根因沒變**——刻度仍是佔位值（上一列），所以「差 9.6kg」這個數字同樣不可信。**此列降為 🟡：可觀察，不可據以判斷** | `Crane_control_PI/main.cpp`（`retract_tension_stop_kg`）、`user_lib/DSZL_107.cpp` | 未修（根因在上一列） ✔ | 實機讀取 2026-08-27｜2026-08-29 複測更正 |
-| 🔴 | **VFD 故障碼顯示是壞的** ⚠️ **2026-08-29 複測：症狀變了，而原本的歸因很可能是錯的** | 08-27 記的是「left 報假警 `f1~f4=160/OPT`／right `ERR read_fail`」；**08-29 兩側都是 `ERR read_fail side=<left\|right>`**，keepalive 亦印 `fault_code=READ_FAIL`（tick 1 後自動 `0x2002 RESET`，tick 2 起 status 恢復 `0x0`）。🔴 **原歸因「`mh300_migration_plan` Phase 3-3 未完成、仍讀 SE3 的 H1007/H1008」站不住**——本機 `CRANE_VFD_IS_SE3 1`，**跑的就是 SE3，讀 SE3 位址本來就該是對的**。→ 真正的線索應是表格中 `SE3_inverter::readFaultCode()` 那列（`0x1007`/`0x1008` 位址待驗），**兩列講的很可能是同一件事**，下次一併查 | 未修；**歸因待重驗** ✔ | 實機讀取 2026-08-27｜2026-08-29 複測推翻歸因 |
+| 🟡 | **VFD 故障碼顯示是壞的** ⚠️ **2026-08-29 複測：症狀變了，而原本的歸因很可能是錯的** | 08-27 記的是「left 報假警 `f1~f4=160/OPT`／right `ERR read_fail`」；**08-29 兩側都是 `ERR read_fail side=<left\| **2026-08-31 查明:不是讀取壞掉,是內容沒有鑑別力**。直讀兩顆:`H1001=0x0080`(b7 SET)、**`H1007`/`H1008` 四槽全部是 160 OPT(通訊逾時)** —— 每次停程式 keepalive 一停就鎖存 OPT,**真實故障已被例行關機擠出歷史**。📌 `07-10=0`(通訊斷即報警+空轉停車)是**安全正確設定,不要改**。✅ 開機訊息已能分辨 OPT(WRN)與非 OPT(**ERR,可能真故障**)。⚠️ 原註解說位址 unverified 是過期的 | 未修；**歸因待重驗** ✔ | 實機讀取 2026-08-27｜2026-08-29 複測推翻歸因 |
 
 ---
 
@@ -900,8 +900,46 @@ if (!right_ok || !left_ok) { ...停住不動... }
 **建議修法**(未實作):讓 `group_seal_ok_` 真的看 group —— 回傳「該組 ≥1 顆吸住」,
 這樣 `right_ok && left_ok` 才真的是「每側各 ≥1」,與註解宣稱的一致。
 
-📌 **決策(per user 2026-08-31):不現在改,等在實際作業條件下判斷。**
-理由:這會改變機器何時急停 —— 以前會繼續的情況(一側全空)之後會停住,是操作面的實質改變。
+✅ **已於 2026-08-31 稍晚改回分側判準(per user「2 3 開始」)。**
+
+📌 **重要更正:我先前把它稱為「bug」並不準確。** 它是**有意識的權宜之計,而且程式碼自己
+寫下了退場條件** —— `WASH_ROBOT.h:637` 與 `WASH_ROBOT.cpp` 的 08-28 註解都明載:
+> 「⚠ 已知取捨(**不是疏漏**):本規則擋不住『吸住的 2 顆剛好在同一側』…
+>   **左右歸屬確認後應改回分側判準。**」
+
+**該退場條件於 2026-08-31 達成**(實機逐組推吸盤,right={5,7}=右上+右下、left={6,8}=左上+左下,
+四顆全對)→ 這次改動不是推翻設計決策,是**執行程式碼自己寫下的計畫**。
+
+**做法**:
+- 新增 `SEAL_MIN_CUPS_PER_SIDE = 1`;`group_seal_ok_` 改為**真的看 group**
+- 單側 group → 該側自己 ≥1 顆吸住;`"all"`/`"feet"` → **兩側各自都要達標**
+- 🔴 **整側被 `zdt_disable` 停用時 `group_slaves_` 回空** → 該側視為不阻擋,
+  否則停用一側等於讓步伐永遠無法進行(而停用是使用者的明確意圖)
+- 保留單次 `vacuum_check_("all")` 掃描再導出兩側答案(原註解:每顆 3 取樣、顆間隔 50ms,
+  分兩次掃 group 會多花一倍 bus 時間)
+- `SEAL_MIN_CUPS_TOTAL` **已無任何程式碼使用**,保留供沿革與日後回退;標頭已註明 `[unused in code]`
+
+**✅ 驗證完成(編譯 16/16 + 實機三向測試)**
+
+📌 **測試路徑用 `realign`**(`cmd_realign` → `do_feet_realign_`)——它分別呼叫兩側,
+**且在任何動作之前就拒絕**,錯誤訊息還會指名是哪一側(`right=ALL` / `left=ALL`)。
+比跑 `step_*_sync` 安全得多(那個會驅動吊機)。
+⚠️ 順帶一提:`do_feet_realign_` 的註解與訊息**本來就是分側語意**
+(「Refuse ONLY if a WHOLE side is off」/「need >=1 sealed per side」)——**舊程式碼給不出來**。
+又一處註解與實作不符,被這次改動修掉。
+
+| 測試 | 條件(實測壓力) | 預期 | 實測 |
+|---|---|---|---|
+| **A** | 四顆全空 `p5..p8 = 0` | 兩側都報 off | ✅ `realign_refuse_side_off **right=ALL left=ALL**` |
+| **B(決定性)** | 右側 `p5=-66 p7=-67` 吸住、左側 `p6=1 p8=0` 空 | **只報 left** | ✅ `realign_refuse_side_off **left=ALL**` |
+| **C(反向對照)** | 兩側各 1 顆:`p6=-68`(左)、`p7=-67`(右) | **放行並執行** | ✅ `[realign] v2 done`,無誤擋 |
+
+🔴 **B 是決定性的**:訊息裡**只有 `left`、沒有 `right`** —— **舊版兩個旗標永遠相等,
+產生不出這個輸出**;它會判定兩側都 OK 然後繼續動作,而整個左側是脫離的。
+🔴 **C 同樣不可省**:只驗「壞的會擋」不夠,還要驗「好的不會被誤擋」。
+**這個洞能活這麼久,正是因為當初只驗了一半。**
+📌 順帶確認 `PUSHER_EXTEND_FEET_PULSE` 改動生效:log 印 `preset=30000`(10cm)。
+📌 測試用真空:`pump on` + `vacuum feet on`,使用者手持平面貼靠指定吸盤;測完已 `vacuum feet off` + `pump off`。
 🔴 **實際作業時要盯的**:出現「一側兩顆全空但步伐照跑」時,那就是這條;
 `out_unsealed` 的診斷清單是對的(它有看 group),**只有布林值是錯的**,所以 log 會印出正確的未吸清單、
 卻仍然放行 —— **看 log 的人會以為系統知道並判斷過了。**
@@ -913,6 +951,314 @@ if (!right_ok || !left_ok) { ...停住不動... }
 只看到 6 個(全在已停用的三支函式裡),因而向使用者說「這條可能可以直接關掉」。
 **完整清單是 16 個,其中 `do_step_sync_` 與 `do_feet_realign_` 都是活的** —— 結論完全相反。
 📌 **判斷「某個東西還有沒有人用」時,不要對呼叫端清單用 `head`。**
+
+### ✅ `CRANE_IP` 伏筆消除 —— 改成開機自動選路(有線優先、WiFi 備援)
+
+**原本的伏筆**(08-28 per user):兩台 Pi 之後會用 eth 串接,**屆時要回頭改 `WASH_ROBOT.h` 的 `CRANE_IP`**。
+🔴 **它不會有任何徵兆**:串上線之後程式照樣走 WiFi,有線路徑就在旁邊沒被用到,log 完全正常。
+而風險是實質的 —— 機器吊在半空中時控制流量跑在 WiFi 上;**而 2026-08-31 當天正好示範了 WiFi 會漂**
+(`.17 → .25`,程式連不上、卡了兩分鐘)。有線位址不會漂。
+
+**做法**:新增 `CRANE_IP_ETH = 192.168.1.10` + `resolve_crane_ip_()`,**開機時先探測有線,通了就用**。
+→ **串接當天自動生效,不必記得回來改常數。把「要記得做的事」換成「自己會做對的事」。**
+
+🔴 **兩個設計上的坑,都刻意避開了:**
+
+1. **不能用 `connectToServer` 去試** —— 它是**無逾時的 blocking connect**,對不存在的主機會卡滿
+   TCP SYN timeout(當天實測約兩分鐘)。「先試有線」若用它實作,**在沒串 eth 的現況下每次開機
+   先卡兩分鐘,比不做還糟**。
+   → 自己寫有界探測:非阻塞 connect + `select` + **`getsockopt(SO_ERROR)`**,逾時 300ms。
+   📌 那個 `SO_ERROR` 檢查正是 2026-08-28 修過的缺陷(select 說可寫≠連上),這裡從一開始就帶上。
+2. **邏輯不能放進 `ep::host`** —— `common/endpoints.h` 的設計規則明載
+   「**沒設環境變數時行為必須位元等價**」,等價性測試靠它。在它上面加探測會破壞測試前提。
+   → 放在 `resolve_crane_ip_`,而且**偵測到環境變數覆蓋時完全不探測、直接照用**。
+
+**三條分支實機全驗**:
+
+| 分支 | 預期 | 實測 |
+|---|---|---|
+| 環境變數覆蓋 | 照用、**不探測** | ✅ `位址由環境變數覆蓋 = 127.0.0.1（不做有線探測）` |
+| 有線不通 | 300ms 內退 WiFi、**不卡頓** | ✅ 開機到 command server 就緒 **1 秒** |
+| WiFi 路徑 | 實際連得上 | ✅ `[OK] crane 192.168.5.25:5002`、`crane_attached=on` |
+
+🟡 **已知小缺**:覆蓋判定是 `overridden != CRANE_IP`,所以把 `FCV_EP_CRANE_HOST` 設成
+**與預設值相同**時無法辨識為覆蓋(會照常探測)。實務上無影響(結果一樣),但要知道。
+📌 兩台的 eth0 **已經都設在 `192.168.1.0/24`**(本體 `.100`／吊機 `.10`),只差實體網線。
+
+### ✅ 減速遮罩組(①+⑧)已修 —— 根因是「同一個數字被當成兩種語意」
+
+**查證過程先排除了一條岔路**:同一個迴圈裡有 `dm2j_active_now` gate,滑台動作期間會整段跳過 tau 偵測
+——一度以為遮罩是被它取代的死碼。**但不是**:`dm2j_motion_active_` 只由
+`dm2j_pair_move_abs_` / `pusher_move_many_` / `pusher_two_stage_retract_` 設定,
+而掃動走的是 `arm_sweep_fire_nowait_` → `PR_move_cm_nowait`(只寫不 poll),**不設那個旗標**
+→ **gate 不適用,tau 偵測全程開著,遮罩確實是該保護減速期的那道,而它壞了。**
+
+**根因**:`est_ms` 被同時當成兩種東西 ——
+- 「**監看多久**」(逾時):刻意設得寬鬆(3900/4500ms),註解說「估太長只是多等一下,
+  safe、no correctness impact」
+- 「**動多久**」(遮罩錨點):`elapsed > est_ms - MASK`
+
+🔴 **那句「no correctness impact」是錯的**:估太長就把遮罩整個推到真實運動之外。
+17cm @250rpm 實際約 **578ms**(推算)／**553ms**(實測),而遮罩窗口是 **3500~4500ms**;
+再加上迴圈在 motion complete 時會 **early-exit**,根本走不到窗口
+→ **這道保護從加進來就沒生效過,而且完全靜默。**
+
+⚠️ **而「把 est_ms 調小」這個直覺修法會直接關掉偵測**:`est_ms ≤ MASK` 時
+`est_ms - MASK ≤ 0` → 條件恆為真 → **整趟偵測全程關閉**,同樣靜默。這就是 ⑧ 那條耦合。
+
+**修法:把兩種語意分開。**
+- `est_ms` = 監看逾時(維持寬鬆,估太長只是多等)
+- **`motion_ms` = 真實運動時間**(新參數,遮罩錨點)
+- 新增 `arm_rail_motion_ms_(target, from, rpm, acc, dec)`:用**實測導程 7.731** 算
+  巡航 + 斜坡(`acc/dec` 單位是 ms/1000rpm → 實際斜坡 = `rpm/1000 × 值`)
+- 呼叫端 `arm_sweep_fire_nowait_` 讀目前座標當起點算出 `motion_ms` 傳入,並印出來
+- 🔴 **`motion_ms <= 0` 退回舊行為** → 讀不到座標或算不出來時,行為與修改前完全相同
+
+**驗算**:17cm@250rpm=578ms、10cm@250rpm=360ms、17cm@1000rpm=332ms —— 與待辦記載的
+「真實運動 553ms」吻合。
+
+⚠️ **本次修改編譯通過(16/16)但未經實機驗證** —— 要觀察 tau 行為需要實際跑掃動
+(會開滾筒刷 CH_BRUSH + 上滑台 17cm)。**bench 有機會時應拿 log 的
+`motion complete at t=Xms` 回頭校驗 `arm_rail_motion_ms_` 的推算值。**
+📌 小坑:`WASH_ROBOT.h` 未 include `<cmath>`,標頭內的取絕對值改用手寫比較(少加 include)。
+
+### ✅ SE3 開機 FAULT bit 查明:是 OPT(通訊逾時),良性 —— 但故障歷史已被它洗掉
+
+**直接讀兩顆的狀態字與故障歷史**(`~/bringup/se3_fault`,唯讀,不啟動吊機程式):
+
+```
+SE3 左 @ .30   H1001 = 0x0080  b7 SET
+               H1007 = 0xA0A0 → 異常1 = 160 OPT / 異常2 = 160 OPT
+               H1008 = 0xA0A0 → 異常3 = 160 OPT / 異常4 = 160 OPT
+SE3 右 @ .31   H1001 = 0x0080  b7 SET
+               H1007 = 0xA0A0 → 異常1 = 160 OPT / 異常2 = 160 OPT
+```
+
+**① 開機 FAULT bit 是良性的,而且是正確安全設定的代價。**
+`07-10 = 0` ＝「通訊中斷即報警 OPT + 空轉停車」,摘要標為**「with keepalive 的建議值」**。
+我們每次停掉吊機程式 → keepalive 停 → 逾時 → OPT 鎖存 → 下次開機看到 b7。
+🔴 **決策:不要改 07-10。** 另一個值(=1)是「不報警繼續運行」——通訊斷了馬達還在轉,
+吊機上不可接受。**這條記下來,免得日後有人為了消掉開機警告而去改它。**
+
+**② 真問題:故障歷史對診斷真故障是無效的。**
+`H1007`/`H1008` **四個槽位全部是 OPT** → 任何真實故障(OC/OV/OHT/SCP)只要發生過,
+**都已被例行關機推擠出歷史**。
+📌 **這解釋了待辦 ⑥「VFD 故障碼顯示是壞的」為何一直查不清楚**:讀 H1007 永遠得到 OPT,
+等於沒有資訊。**不是讀取壞掉,是內容已經沒有鑑別力。**
+⚠️ 連帶:`H1007/H1008` 位址其實**規格書有明載**(`SE3_INVERTER_MODBUS_SUMMARY.md` §Error Code
+Reference),程式碼註解說「addresses are unverified」是過期的。
+
+**③ 已改:開機訊息能分辨 OPT 與真故障**(`SE3_inverter.cpp` init 的 FAULT 分支)
+- 是 OPT → `LOG_WRN`「最近異常=OPT(160) 通訊逾時 — **上次關機的預期殘留**」
+- 不是 OPT → **`LOG_ERR`**「**不是 OPT,可能是真故障**,查 H1007/H1008」
+- 讀不到 → `LOG_WRN`「無法判斷」
+📌 **分流原則:預期的事安靜(WRN)、意外的事大聲(ERR,不受 debug_mode 限制)。**
+實機驗證(需 `CRANE_DRIVER_DEBUG=1` 才看得到 WRN):
+`[WRN] [SE3:1@L] init: FAULT bit set (status=0x0080), 最近異常=OPT(160) …` 左右都正確。
+
+🟡 **順帶暴露:`LOG_WRN` 仍然被 `debug_mode` 蓋住**(今天只解禁了 `LOG_ERR`)。
+本次的良性訊息因此預設看不到 —— 對「良性」而言可接受,但**warning 整體不可見**這件事
+本身值得評估。未改,列為待辦。
+
+### ✅ B 段安全項 + 從「放回 12cm」意外挖出的一串問題
+
+**做完的(B 段可在軟體側處理的部分)**
+- **④ `run_depth_avoid` 自動改走 cross → 已停用**:改成偵測到障礙就**停下來說明原因**
+  (`depth_avoid_obstacle_needs_manual`),而不是跑到下一輪撞上守衛回一個看不懂的 ERR。
+  📌 一般步伐**本來就已經是 `do_step_sync_`**(2026-07-28 per user 改過),只有 auto-cross 那條有問題。
+- **③a `cmd_hold` 補 motion 互斥**:稽核六支會驅動 VFD 的指令,`motion_rope`／`cmd_roll_correct`／
+  `cmd_align_lengths`／`cmd_side_measured` 都有 `try_lock(motion_mtx)`,**只有 `cmd_hold` 沒有**
+  →GUI hold 可在 motion 跑到一半時同時驅動同一顆 VFD。
+  ⚠️ **只鎖 `on`,`off` 永遠放行** —— `off` 是解除操作,擋掉等於「動作中無法放開 hold」,比原problem更危險。
+  📌 `cmd_manual` 也沒有鎖,但那是**刻意的原始旁路**(註解自陳 bypasses safety),**不該加**。
+  🟡 反向(hold 生效期間再啟動 motion)未做 —— 要在 motion 進入點加 `any_hold_active()` 檢查,
+  是行為改變,應由使用者拍板。
+- **③b 左右繩長差硬警報(新增)**:`motion_rope` 每輪檢查,超標即 abort 兩側
+  (安全原則同既有的 vfd fault:一側卡住=兩側都停)。附 `set_length_diff_max_cm` runtime setter、
+  `status` 曝露欄位、上下界負向對照都驗過。
+  🔴 **第一版是錯的,上機資料當場打臉**:寫成 `|left - right|` 絕對差,而靜止時
+  `left=-249 / right=-236` 就差 **13cm**、門檻 15cm ——**機器沒動就快觸發**。
+  原因:**兩支 SD76 零點各自獨立**,固定偏移正常。已改為
+  `|(cur_L-base_L) - (cur_R-base_R)|`(本次動作期間的相對位移差)。
+  📌 **沒有上機看那兩個數字,這個 bug 會一路帶到現場才炸。**
+  🟡 門檻預設 15cm 是保守起手值,**需要使用者確認**。刻意不從傾角回推
+  (`FOLLOWER_SPAN_CM=100` 標著 PLACEHOLDER,拿未校正跨距換算會得到看似精確但無根據的數字)。
+
+**B 段做不了的(誠實列出)**:② DSZL 刻度／⑤ 張力刻度 → **要掛已知重物實測**;
+⑥ VFD 故障碼 → 要逐項排查且 08-29 症狀已變;⑦ 上滑台 RPM → **per user 由使用者自行調整**,不重開。
+①+⑧(減速遮罩與 `*_EST_MS` 耦合)未做。
+
+### 🔴🔴 從「左繩放回 12cm」意外挖出:VFD 寫入間歇失敗,而且會吃掉減速命令
+
+**起因是我的失誤**:驗證 `cmd_hold` 互斥時下了 `up_left on` → `sleep 1` → `off`,
+**`up_left on` 不是設旗標,它真的收繩** —— 左繩被收了 12cm(`-249 → -261`)。
+📌 **這是同一天第二次犯同一個錯**(稍早把 `step_down_sync 10` 放進驗證清單)。
+**驗證清單只該放預期被拒絕的指令;會動的必須事先講明。**
+
+**放回去的過程暴露了真問題。** log 顯示**每個動作指令都恰好有一次 `SE3` 寫入失敗**:
+
+| 指令 | 失敗的寫入 | 結果 |
+|---|---|---|
+| `pay_out_left 12` | `0x1000=0x0000`(停止,有 `reliable_stop_one` 重試)| 過衝 5cm |
+| `retract_left 1` @5Hz | `0x1000`(同上) | **準確 1cm** |
+| `retract_left 4` @5Hz | **`0x1002=0x01F4`(減速到 5Hz)** | **過衝到 10cm** |
+
+🔴 **修:短程直接以 `fine_adjust_hz` 起步。** 舊行為一律以 `motion_hz(50Hz)` 起步,再靠
+slow-approach 寫一筆減速;而 **`cm <= CMD_MEASURED_APPROACH_CM(8)` 時該條件第一輪就成立**
+= 「用 50Hz 起步、立刻送一筆減速」。**那筆只要失敗一次,短程就整段跑在 50Hz**,
+4cm 瞬間走完、重試來不及。短程本來就不需要高速段。
+
+📌 **兩個被推翻的解釋(自記)**:
+1. 我先把過衝全歸因於「機械滑行」——**per user 是 6mm 鋼索的彈性**:減速時張力驟降,
+   被拉伸的鋼索回彈,計米器量到的長度變化**不全是捲筒轉動**。這解釋了為何速度越高過衝越大。
+2. 但這一輪的**大**過衝主因不是彈性,是**減速命令根本沒送到**。
+   **5Hz 時滑行 ≈ 0(1cm 指令走 1cm)** 同時支持兩者:低速→彈性小,且高速段被跳過。
+
+### ✅ driver log 分不出左右 —— 已修(SE3 / DSZL / MH300)
+
+`_log_tag` 只由 slave id 組成,而**左右兩顆的 slave 都是 1**(各自獨佔一條 gateway,號碼不必錯開)
+→ `[SE3:1] ... comm fail` **分不出是哪一顆**。今天 `LOG_ERR` 解禁後這些訊息才看得見,
+卻卡在這裡 —— **看得見、但一半的診斷價值被標籤吃掉**(當晚查 VFD 寫入失敗就卡在這點)。
+
+**做法**:三支 driver 加 `set_log_side("L"/"R")`(冪等),**存成 `_log_side` 由 `init()` 併進 tag**
+→ 呼叫端在 **init 之前**設定,**init 內部印的那幾行也帶得到標籤**(那正是最需要歸屬的位置)。
+SD76 是 slave 1/2,本來就分得出,不需要。
+
+**驗證**:第一次跑「未帶側別 = 0」——**但那證明不了任何事**(該輪根本沒有 SE3 訊息,
+通訊失敗是間歇的)。開 `CRANE_DRIVER_DEBUG=1` 強制產生才驗到:
+```
+[WRN] [SE3:1@L] init probe OK but FAULT bit set (status=0x0080) — clearAlarm
+[WRN] [SE3:1@R] init probe OK but FAULT bit set (status=0x0080) — clearAlarm
+```
+📌 **「沒有壞訊息」不等於「修好了」** —— 要讓它印出來才算驗到。
+
+### 🔴 順帶查明:兩顆 SE3 每次開機都帶著 FAULT bit
+
+上面那兩行顯示**左右兩顆 init 時 `status=0x0080`(FAULT)都是設起來的**,程式每次開機都要 `clearAlarm`。
+→ 今晚那些 `clearAlarm: write H1101 comm fail` **不是隨機出現**,是每次開機都要做這件事,而那筆寫入偶爾失敗。
+🔴 **這把待辦 ⑥「VFD 故障碼顯示是壞的」串起來了**:`fault_code=READ_FAIL` 是偵測到 FAULT(0x80)
+之後去讀 `0x1007` 故障碼、而該筆讀取失敗。**FAULT 本身是真的,不是誤報。**
+🟡 **待查:為什麼每次開機都帶 FAULT?**(上次斷電時的殘留?還是真有反覆發生的故障?)
+
+### 📌 SD76 兩支已依使用者指示歸零
+
+`FC06 reg 0x0000 = 0x0003`(= 下排復位 `0x0001` + 上排復位 `0x0002`,依手冊清零控制碼),
+前後讀值均留存:`-255 / -236` → `0 / 0`。**只清計數器,不驅動任何東西。**
+🔴 **使用者指示:左繩不可再收繩** —— 本 session 之後不再出現 `retract_left`。
+
+### ✅ init 訊息誠實化 —— 系統掃描「還有誰的 `init()` 不碰匯流排」
+
+PQW 那個坑提示了一個**類型**,所以把 15 支 driver 的 `init()` 全掃一遍
+(判準:函式體內有沒有實際的匯流排交易):
+
+| 有探測(4) | 無探測(10) |
+|---|---|
+| `MH300_inverter`、`PQW_IO_16O_RLY`(本日新增)、`SD76_length_meters`、`SE3_inverter` | `CLV900`、`DIHOOL`、`DM2J_RS570`、`DSZL_107`、`DY_500`、`JC_100_METER`、`QX_DO24`、`XKC_Y25`、`ZDT_motor_control`、`ZS_DIO_R` |
+
+🔴 **但「不探測」本身不是問題,誤導才是。** 對照應用層的 init 訊息:
+- **老實的**:`[OK] XKC water level slave 13 (sensor presence not probed)`、
+  `[OK] QX-DO24 PWM slave 9 (presence not probed)`
+- 🔴 **不老實的(3 處)**:`DM2J arm rail`／`ZDT 5~8`／`JC-100 5~8` —— **無條件印 `[OK]`**,
+  而它們的 `init()` 只綁 client、設 slave 號,**裝置實體拔掉一樣會印 `[OK]`**。
+
+✅ **已補上 `(presence not probed)`**,用詞比照同段本來就誠實的兩行。實機驗證輸出正確。
+📌 **副作用是好的**:`[OK] PQW slave 12 @ cli_20_ (.20)` 現在是**唯一沒有但書**的一行
+→ **「沒有但書」從此代表「真的驗過在線」**,這個標記變得有意義。
+
+🟡 **未替那 9 個裝置加探測是刻意的決定,不是偷懶**:本體 `init()` 的失敗路徑是
+**`[FATAL]` + 中止整個 init**,替 DM2J + ZDT×4 + JC-100×4 加探測 = **9 個新的開機失敗點**,
+一次匯流排抖動就開不了機。要加得比照 PQW 帶重試(本日 PQW 就是為此加了 3 次重試),
+**是獨立的決定,應該由使用者在了解取捨後拍板。**
+
+### ✅ `ch3=11` 結案:模組端殘留,無害(per user「只用到 CH1」)
+
+**當初的疑點**:`pwm status` 顯示 `ch3=11`,而 driver 的 `duty_max=10` —— 超出上限。
+
+**查證結果:那不是本軟體寫的,也不可能是。**
+- `QX_DO24::setPWM_Duty()` **會拒絕** `[duty_min_pct, duty_max_pct] = [5,10]` 之外的值
+- `pwm_set_duty_only_()` **只寫 `PWM_STEP_CH`(=1)**
+- `cmd_pwm_status` 讀的是**模組上的實際暫存器**(`getPWM_Duty/Freq/Control`)
+→ `ch3=11%` 與 `ch4=50%/1000Hz/ctrl=0` 都是**模組端既有狀態**,
+  可能是廠商工具設的、或改 slave 號(6→9)之前留下的。
+
+**per user:左右兩顆風扇共用 CH1;CH2/3/4 沒接東西、不管。** → 無害,結案。
+
+**順手改善**(`cmd_pwm_status`):輸出尾端新增 `active_ch=1 (ch2-4 unused: module-side residue…)`。
+📌 理由:原本四個通道平鋪、沒有任何線索說明只有 ch1 是活的 ——
+**我就是因為看到 `ch3=11` 超出上限而以為是缺陷,追了一輪才確認無害。**
+⚠️ **只新增欄位、不動既有欄位格式**,避免打壞既有解析。實機驗證輸出正確。
+
+📌 **通則:「狀態輸出把所有通道平鋪、但只有一個是活的」本身就是一個陷阱** ——
+讀的人無從分辨「異常值」與「無關的殘留」。成本是一個欄位。
+
+### ✅ `crane_cli_` 重連洗版已修 —— 改為「保留狀態轉換、限流重複失敗」
+
+**問題**(2026-08-31 上機時親眼看到):吊機關機時 `reconnectLoop` 每 500ms 印兩行
+(`reconnecting` + `reconnect failed`),**45 秒 = 107 組 / 214 行**,把 log 裡其他訊息整個沖掉。
+
+📌 **刻意不採用 `set_quiet_reconnect_log(true)`**(`arm_cli_` 2026-07-23 / `depth_cli_` 2026-08-27
+用的那個旗標):那兩者是「**已知還沒裝、永遠不會接上**」＝純噪音;
+而**吊機離線是該被看見的事件**,靜音會把該看的一起藏掉。
+
+**做法**(改在 `transport/TCP_client.cpp` 的 `reconnectLoop`,對所有實例生效):
+- 頭 `RECONN_LOG_BURST`(=3)次照原樣逐次印 → **短暫抖動仍然完整可見**
+- 之後每 `RECONN_SUMMARY_MS`(=30s)一行摘要:**已嘗試 N 次 / 離線 X 秒**
+- **成功一定印**,並帶上**斷線時長與嘗試次數**
+- 狀態存在 `reconn_fail_streak_` / `reconn_down_since_ms_` / `reconn_last_log_ms_`
+  （只由 `reconnectLoop` 單一執行緒讀寫，不需同步）
+- `quiet_reconnect_log_` 的語意完全不動(arm / depth 仍是全靜音)
+
+**實機雙向驗證**(條件與當日下午完全相同:吊機關機、本體對它重連):
+
+| | 舊版(45s) | 新版(100s) |
+|---|---|---|
+| `reconnecting` | ~107 | **3** |
+| `reconnect failed` | ~107 | **3** |
+| 30s 摘要 | — | **3** |
+| **總行數** | **214** | **9** |
+
+恢復訊息:`reconnect success (斷線 175.5s, 嘗試 345 次)`;`crane_attached=on`,重連行為本身未受影響。
+
+🔴 **診斷價值反而增加**:「離線多久 / 試了幾次」正是**舊版洗版時看不到的東西**——
+它每 500ms 印一次,卻沒有任何一行告訴你累計狀態。
+📌 **這條的通則:洗版的解法不是靜音,是換一個「每行都帶新資訊」的輸出設計。**
+
+### ✅ ⑨b 已修 —— 但**同時推翻了它自己宣稱的嚴重性**
+
+**修**:`cmd_arm_sweep()` 進場補 `abort_flag = false`(取得 `motion_mtx_` 之後,比照姊妹函式
+`cmd_arm_clean_sweep_dry`;`cmd_side_measured` 的同型修正是 `28dfa30`)。
+📌 `do_arm_sweep_` **只有一個呼叫端**(`cmd_arm_sweep:364`),所以放在 `cmd_arm_sweep` 不影響其他路徑。
+
+🔴 **但 ONBOARDING §1 / runbook §A2 宣稱的嚴重性是誇大的,已實測推翻**:
+> 原文:「任何一次 `stop`／`emergency_stop` 之後,`arm_sweep` 會**永久**回 `ERR aborted`,
+>       只能重開主程式才能恢復」
+
+稽核 **全部 4 個**設 `abort_flag = true` 的位置 + 實機確認:
+
+| 設 abort_flag 的位置 | 是否同時進 Error |
+|---|---|
+| `cmd_emergency_stop` | ✅ 有(`set_state_(State::Error)` 在函式**最後一行**) |
+| `imu_monitor_loop_` | ✅ 有 |
+| `cmd_shutdown` / `stop()` | 收工路徑,不適用 |
+
+- **`cmd_reset` 會清掉 `abort_flag`** → Error → `reset` 就恢復,**不需要重開程式**
+- 而且 `cmd_arm_sweep` 開頭的 `State::Error` 檢查會**先**攔下來,`abort_flag` 那條**根本走不到**
+- 實機:idle 時送 `emergency_stop` → **`state=error`** → `reset` 回 `OK reset`
+
+→ **目前沒有已知可達路徑**會讓 `abort_flag` 停在 true 而狀態不是 Error。
+📌 **仍然修的理由**:姊妹函式都有、只有它沒有＝不一致;成本一行,防的是未來新增
+「設 `abort_flag` 但不進 Error」的路徑。**但不該再宣稱它是「永久卡死」。**
+
+### ⚠️ 自記:這一輪我又用了有缺陷的方法,兩次
+
+1. **稽核用固定行數窗口** —— 先用「函式起點 +14 行」判斷有沒有 `abort_flag = false`,
+   結果窗口從 `cmd_arm_sweep`(9 行)**溢進下一個函式**,把姊妹函式的那行算到它頭上 → **假 ✅**。
+   ✅ 改成用「下一個函式起點」界定真實範圍才得到正確答案。
+2. **同樣的錯又犯一次** —— 用 `sed -n '3429,3446p'` 看 `cmd_emergency_stop` 有沒有設 Error,
+   而 `set_state_(State::Error)` 在 **3448**,差兩行。因此推論出「emergency_stop 不設 Error →
+   idle 時 abort_flag 會卡住」這個**錯誤的可達路徑**,實機一測就被推翻。
+🔴 **通則:用固定行數的窗口去判斷「某段程式碼裡沒有 X」是不可靠的 —— 只能證明「窗口內沒有」。**
+   要斷言「沒有」,範圍必須由語法界定(函式邊界),或直接對整個檔案 grep 再看歸屬。
 
 ### ✅ 交替步伐 / 跨障礙已停用(2026-08-31 實作 + 實機驗證)
 

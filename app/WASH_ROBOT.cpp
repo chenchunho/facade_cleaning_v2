@@ -2,6 +2,12 @@
 #include <windows.h>
 #else
 #include <unistd.h>
+// [2026-08-31] resolve_crane_ip_ 的有界可達性探測所需（非阻塞 connect + select）
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <cerrno>
 #endif
 
 #include "WASH_ROBOT.h"
@@ -175,9 +181,19 @@ bool WashRobot::init() {
                                             ARM_RAIL_TRAVEL_MAX_CM);
     D_(DM2J_ARM).set_lead_cm_per_rev(rail_lead);
     D_(DM2J_ARM).set_travel_limit_cm(0.0, rail_travel);
+    // ⚠️ [2026-08-31] 「presence not probed」不是隨手加的免責聲明，是**事實陳述**：
+    //    本 driver 的 init() 不做任何匯流排交易（只綁 client、設 slave 號），所以這行 [OK]
+    //    只證明「軟體物件建好了」，**不證明裝置在線**。裝置實體拔掉一樣會印 [OK]。
+    //    📌 用詞比照同一段裡本來就誠實的 XKC / QX-DO24 兩行。
+    //    🔴 這個坑 2026-08-31 由 PQW 實證：模組被實體移除，init 照印 [OK]，下游
+    //       set_water_inlet_() 全部靜默失敗（PQW 當日已補 FC01 存在性探測）。
+    //    🟡 **未替本行的裝置加探測是刻意的決定**：本函式的失敗路徑是 [FATAL] + 中止整個
+    //       init，替 DM2J/ZDT×4/JC-100×4 共 9 個裝置加探測 = 9 個新的開機失敗點，
+    //       一次匯流排抖動就開不了機。要加的話得比照 PQW 帶重試，是獨立的決定。
     std::cout << "[OK] DM2J arm rail (slave " << DM2J_ARM << " @ cli_20_)"
               << " lead=" << rail_lead << " cm/rev"
-              << " travel<=" << rail_travel << " cm\n";
+              << " travel<=" << rail_travel << " cm"
+              << " (presence not probed)\n";
 
     // ZDT slave 5..8 on cli_20_ ([v2] 4 cups: right{5,7} / left{6,8}，2026-08-28 修正)
     // [2026-08-27 per user] slave 1-4 → 5-8，見 WASH_ROBOT.h CUP_SLAVE_FIRST。
@@ -186,7 +202,9 @@ bool WashRobot::init() {
             std::cerr << "[FATAL] ZDT slave " << i << " init fail\n"; return true;
         }
     }
-    std::cout << "[OK] ZDT " << CUP_SLAVE_FIRST << "~" << CUP_SLAVE_LAST << "\n";
+    // presence not probed —— 理由同上方 DM2J 那段的說明。
+    std::cout << "[OK] ZDT " << CUP_SLAVE_FIRST << "~" << CUP_SLAVE_LAST
+              << " (presence not probed)\n";
 
     // JC-100 slave 5..8 ([v2] one vacuum-pressure sensor per cup)
     // 與 ZDT 同號（推桿 slave N 末端的吸盤 = 真空表 slave N），分屬 .20/.22 兩條 bus，不衝突。
@@ -195,7 +213,9 @@ bool WashRobot::init() {
             std::cerr << "[FATAL] JC-100 slave " << i << " init fail\n"; return true;
         }
     }
-    std::cout << "[OK] JC-100 " << CUP_SLAVE_FIRST << "~" << CUP_SLAVE_LAST << "\n";
+    // presence not probed —— 理由同上方 DM2J 那段的說明。
+    std::cout << "[OK] JC-100 " << CUP_SLAVE_FIRST << "~" << CUP_SLAVE_LAST
+              << " (presence not probed)\n";
 
     // PQW 8CH relay
     // [2026-08-27 per user] cli_22_ → cli_20_（relay 搬到 .20，見 init() 開頭說明）。
@@ -248,8 +268,13 @@ bool WashRobot::init() {
     weight_comm_ok_[0].store(false);
     weight_comm_ok_[1].store(false);
 
+    // [2026-08-31] 先決定走有線還是 WiFi（見 resolve_crane_ip_），再做 lazy connect。
+    // 這一行讓「eth 串接後要回頭改 CRANE_IP」那條伏筆自動生效，不必記得回來改常數。
+    resolve_crane_ip_();
+
     // Crane (lazy — don't fail boot if crane is down)
-    const std::string ep_crane = ep::host("CRANE", CRANE_IP);
+    const std::string ep_crane = crane_ip_resolved_.empty()
+                               ? ep::host("CRANE", CRANE_IP) : crane_ip_resolved_;
     const int         pt_crane = ep::port("CRANE", CRANE_PORT);
     if (crane_connect_if_needed_())
         std::cerr << "[WARN] crane " << ep_crane << ":" << pt_crane << " not yet reachable\n";
@@ -606,9 +631,72 @@ std::string WashRobot::state_violation_(State cur) const {
 
 //=========== crane ===========
 
+// [2026-08-31] 有界的 TCP 可達性探測：非阻塞 connect + select，逾時即放棄。
+// ⚠️ 刻意不用 TCP_client::connectToServer —— 它是**無逾時的 blocking connect**，
+//    對不存在的主機會卡滿 TCP SYN timeout（實測約兩分鐘）。用它來「試試看有線通不通」
+//    會讓沒串 eth 的現況下每次開機先卡兩分鐘，比不做還糟。
+bool WashRobot::tcp_reachable_(const std::string& ip, int port, int timeout_ms) {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+    const int flags = ::fcntl(fd, F_GETFL, 0);
+    ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port   = htons((uint16_t)port);
+    if (::inet_pton(AF_INET, ip.c_str(), &a.sin_addr) != 1) { ::close(fd); return false; }
+
+    bool ok = false;
+    if (::connect(fd, (sockaddr*)&a, sizeof(a)) == 0) {
+        ok = true;                       // 立即連上（同網段常見）
+    } else if (errno == EINPROGRESS) {
+        fd_set wf; FD_ZERO(&wf); FD_SET(fd, &wf);
+        timeval tv{ timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+        if (::select(fd + 1, nullptr, &wf, nullptr, &tv) > 0) {
+            // 🔴 select 說可寫**不等於**連上 —— 必須查 SO_ERROR。
+            //    這正是 2026-08-28 修過的那個缺陷（連到沒人聽的埠也判定成功）。
+            int err = 0; socklen_t len = sizeof(err);
+            if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0) ok = true;
+        }
+    }
+    ::close(fd);
+    return ok;
+}
+
+// [2026-08-31] 開機決定 crane 走有線還是 WiFi。只在 init 呼叫一次。
+void WashRobot::resolve_crane_ip_() {
+    const std::string wifi = CRANE_IP;
+    const std::string eth  = CRANE_IP_ETH;
+    const int         port = ep::port("CRANE", CRANE_PORT);
+
+    // 🔴 環境變數覆蓋存在時完全不探測 —— common/endpoints.h 的設計規則是
+    //    「沒設環境變數時行為必須位元等價」，等價性測試靠它。有覆蓋就照用。
+    const std::string overridden = ep::host("CRANE", CRANE_IP);
+    if (overridden != wifi) {
+        crane_ip_resolved_ = overridden;
+        std::cout << "[crane] 位址由環境變數覆蓋 = " << crane_ip_resolved_
+                  << "（不做有線探測）\n";
+        return;
+    }
+
+    if (tcp_reachable_(eth, port, CRANE_ETH_PROBE_MS)) {
+        crane_ip_resolved_ = eth;
+        std::cout << "[crane] 走**有線** " << eth << ":" << port
+                  << "（探測通過）— WiFi " << wifi << " 未使用\n";
+    } else {
+        crane_ip_resolved_ = wifi;
+        std::cout << "[crane] 有線 " << eth << " 探測不通（" << CRANE_ETH_PROBE_MS
+                  << "ms）→ 走 WiFi " << wifi << ":" << port << "\n";
+    }
+}
+
 bool WashRobot::crane_connect_if_needed_() {
     if (crane_cli_.isConnected()) return false;
-    return !crane_cli_.connectToServer(ep::host("CRANE", CRANE_IP), ep::port("CRANE", CRANE_PORT));
+    // crane_ip_resolved_ 為空表示 init 還沒跑到 resolve（或被略過）→ 退回原常數，
+    // 行為與 2026-08-31 之前完全相同。
+    const std::string ip = crane_ip_resolved_.empty()
+                         ? ep::host("CRANE", CRANE_IP) : crane_ip_resolved_;
+    return !crane_cli_.connectToServer(ip, ep::port("CRANE", CRANE_PORT));
 }
 
 std::string WashRobot::crane_cmd_(const std::string& line, int timeout_sec) {
@@ -970,6 +1058,10 @@ std::string WashRobot::cmd_run_depth_avoid() {
 
         step_cm_.store(next_step_cm);
         std::string sr;
+        // ⚠️ [2026-08-31] run_as_cross 目前**恆為 false** —— 上面的觸發點已改成「停下來
+        //    交給使用者」而不是設 next_is_cross。本分支因此不可達，**刻意保留原碼**：
+        //    cross 步伐要恢復（改寫成單閥架構或加硬體閥）時，把觸發點改回去即可。
+        //    ⚠️ 不要因為「看起來沒人用」就刪掉它。
         if (run_as_cross) {
             evt_("depth_avoid_cross_obstacle_step step_cm=" + std::to_string(next_step_cm));
             sr = do_cross_obstacle_(/*up=*/false);
@@ -1026,10 +1118,20 @@ std::string WashRobot::cmd_run_depth_avoid() {
         // itself the automatic cross doesn't re-trigger even if candidates
         // are still >0 afterward (wide obstacle needing 2+ crosses — left to
         // the user to drive manually via continue).
+        // 🔴 [2026-08-31] 自動改走 cross 步伐已停用 —— do_cross_obstacle_ 本身已停用
+        //    （硬體沒有分側真空，見該函式進入點的守衛）。
+        //    原行為：candidates>0 → 下一步自動改走 do_cross_obstacle_，無確認提示。
+        //    若保留原行為，這裡會一路跑到偵測出障礙，然後在下一次 iteration 撞上
+        //    守衛回 ERR 而中止 —— **fail-closed 是安全的，但現象是「跑好好的突然吐一個
+        //    看不懂的錯」**，看的人會去查步伐或硬體，而不是知道「偵測到障礙、而避障走法
+        //    目前不可用」。改成在這裡就停，並把原因講清楚。
         if (!run_as_cross && candidates > 0) {
-            next_is_cross = true;
             std::cout << "[depth_avoid] candidates=" << candidates
-                      << " — next step will AUTO use cross_obstacle gait\n";
+                      << " — 偵測到障礙物，但 cross_obstacle 步伐已停用（單閥、無分側真空）"
+                      << " → 停止自動避障，交由使用者判斷\n";
+            evt_("depth_avoid_obstacle_needs_manual candidates=" + std::to_string(candidates)
+                 + " reason=cross_gait_disabled");
+            break;
         }
 
         // [2026-07-21] Slant range -> along-travel remaining clearance (see
@@ -1453,7 +1555,17 @@ bool WashRobot::arm_sweep_fire_nowait_(double target_cm, int rpm, int acc, int d
     // [2026-05-28] Replace plain sleep with monitor loop (Option A: DM2J:14
     // alarm bit + Option C: damiao M2 tau spike). Sets arm_sweep_obstacle_pending_
     // on detection → main thread try_or_pause_ external-pause picks it up.
-    arm_monitor_during_sweep_(est_ms);
+    // [2026-08-31] 一併把「真實運動時間」算給 monitor 當減速遮罩的錨點。
+    // 起點取目前座標；讀不到就退回 0（保守：距離估得較長→遮罩較晚，寧可晚遮不要早遮，
+    // 早遮等於在還在巡航時就關掉偵測）。
+    double from_cm = 0.0;
+    if (D_(DM2J_ARM).read_position_cm(from_cm)) from_cm = 0.0;   // false = 成功（本專案慣例）
+    const int motion_ms = arm_rail_motion_ms_(target_cm, from_cm, rpm, acc, dec);
+    if (motion_ms > 0)
+        std::cout << "[arm_sweep] 推算運動時間 " << motion_ms << "ms（"
+                  << from_cm << "→" << target_cm << "cm @" << rpm << "rpm）"
+                  << " — 減速遮罩錨點；est_ms=" << est_ms << "ms 僅為監看逾時\n";
+    arm_monitor_during_sweep_(est_ms, motion_ms);
     return true;
 }
 
@@ -1467,7 +1579,7 @@ bool WashRobot::arm_sweep_fire_nowait_(double target_cm, int rpm, int acc, int d
 //   - M2 holds slot angle; sensitive to twisting forces. Secondary backup.
 // All share the same pause channel (arm_sweep_obstacle_pending_); detail string
 // distinguishes the source (slide_alarm / m1_tau_spike / m2_tau_spike) for the EVT.
-void WashRobot::arm_monitor_during_sweep_(int est_ms) {
+void WashRobot::arm_monitor_during_sweep_(int est_ms, int motion_ms) {
     // arm_attached_=off → no tau to read; fall back to plain sleep so caller
     // semantics unchanged. (DM2J:14 still moves; could monitor alarm but no
     // tau reference.)
@@ -1627,7 +1739,30 @@ void WashRobot::arm_monitor_during_sweep_(int est_ms) {
         // obstacles in last ~16cm of slide travel not detected.
         // Diagnostic log still prints in decel mask so user can see what M1/M2
         // are doing during decel.
-        const bool in_decel_mask = (elapsed > est_ms - ARM_SWEEP_DECEL_MASK_MS);
+        // 🔴 [2026-08-31] 遮罩改錨定「真實運動時間」，不再錨定 est_ms。
+        //
+        // 舊寫法 `elapsed > est_ms - MASK` 有兩個問題，而且互相掩蓋：
+        //  ① **est_ms 是「監看多久」不是「動多久」**。它被刻意設得很長
+        //     （3900/4500ms），註解說「估太長只是多等一下，safe、no correctness
+        //     impact」——**那句是錯的**：遮罩錨在 est_ms 結尾，估太長就把遮罩
+        //     整個推到真實運動之外。17cm @250rpm 實際只要約 578ms（實測 553ms），
+        //     而遮罩窗口是 3500~4500ms → **真實減速期完全沒有遮罩**，
+        //     而迴圈又會在 motion complete 時 early-exit，根本走不到窗口。
+        //     ⇒ **這道保護從加進來就沒生效過，而且不會有任何訊息。**
+        //  ② est_ms ≤ MASK 時 `est_ms - MASK ≤ 0` → 條件恆為真 →
+        //     **整趟偵測全程關閉**，同樣靜默。所以「把 est_ms 調小」這個
+        //     直覺修法會直接關掉偵測。
+        //
+        // 兩者的耦合來自「同一個數字被當成兩種語意」。分開之後：
+        //   est_ms    = 監看逾時（可以估得寬鬆，估太長只是多等）
+        //   motion_ms = 真實運動時間（遮罩錨點，要盡量接近事實）
+        //
+        // ⚠️ motion_ms 是**推算值**（arm_rail_motion_ms_，用實測導程 7.731）。
+        //    bench 有機會時應拿 log 的 "motion complete at t=Xms" 回頭校驗。
+        // ⚠️ **本次修改未經實機驗證**（需要實際掃動才能觀察 tau 行為）。
+        //    motion_ms <= 0 時退回舊行為，行為與修改前完全相同。
+        const int  mask_anchor    = (motion_ms > 0) ? motion_ms : est_ms;
+        const bool in_decel_mask  = (elapsed > mask_anchor - ARM_SWEEP_DECEL_MASK_MS);
 
         // ---- Option C: M1 + M2 tau spike (if baselines available) ----
         // [2026-05-29] Skip entirely while DM2J motion active — mechanical
@@ -4860,17 +4995,19 @@ std::vector<int> WashRobot::vacuum_check_(const std::string& group) {
 // "sealed enough" 判準。
 //
 // [2026-07-08 per user] 原規則：每一側 ≥1 顆吸住就算該側錨定夠。
-// [2026-08-28 per user] 現規則：**4 顆裡總共有 SEAL_MIN_CUPS_TOTAL(=2) 顆吸住
-//   就算 OK**，不再分側。
+// [2026-08-28 per user] 曾改為：4 顆裡總共有 SEAL_MIN_CUPS_TOTAL(=2) 顆吸住就算 OK，不再分側。
+// ✅ [2026-08-31] **已改回分側判準**（每側各 >= SEAL_MIN_CUPS_PER_SIDE=1）——
+//   這正是下方 08-28 註解自己寫下的退場條件「左右歸屬確認後應改回分側判準」，
+//   而該條件已達成：實機逐組推吸盤驗證 right={5,7}／left={6,8} 四顆全對。
 //
 // 為什麼改：ZDT_RF*/LF* 那組左右歸屬跟實體不符（見 WASH_ROBOT.h 的警告），
 // 「分側」算出來的答案本來就不對。bench log 已經出現誤觸發——5、6 沒吸到被
 // 判成「右側整側全裸」而觸發後退，但實體上 5、6 分屬兩側、另外兩顆還吸著，
 // 依實體規則本來應該直接放行。
 //
-// ⚠ 已知取捨（不是疏漏）：本規則擋不住「吸住的 2 顆剛好在同一側」的情況
+// ⚠ 該規則的已知取捨（不是疏漏）：擋不住「吸住的 2 顆剛好在同一側」的情況
 //   （例如 5、7 都吸住、6、8 都掉），那時另一側整個懸空但仍會回 true。
-//   左右歸屬確認後應改回分側判準。
+//   ✅ 這個洞正是 2026-08-31 改回分側判準所修掉的。
 //
 // 回傳 true = 夠吸；out_unsealed 仍然只列「本 group 裡」沒吸到的杯子，
 // 供呼叫端做重試 / top-up 的目標清單與 log 使用（這部分語意沒變）。
@@ -4879,16 +5016,37 @@ std::vector<int> WashRobot::vacuum_check_(const std::string& group) {
 // 顆間隔 50ms，分兩次掃 group 會多花一倍 bus 時間。
 bool WashRobot::group_seal_ok_(const std::string& group, std::vector<int>& out_unsealed) {
     const std::vector<int> all_unsealed = vacuum_check_("all");
-    const std::vector<int> all_slaves   = group_slaves_("all");
 
     // 本 group 的未吸清單（呼叫端拿去重試/補吸/印 log）
+    const std::vector<int> grp = group_slaves_(group);
     out_unsealed.clear();
-    for (int s : group_slaves_(group))
+    for (int s : grp)
         if (std::find(all_unsealed.begin(), all_unsealed.end(), s) != all_unsealed.end())
             out_unsealed.push_back(s);
 
-    const int sealed_total = (int)all_slaves.size() - (int)all_unsealed.size();
-    return sealed_total >= SEAL_MIN_CUPS_TOTAL;
+    // 單側 group（"right" / "left"）：這一側自己要有 >= SEAL_MIN_CUPS_PER_SIDE 顆吸住。
+    // 🔴 [2026-08-31] 這是本函式的行為改變。舊版回傳的是
+    //        sealed_total(全部四顆) >= SEAL_MIN_CUPS_TOTAL
+    //    ——**完全沒有用到 group 參數**，所以 group_seal_ok_("right") 與
+    //    group_seal_ok_("left") 永遠回傳相同的值，而 do_step_sync_ 的
+    //    `if (!right_ok || !left_ok)` 因此退化成一個全域的「四顆裡有 >=2 顆」檢查。
+    //    後果：右上+右下都吸住、左邊兩顆全空 → sealed_total==2 → 兩個旗標都 true
+    //    → 步伐照跑，而整個左側是脫離的。
+    auto side_ok = [&](const std::string& g) {
+        const std::vector<int> ss = group_slaves_(g);
+        // 整側都被 zdt_disable 停用時 ss 為空：沒有杯子可以要求，視為不阻擋，
+        // 否則停用一側等於讓步伐永遠無法進行（而停用是使用者的明確意圖）。
+        if (ss.empty()) return true;
+        int sealed = 0;
+        for (int s : ss)
+            if (std::find(all_unsealed.begin(), all_unsealed.end(), s) == all_unsealed.end())
+                ++sealed;
+        return sealed >= SEAL_MIN_CUPS_PER_SIDE;
+    };
+
+    if (group == "all" || group == "feet")
+        return side_ok("right") && side_ok("left");   // 兩側各自都要達標
+    return side_ok(group);
 }
 
 // [2026-07-08 per user] Best-effort top-up of a side's still-unsealed cup(s)

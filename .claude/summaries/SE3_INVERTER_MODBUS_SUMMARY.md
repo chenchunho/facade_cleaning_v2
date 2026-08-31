@@ -155,6 +155,34 @@ For inverter reset / parameter clear functions. Write specific magic values.
 
 When using FC H03 or H10 on multiple registers, if ≥1 register is operable the operation succeeds (not all-or-nothing).
 
+## 🔴 面板切換程序（P.79 / P.5）—— 2026-08-31 由封存的計畫檔抄入
+
+> **為什麼抄到這裡**：這段原本**只存在於 `.claude/archive/se3_mode6_migration_plan.md` §1.1**
+> （已封存的計畫檔），是**唯一副本**。而 bench 目前**仍在跑 SE3**
+> （`Crane_control_PI/main.cpp` `#define CRANE_VFD_IS_SE3 1`），不是已作廢的舊文件。
+> 封存的計畫檔遲早會被清掉，操作程序不該跟著消失 → 移到 `summaries/`（裝置協定的權威位置）。
+
+### 改 `P.79` 之前必做
+
+1. **先把馬達停下，並解除變頻器的 OPT 異常**
+2. **不要直接跳**：從 `P.79=3` 先退到 `P.79=2`（外部），**再**進目標值
+   （例如 `3 → 2 → 6`）—— **直接切換會 latch 卡住**
+
+### `P.5`（multi-speed）必須保持 `0`
+
+`P.5 > 0` 時**多段速會覆蓋 `H1002` 的頻率命令** → Modbus 設頻率看起來成功、實際不生效。
+⚠️ 這是「寫入回報成功但沒作用」那一類，log 上看不出來。
+
+### 相關參數（切到 mode 6 時的對照，供日後參考）
+
+| 參數 | 原值 | mode 6 目標 | 說明 |
+|---|---|---|---|
+| **P.79** | 3 | **6** | 操作模式：6 = Modbus 頻率 + STF/STR 端子 RUN |
+| **P.5** | 0 | **保持 0** | multi-speed，>0 會覆蓋 H1002 |
+| P.55-57 | 已設 | 保留 | DC brake（重物 hold，2026-05-09 設好）|
+
+---
+
 ## Operation Mode Parameter (00-16 / P.79)
 
 | Value | Mode | Frequency source | Run/Stop source |

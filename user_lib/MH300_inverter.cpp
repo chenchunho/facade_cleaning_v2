@@ -59,7 +59,8 @@ bool MH300_inverter::init(const std::string& ip, int port, int id, bool debug)
     owns       = true;
     deviceID   = id;
     debug_mode = debug;
-    _log_tag   = "MH300:" + std::to_string(id);
+    _log_tag   = "MH300:" + std::to_string(id)
+               + (_log_side.empty() ? "" : "@" + _log_side);   // [2026-08-31] 側別
     if (!client->connectToServer(ip, port)) {
         LOG_ERR(_log_tag, "connect failed %s:%d", ip.c_str(), port);
         return true;
@@ -73,7 +74,8 @@ bool MH300_inverter::init(TCP_client& extClient, int id, bool debug)
     owns       = false;
     deviceID   = id;
     debug_mode = debug;
-    _log_tag   = "MH300:" + std::to_string(id);
+    _log_tag   = "MH300:" + std::to_string(id)
+               + (_log_side.empty() ? "" : "@" + _log_side);   // [2026-08-31] 側別
 
     // Modbus probe: read the status word to verify the drive actually answers
     // on the RS485 bus behind the shared TCP gateway. A TCP connect to the

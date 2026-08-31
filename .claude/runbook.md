@@ -222,10 +222,21 @@ baseline 已含。判讀時不要算到本分支頭上。
 | ⑨a | `cmd_side_measured` 在 `stop` 之後 | 送一次 `emergency_stop`／`reset`，再下 v2 step 指令 → 正常執行 | 永久回 `ERR aborted` → `abort_flag` 沒被重置 |
 | ⑥ | **吊機關機**時本體的重連訊息 | `reconnect success` **0 次**；只看到 reconnect failed | 吊機沒開卻印 `reconnect success` → `SO_ERROR` 修正沒進去 |
 
-⚠️ **⑨b 已知未修**：`cmd_arm_sweep()` 進場**沒有**重置 `abort_flag`（姊妹函式有）。
-所以任何一次 `stop`／`emergency_stop` 之後，`arm_sweep` 會**永久回 `ERR aborted`
-且完全沒有輸出**（`try_or_pause_` 的中止路徑不印任何東西）。
-🔴 **這不是這次上機要驗的東西，是要知道它會這樣** —— 遇到就先 `reset`／`init`。
+✅ **⑨b 已修，並更正嚴重性（2026-08-31）**：`cmd_arm_sweep()` 進場原本**沒有**重置 `abort_flag`
+（姊妹函式 `cmd_arm_clean_sweep_dry` 有），已補上一行。
+
+🔴 **但本條原本宣稱的嚴重性是誇大的，實測推翻**。原文說「任何一次 `stop`／`emergency_stop` 之後
+`arm_sweep` 會**永久**回 `ERR aborted`，只能重開主程式才能恢復」。原始碼稽核 + 實機確認：
+- 全部 **4 個**設 `abort_flag = true` 的位置：`cmd_emergency_stop` 與 `imu_monitor_loop_`
+  **都同時 `set_state_(State::Error)`**；`cmd_shutdown` / `stop()` 是收工路徑
+- **`cmd_reset` 會清掉 `abort_flag`** → Error → `reset` 就恢復，不需要重開程式
+- 而且 `cmd_arm_sweep` 開頭的 `State::Error` 檢查會**先**攔下來，`abort_flag` 那條根本走不到
+- 實機：idle 時送 `emergency_stop` → **`state=error`**（不是留在 idle）→ `reset` 成功
+
+→ **目前沒有已知可達路徑**會讓 `abort_flag` 停在 true 而狀態不是 Error。
+📌 **那為什麼還是修**：姊妹函式都有這一行、只有它沒有，本身就是不一致；成本一行，
+防的是未來新增「設 `abort_flag` 但不進 Error」的路徑。
+⚠️ **記取**：`try_or_pause_` 的中止路徑確實不印任何東西——這條沒錯，只是它需要的前提不成立。
 
 #### 階段 B — 動單一軸，拿尺量
 
