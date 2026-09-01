@@ -87,6 +87,26 @@ public:
 	                        int send_timeout_ms, int total_timeout_ms,
 	                        int quiet_ms);
 
+	// 🔴 [2026-09-01] 送出前排空接收緩衝區。**與 sendAndReceive() 內部用的是同一段邏輯**
+	// （非阻塞讀到空為止，上限 4096），抽出來給「接收端有自己組幀邏輯、無法改用
+	// sendAndReceive 的 driver」在交易開頭呼叫。
+	//
+	// 為什麼需要：ZDT / DM2J / PQW 走的是 sendData() + 自己的 readEcho()/recv_frame_()，
+	// **沒有送出前排空**。只要有一筆回覆遲到，緩衝區就永遠落後一筆 —— 之後每次讀到的
+	// 都是上一筆交易的回覆 → 校驗失敗 → **永久失步，只能重連才能恢復**。
+	// 2026-09-01 DSZL_107 因為完全相同的缺陷一天內卡死四次
+	//（證據：`stale/foreign reply txid=3510 want=3511`，正好差一筆；socket 仍 ESTAB
+	// 但 Recv-Q 卡著一筆完整回覆）。DSZL 已改用 sendAndReceive；這三支因為接收端
+	// 有組幀邏輯不能照搬，改為在交易開頭顯式排空。
+	//
+	// ⚠️ **刻意不放進 sendData() 內部**：crane_cli_ / arm_cli_ 也用 sendData()，
+	// 那些是文字協定連線，排空會把吊機主動推送的 EVT 廣播吃掉。
+	//
+	// ⚠️ 這不是原子交易（drain 與 send 之間可能被插入）。呼叫端若有並行需求，
+	// 仍應由上層的 bus mutex 序列化 —— 現況本來就是如此。
+	// 回傳排空的位元組數（0 = 本來就是乾淨的）。
+	int drainRx();
+
 	int available();
 	void close();
 	bool isConnected() { return connected; }

@@ -258,6 +258,7 @@ bool PQW_IO_16O_RLY::controlRelay(int id, bool status)
 
 	// Send the relay command. Genuine TCP send failure (gateway down) → real
 	// error reported via return true.
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	if (!client->sendData((char*)cmd.data(), cmd.size(), 50))
 		return true;
 
@@ -282,6 +283,7 @@ bool PQW_IO_16O_RLY::controlAll(bool status)
 	auto cmd = buildAllRelayCmd(status);
 	printHex(cmd, "TX all relay");
 
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	if (!client->sendData((char*)cmd.data(), cmd.size(), 100))
 		return true;
 
@@ -300,6 +302,7 @@ std::vector<bool> PQW_IO_16O_RLY::readAllStatus()
 	auto cmd = buildReadCmd();
 	printHex(cmd, "TX read status");
 
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	client->sendData((char*)cmd.data(), cmd.size(), 100);
 
 	auto resp = readEcho();

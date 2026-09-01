@@ -396,6 +396,37 @@ int TCP_client::receiveData(char* buf, int bufSize, int timeout_ms) {
 	return received;
 }
 
+// [2026-09-01] 見標頭的說明。與 sendAndReceive() 內部的排空邏輯相同。
+int TCP_client::drainRx()
+{
+	std::lock_guard<std::mutex> lock(socket_mtx);
+	if (!connected || sock == INVALID_SOCKET) return 0;
+#ifdef _WIN32
+	u_long mode = 1;
+	ioctlsocket(sock, FIONBIO, &mode);
+#else
+	int orig_flags = fcntl(sock, F_GETFL, 0);
+	fcntl(sock, F_SETFL, orig_flags | O_NONBLOCK);
+#endif
+	char trash[256];
+	int total = 0;
+	while (true) {
+		int got = recv(sock, trash, sizeof(trash), 0);
+		if (got <= 0) break;
+		total += got;
+		if (total > 4096) break;
+	}
+#ifdef _WIN32
+	mode = 0;
+	ioctlsocket(sock, FIONBIO, &mode);
+#else
+	fcntl(sock, F_SETFL, orig_flags);
+#endif
+	if (total > 0)
+		LOG_DBG(_log_tag, "drainRx: 丟棄 %d 個殘留位元組（前一筆交易的遲到回覆）", total);
+	return total;
+}
+
 int TCP_client::sendAndReceive(const char* tx_buf, int tx_len,
                                char* rx_buf, int rx_size,
                                int send_timeout_ms, int recv_timeout_ms)

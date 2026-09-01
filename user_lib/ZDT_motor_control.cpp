@@ -53,6 +53,7 @@ bool ZDT_motor_control::set_zero() {
 	if (!client) return true;
 	auto cmd = build_write_single_register(0x000A, 0x0001);
 	LOG_HEX(_log_tag, "TX set_zero", cmd.data(), (int)cmd.size());
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 	auto resp = readEcho(200);
 	LOG_HEX(_log_tag, "RX set_zero", resp.data(), (int)resp.size());
@@ -63,6 +64,7 @@ bool ZDT_motor_control::calibrate_encoder() {
 	if (!client) return true;
 	auto cmd = build_write_single_register(0x0006, 0x0001);
 	LOG_HEX(_log_tag, "TX calibrate_encoder", cmd.data(), (int)cmd.size());
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 	std::this_thread::sleep_for(std::chrono::milliseconds(500));
 	auto resp = readEcho(500);
@@ -74,6 +76,7 @@ bool ZDT_motor_control::reset_motor() {
 	if (!client) return true;
 	auto cmd = build_write_single_register(0x0008, 0x0001);
 	LOG_HEX(_log_tag, "TX reset_motor", cmd.data(), (int)cmd.size());
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 	auto resp = readEcho(200);
 	LOG_HEX(_log_tag, "RX reset_motor", resp.data(), (int)resp.size());
@@ -93,6 +96,7 @@ bool ZDT_motor_control::motion_control_driver_EN(bool status) {
 	cmd.push_back((uint8_t)(crc >> 8));
 
 	LOG_HEX(_log_tag, status ? "TX Driver EN ON" : "TX Driver EN OFF", cmd.data(), (int)cmd.size());
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 	auto resp = readEcho(200);
 	LOG_HEX(_log_tag, "RX Driver EN", resp.data(), (int)resp.size());
@@ -110,6 +114,7 @@ bool ZDT_motor_control::get_system_status() {
 	cmd.push_back((uint8_t)(crc >> 8));
 
 	LOG_HEX(_log_tag, "TX get_status", cmd.data(), (int)cmd.size());
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 
 	auto resp = readEcho(300);
@@ -230,6 +235,7 @@ bool ZDT_motor_control::read_driver_config(uint16_t out[15]) {
 	cmd.push_back((uint8_t)(crc >> 8));
 
 	LOG_HEX(_log_tag, "TX read_driver_config", cmd.data(), (int)cmd.size());
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 
 	auto resp = readEcho(300);
@@ -275,6 +281,7 @@ bool ZDT_motor_control::write_driver_config(const uint16_t in[15], bool store) {
 	cmd.push_back((uint8_t)(crc >> 8));
 
 	LOG_HEX(_log_tag, "TX write_driver_config", cmd.data(), (int)cmd.size());
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 
 	auto resp = readEcho(300);
@@ -318,6 +325,7 @@ bool ZDT_motor_control::release_stall_flag() {
 
 	LOG_HEX(_log_tag, "TX release_stall", cmd.data(), (int)cmd.size());
 
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
 
 	auto resp = readEcho(200);
@@ -335,6 +343,7 @@ bool ZDT_motor_control::emergency_stop(bool sync) {
 	auto cmd = build_write_single_register(0x00FE, data);
 
 	LOG_HEX(_log_tag, "TX emergency_stop", cmd.data(), (int)cmd.size());
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 
 	auto resp = readEcho(200);
@@ -372,6 +381,7 @@ bool ZDT_motor_control::motion_control_speed_mode(int dir, int acc_rpm, int rpm,
 			std::snprintf(tx_label, sizeof(tx_label), "TX Speed Mode");
 		LOG_HEX(_log_tag, tx_label, cmd.data(), (int)cmd.size());
 
+		client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 		if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) {
 			LOG_ERR(_log_tag, "Send failed, waiting for retry");
 			attempt++;
@@ -451,6 +461,7 @@ bool ZDT_motor_control::motion_control_pos_mode(int dir, int acc_rpm, int rpm, i
 			std::snprintf(tx_label, sizeof(tx_label), "TX Pos Mode");
 		LOG_HEX(_log_tag, tx_label, cmd.data(), (int)cmd.size());
 
+		client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 		if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) {
 			LOG_ERR(_log_tag, "Send failed, waiting for retry");
 			attempt++;
@@ -536,6 +547,7 @@ bool ZDT_motor_control::motion_control_pos_mode_nowait(int dir, int acc_rpm, int
 			std::snprintf(tx_label, sizeof(tx_label), "TX Pos Mode");
 		LOG_HEX(_log_tag, tx_label, cmd.data(), (int)cmd.size());
 
+		client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 		if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) {
 			LOG_ERR(_log_tag, "Send failed, waiting for retry");
 			attempt++;
@@ -584,6 +596,7 @@ bool ZDT_motor_control::factory_reset() {
 	// 3.1.5 factory reset: Func 0x06, Reg 0x000F, Data 0x0001
 	auto cmd = build_write_single_register(0x000F, 0x0001);
 	LOG_HEX(_log_tag, "TX factory_reset", cmd.data(), (int)cmd.size());
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 	auto resp = readEcho(500);
 	LOG_HEX(_log_tag, "RX factory_reset", resp.data(), (int)resp.size());
@@ -599,6 +612,7 @@ bool ZDT_motor_control::trigger_home(int mode, bool sync) {
 	uint16_t data = ((uint16_t)mode << 8) | (sync ? 0x01 : 0x00);
 	auto cmd = build_write_single_register(0x009A, data);
 	LOG_HEX(_log_tag, "TX trigger_home", cmd.data(), (int)cmd.size());
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 	auto resp = readEcho(200);
 	LOG_HEX(_log_tag, "RX trigger_home", resp.data(), (int)resp.size());
@@ -610,6 +624,7 @@ bool ZDT_motor_control::abort_home() {
 	// 3.3.3 force abort home: Func 0x06, Reg 0x009C(Emm), Data [0x48, 0x00]
 	auto cmd = build_write_single_register(0x009C, 0x4800);
 	LOG_HEX(_log_tag, "TX abort_home", cmd.data(), (int)cmd.size());
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 	auto resp = readEcho(200);
 	LOG_HEX(_log_tag, "RX abort_home", resp.data(), (int)resp.size());
@@ -625,6 +640,7 @@ bool ZDT_motor_control::trigger_sync_move() {
 	cmd.push_back((uint8_t)(crc & 0xFF));
 	cmd.push_back((uint8_t)(crc >> 8));
 	LOG_HEX(_log_tag, "TX trigger_sync", cmd.data(), (int)cmd.size());
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) {
 		LOG_ERR(_log_tag, "trigger_sync: send failed");
 		return true;   // error — the only failure this function can actually detect
@@ -663,6 +679,7 @@ bool ZDT_motor_control::set_home_zero_position(bool store) {
 	uint16_t data = (0x88 << 8) | (store ? 0x01 : 0x00);
 	auto cmd = build_write_single_register(0x0093, data);
 	LOG_HEX(_log_tag, "TX set_home_zero", cmd.data(), (int)cmd.size());
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
 	auto resp = readEcho(200);
 	LOG_HEX(_log_tag, "RX set_home_zero", resp.data(), (int)resp.size());

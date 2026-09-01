@@ -14,6 +14,10 @@
 #include <thread>
 #include <chrono>
 
+// [2026-09-01] 重新同步的最大丟棄筆數。落後一筆是實測到的情況，
+// 3 給足餘裕又不會在真的斷線時空轉太久（每次最多 400ms）。
+static constexpr int DSZL_RESYNC_MAX = 3;
+
 // X518 register addresses (decoded from x518多通道数据采集器操作手册v1.1.pdf
 // + 2026-05-08 bench validation):
 //   0x0A00 .. 0x0A03  : channel data, 4 registers = 2 longs (CH1, CH2) — read FC03
@@ -137,14 +141,54 @@ bool DSZL_107::modbus_read(uint16_t addr, uint16_t quantity, uint8_t* rx, int& r
         (uint8_t)(quantity >> 8), (uint8_t)(quantity & 0xFF)
     };
 
+    // 🔴🔴 [2026-09-01] sendData + receiveData → **sendAndReceive**。
+    //
+    // 分開兩步呼叫**沒有送出前的排空（drain）**，也不是原子交易。後果是：
+    // 只要有一筆回覆遲到（或多來一筆），緩衝區就永遠落後一筆 —— 之後每次
+    // receiveData 讀到的都是**上一筆交易的回覆** → txid/slave 對不上 → 全數被拒
+    // → **永久失步，只能重連才能恢復**。
+    //
+    // 實證（2026-09-01 一天內四次）：
+    //   [ERR] [DSZL:1] stale/foreign reply txid=3510 want=3511   ← 正好差一筆
+    //   ss 顯示 socket 仍 ESTAB 但 Recv-Q 卡著 13 bytes
+    //   （＝一筆完整的 MBAP FC03 回覆：7 頭 + fc + bc + 4 資料）
+    //
+    // 對照：SE3_inverter::sendModbus 走的是 sendAndReceive，所以它的故障是
+    // **間歇且會自癒**的；DSZL 走這條沒有 drain 的路徑，故障是**永久**的。
+    // ⚠️ 這個差異也一度誤導了診斷 —— 查了 sendAndReceive 有 drain 就以為
+    //    DSZL 也有，實際上兩支 driver 走不同路徑。
+    //
+    // TCP_client::sendAndReceive 在同一把 socket_mtx 內完成 drain → send → recv，
+    // 排空的是「先前放棄/失敗的交易留下的位元組」，正是本缺陷需要的。
     LOG_HEX(_log_tag, "TX read", req, (int)sizeof(req));
 
-    if (!client->sendData((char*)req, (int)sizeof(req), 100))
-        return true;
-
+    // 🔴🔴 [2026-09-01 第二次修正] **txid 不符時要重新同步，不能只是放棄。**
+    //
+    // 第一次修正（改用 sendAndReceive 取得送出前排空）**不夠**，實測仍卡死：
+    //   [ERR] [DSZL:1] stale/foreign reply txid=1861 want=1862   ← 仍正好差一筆
+    //
+    // 為什麼排空救不了：一旦錯開一筆，上一筆的回覆**恰好在新交易的 recv 窗口內**
+    // 抵達（不是躺在緩衝區裡等著被排空）——drain 發生在送出前，那時它還沒到。
+    // 於是每一筆都讀到上一筆的答案，**自我延續，永遠追不回來**。
+    //
+    // 正確做法：**丟掉不符的回覆、繼續讀（不重送）**。因為我們只落後一筆，
+    // 下一次讀取就會拿到正確的回覆 —— 一筆交易內即完成重新同步。
+    // ⚠️ 刻意**不重送請求**：重送只會讓佇列裡再多一筆答案，把落後變成落後兩筆。
     char buf[256];
-    int n = client->receiveData(buf, sizeof(buf), 400);
-    if (n < 9) return true;        // need at least MBAP(7) + fc + bc
+    int n = 0;
+    bool synced = false;
+    for (int attempt = 0; attempt <= DSZL_RESYNC_MAX; ++attempt) {
+        n = (attempt == 0)
+            ? client->sendAndReceive((const char*)req, (int)sizeof(req),
+                                     buf, sizeof(buf), 100, 400)
+            : client->receiveData(buf, sizeof(buf), 400);   // 只讀，不重送
+        if (n < 9) return true;        // need at least MBAP(7) + fc + bc
+        const uint16_t rx = ((uint16_t)(uint8_t)buf[0] << 8) | (uint8_t)buf[1];
+        if (rx == txid_) { synced = true; break; }
+        LOG_ERR(_log_tag, "丟棄遲到回覆 txid=%u want=%u（重新同步 %d/%d）",
+                rx, txid_, attempt + 1, DSZL_RESYNC_MAX);
+    }
+    if (!synced) return true;
 
     LOG_HEX(_log_tag, "RX read", buf, n);
 
@@ -166,11 +210,7 @@ bool DSZL_107::modbus_read(uint16_t addr, uint16_t quantity, uint8_t* rx, int& r
     // earlier, abandoned transaction can still be sitting in the socket when
     // the next request goes out — without this it would be read as the answer
     // to the current one.
-    const uint16_t rx_txid = ((uint16_t)(uint8_t)buf[0] << 8) | (uint8_t)buf[1];
-    if (rx_txid != txid_) {
-        LOG_ERR(_log_tag, "stale/foreign reply txid=%u want=%u", rx_txid, txid_);
-        return true;
-    }
+    // [2026-09-01] txid 已由上方的重新同步迴圈保證相符，此處不再需要檢查。
     // Protocol id must be 0 for Modbus.
     if (buf[2] != 0 || buf[3] != 0) return true;
     // Unit id must be the slave we addressed.
@@ -231,13 +271,14 @@ bool DSZL_107::modbus_write_long(uint16_t addr, int32_t value)
         (uint8_t)( value        & 0xFF)
     };
 
+    // [2026-09-01] 同 modbus_read：改用 sendAndReceive（原子 + 送出前排空）。
+    // 讀寫共用同一條連線，**任一邊失步都會污染另一邊** —— 只修讀不修寫，
+    // 一次失敗的寫入照樣能讓後續所有讀取永久錯開。
     LOG_HEX(_log_tag, "TX write_long", req, (int)sizeof(req));
 
-    if (!client->sendData((char*)req, (int)sizeof(req), 100))
-        return true;
-
     char buf[32];
-    int n = client->receiveData(buf, sizeof(buf), 300);
+    int n = client->sendAndReceive((const char*)req, (int)sizeof(req),
+                                   buf, sizeof(buf), 100, 300);
     if (n < 12) return true;
 
     LOG_HEX(_log_tag, "RX write_long", buf, n);

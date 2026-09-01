@@ -531,6 +531,7 @@ bool DM2J_RS570::read_version(uint16_t& ver1, uint16_t& ver2)
 	tx[6] = crc & 0xFF;
 	tx[7] = crc >> 8;
 
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	client->sendData((char*)tx, 8, 200);
 
 	uint8_t rx[32];
@@ -569,6 +570,7 @@ bool DM2J_RS570::read_status(uint32_t& status)
 
 	LOG_HEX(_log_tag, "TX read_status", tx, 8);
 
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	client->sendData((char*)tx, 8, 200);
 
 	uint8_t rx[32] = { 0 };
@@ -612,6 +614,7 @@ bool DM2J_RS570::read_error_code(uint16_t& errCode)
 	tx[6] = crc & 0xFF;
 	tx[7] = crc >> 8;
 
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	client->sendData((char*)tx, 8, 200);
 
 	uint8_t rx[32] = { 0 };
@@ -638,6 +641,7 @@ bool DM2J_RS570::read_save_status(uint16_t& saveStatus)
 	tx[6] = crc & 0xFF;
 	tx[7] = crc >> 8;
 
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	client->sendData((char*)tx, 8, 200);
 
 	uint8_t rx[32] = { 0 };
@@ -698,6 +702,7 @@ bool DM2J_RS570::read_motor_position(int32_t& pos)
 
 	LOG_HEX(_log_tag, "TX read_pos", tx, 8);
 
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	client->sendData((char*)tx, 8, 200);
 
 	uint8_t rx[32];
@@ -731,6 +736,7 @@ bool DM2J_RS570::read_pulse_per_rev(uint16_t& ppr)
 
 	LOG_HEX(_log_tag, "TX read_ppr", tx, 8);
 
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	client->sendData((char*)tx, 8, 200);
 	std::this_thread::sleep_for(std::chrono::milliseconds(200));
 	uint8_t rx[32];
@@ -843,6 +849,7 @@ bool DM2J_RS570::sendRecv(const std::vector<uint8_t>& tx, std::vector<uint8_t>& 
 {
 	if (!client) return true;
 
+	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
 	if (!client->sendData((const char*)tx.data(), tx.size(), 50))
 		return true;
 

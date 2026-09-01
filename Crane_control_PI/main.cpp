@@ -243,6 +243,23 @@ static constexpr int    CMD_MEASURED_APPROACH_CM = 8;  // cmd_side_measured: slo
 // two-stage unless asked to mirror this.
 static constexpr int    CMD_HALF_SPEED_APPROACH_CM = 15;
 
+// 🔴 [2026-09-01] **減速距離隨速度縮放** —— 上面兩個常數的註解自己就寫著
+// 「速度越高、減速到 fine_adjust_hz 需要越長距離」，卻是手調的固定 cm。
+//
+// 50Hz 實測（229cm 上行）：平均 |roll| 0.94°、**36% 超出 ±1°**、最大 3.20°，
+// 而且大偏差全部集中在**最後的減速段**：那時 base 已降到 ~10Hz、cap 只剩 5Hz
+// ——**能用的控制權限最小，要對付的擾動最大**（50Hz 累積的動量變成擺盪）。
+// 對照：修好 hz_max 飽和之後 50Hz **完全沒有改善**（0.94°/36% → 0.94°/36%），
+// 證實瓶頸不在控制權限，在減速激發的動力學。
+//
+// 🔴 **只放大、不縮小**（`max(1.0, ...)`）：10Hz 實測 3% 出帶、30Hz 實測 11%，
+//    這兩個速度的現行值是驗證過的，縮放若讓它們變短會破壞已知良好的行為。
+//    參考速度取 40Hz —— 那正是 2026-07-14 把 5→8 時所配的 motion_hz。
+//
+// 📌 這是本檔第四次出現同一形狀的缺陷：「絕對值常數在速度改變時失去意義」。
+//    前三次：減速遮罩錨定 est_ms（2026-08-31）、balance_imu_kp 的 Hz/度、
+//    balance hz_max_offset。**下次看到「配某個速度調出來的常數」就該先問這件事。**
+
 // Frequency presets — runtime adjustable via set_hold_hz / set_motion_hz /
 // set_middle_hz cmds. Defaults conservative (10 Hz) for first deploy / bench
 // validation; bump up via GUI once direction + safety verified.
@@ -251,6 +268,14 @@ static constexpr double VFD_MOTION_HZ_DEFAULT    = 50.0;  // 2026-08-04 per user
 static constexpr double MIDDLE_WINCH_HZ_DEFAULT  = 10.0;
 static std::atomic<double> g_vfd_hold_hz     {VFD_HOLD_HZ_DEFAULT};
 static std::atomic<double> g_vfd_motion_hz   {VFD_MOTION_HZ_DEFAULT};
+
+// [2026-09-01] 減速距離的速度縮放 —— 說明見上方 CMD_HALF_SPEED_APPROACH_CM 附近。
+static constexpr double APPROACH_REF_HZ = 40.0;
+static inline double approach_scale() {
+    return std::max(1.0, g_vfd_motion_hz.load() / APPROACH_REF_HZ);
+}
+static inline int approach_half_cm()  { return (int)std::lround(CMD_HALF_SPEED_APPROACH_CM * approach_scale()); }
+static inline int approach_fine_cm()  { return (int)std::lround(CMD_MEASURED_APPROACH_CM   * approach_scale()); }
 static std::atomic<double> g_middle_winch_hz {MIDDLE_WINCH_HZ_DEFAULT};
 
 // [2026-07-23 per user] roll_correct (differential IMU leveling — called by
@@ -682,7 +707,25 @@ static constexpr double BALANCE_DEADBAND_DEFAULT = 1.0;   // cm, |err| below = n
 //   · 15cm 是保守起手值：夠大所以正常運作不會誤觸，夠小所以真的卡住時來得及停。
 //     實機跑過幾輪之後應該依觀察到的正常差值分佈回頭調。
 // 📌 比照 tension_diff_max_kg 做成 runtime 可調（set_length_diff_max_cm）。
-static constexpr double LENGTH_DIFF_MAX_CM_DEFAULT = 15.0;
+// 🔴🔴 [2026-09-01] **這道守衛的角色變了，數值也跟著改：15 → 10。**
+//
+// 舊世界：平衡控制器盯「計米器左右差」，本守衛也盯同一個量 → 它既是**卡死偵測**
+//         也是**姿態指標**（2026-09-01 實測 1cm 繩長差 ≈ 1° 傾斜）。
+// 新世界：平衡控制器改盯 **IMU roll**（BalanceSource::Imu），計米器差不再被控制。
+//         而鋼索有彈性遲滯（同日實測：同樣繩長 168/169 量到 roll +0.21° 與 +1.90°）
+//         → **要維持同樣的 roll，繩長差本來就可能需要非零**。
+//         50Hz 上行實測：roll 表現良好（最大 1.48°、平均 0.77°），
+//         但左右差衝到 5cm 被舊門檻擋下 —— **守衛在對抗控制器**。
+//
+// 🔴 所以本值現在的意義是**單側卡死/失步的偵測**，不是姿態指標。姿態由兩道更直接的
+//    防線負責：① IMU 驅動平衡（控制）② 上位監看的 roll 門檻（中止）。
+// 🔴 而「一側**沒啟動**」這個最危險的情境，已由 dual_vfd_sync_start 的**啟動驗證**
+//    在 t=0 攔下（同日新增），不再依賴本守衛。
+//
+// 為什麼 10 夠用：50Hz 實測線速度約 24cm/s，單側完全卡住時 10cm 差距約 0.4 秒觸發。
+// ⚠️ 這是**放寬**安全門檻（per user 2026-09-01 核准）。切回 BalanceSource::Meter
+//    時應考慮調回較緊的值 —— 那時計米器差重新成為姿態指標。
+static constexpr double LENGTH_DIFF_MAX_CM_DEFAULT = 10.0;
 static std::atomic<double> g_length_diff_max_cm {LENGTH_DIFF_MAX_CM_DEFAULT};
 static constexpr double BALANCE_HZ_MIN_DEFAULT       = 5.0;   // Hz, hard floor on per-side hz after trim (2→5 on 2026-05-15: avoid near-stall on slow side under aggressive cap)
 // Note: hz_max changed from absolute Hz (30) to **offset above base_hz** (default 5).
@@ -725,7 +768,22 @@ static std::atomic<double> g_balance_deadband  {BALANCE_DEADBAND_DEFAULT};
 //    length_diff_max_cm 的中止保護與 fine_adjust 事後對齊。**兩者互補，不取代。**
 enum class BalanceSource { Meter, Imu };
 static std::atomic<BalanceSource> g_balance_source {BalanceSource::Meter};   // 預設 Meter＝與現行逐位元相同
-static constexpr double BALANCE_IMU_KP_DEFAULT       = 2.0;   // Hz / 度
+// 🔴 [2026-09-01] kp 的語意由「Hz/度」改為「**base_hz 的比例/度**」。
+//
+// 原因（229cm 全程實測，同樣的 IMU 平衡、只差速度）：
+//     10Hz 上行：平均 |roll| 0.54°、超出 ±1° 僅 **3%**
+//     30Hz 下行：平均 |roll| 0.84°、超出 ±1° 達 **35%**
+// roll 在中段**穩定停在 +1.0～+1.9**（不是振盪）＝ 比例控制器的**穩態誤差**。
+//
+// 根因：trim 是絕對 Hz，但修正效果取決於它**佔基礎速度的比例**：
+//     base=10Hz, roll 0.5° → trim 1.0Hz → 差速 10%
+//     base=30Hz, roll 1.2° → trim 2.4Hz → 差速  8%   ← 同 kp，相對力道掉到 1/3
+// **速度提高 3 倍，同一個 kp 的相對修正力道就掉到 1/3。**
+//
+// 改成比例式後同一個參數在所有速度成立 —— 這很重要，因為 per user
+// 實際操作是**上行 50Hz、下行最多 30Hz**，本來就會在兩個速度間切換。
+// 0.2 是由已驗證值換算：base=10 時 0.2×10 = 2.0Hz/度，與舊 kp=2 等價。
+static constexpr double BALANCE_IMU_KP_DEFAULT       = 0.2;   // base_hz 的比例 / 度
 static constexpr double BALANCE_IMU_DEADBAND_DEFAULT = 0.5;   // 度（目標帶寬 ±1°，死區取一半）
 static constexpr int    IMU_ROLL_STALE_MS            = 750;   // 3 × BALANCE_TICK_MS
 static constexpr double IMU_ROLL_SANITY_DEG          = 20.0;  // setter 上界；超過視為壞資料
@@ -1395,6 +1453,7 @@ static void apply_balance_trim(double base_hz_left, double base_hz_right, int di
     // [2026-09-01] 誤差來源選擇。IMU 路徑需要資料**新鮮**才用；過期一律退回
     // 計米器路徑（不是凍結、不是續用舊值——過期的姿態拿來驅動馬達比不修更危險）。
     double err = 0.0, kp = 0.0, deadband = 0.0;
+    bool   imu_path = false;      // [2026-09-01] IMU 路徑的 kp 是比例式，見下方 trim 計算
     const char* src = "meter";
     int64_t imu_age = -1;
     const bool want_imu = (g_balance_source.load() == BalanceSource::Imu);
@@ -1420,6 +1479,7 @@ static void apply_balance_trim(double base_hz_left, double base_hz_right, int di
         //   roll=-0.7, dir=-1 → err=-0.7 → trim=-1.4 → L=10.71 R=9.29
         //   與當時 log 逐位元吻合。
         err      = -(double)direction * g_imu_roll_deg.load();
+        imu_path = true;
         kp       = g_balance_imu_kp.load();
         deadband = g_balance_imu_deadband.load();
         src      = "imu";
@@ -1452,14 +1512,31 @@ static void apply_balance_trim(double base_hz_left, double base_hz_right, int di
     // [2026-09-01] cap 以**較慢側**的 base 計算：兩側階段不同時，用快側的 base
     // 會讓慢側被推超過它該有的速度（減速段的意義就沒了）。
     const double cap       = std::min(base_hz_left, base_hz_right) * cap_ratio;
-    double trim = kp * err;
+    // [2026-09-01] IMU 路徑：kp 是「base 的比例/度」，所以要乘上基礎速度
+    // ——否則同一個 kp 在高速時相對修正力道會等比例變弱（見 BALANCE_IMU_KP_DEFAULT
+    // 的說明與 30Hz 實測數據）。計米器路徑維持原本的絕對 Hz/cm 語意不動。
+    const double base_avg = 0.5 * (base_hz_left + base_hz_right);
+    double trim = imu_path ? (kp * base_avg * err) : (kp * err);
     if (trim >  cap) trim =  cap;
     if (trim < -cap) trim = -cap;
 
-    const double hz_min     = g_balance_hz_min.load();
-    const double hz_max_off = g_balance_hz_max_offset.load();
-    const double hz_max_l   = base_hz_left  + hz_max_off;   // 每側各自的上界
-    const double hz_max_r   = base_hz_right + hz_max_off;
+    const double hz_min = g_balance_hz_min.load();
+    // 🔴 [2026-09-01] **夾限不得比 cap 已經允許的更緊**（原本是 base + offset）。
+    //
+    // 內部矛盾：cap 隨速度縮放（min(base)×cap_ratio），hz_max_offset 是絕對值不縮放。
+    //     base=10：cap 允許單側 trim 2.5Hz、offset 給 +5Hz → 不衝突
+    //     base=50：cap 允許單側 trim 12.5Hz、offset 只給 +5Hz → **cap 根本達不到**
+    // 50Hz 實測後果（同日）：`trim=-22.2Hz L=55 R=38.9` —— 上調側被夾在 base+5，
+    // 下調側卻能 -11 → **修正變成單邊的、總速度還被拉低**，控制器持續飽和。
+    //
+    // max(offset, cap/2) 由構造保證兩者一致：低速時 offset 較大（行為**逐位元不變**，
+    // base=10 仍是 15），高速時讓 cap 真的可達（base=50 → 62.5）。
+    //
+    // 📌 這是本檔第三次出現同一形狀的缺陷 ——「絕對值常數在速度改變時失去意義」
+    //    （前兩次：2026-08-31 減速遮罩錨定 est_ms、同日 balance_imu_kp 的 Hz/度）。
+    const double hz_head    = std::max(g_balance_hz_max_offset.load(), cap / 2.0);
+    const double hz_max_l   = base_hz_left  + hz_head;   // 每側各自的上界
+    const double hz_max_r   = base_hz_right + hz_head;
     double left_hz  = base_hz_left  - trim / 2.0;
     double right_hz = base_hz_right + trim / 2.0;
     if (left_hz  < hz_min)   left_hz  = hz_min;
@@ -2825,16 +2902,18 @@ static std::string motion_rope(int cm, bool is_retract) {
             //   off below once either side has entered EITHER stage (see its
             //   guard further down) — it would otherwise fight these back up
             //   toward motion_hz on the next tick.
-            if (l_valid && !left_half_slowed && !left_slowed && movedL >= cm - CMD_HALF_SPEED_APPROACH_CM) {
+            const int appr_half = approach_half_cm();   // [2026-09-01] 隨速度縮放
+            const int appr_fine = approach_fine_cm();
+            if (l_valid && !left_half_slowed && !left_slowed && movedL >= cm - appr_half) {
                 if (!vfd_left.setFreqHz(g_vfd_motion_hz.load() / 2.0, VFD_MAX_HZ)) left_half_slowed = true;
             }
-            if (r_valid && !right_half_slowed && !right_slowed && movedR >= cm - CMD_HALF_SPEED_APPROACH_CM) {
+            if (r_valid && !right_half_slowed && !right_slowed && movedR >= cm - appr_half) {
                 if (!vfd_right.setFreqHz(g_vfd_motion_hz.load() / 2.0, VFD_MAX_HZ)) right_half_slowed = true;
             }
-            if (l_valid && !left_slowed && movedL >= cm - CMD_MEASURED_APPROACH_CM) {
+            if (l_valid && !left_slowed && movedL >= cm - appr_fine) {
                 if (!vfd_left.setFreqHz(g_fine_adjust_hz.load(), VFD_MAX_HZ)) left_slowed = true;
             }
-            if (r_valid && !right_slowed && movedR >= cm - CMD_MEASURED_APPROACH_CM) {
+            if (r_valid && !right_slowed && movedR >= cm - appr_fine) {
                 if (!vfd_right.setFreqHz(g_fine_adjust_hz.load(), VFD_MAX_HZ)) right_slowed = true;
             }
 
@@ -3647,7 +3726,7 @@ static std::string cmd_status() {
         int64_t age = -1;
         const bool fresh = imu_roll_fresh(&age);
         oss << " balance_source=" << (g_balance_source.load() == BalanceSource::Imu ? "imu" : "meter");
-        oss << " balance_imu_kp=" << g_balance_imu_kp.load();
+        oss << " balance_imu_kp_ratio=" << g_balance_imu_kp.load();   // [2026-09-01] 改名：語意由 Hz/deg 變為 base 比例/deg
         oss << " balance_imu_deadband=" << g_balance_imu_deadband.load();
         oss << " imu_roll=" << g_imu_roll_deg.load();
         oss << " imu_roll_age_ms=" << age;
@@ -4340,9 +4419,11 @@ static std::string cmd_set_balance_source(const std::string& src) {
     return "OK\n";
 }
 static std::string cmd_set_balance_imu_kp(double v) {
-    if (!(v > 0.0) || v > 50.0) return "ERR out_of_range\n";
+    // [2026-09-01] 單位是「base_hz 的比例/度」，不是 Hz/度。範圍收窄到 2.0，
+    // 因為 1.0 就已經是「每 1 度偏差給滿基礎速度的差速」——再高沒有物理意義。
+    if (!(v > 0.0) || v > 2.0) return "ERR out_of_range\n";
     g_balance_imu_kp.store(v);
-    std::cout << "[crane] balance_imu_kp = " << v << " Hz/deg\n";
+    std::cout << "[crane] balance_imu_kp = " << v << " (base_hz 比例/deg)\n";
     return "OK\n";
 }
 static std::string cmd_set_balance_imu_deadband(double v) {
