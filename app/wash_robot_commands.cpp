@@ -657,6 +657,22 @@ void WashRobot::do_sync_imu_roll_correct_() {
         return (n > 0 ? sum / n : imu_.x) - imu_roll0_;
     };
 
+    // 🔴 [2026-09-01] 發散偵測用的前一輪 |roll|。負值 = 還沒有前一輪。
+    // 起因：週期測試第 5 步實測
+    //     pass 0 roll=+2.69° → roll_correct  2
+    //     pass 1 roll=-5.29° → roll_correct -5   ← 反號且更大
+    //     pass 2 roll=+6.39° → roll_correct  6   ← 再反號再更大
+    //     NOT converged — roll=-6.53°   → 回程一啟動就撞上 6° 中止門檻
+    // **每輪反號、振幅遞增 —— 修正在灌能量，不是修正不足。**
+    // 原邏輯只有「收斂了就停」與「試滿 3 輪」，沒有「越修越糟就住手」的概念。
+    // 根因是讀到的是擺盪的某個相位而非真實傾角（FOLLOWER_IMU_SETTLE_MS 只有
+    // 800ms，繩吊的機體還沒停）。2026-08-04 把 FOLLOWER_ROLL_TOL_DEG 由 1.0 提到
+    // 2.0 就是為了同一個現象 —— 那只是讓它更少發生，沒有解決它。
+    // 這道守衛同時保護正式走法：do_step_sync_ 呼叫的就是本函式。
+    // ⚠️ follower_imu_level_（交替步伐的分側校平）有一模一樣的缺陷，但那條路徑
+    //    已被 ERR alt_gait_disabled_single_valve 擋死，本次不動它。
+    double prev_abs = -1.0;
+
     for (int pass = 0; pass < FOLLOWER_IMU_MAX_PASSES; ++pass) {
         if (check_abort_()) return;
         // [2026-08-28] 同上：瞬時 read_error 不足以判定 IMU 壞掉。原本這行讓整段
@@ -677,6 +693,19 @@ void WashRobot::do_sync_imu_roll_correct_() {
             evt_("step_sync_imu_ok roll=" + std::to_string(roll));
             return;
         }
+        // 🔴 發散偵測（見上方 prev_abs 的說明）：上一輪修完之後 |roll| 沒有變小
+        // ——就代表這個修正沒有在幫忙。**立刻住手**，殘餘傾角交給操作者，
+        // 而不是照原邏輯再修兩輪把它放大。刻意用 >= 而不是「沒有顯著改善」：
+        // 差之毫釐時停手的代價只是少修一次，繼續修的代價是實測的 ±6°。
+        if (prev_abs >= 0.0 && std::fabs(roll) >= prev_abs) {
+            std::cout << "[step_sync_imu] DIVERGING — 上一輪修正後 |roll| 由 "
+                      << prev_abs << "° 變成 " << std::fabs(roll)
+                      << "°（沒有變小）→ 停止微調，殘餘傾角交給操作者\n";
+            evt_("step_sync_imu_diverging roll=" + std::to_string(roll)
+                 + " prev=" + std::to_string(prev_abs));
+            return;
+        }
+        prev_abs = std::fabs(roll);
         double cm = 0.5 * FOLLOWER_SPAN_CM * std::tan(std::fabs(roll) * DEG2RAD);
         if (cm < 1.0) cm = 1.0;
         if (cm > (double)FOLLOWER_IMU_MAX_TRIM_CM) cm = (double)FOLLOWER_IMU_MAX_TRIM_CM;
@@ -3763,8 +3792,19 @@ std::string WashRobot::cmd_pwm_set(int ch, int hz, int control, double duty_pct)
               << " duty=" << duty_pct << " (enabled=" << (PWM_ENABLED ? "1" : "0")
               << " slave=" << PWM_SLAVE << ")\n";
 
+    // 🔴 [2026-09-01] **關閉方向任何狀態都放行**。
+    // 起因：週期測試中止時腳本送 `pwm set 1 50 65535 5`（＝停止）收尾，卻收到
+    // `ERR state_violation current=error` —— 因為 emergency_stop 先把本體打進 Error。
+    // 那一次剛好風扇本來就是關的，但若中止發生在「風扇已開、吊機移動中」，
+    // **螺旋槳會停在 7% 一直吹，而腳本沒有任何辦法關掉它**。
+    // 判準：**把螺旋槳關掉永遠不是危險方向**，開大才是。所以只有
+    // duty > 停止值（PWM_STEP_OFF_DUTY_PCT）時才維持原本的 Error gating。
     State cur = state_.load();
-    if (cur == State::Error) return state_violation_(cur);
+    if (cur == State::Error && duty_pct > PWM_STEP_OFF_DUTY_PCT)
+        return state_violation_(cur);
+    if (cur == State::Error)
+        std::cout << "[pwm_set] Error 狀態放行（duty=" << duty_pct
+                  << " <= 停止值 " << PWM_STEP_OFF_DUTY_PCT << "，關閉方向不擋）\n";
     // PWM 停用時在這裡也擋一道，不是只靠 init 不做 —— driver 的 client 指標
     // 若被別的路徑設起來，寫入就會落到那個 slave 號的裝置上（2026-08-27 撞號
     // 事件正是這個風險的實例）。沿革見 WASH_ROBOT.h 的 PWM_ENABLED 註解。
@@ -4042,6 +4082,37 @@ std::string WashRobot::cmd_pusher(const std::string& group, const std::string& p
         if (try_or_pause_([this, &slaves]() { return pusher_two_stage_retract_(slaves); }, ctx)) return on_abort();
         return "OK\n";
     }
+    if (pos == "extend_raw") {
+        // 🔴 [2026-09-01 per user] **不尋封的伸出** —— 推到各 slave 的預設脈衝
+        // （目前四顆都是 30000 ＝ 10.0cm）就停，不驗真空度、不補伸、不重試，
+        // 也不更新 last_seal_pulse_。
+        //
+        // **為什麼需要這條路**（使用者說明）：**有些玻璃面本身有縫隙**，吸盤落在縫上
+        // 本來就吸不住 —— 那不是故障，是現場條件。而 smart_extend_subset_ 會為了
+        // 找到密封一路補伸（最多到 ~16cm）並反覆重試，在有縫的玻璃上那是徒勞，
+        // 還會把推桿推到接近行程極限。「吸不到就繼續走」是**設計要求**，不是妥協。
+        //
+        // ⚠️ 因此這條路徑**不能拿來宣稱吸附系統可用** —— 它連驗都沒驗。
+        auto slaves = group_slaves_(group);
+        if (slaves.empty()) return "ERR unknown_group\n";
+        // 依預設脈衝分組。四顆同值時只有一組 → 一次 sync 觸發、四顆同時動。
+        // 若日後常數分歧，退化成逐組依序移動**並印出提示**，而不是靜默地只採用
+        // 其中一個值（那正是 CH_BRUSH 5/15 那類「送出成功但打錯地方」的形狀）。
+        std::map<int, std::vector<int>> by_pulse;
+        for (int s : slaves) by_pulse[preset_extend_pulse_for_slave_(s)].push_back(s);
+        if (by_pulse.size() > 1)
+            std::cout << "[pusher extend_raw] ⚠ 預設脈衝不一致，分 " << by_pulse.size()
+                      << " 組依序移動（非同時）\n";
+        for (auto& kv : by_pulse) {
+            const int pulse = kv.first;
+            auto& grp = kv.second;
+            std::cout << "[pusher extend_raw] pulse=" << pulse
+                      << " (" << (pulse / 3000.0) << "cm) slaves=" << grp.size() << "\n";
+            if (try_or_pause_([this, pulse, &grp]() { return pusher_move_many_(grp, pulse); },
+                              "manual_pusher_" + group + "_extend_raw")) return on_abort();
+        }
+        return "OK\n";
+    }
     if (pos == "extend") {
         // Manual extend mirrors auto-cycle extend logic: per-slave start pulses
         // from last_seal_pulse_ + B compensation, vacuum early-stop, fine_tune
@@ -4057,7 +4128,30 @@ std::string WashRobot::cmd_pusher(const std::string& group, const std::string& p
         if (try_or_pause_([this, group, &slaves]() { return smart_extend_subset_(group, slaves); }, ctx)) return on_abort();
         return "OK\n";
     }
-    return "ERR expected_extend_or_retract\n";
+    return "ERR expected_extend_or_retract_or_extend_raw\n";
+}
+
+// [2026-09-01 per user] 把 do_sync_imu_roll_correct_() 開成獨立指令。
+//
+// 為什麼開成指令而不是在測試腳本裡重寫：那段有調過的幾何與判準
+// （6 筆平均、FOLLOWER_SPAN_CM tan 換算、FOLLOWER_ROLL_TOL_DEG 容許、
+// ROLL PANIC、最多 FOLLOWER_IMU_MAX_PASSES 輪）。在腳本裡重寫等於維護
+// 兩份會各自漂移的實作 —— 而其中一份還是安全相關的。
+//
+// ⚠️ 現值 FOLLOWER_ROLL_TOL_DEG = 2.0，|roll| 低於它就直接判定「夠平」返回，
+// 所以小角度時本指令**多半不會做任何動作**（回 OK 是「不需要修」不是「修好了」）。
+// 實際有沒有介入要看 EVT：step_sync_imu_ok / _no_converge / _roll_panic。
+std::string WashRobot::cmd_imu_level() {
+    State cur = state_.load();
+    if (cur == State::Error || cur == State::Running || cur == State::Balancing
+        || cur == State::ReturningHome || cur == State::WaitingConfirm
+        || cur == State::PausedOnError)
+        return state_violation_(cur);
+
+    std::lock_guard<std::mutex> lk(motion_mtx_);
+    abort_flag = false;
+    do_sync_imu_roll_correct_();
+    return "OK\n";
 }
 
 // Manual single-slave ZDT extend / retract. Picks per-slave extend pulse based

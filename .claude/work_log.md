@@ -316,6 +316,153 @@ threshold 再實作」：① `cmd_hold` 與 motion 互斥（避免 hold 跟 moti
 
 ---
 
+## 2026-09-01（續十一）— 🔴🔴 查到連線失步的**真正根因**：`available()` 跨執行緒改 socket 模式且不拿鎖
+
+### 起因：使用者的一句提問
+
+跑週期測試時 `.20` 匯流排卡死（四顆 ZDT 全滅、`Recv-Q=8` 持續、只有重啟程式能救）。
+使用者問：**「有沒有可能是 TCP_client 因為太多人引用，本身沒有 mutex，導致多個物件同時送出封包相撞？」**
+
+順著查下去，答案比問題本身更嚴重。
+
+### 第一層（使用者猜對的部分）：`socket_mtx` 是「每次呼叫」原子，不是「每筆交易」原子
+
+裸的 `sendData()` + `receiveData()` 對之間**鎖是放開的**，共用同一個 `TCP_client` 的另一條
+執行緒可以插進來：`T1 send(A) → T2 send(B) → T1 recv() 拿到 B 的回覆`。
+
+📌 **程式碼早就記載過這件事**：`TCP_client::sendAndReceive()` 的標頭註解寫著
+「Pre-existing send/recv pair pattern **was racy because the mutex was released between
+the two calls**」—— 它就是為此而寫的（為吊機端共用網關）。**但本體的 5 支裸對驅動從未跟進。**
+
+`.20` 上同時掛著 **ZDT 5~8 + PQW 12 + DM2J 14**，三支全是裸對；而 app 層的 `zdt_bus_mtx_`
+**只有 ZDT 在拿**（`WASH_ROBOT.cpp:165` 自己寫明 DM2J 不拿，PQW 也不拿）。
+⚠️ **CLAUDE.md 有一句要更正**：說 rail sweep 與主執行緒「靠 `TCP_client::socket_mtx`
+序列化（**幀不會交錯**）」—— 那句只有 per-call 成立。
+
+### 🔴🔴 第二層（真正的根因）：`available()` 不拿鎖，而且會改 socket 模式
+
+```cpp
+int TCP_client::available() {            // ← 沒有 lock_guard
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);   // 改共用 socket 的模式
+    int r = recv(sock, &tmp, 1, MSG_PEEK);
+    fcntl(sock, F_SETFL, flags);                // 還原
+```
+
+而 `reconnectLoop` **對每一個連線、每 500ms 呼叫它一次**
+（`if (!connected || available() < 0)`，連線正常時短路讓它一定被執行）。
+
+| | 故障 |
+|---|---|
+| **(a)** | 監看緒設非阻塞的瞬間，worker 正在 `recv()` → 立刻 EAGAIN → 判定「無回覆」→ 裝置隨後送到的回覆沒人讀 → **失步** |
+| **(b)** | `sendAndReceive`/`drainRx` 的排空也會 `F_GETFL`/設 `O_NONBLOCK`/還原。若 `available()` **在排空期間**讀到 flags，讀到的「原值」已含 `O_NONBLOCK`，還原時把非阻塞寫回去 → **socket 永久非阻塞，之後每次 recv 立刻 EAGAIN、每筆交易都「逾時」** |
+
+### 🔬 現場指紋（決定性證據）
+
+```
+17:24:53.170 [ZDT:5] RX Pos Mode: TIMEOUT
+17:24:53.271 [ZDT:5] RX Pos Mode: TIMEOUT     ← 只差 101ms
+```
+那條重試路徑上，兩次 TIMEOUT 之間**應該**有 `readEcho(500)` + `release_stall_flag()` +
+`sleep(100)` ≥600ms，且 recv 逾時本身設 300ms。**實測 101ms ⇒ 那些 recv 根本沒有等。**
+（稍早 17:21:28.712 → .812 也是 100ms，一模一樣。）
+
+**這一條同時解釋了今天所有對不上的觀察：**
+- `Recv-Q` 持續非 0 —— 回覆有到，但每次 recv 立刻 EAGAIN 不讀它
+- **只有重連救得回來** —— 新 socket ＝ 全新 flags
+- 隨機、跨網關、跨兩支程式 —— 每個 `TCP_client` 都有自己的 500ms 監看緒
+- **補了排空還是會卡** —— 排空清得掉緩衝區，清不掉 socket 模式
+
+🔴 **這推翻了今天稍早的兩次歸因**：先前記的「遲到回覆落在下一筆 recv 窗口」與
+「執行緒交易交錯」都是**可能存在但不是主因**的機制。真正一直在製造失步的是這條。
+
+### 修法（已上線）
+
+| 項目 | 內容 |
+|---|---|
+| `available()` | ① 拿 `socket_mtx`（reconnectLoop 是先呼叫、返回後才建 lock_guard，非巢狀，無死鎖）② Linux 改用 `recv(MSG_PEEK\|MSG_DONTWAIT)`，**完全不碰 `fcntl`** —— 不去動共用狀態比加鎖更徹底。Windows 無 `MSG_DONTWAIT`，維持 ioctl 但移進鎖內 |
+| ZDT 原子化 | 17 個送出點收斂成一支 `txn()`（`sendAndReceive`）。**只有 `trigger_sync_move` 刻意保留裸送出** —— 廣播無回覆，`txn()` 會把「送出失敗」與「無回覆」收斂成同一個空值，等於拿掉它唯一的錯誤偵測 |
+
+📌 檔案內剩下的所有 `fcntl` 模式切換（`drainRx`/`sendData`/`sendAndReceive`/`sendAndReceiveQuiet`
+的排空）**全部在 `socket_mtx` 內**，這條競態徹底關閉。
+📌 **附帶效益**：ZDT 自動納入「連續 10 次接收逾時 → 主動斷線」守衛。先前它走裸對，
+守衛看不到它 —— 卡死時**沒有任何機制救得回來**，只能人工重啟程式。
+
+⚠️ **一個明著記的行為變更**：`release_stall_flag()` 原本在**送出失敗**時回 `false`（＝無錯），
+改用原子交易後無法區分送出失敗與無回覆，一律視為失敗。比原本誠實（指令沒送出去卻回報成功
+是錯的），但它是行為變更。
+
+🔴 **未改**：`DM2J` / `PQW` / `XKC` / `DY_500` 四支仍是裸對（per user：先改 ZDT 一支、實機驗證）。
+
+---
+
+### 同日其他修正
+
+**`do_sync_imu_roll_correct_` 發散守衛**（週期測試第 5 步實測發散）
+```
+pass 0 roll=+2.69° → roll_correct  2
+pass 1 roll=-5.29° → roll_correct -5   ← 反號且更大
+pass 2 roll=+6.39° → roll_correct  6   ← 再反號再更大
+NOT converged — roll=-6.53°  → 回程一啟動就撞中止門檻
+```
+原邏輯只有「收斂了就停」與「試滿 3 輪」，**沒有「越修越糟就住手」的概念**。
+已加：上一輪修完 `|roll|` 沒變小就立刻停手。同時保護正式走法（`do_step_sync_` 呼叫同一函式）。
+
+🔴 **更深一層：致動解析度不足，這個迴路結構上無法收斂。** 手動送 `roll_correct 1`（最小步）
+實測 roll 變化 **−4.73°**，而吊機位置顯示 `L 放 2 / R 收 3`＝**指令 1cm、實際動了約 5cm**。
+回推 4.73°÷5cm ≈ 0.95°/cm ⇒ **幾何模型（`FOLLOWER_SPAN_CM=100`）其實是對的，
+問題是吊機做不出小的差動位移**。而容許帶 `FOLLOWER_ROLL_TOL_DEG` 只有 2° —— 最小可執行步
+（≈5°）比死區還大。**修法方向不是校幾何常數，是讓吊機能執行小差動，或把容許帶開到比最小步大。**
+
+**`cmd_pwm_set` 關閉方向不再被狀態擋**：中止時腳本送 `pwm ... duty=5`（停止）收到
+`ERR state_violation current=error`（`emergency_stop` 先把本體打進 Error）。那次剛好風扇本來
+就關著，但**若中止發生在「風扇已開、吊機移動中」，螺旋槳會停在 7% 一直吹而腳本無法關掉**。
+判準：**把螺旋槳關掉永遠不是危險方向**。只有 `duty > PWM_STEP_OFF_DUTY_PCT` 才維持 gating。
+
+**四支新指令**：`relay_status` / `relay <ch> <on|off>`（見續十）、
+`pusher <group> extend_raw`（不尋封的伸出）、`imu_level`（單獨執行步後 IMU 校平）。
+
+🔴 **`extend_raw` 的存在理由（per user）**：**有些玻璃面有縫隙**，吸盤落在縫上本來就吸不住
+—— 那是現場條件不是故障。而 `smart_extend_subset_` 會為了找封一路補伸（最多 ~16cm）並重試，
+在有縫的面上是徒勞且會把推桿推到接近行程極限。**「吸不到就繼續走」是設計要求，不是妥協。**
+
+---
+
+### ⚠️ 一個我犯的錯，值得單獨記
+
+**`init` 會用當下姿態取 IMU 基準（`imu_take_baseline_`）。我在提醒過這個風險之後，
+還是在機器歪 2.92° 的狀態下按了 init**，把 2.92° 定義成「水平」。後果兩層：
+① `status` 的 `roll` 恆報 0，**中止門檻整個偏移 2.9°**（真實 +6° 讀成 +3.1° 不觸發）；
+② `imu_push_loop_` 推給吊機的也是扣基準的值 → **吊機平衡迴路會把機器維持在歪 2.9° 的姿態**。
+
+**兩個對策已落地**：
+- 測試腳本的監看與統計**一律讀 `raw_x`**（IMU 直出、與基準無關）。**安全門檻不可以建立在會漂的基準上。**
+- 要重取基準用 `imu_zero`（只動 IMU 基準），不要用 `init`（會連帶重設上滑台零點、又撞吊機水閥）
+
+---
+
+### 週期測試（機構耐久，per user 設計）
+
+一個週期 = 下行 5 步 × 40cm（走滿 200cm）+ 回程拉回頂端。每步：
+風扇關 → 開真空閥 → `extend_raw` 10cm → `pusher all retract`（內建關閥→洩壓→CH6 正壓 500ms→
+兩段收回）→ 風扇 7% → delay 1s → `pay_out 40` → 靜置 → （`imu_level` 已移除）。
+
+📌 **`imu_level` 已從週期移除**（per user 原本要保留，實測發散後移除）。移動中的姿態由吊機端
+IMU 平衡迴路負責就夠了 —— 拿掉它之後 5 步全乾淨。
+📌 **回程由 50Hz 改 30Hz**：50Hz 實測左右差瞬間 **9cm**，而韌體自己的 `length_diff_max_cm` 是 10
+—— 放寬腳本門檻沒有意義，韌體會先擋。30Hz 多次驗證瞬態差最大 7cm。
+
+**根因修正後的第一趟（1 週期）**：零中止、`.20`/`.22` `Recv-Q` 皆 0、**ZDT 錯誤 0**
+（上一輪是四顆全滅）、連續逾時斷線守衛 0 次觸發。
+
+⚠️ **兩件不能宣稱**：
+① **姿態變好不能記在傳輸層修正頭上** —— 出帶率由 88~100% 掉到 0~25% 很漂亮，但**基準偏移
+同時由 0.85° 降到 0.36°**，判定門檻整個位移了。兩者之間沒有機制上的因果。
+② **一趟乾淨不等於根因解決** —— 今天的卡死都是跑 20~40 分鐘才浮現，而那趟只有 2 分鐘。
+`available()` 的競態窗口是每 500ms 一次、每條連線各自獨立，要撞上需要時間累積。
+
+---
+
 ## 2026-09-01（續十）— 繼電器逐顆實測：8 格裡 1 格是錯的，而且錯的那格關掉了半套真空系統
 
 ### 起因

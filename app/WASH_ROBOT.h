@@ -156,7 +156,14 @@ public:
     std::string cmd_water_pump(bool on);                 // water tank pump (PQW CH6)
     std::string cmd_water_inlet(bool on);                // water inlet ball valve [2026-06-05 控制權移到 crane PQW (.34 slave 12 CH4)]
     std::string cmd_water_level();                       // XKC-Y25 一次性讀取水位 (2026-06-06)
+    // pos: extend | retract | extend_raw
+    //   extend      = smart_extend_subset_（尋封：吸不住就補伸最多到 ~16cm 並重試）
+    //   extend_raw  = 🆕 2026-09-01 推到預設脈衝就停，**不驗真空度**。
+    //                 現場條件：有些玻璃面有縫隙，吸盤落在縫上本來就吸不住，
+    //                 尋封在那種面上是徒勞且會把推桿推到接近行程極限。
     std::string cmd_pusher(const std::string& group, const std::string& pos);
+    // [2026-09-01 per user] 單獨執行同步步伐的 IMU 差動校平（見 .cpp 的說明）。
+    std::string cmd_imu_level();
     std::string cmd_zdt_pusher(int slave, const std::string& action);   // single-slave manual extend/retract (slave 1..9)
     std::string cmd_zdt_zero(const std::string& group);   // "feet"|"body"|"center"|"all" — set current ZDT pos as new zero (manual 3.1.3)
     std::string cmd_zdt_disable(int slave);  // exclude slave 1..9 from all group ZDT ops (e.g. not yet installed)

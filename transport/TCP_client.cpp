@@ -650,7 +650,42 @@ int TCP_client::sendAndReceiveQuiet(const char* tx_buf, int tx_len,
 
 //=========== utility: available / close ===========
 
+// 🔴🔴 [2026-09-01] 兩處修正 —— 這支先前是**跨執行緒改共用 socket 模式而且不拿鎖**。
+//
+// 舊版行為：`fcntl(F_GETFL)` → `fcntl(F_SETFL, flags|O_NONBLOCK)` → `recv(MSG_PEEK)`
+//           → `fcntl(F_SETFL, flags)` 還原，**全程沒有 socket_mtx**。
+// 而 reconnectLoop 對**每一個連線、每 500ms** 呼叫它一次（連線正常時
+// `if (!connected || available() < 0)` 的短路讓 available() 一定被執行）。
+//
+// 造成兩種故障：
+//
+// (a) **讓別條執行緒的阻塞 recv() 瞬間返回**
+//     監看緒把 socket 設成非阻塞的那一瞬間，worker 正在 sendAndReceive 的 recv()
+//     裡 → 立刻 EAGAIN → 驅動判定「無回覆」→ 裝置隨後送到的回覆沒人讀 → 失步。
+//
+// (b) **把 socket 永久留在非阻塞** ← 這個是永久性的
+//     sendAndReceive/drainRx 的排空也會 F_GETFL / 設 O_NONBLOCK / 還原。
+//     若 available() 在**排空期間**讀到 flags，它讀到的「原值」已含 O_NONBLOCK，
+//     還原時就把非阻塞寫回去 → **之後每次 recv 立刻 EAGAIN、每筆交易都「逾時」**。
+//
+// 🔬 現場指紋（2026-09-01 `.20` 匯流排卡死）：
+//     17:24:53.170 [ZDT:5] RX Pos Mode: TIMEOUT
+//     17:24:53.271 [ZDT:5] RX Pos Mode: TIMEOUT   ← 只差 101ms
+//     那條路徑上兩次 TIMEOUT 之間應有 readEcho(500) + release_stall_flag + sleep(100)
+//     ≥600ms，且 recv 逾時本身設 300ms。**實測只差 101ms ＝ 那些 recv 根本沒有等。**
+//     這同時解釋了：Recv-Q 持續非 0（回覆有到但每次 recv 立刻 EAGAIN 不讀）、
+//     只有重連救得回來（新 socket ＝ 全新 flags）、隨機且跨網關跨程式發生
+//     （每個 TCP_client 都有自己的 500ms 監看緒）、以及為什麼補了排空還是會卡
+//     （排空清得掉緩衝區，清不掉 socket 模式）。
+//
+// 修法：
+//   ① 拿 socket_mtx。reconnectLoop 是「先呼叫本函式、返回後才建 lock_guard」，
+//      不是巢狀持有，沒有死鎖風險。代價只是健康檢查可能排在一筆長 recv 之後。
+//   ② Linux 改用 MSG_DONTWAIT，**完全不碰 fcntl** —— 根本不去動共用狀態，
+//      比加鎖更徹底：即使日後有人忘了鎖，也不會再把模式改壞。
+//      Windows 沒有 MSG_DONTWAIT，維持 ioctl，但現在在鎖內。
 int TCP_client::available() {
+	std::lock_guard<std::mutex> lock(socket_mtx);
 	if (sock == INVALID_SOCKET) return -1;
 #ifdef _WIN32
 	u_long mode = 1;
@@ -671,12 +706,10 @@ int TCP_client::available() {
 	// `available() < 0` check silently never fired on a clean remote
 	// shutdown and the connection stayed "connected" forever. Mirrors the
 	// Windows branch above.
-	int flags = fcntl(sock, F_GETFL, 0);
-	fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+	// MSG_DONTWAIT 取代先前的 fcntl 切換 —— 見上方 (a)(b) 的說明。
 	char tmp;
-	int r = recv(sock, &tmp, 1, MSG_PEEK);
+	int r = recv(sock, &tmp, 1, MSG_PEEK | MSG_DONTWAIT);
 	int err = errno;
-	fcntl(sock, F_SETFL, flags);
 	if (r > 0) return 1;
 	if (r == 0) return -1;                                // peer closed
 	if (err == EWOULDBLOCK || err == EAGAIN) return 0;     // no data, still open

@@ -105,6 +105,34 @@ private:
 	uint16_t modbusCRC(const uint8_t* data, int len);
 	std::vector<uint8_t> build_write_single_register(uint16_t reg_addr, uint16_t value);
 	void printHex(const std::vector<uint8_t>& data, const std::string& prefix);
+	// 🔴 [2026-09-01] 原子交易：drain → send → recv 全程握著 TCP_client 的
+	// socket_mtx，中間不放鎖。**取代原本的 `drainRx() + sendData() + readEcho()` 三連**。
+	//
+	// 為什麼非改不可：`socket_mtx` 是**每次呼叫**原子，不是**每筆交易**原子。
+	// 裸的 send/recv 對之間鎖是放開的，所以共用同一個 TCP_client 的另一條執行緒
+	// 可以插進來：
+	//     T1 sendData(A) → T2 sendData(B) → T1 receiveData() 拿到 B 的回覆
+	// `.20` 這條匯流排上同時掛著 **ZDT 推桿 5~8 + PQW 繼電器 12 + DM2J 上滑台 14**，
+	// 而 app 層的 `zdt_bus_mtx_` 只有 ZDT 的群組操作在拿 —— PQW 與 DM2J 都不拿
+	// （見 WASH_ROBOT.cpp:165）。所以 ZDT 對 PQW／DM2J 之間沒有任何交易級互斥。
+	// ⚠️ CLAUDE.md 原本寫「靠 TCP_client::socket_mtx 序列化（幀不會交錯）」——
+	//    那句只有 per-call 成立，交易會交錯，幀當然也會。
+	//
+	// 📌 `TCP_client::sendAndReceive()` 的標頭註解早就記載過同一個 race，它就是為此
+	// 而寫的（2026 年較早，為吊機端共用網關），但本體這 5 支裸對驅動從未跟進。
+	// 08-28 只在送出前補 `drainRx()` 不夠：排空只能清「已躺在緩衝區」的位元組，
+	// **抓不到在 recv 窗口內才抵達的遲到回覆**。2026-09-01 實測 `.20` 卡死
+	// （`Recv-Q=8` 持續、四顆 ZDT 全滅、只有重連能清）就是這條路徑。
+	//
+	// 附帶效益：改用 sendAndReceive 之後，本驅動自動納入 TCP_client 的
+	// 「連續 10 次接收逾時 → 主動斷線」守衛（那個守衛只加在原子交易 API 上）。
+	// 先前 ZDT 走裸對，守衛看不到它，卡死時**沒有任何機制救得回來**，只能重啟程式。
+	//
+	// 回傳空 vector = 失敗（送出失敗或無回覆／CRC 錯）。呼叫端本來就一律把空當失敗。
+	std::vector<uint8_t> txn(const std::vector<uint8_t>& cmd, int recv_timeout_ms);
+
+	// ⚠️ 仍保留：重試迴圈與 trigger_sync_move 用它做「排掉殘留位元組」，那是純讀取
+	// 不配對送出，不適用 txn()。一般交易請一律用 txn()。
 	std::vector<uint8_t> readEcho(int timeout_ms);
 };
 

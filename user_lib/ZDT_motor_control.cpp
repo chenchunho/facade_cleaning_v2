@@ -53,9 +53,7 @@ bool ZDT_motor_control::set_zero() {
 	if (!client) return true;
 	auto cmd = build_write_single_register(0x000A, 0x0001);
 	LOG_HEX(_log_tag, "TX set_zero", cmd.data(), (int)cmd.size());
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
-	auto resp = readEcho(200);
+	auto resp = txn(cmd, 200);
 	LOG_HEX(_log_tag, "RX set_zero", resp.data(), (int)resp.size());
 	return !(resp.size() > 0 && resp == cmd);
 }
@@ -64,10 +62,10 @@ bool ZDT_motor_control::calibrate_encoder() {
 	if (!client) return true;
 	auto cmd = build_write_single_register(0x0006, 0x0001);
 	LOG_HEX(_log_tag, "TX calibrate_encoder", cmd.data(), (int)cmd.size());
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
-	std::this_thread::sleep_for(std::chrono::milliseconds(500));
-	auto resp = readEcho(500);
+	// [2026-09-01] 原本是「送出 → 固定睡 500ms → 讀(逾時 500ms)」。改成原子交易後
+	// recv 會阻塞到位元組抵達為止，所以固定睡眠沒有存在意義，等待上限合併為 1000ms
+	// （＝原本的 500 睡 + 500 讀），最壞情況不變、一般情況更快。
+	auto resp = txn(cmd, 1000);
 	LOG_HEX(_log_tag, "RX calibrate_encoder", resp.data(), (int)resp.size());
 	return !(resp.size() > 0 && resp == cmd);
 }
@@ -76,9 +74,7 @@ bool ZDT_motor_control::reset_motor() {
 	if (!client) return true;
 	auto cmd = build_write_single_register(0x0008, 0x0001);
 	LOG_HEX(_log_tag, "TX reset_motor", cmd.data(), (int)cmd.size());
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
-	auto resp = readEcho(200);
+	auto resp = txn(cmd, 200);
 	LOG_HEX(_log_tag, "RX reset_motor", resp.data(), (int)resp.size());
 	return !(resp.size() > 0 && resp == cmd);
 }
@@ -96,9 +92,7 @@ bool ZDT_motor_control::motion_control_driver_EN(bool status) {
 	cmd.push_back((uint8_t)(crc >> 8));
 
 	LOG_HEX(_log_tag, status ? "TX Driver EN ON" : "TX Driver EN OFF", cmd.data(), (int)cmd.size());
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
-	auto resp = readEcho(200);
+	auto resp = txn(cmd, 200);
 	LOG_HEX(_log_tag, "RX Driver EN", resp.data(), (int)resp.size());
 	return !(resp.size() == 8 && resp[1] == 0x10);
 }
@@ -114,10 +108,7 @@ bool ZDT_motor_control::get_system_status() {
 	cmd.push_back((uint8_t)(crc >> 8));
 
 	LOG_HEX(_log_tag, "TX get_status", cmd.data(), (int)cmd.size());
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
-
-	auto resp = readEcho(300);
+	auto resp = txn(cmd, 300);
 	LOG_HEX(_log_tag, "RX get_status", resp.data(), (int)resp.size());
 
 	// Emm response: Addr(1) + Func(1) + ByteCount(1) + Data(32) + CRC(2) = 37 bytes
@@ -235,10 +226,7 @@ bool ZDT_motor_control::read_driver_config(uint16_t out[15]) {
 	cmd.push_back((uint8_t)(crc >> 8));
 
 	LOG_HEX(_log_tag, "TX read_driver_config", cmd.data(), (int)cmd.size());
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
-
-	auto resp = readEcho(300);
+	auto resp = txn(cmd, 300);
 	LOG_HEX(_log_tag, "RX read_driver_config", resp.data(), (int)resp.size());
 
 	// Expected: Addr(1) + FC(1) + byteCount(1) + 30 data + CRC(2) = 35 bytes
@@ -281,10 +269,7 @@ bool ZDT_motor_control::write_driver_config(const uint16_t in[15], bool store) {
 	cmd.push_back((uint8_t)(crc >> 8));
 
 	LOG_HEX(_log_tag, "TX write_driver_config", cmd.data(), (int)cmd.size());
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
-
-	auto resp = readEcho(300);
+	auto resp = txn(cmd, 300);
 	LOG_HEX(_log_tag, "RX write_driver_config", resp.data(), (int)resp.size());
 
 	// Echo: Addr + FC + reg_addr(2) + qty(2) + CRC(2) = 8 bytes
@@ -325,10 +310,7 @@ bool ZDT_motor_control::release_stall_flag() {
 
 	LOG_HEX(_log_tag, "TX release_stall", cmd.data(), (int)cmd.size());
 
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return false;
-
-	auto resp = readEcho(200);
+	auto resp = txn(cmd, 200);
 
 	LOG_HEX(_log_tag, "RX release_stall", resp.data(), (int)resp.size());
 
@@ -343,10 +325,7 @@ bool ZDT_motor_control::emergency_stop(bool sync) {
 	auto cmd = build_write_single_register(0x00FE, data);
 
 	LOG_HEX(_log_tag, "TX emergency_stop", cmd.data(), (int)cmd.size());
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
-
-	auto resp = readEcho(200);
+	auto resp = txn(cmd, 200);
 	LOG_HEX(_log_tag, "RX emergency_stop", resp.data(), (int)resp.size());
 
 	// FC 0x06 reply echoes the command
@@ -381,15 +360,9 @@ bool ZDT_motor_control::motion_control_speed_mode(int dir, int acc_rpm, int rpm,
 			std::snprintf(tx_label, sizeof(tx_label), "TX Speed Mode");
 		LOG_HEX(_log_tag, tx_label, cmd.data(), (int)cmd.size());
 
-		client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-		if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) {
-			LOG_ERR(_log_tag, "Send failed, waiting for retry");
-			attempt++;
-			std::this_thread::sleep_for(std::chrono::milliseconds(50));
-			continue;
-		}
-
-		auto resp = readEcho(200);
+		// [2026-09-01] 原子交易。送出失敗與無回覆在這一層已無法區分，兩者都得到
+		// 空 resp，往下走同一條重試路徑（原本送出失敗是另一條 50ms 重試分支）。
+		auto resp = txn(cmd, 200);
 
 		if (resp.empty())
 			LOG_ERR(_log_tag, "RX Speed Mode: TIMEOUT");
@@ -461,15 +434,9 @@ bool ZDT_motor_control::motion_control_pos_mode(int dir, int acc_rpm, int rpm, i
 			std::snprintf(tx_label, sizeof(tx_label), "TX Pos Mode");
 		LOG_HEX(_log_tag, tx_label, cmd.data(), (int)cmd.size());
 
-		client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-		if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) {
-			LOG_ERR(_log_tag, "Send failed, waiting for retry");
-			attempt++;
-			std::this_thread::sleep_for(std::chrono::milliseconds(50));
-			continue;
-		}
-
-		auto resp = readEcho(300);
+		// [2026-09-01] 原子交易。送出失敗與無回覆在這一層已無法區分，兩者都得到
+		// 空 resp，往下走同一條重試路徑（原本送出失敗是另一條 50ms 重試分支）。
+		auto resp = txn(cmd, 300);
 
 		if (resp.empty())
 			LOG_ERR(_log_tag, "RX Pos Mode: TIMEOUT");
@@ -547,15 +514,9 @@ bool ZDT_motor_control::motion_control_pos_mode_nowait(int dir, int acc_rpm, int
 			std::snprintf(tx_label, sizeof(tx_label), "TX Pos Mode");
 		LOG_HEX(_log_tag, tx_label, cmd.data(), (int)cmd.size());
 
-		client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-		if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) {
-			LOG_ERR(_log_tag, "Send failed, waiting for retry");
-			attempt++;
-			std::this_thread::sleep_for(std::chrono::milliseconds(50));
-			continue;
-		}
-
-		auto resp = readEcho(300);
+		// [2026-09-01] 原子交易。送出失敗與無回覆在這一層已無法區分，兩者都得到
+		// 空 resp，往下走同一條重試路徑（原本送出失敗是另一條 50ms 重試分支）。
+		auto resp = txn(cmd, 300);
 
 		if (resp.empty())
 			LOG_ERR(_log_tag, "RX Pos Mode: TIMEOUT");
@@ -596,9 +557,7 @@ bool ZDT_motor_control::factory_reset() {
 	// 3.1.5 factory reset: Func 0x06, Reg 0x000F, Data 0x0001
 	auto cmd = build_write_single_register(0x000F, 0x0001);
 	LOG_HEX(_log_tag, "TX factory_reset", cmd.data(), (int)cmd.size());
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
-	auto resp = readEcho(500);
+	auto resp = txn(cmd, 500);
 	LOG_HEX(_log_tag, "RX factory_reset", resp.data(), (int)resp.size());
 	return !(resp.size() > 0 && resp == cmd);
 }
@@ -612,9 +571,7 @@ bool ZDT_motor_control::trigger_home(int mode, bool sync) {
 	uint16_t data = ((uint16_t)mode << 8) | (sync ? 0x01 : 0x00);
 	auto cmd = build_write_single_register(0x009A, data);
 	LOG_HEX(_log_tag, "TX trigger_home", cmd.data(), (int)cmd.size());
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
-	auto resp = readEcho(200);
+	auto resp = txn(cmd, 200);
 	LOG_HEX(_log_tag, "RX trigger_home", resp.data(), (int)resp.size());
 	return !(resp.size() > 0 && resp == cmd);
 }
@@ -624,9 +581,7 @@ bool ZDT_motor_control::abort_home() {
 	// 3.3.3 force abort home: Func 0x06, Reg 0x009C(Emm), Data [0x48, 0x00]
 	auto cmd = build_write_single_register(0x009C, 0x4800);
 	LOG_HEX(_log_tag, "TX abort_home", cmd.data(), (int)cmd.size());
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
-	auto resp = readEcho(200);
+	auto resp = txn(cmd, 200);
 	LOG_HEX(_log_tag, "RX abort_home", resp.data(), (int)resp.size());
 	return !(resp.size() > 0 && resp == cmd);
 }
@@ -640,7 +595,14 @@ bool ZDT_motor_control::trigger_sync_move() {
 	cmd.push_back((uint8_t)(crc & 0xFF));
 	cmd.push_back((uint8_t)(crc >> 8));
 	LOG_HEX(_log_tag, "TX trigger_sync", cmd.data(), (int)cmd.size());
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
+	// ⚠️ [2026-09-01] **本函式刻意保留裸 drainRx + sendData，不改用 txn()**：
+	// 這是廣播（slave 0x00），依規範沒有從站會回覆，所以「沒有回覆」是正常結果，
+	// 而本函式唯一偵測得到的錯誤就是**送出失敗** —— txn() 把送出失敗與無回覆
+	// 收斂成同一個空 vector，會讓這裡唯一的錯誤偵測消失。
+	// 殘餘風險可接受：其餘 16 個 ZDT 站點改為原子之後，本函式的送出已不可能插進
+	// 別的 ZDT 交易中間（對方全程握鎖）。仍能交錯的只剩同匯流排上尚未原子化的
+	// PQW / DM2J —— 那兩支本來就還沒改，屬於下一階段。
+	client->drainRx();
 	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) {
 		LOG_ERR(_log_tag, "trigger_sync: send failed");
 		return true;   // error — the only failure this function can actually detect
@@ -679,9 +641,7 @@ bool ZDT_motor_control::set_home_zero_position(bool store) {
 	uint16_t data = (0x88 << 8) | (store ? 0x01 : 0x00);
 	auto cmd = build_write_single_register(0x0093, data);
 	LOG_HEX(_log_tag, "TX set_home_zero", cmd.data(), (int)cmd.size());
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	if (!client->sendData((char*)cmd.data(), (int)cmd.size(), 100)) return true;
-	auto resp = readEcho(200);
+	auto resp = txn(cmd, 200);
 	LOG_HEX(_log_tag, "RX set_home_zero", resp.data(), (int)resp.size());
 	return !(resp.size() > 0 && resp == cmd);
 }
@@ -709,6 +669,28 @@ std::vector<uint8_t> ZDT_motor_control::build_write_single_register(uint16_t reg
 
 void ZDT_motor_control::printHex(const std::vector<uint8_t>& data, const std::string& prefix) {
 	LOG_HEX(_log_tag, prefix.c_str(), data.data(), (int)data.size());
+}
+
+// 🔴 [2026-09-01] 原子交易 —— 見標頭的完整說明。
+// 與 readEcho() 共用同一套 CRC 檢查（刻意不查 slave id：trigger_sync_move
+// 廣播到 0x00，在這一層做 per-slave 檢查對那條路是錯的）。
+std::vector<uint8_t> ZDT_motor_control::txn(const std::vector<uint8_t>& cmd, int recv_timeout_ms) {
+	if (!client) return {};
+	uint8_t buf[128];
+	// send_timeout 100ms 沿用原本 sendData 的值，recv_timeout 由呼叫端指定
+	// （沿用各站點原本傳給 readEcho 的數字，不趁機改時序）。
+	const int n = client->sendAndReceive((const char*)cmd.data(), (int)cmd.size(),
+	                                     (char*)buf, sizeof(buf), 100, recv_timeout_ms);
+	if (n <= 0) return {};
+
+	if (n >= 4) {
+		const uint16_t rx_crc = (uint16_t)buf[n - 2] | ((uint16_t)buf[n - 1] << 8);
+		if (modbusCRC(buf, n - 2) != rx_crc) {
+			LOG_ERR(_log_tag, "reply CRC mismatch (%d bytes) — frame dropped", n);
+			return {};
+		}
+	}
+	return std::vector<uint8_t>(buf, buf + n);
 }
 
 std::vector<uint8_t> ZDT_motor_control::readEcho(int timeout_ms) {

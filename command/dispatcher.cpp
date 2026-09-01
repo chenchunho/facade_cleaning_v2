@@ -312,6 +312,7 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
         }
         return "ERR usage:pwm_<set|save|status>\n";
     }
+    if (cmd == "imu_level")    return robot.cmd_imu_level();
     if (cmd == "relay_status") return robot.cmd_relay_status();
     if (cmd == "relay") {
         int ch = 0; std::string s2;
@@ -345,7 +346,7 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
     if (cmd == "water_level")    return robot.cmd_water_level();
     if (cmd == "pusher") {
         std::string g, p; iss >> g >> p;
-        if (iss.fail()) return "ERR usage:pusher_<group>_<extend|retract>\n";
+        if (iss.fail()) return "ERR usage:pusher_<group>_<extend|retract|extend_raw>\n";
         return robot.cmd_pusher(g, p);
     }
     if (cmd == "zdt_pusher") {
