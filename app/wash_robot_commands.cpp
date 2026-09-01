@@ -551,10 +551,10 @@ void WashRobot::follower_imu_level_(const std::string& move_group) {
         constexpr int GAP_MS  = 50;   // ~300ms window
         double sum = 0.0; int n = 0;
         for (int k = 0; k < SAMPLES; ++k) {
-            if (!imu_.read_error.load()) { sum += imu_.z; ++n; }
+            if (!imu_.read_error.load()) { sum += imu_.x; ++n; }
             if (k < SAMPLES - 1) sleep_ms_(GAP_MS);
         }
-        return (n > 0 ? sum / n : imu_.z) - imu_roll0_;
+        return (n > 0 ? sum / n : imu_.x) - imu_roll0_;
     };
 
     for (int pass = 0; pass < FOLLOWER_IMU_MAX_PASSES; ++pass) {
@@ -603,7 +603,7 @@ void WashRobot::follower_imu_level_(const std::string& move_group) {
         }
         sleep_ms_(FOLLOWER_IMU_SETTLE_MS);   // settle before re-reading roll
     }
-    const double end_roll = imu_.read_error.load() ? 0.0 : (imu_.z - imu_roll0_);
+    const double end_roll = imu_.read_error.load() ? 0.0 : (imu_.x - imu_roll0_);
     std::cout << "[imu_level] " << move_group << " NOT converged in " << FOLLOWER_IMU_MAX_PASSES
               << " passes — roll=" << end_roll << "° — proceed on coarse (non-fatal)\n";
     evt_("imu_level_no_converge " + move_group + " roll=" + std::to_string(end_roll));
@@ -634,15 +634,27 @@ void WashRobot::do_sync_imu_roll_correct_() {
     }
     sleep_ms_(FOLLOWER_IMU_SETTLE_MS);   // let the just-released machine stop swinging
 
+    // 🔴 [2026-09-01] 軸向修正 imu_.z -> imu_.x —— **實測證據，不是推論**：
+    //   status 實讀 ax=-0.00 ay=0.03 az=1.00  → 重力全在 Z 軸 = IMU **水平安裝**
+    //                raw_x=1.87 raw_y=0.12 raw_z=-151.05
+    //   水平安裝下 imu_.x=尤拉滾轉、imu_.z=磁力計航向角（與傾斜無關）。
+    // WASH_ROBOT.cpp:2781 那句「實測 roll 改讀 yaw 才會隨左右傾斜穩定變化」
+    // 是 **2026-08-26 垂直安裝時代**的觀察；08-27 改回水平時 cmd_status /
+    // imu_monitor_loop_ / imu_take_baseline_ 都改成 x/y 了，**只有本函式與
+    // follower_imu_level_ 和 init 的那行 print 沒改**。
+    // 🔴🔴 實際後果不是「修正方向錯」而是「從來沒修正過」：讀到 raw_z=-151 →
+    //   |−151| > BAL_CAL_ROLL_PANIC_DEG(15) 恆為真 → 每次都走 ROLL PANIC 分支
+    //   直接 return（non-fatal，只印一行）。而 do_sync_imu_roll_correct_ 在
+    //   do_step_sync_（v2 正式走法）的活路徑上。
     auto read_roll_avg = [this]() -> double {
         constexpr int SAMPLES = 6;
         constexpr int GAP_MS  = 50;   // ~300ms window, same as follower_imu_level_
         double sum = 0.0; int n = 0;
         for (int k = 0; k < SAMPLES; ++k) {
-            if (!imu_.read_error.load()) { sum += imu_.z; ++n; }
+            if (!imu_.read_error.load()) { sum += imu_.x; ++n; }
             if (k < SAMPLES - 1) sleep_ms_(GAP_MS);
         }
-        return (n > 0 ? sum / n : imu_.z) - imu_roll0_;
+        return (n > 0 ? sum / n : imu_.x) - imu_roll0_;
     };
 
     for (int pass = 0; pass < FOLLOWER_IMU_MAX_PASSES; ++pass) {
@@ -682,7 +694,7 @@ void WashRobot::do_sync_imu_roll_correct_() {
         }
         sleep_ms_(FOLLOWER_IMU_SETTLE_MS);
     }
-    const double end_roll = imu_.read_error.load() ? 0.0 : (imu_.z - imu_roll0_);
+    const double end_roll = imu_.read_error.load() ? 0.0 : (imu_.x - imu_roll0_);
     std::cout << "[step_sync_imu] NOT converged in " << FOLLOWER_IMU_MAX_PASSES
               << " passes — roll=" << end_roll << "° — proceed anyway (non-fatal)\n";
     evt_("step_sync_imu_no_converge roll=" + std::to_string(end_roll));

@@ -1322,6 +1322,20 @@ private:
     std::atomic<bool>    imu_mon_running_;
     std::thread          imu_mon_thread_;
 
+    // [2026-09-01] IMU 姿態推送（給吊機的 IMU 驅動平衡迴路用）。
+    // 🔴 **刻意用獨立執行緒，不塞進 imu_monitor_loop_** —— 那個迴圈是 45° 傾斜
+    //    緊急停止的偵測迴圈，把網路 I/O 放進去，網路一卡就會延遲傾斜偵測。
+    //    保護迴圈不可以被非保護工作阻塞。
+    // 🔴 用第三條連線（照 crane_cli_estop_ 的模式），不搶 crane_mtx_ ——
+    //    do_step_sync_ 期間主連線正阻塞在 pay_out_* 的回覆等待上。
+    //    吊機 TCP server 是多連線、每連線一執行緒，所以能平行服務。
+    std::atomic<bool>    imu_push_running_{false};
+    std::thread          imu_push_thread_;
+    TCP_client           crane_cli_imu_;
+    std::mutex           crane_imu_mtx_;
+    void                 imu_push_loop_();
+    static constexpr int IMU_PUSH_PERIOD_MS = 250;   // ~4Hz，對齊吊機 BALANCE_TICK_MS
+
     std::atomic<State>   state_;
     State                state_before_pause_;  // remembered on cmd_pause, restored on cmd_resume
     State                state_before_wait_;   // remembered on balance_ask, restored on confirm_balance / hysteresis clear

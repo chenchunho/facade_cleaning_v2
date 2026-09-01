@@ -315,6 +315,457 @@ threshold 再實作」：① `cmd_hold` 與 motion 互斥（避免 hold 跟 moti
 
 ---
 
+## 2026-09-01（續七）— 任務目標定案、四項修正實機驗證、以及一個尚未查明的連線卡死
+
+### 🎯 任務目標（per user）：**地面↔頂端 10 趟來回，全程本體平衡（roll ±1°）**
+
+**作業區間（per user 確認）**：
+```
+上限  L=0     頂端（今日歸零處）
+下限  L=229   離地 88 cm —— per user「可以接受，是安全的」
+單程  229 cm  ×  20 次橫越  =  45.8 m
+```
+
+🔴 **推翻「牆面長度 208 cm」**：per user 現場量測 `L=229` 時**離地 88 cm**
+→ 頂端到地面實際 317 cm。稍早在 `L=208` 說的「離地一點點」換算其實是**離地約 109 cm**。
+📌 這也讓早上那筆觀察前後一致了——當時就指出「張力只掉 10%、機器應該仍完全吊著」。
+**不是計米器滑差，是目視估計偏樂觀。**
+
+### ✅ 四項修正，全部有實機對照數據
+
+以同一段 40 cm 反覆測試，逐項隔離效果：
+
+| 趟 | 誤差來源 | 接近段 gate | `diff_tol` | 最大左右差 | 移動中最大 \|roll\| | 終點 roll |
+|---|---|---|---|---|---|---|
+| 1 | meter | 關閉（原行為） | 2 | 4 cm | 3.64° | −0.16° |
+| 2 | meter | ✅ 修正 | 2 | 2 cm | 1.68° | 🔴 −1.63° |
+| 3 | meter | ✅ | ✅ 1 | 3 cm | 1.89° | −0.76° |
+| 4 | **imu** | ✅ | ✅ 1 | **1 cm** | **1.32°** | **−0.41°** |
+
+**① 平衡 gate（`apply_balance_trim` 改為逐側 base_hz）**
+原本呼叫端永遠傳 `g_vfd_motion_hz`，但 `motion_rope` 有**逐側獨立**的三段煞車
+（`motion_hz` → `/2` @15cm → `fine_adjust_hz` @8cm）。減速後平衡一寫入就把速度拉回去
+——所以當初（2026-07-23）的處置是**在接近段整個關掉平衡**。
+🔴 代價實測：`pay_out 40cm` 的 0–25cm 左右差 ≤1cm（死區內，零筆 `[BAL]`），
+**25–41cm 無平衡 → 差距長到 4cm、roll 3.6°**。偏差正是在那個空白窗口長出來的。
+✅ 改傳各側**當前實際生效**的 base 後，gate 不必再關接近段。`[BAL]` log 實證：
+`L=11 R=5`（右側已 half-slow）、`reset to base L=5 R=10`（逐側 reset）。
+📌 **無平衡窗口是固定 15cm**：40cm 行程佔 37%，**229cm 只佔 6.5%**
+——我們一直在用最不利的距離做測試。
+
+**② `FINE_ADJUST_TOLERANCE_CM` 拆出左右差容許值**
+同一個常數被用在兩件語意不同的事：①每側**位置**誤差（高度，±2cm 無妨）
+②左右**差**（**姿態**，1cm ≈ 1°）。**又是「同一個數字兩種語意」**（同 08-31 減速遮罩）。
+實例：`retract 40` 收在 `L=171 R=169`，`fine_adjust` 判定「diff=2 — within ±2」就不對齊
+→ 終點 roll −1.63° 出規格。✅ 新增 `g_fine_adjust_diff_tol_cm`（預設 1）+ setter + status。
+
+**③ IMU 驅動平衡的符號 —— 🔴 我寫錯並在實機上放大了偏差**
+```cpp
+err = g_imu_roll_deg.load();              // 🔴 錯：少了 direction
+err = -(double)direction * g_imu_roll_deg.load();   // ✅ 正確
+```
+`direction` 是 +1(pay_out)/−1(retract)。**同樣的傾斜，放繩與收繩需要加速的是相反那側**：
+收繩時左繩太長要**收快左側**；放繩時左繩太長要**放慢左側**。
+🔴 **後果**：`pay_out 20cm` 期間 roll 由 −1.66° **單調惡化到 −5.18°**，被監看中止。
+✅ 修正後同一個 `pay_out 20cm`：+1.39° → −1.71°（最大偏離）→ **+0.36° 收斂**，`OK` 完成。
+`[BAL]` 顯示雙向修正（`err=-1.41→trim=-2.82` 與 `err=+1.85→trim=+3.70`）。
+📌📌 **教訓：單一方向的測試不足以驗證符號。** 我第一次只測 retract，剛好是對的方向。
+⚠️ 這正是計畫裡自己標的風險——「一個錯誤的 roll 值會主動把機器弄歪」，只是錯的是符號不是數值。
+
+**④ `dual_vfd_sync_start` 加啟動驗證**
+原本結尾直接 `HOLD_TRACE("EXIT OK (both running)")` —— **那句話從來沒被檢查過**，
+只確認「寫入成功」。實例（13:12 @50Hz）：重試回報 `errL=0`、宣告 both running，
+**左側馬達沒轉**；0.6 秒後左右差 7cm、roll 6.8°，靠 `length_diff_max_cm=5` 才中止。
+✅ 改為 Phase B 後平行 `readStatusWord()` 驗 bit0 running，未通過走既有緊急路徑。
+做法沿用同檔 `fine_adjust` 既有的 post-start 讀取（差別：那裡只印診斷，這裡當判準）。
+🔴 **窗口 200→500ms**：首次實測就用掉 **191ms**，只差 9ms 就會誤判正常啟動。
+✅ 實測不誤擋：`啟動驗證通過 (191ms, L+R running)`。
+✅ 實測有效：`retract 229` 時 Phase A 就攔下，**機器完全沒動**（對比未修正時歪 6.8°）。
+
+### 🔴🔴 未查明：SE3 連線會卡死，重啟才能恢復（今天第三次）
+
+| 時間 | 裝置 | 證據 |
+|---|---|---|
+| 11:41 | DSZL `.32` | `Recv-Q=13`、`stale/foreign reply txid=3510 want=3511` |
+| 13:12 | SE3 `@L` | 間歇 `writeParam comm fail`，重試回報成功但馬達沒轉 |
+| 13:27 | SE3 `@R` | `Recv-Q=7`，keepalive 由 50/50 → 28/22 → **0/50**（~90 秒內劣化） |
+
+**三個假設全被證據否掉**（過程記著，免得重走）：
+- ❌ **USR 網關 `_pt=0` 幀分片**：`comm fail` 的定義是 `sendModbus` 收到 **0 bytes**；
+  分片會走**另一條訊息** `bad reply len=%d`，而我們沒看到那一條。
+  → 08-28「沒有證據前不動共用設定」的決策**在今天的證據下依然成立**，`_pt` 未動。
+- ❌ **失步自我延續**：`TCP_client::sendAndReceive` **有 drain**，同一把鎖內、送出前非阻塞排空。
+- ❌ **裝置變慢**：停程式後唯讀探測（`se3_latency.py`，新增）
+  **兩側都 4.8–5.5ms、6/6 成功、回覆逐位元相同**。裝置/網關/網路全部健康。
+
+**已量到的事實**：程式端每筆交易失敗、**日誌無任何 reconnect/disconnect**、socket 仍 `ESTAB`
+且卡著一筆未讀回覆、重啟即恢復（右側 keepalive 立刻回到 `ok=10 fail=0`）。
+🔴 **機制未知。** 這是 10 趟耐久測試的頭號阻礙——中途卡死意味著中止 + 重啟。
+
+### ⚠️ 自記：我的兩個操作失誤
+
+1. **重啟太快**：`5002` 關閉後立刻啟動，舊 process 還握著 X518 的連線（有連線數上限）
+   → 新 process `dev_dsz=0`，而**旗標只在 init 設一次、本專案無 hot re-init**。
+   runbook 自己警告過「印出 `[SHUTDOWN]` 不等於結束」，**我當天稍早還正確做過這個檢查**。
+   → 之後一律等「`5002` 關閉 **且** 網關連線數歸零」才啟動。
+2. **`pkill -f <字串>` 兩次殺到自己**：ssh 遠端命令列本身含該字串。改用 `pkill -x`。
+
+### 待完成
+
+- 🔴 **SE3/DSZL 連線卡死的機制**（頭號阻礙，三次重現，重啟是唯一 workaround）
+- 🔴 **229 cm 全程從未成功跑過**（最長 40 cm）
+- 🔴 **50 Hz 從未成功跑過**（唯一一次嘗試撞上 SE3 故障）
+- 🔴 10 趟連續 + 完整軌跡證據（`retract_seg.py` 已加統計輸出：最大 roll／出帶比例／最大左右差）
+- 🟡 `BALANCE_IMU_KP=2.0` / `deadband=0.5` 仍是未調的初值（只在 10 Hz、≤40cm 驗過）
+- 🟡 Part B（`FOLLOWER_ROLL_TOL_DEG` 2.0→1.0）仍待上述驗證後再做
+
+---
+
+## 2026-09-01（續六）— IMU 驅動平衡迴路實作完成（階段 1 驗證通過，未上機驗證）
+
+### 為什麼要做：離散步階這條路在原理上走不通
+
+per user 規格是**移動全程** roll ±1°（帶寬 2°）。計米器路徑有兩道天花板，**都比帶寬大**：
+
+| 天花板 | 量級 |
+|---|---|
+| **量化**：指令與計米器讀數都是整數 cm；balance deadband 1cm | **0.8–1.5°** |
+| **鋼索彈性遲滯**：同樣繩長 168/169 實測出 roll **+0.21°** 與 **+1.90°** | **1.69°** |
+
+📌 彈性這條原始碼早有記載（`cmd_side_measured`：「被拉伸的鋼索回彈，
+**計米器量到的變化不全是捲筒轉動**」）——我今天量到的是同一件事的另一面。
+
+🔴 **而 per user 補充「5–50 是可設定範圍，10–50 才是實際操作範圍」之後，
+Part A（減速段）也失去效果**：`finish_hz` 只能訂 10，與 `roll_correct_hz` 相同 →
+預設值下減速段等於停用。**降速消除過衝，但消除不了 1cm 的量化下限。**
+（Part A 仍保留：把 `roll_correct_hz` 調到 30 做大角度修正時，收尾降回 10 有意義。）
+
+### 設計：只換誤差來源，不換控制律
+
+```
+現在   err = progL − progR   （計米器差，cm）
+改為   err = roll            （IMU 姿態，度）
+```
+對稱分配 / cap / `hz_min-max` / 250ms tick **全部沿用**——控制律今天實測有效
+（30cm 段左右差全程 0–3cm），問題從來不在控制律。
+
+🔴 **用「度」不換算成 cm**：換算會憑空造出假的長度，正是 08-31 減速遮罩那個缺陷的形狀
+（同一個數字被當成兩種語意）。IMU 路徑有自己的 `kp`（Hz/度）與 `deadband`（度）。
+
+### 吊機端（`Crane_control_PI/main.cpp`）
+
+- `BalanceSource{Meter,Imu}` + `g_balance_source`，**預設 `Meter`＝與現行逐位元相同**
+- `g_imu_roll_deg` + `g_imu_roll_stamp_ms`、`imu_roll_fresh()`
+- 常數：`BALANCE_IMU_KP_DEFAULT=2.0`（Hz/度）、`BALANCE_IMU_DEADBAND_DEFAULT=0.5`（度）、
+  `IMU_ROLL_STALE_MS=750`（3 tick）、`IMU_ROLL_SANITY_DEG=20`
+- 指令：`set_imu_roll` / `set_balance_source` / `set_balance_imu_kp` / `set_balance_imu_deadband`
+- `apply_balance_trim` 依來源選誤差；**IMU 過期一律退回計米器**並限流警告（2 秒一次）
+- `status` 增 `balance_source` / `imu_roll` / `imu_roll_age_ms` / `imu_roll_fresh` /
+  `balance_imu_kp` / `balance_imu_deadband`
+- `[BAL]` log 補上 `src=` 與**單位隨來源變**（原本寫死 `cm`，IMU 模式會把度誤讀成公分）
+
+### 本體端（`app/WASH_ROBOT.{h,cpp}`）
+
+- 新增 `imu_push_loop_()` 執行緒 + `crane_cli_imu_` / `crane_imu_mtx_`
+- 🔴 **獨立執行緒，不塞進 `imu_monitor_loop_`**——那是 45° 傾斜緊急停止的偵測迴圈，
+  放網路 I/O 進去，網路一卡就延遲保護。**保護迴圈不可被非保護工作阻塞。**
+- 🔴 **第三條連線**（照 `crane_cli_estop_` 的模式），不搶 `crane_mtx_`——
+  `do_step_sync_` 期間主連線正阻塞在 `pay_out_*` 的回覆等待上。
+  依據：`WASH_ROBOT.h:1201`「Shim is multi-connection (per-conn thread)」。
+- 📌 **實作時偏離計畫一處**：原計畫「非移動中不推」，改成**一律推**。
+  理由：資料永遠新鮮 → 動作一開始就能用，而過期機制就**只在真正的故障**
+  （本體掛掉／網路斷）時觸發，那才是它該有的語意。成本每 250ms 一行短指令。
+- 推送失敗**完全靜默且不重試**；讀掉回覆避免堆積
+  （今天 DSZL 的 `Recv-Q=13` / `txid` 失步就是回覆沒讀乾淨造成的）。
+
+### ✅ 階段 1 驗證（完全不動馬達）
+
+| 項目 | 結果 |
+|---|---|
+| 資料流通 | `imu_roll=0.69` 與本體一致；`age_ms` 162/116/62 循環，**從未超過門檻** |
+| 預設不改變行為 | `balance_source=meter` |
+| 健全性上界 | `set_imu_roll 25` / `-25` → **`ERR roll_out_of_sanity_range`**；`1.5` → `OK` |
+| 來源切換 | `garbage` → `ERR expected_meter_or_imu`；`imu` / `meter` → `OK` |
+| **過期退回** | 停本體 → age **4345→7389ms 持續成長、`imu_roll_fresh=0`**；重啟 → 恢復 `fresh=1` |
+
+### 🎯 順帶：Part 0（IMU 軸向）在啟動路徑上得到驗證
+
+```
+今天早上   [OK] IMU /dev/ttyUSB0 roll=-150.32   pitch=0.922852     ← 印的是 yaw
+現在       [OK] IMU /dev/ttyUSB0 roll=0.692139  pitch=0.148315     ← 正確
+```
+
+### 🔴 這個方案不能解決什麼（已寫進原始碼註解）
+
+**一側 VFD 沒啟動時調頻率一樣救不了**（今天 10cm 試走實測 `delta_L=0` 而回報 `err=0`）。
+那條仍靠 `length_diff_max_cm=5` 的中止保護與 `fine_adjust` 事後對齊。
+**兩套機制互補，IMU 平衡不取代繩長差保護。**
+
+### ⚠️ 性質改變（原始碼註解已標明）
+
+本檔原本明寫 *balance is nice-to-have, not load-bearing*（失敗只記 log）。
+改成 IMU 驅動後**一個錯誤的 roll 值會主動把機器弄歪**。
+因此過期退回與健全性上界**是本功能成立的前提，不是防呆加分項**——兩者都已實測。
+
+### 待完成
+
+- 🔴 **階段 2**：機器**放低**後，`balance_source=imu`、短距 retract、手動灌 roll，
+  看 `[BAL] src=imu` 的 Hz 分配是否隨灌入值變化
+- 🔴 **階段 3**：實跑並與**今天的基線**比對（第 1 段 30cm：左右差 0→3cm、roll −0.87→−3.07°）
+- 🔴 `BALANCE_IMU_KP=2.0` / `deadband=0.5` 都是**未經實測的初值**，需在低處調
+- 🟡 Part B（`FOLLOWER_ROLL_TOL_DEG` 2.0→1.0）仍待 Part A/IMU 平衡驗證後再做
+- 🟡 `launch.sh` 每次啟動漏一個 `sleep` process（今天累積 3+1 個，已手動清）
+
+---
+
+## 2026-09-01（續五）— 🔴🔴 IMU 差動校平從 08-27 起就是個 no-op（實測證實並修復）
+
+### 起因：規劃 `roll_correct` 減速段時，順手查「本體是否已有 IMU 閉迴路」
+
+有——`do_sync_imu_roll_correct_()`，做的正是需要的事（讀平均 roll → 幾何換算 cm →
+下 `roll_correct` → 沉澱 → 最多 3 輪）。**不必重造。** 但讀它的時候發現軸向不對。
+
+### 🔴🔴 缺陷：兩支自動校平讀 `imu_.z`（偏航），卻減去 `imu_roll0_`（從 `imu_.x` 取的滾轉基準）
+
+```
+cmd_status 的 roll= / cmd_imu_zero / imu_monitor_loop_ / imu_take_baseline_  → imu_.x / imu_.y  ✅
+follower_imu_level_        (wash_robot_commands.cpp:554,557,606)             → imu_.z          🔴
+do_sync_imu_roll_correct_  (wash_robot_commands.cpp:642,645,685)             → imu_.z          🔴
+init 的 [OK] IMU print     (WASH_ROBOT.cpp:313)                              → imu_.z          🔴
+```
+
+**實測證據（`cmd_status` 本身就有輸出，08-27 為了解決這類爭議加的）**：
+```
+ax=-0.00  ay=0.03  az=1.00        ← 重力全在 Z 軸 = IMU 水平安裝
+raw_x=1.87  raw_y=0.12  raw_z=-151.05
+```
+`az=1.00` 證明現在是**水平安裝** → `imu_.x` 是尤拉滾轉、`imu_.z` 是磁力計航向角。
+
+📌 **今天早上的啟動 log 就是證據，我當時沒抓到**：
+`[OK] IMU /dev/ttyUSB0 roll=-150.32 pitch=0.922852` —— **−150 是 yaw，0.92 才是真正的 roll**。
+
+### 🔴🔴 實際後果不是「修正方向錯」，是「從來沒有修正過」
+
+```cpp
+const double roll = read_roll_avg();                       // 讀到 -151.05
+if (std::fabs(roll) > BAL_CAL_ROLL_PANIC_DEG /* 15.0 */) { // |−151| > 15 恆為真
+    evt_("step_sync_imu_roll_panic ..."); return;          // non-fatal，印一行就 return
+}
+```
+→ **每次都走 ROLL PANIC 分支直接放棄。** 而 `do_sync_imu_roll_correct_` 由
+`do_step_sync_()`（**v2 正式走法**）呼叫，`wash_robot_commands.cpp:1893`。
+**IMU 差動校平在活路徑上，從 2026-08-27 起就是個 no-op。**
+
+### 🔗 這條線索把 08-04 那次調整也解釋了
+
+```cpp
+FOLLOWER_ROLL_TOL_DEG = 2.0
+// 2026-08-04 per user: 1.0→2.0；2026-07-23: 0.5→1.0
+// —— small tilts were triggering trim passes that then oscillated sign each pass
+```
+容許值曾經是 1.0°，因為**修正會來回震盪**而放寬到 2.0°。
+震盪的兩個成因今天都量到了：① 最小步階 2.9–3.3° > 帶寬（見續四）；② 軸向錯誤。
+**當時是治症狀（放寬容許值），沒治病因。** 而 `2.0` 直接牴觸 per user 的 ±1° 規格。
+
+### ⚠️ 自記：我下錯結論一次，撤回後才用實測解決
+
+第一次改完，殘留掃描翻出 `WASH_ROBOT.cpp:2785`「**實測** roll 改讀 yaw(`imu_.z`)
+才會隨左右傾斜穩定變化」→ 我判斷自己的前提錯了，**`git checkout` 撤回**。
+接著讀 `status` 的加速度三軸，`az=1.00` 才證明是水平安裝、原判斷成立，重新套用。
+
+📌 **兩個教訓**：
+1. **`grep` 單行看註解會被誤導** —— 2785 是 08-26 垂直安裝時代的敘述，
+   **正確的那句（08-27 改回水平、用 x/y）就在下一行**。整段讀就不會誤判。
+2. **撤回是對的** —— 當時我沒有證據，只有兩段互相矛盾的註解。
+   正確做法就是撤回 → 量測 → 再改，而不是挑一段自己相信的註解。
+
+### ✅ 已修（8 處）
+
+| 檔案 | 內容 |
+|---|---|
+| `app/wash_robot_commands.cpp` | `follower_imu_level_` 3 處、`do_sync_imu_roll_correct_` 3 處：`imu_.z` → `imu_.x` |
+| `app/WASH_ROBOT.cpp:313` | init print `roll=imu_.z pitch=imu_.x` → `roll=imu_.x pitch=imu_.y` |
+| 註解 | 把實測證據（`az=1.00`／`raw_z=-151.05`／早上的 log）與 ROLL PANIC 後果寫進原始碼 |
+
+⚠️ `raw_z=` 的診斷輸出保留（那本來就該印 z）。`2785` 的歷史敘述**不動**——它在上下文中是正確的。
+
+✅ **建置驗證**：本體 16/16 TU + 連結成功、零警告零錯誤，新 binary 已就位
+（`~/bringup/facade_cleaning_v2.out`，md5 `e6642bb3…`）。
+⚠️ **執行中的仍是舊 process**（Linux 保留 inode）——**下次重啟才會生效**。
+
+### 🔴 尚未做行為驗證
+
+軸向修正的**行為驗證需要跑一次 `step_sync`**（那才會走到 `do_sync_imu_roll_correct_`），
+而機器目前懸空。**未驗證，不宣稱已生效。**
+
+### 待完成（Part A/B/C 尚未開始）
+
+- 🔴 **Part A**：`roll_correct` 加減速段（`ROLL_CORRECT_APPROACH_CM` + `g_roll_finish_hz`
+  + 短程直接慢速起步，照 `cmd_side_measured` 08-31 的教訓）
+- 🔴 **Part B**：`FOLLOWER_ROLL_TOL_DEG` 2.0 → 1.0（**必須在 Part A 之後**，否則重演 08-04 震盪）
+- 🔴 **Part C**：`FOLLOWER_SPAN_CM = 100.0` 是 PLACEHOLDER，需實測校正
+- 🔴 Part 0 的行為驗證（需 `step_sync`，機器要在可作業位置）
+
+---
+
+## 2026-09-01（續四）— 實機總測試：三個修正在現場得到證實，並挖出兩件會擋住 ±1° 的事
+
+### 🔴🔴 現況（下次接手先讀這條）
+
+**機器懸空停在 `L=168 R=169`（per user 指示留在此位置）**，`roll=+0.21°`、`state=idle`、
+`tension_valid=1`、VFD keepalive `fail=0`、無漂移。兩台程式與 GUI 均在執行中。
+**牆面總長度實測 208 cm**（頂樓歸零 → 落到離地一點點）。**尚未收繩回 0 位置**，剩約 168 cm。
+
+### ✅ 三個近日修正在現場得到證實
+
+| 修正 | 現場證據 |
+|---|---|
+| SE3 型號字串（08-31） | 吊機 init 印 `VFD left/right (SE3)`，非寫死的 `MH300` |
+| `CRANE_IP` 開機自動選路（08-31） | `有線 192.168.1.10 探測不通（300ms）→ 走 WiFi 192.168.5.25` → `[OK] crane`。**有線確實斷**（另測 `.1.100` 也不通）；沒有這個修正會卡滿 TCP SYN timeout 兩分鐘 |
+| 深度相機移除（09-01） | 本體 init **一行 `depth_cam` 都沒有** |
+| `LOG_ERR` 脫離 `debug_mode`（08-31） | **見下方 DSZL 故障** —— 這次直接靠它定位根因 |
+| PQW 存在性探測（08-31） | 吊機 init `[ERR] PQW init presence probe failed`，正確反映模組實體拔除 |
+
+### 🔴 DSZL 張力兩側同時 ERR —— 根因查明，且推翻「裝置故障」的第一印象
+
+**症狀**：`tension_left=ERR tension_right=ERR tension_valid=0`，而 `dev_dsz_*` 仍是 1。
+**若在此狀態下驅動馬達，過載保護與收繩軟停會靜默失效**：
+```cpp
+static std::string tension_safety_check(double& l, double& r) {
+    if (read_tensions(l, r)) return "";   // 讀取失敗 = 回傳「無警報」
+```
+→ **已據此中止原定計畫，未在無保護下動馬達。**
+
+🔴 **根因是 TCP 連線上的協議失步**，不是裝置壞掉：
+```
+ESTAB  Recv-Q=13  192.168.1.10:36324 → 192.168.1.32:502   ← 13 bytes 卡在接收佇列
+```
+遲到的回覆留在緩衝區 → 之後每次讀取都拿到上一筆 → slave/CRC 不符 → 全數被拒。
+
+🔴 **`502 Connection refused` 是誤導**：X518 **ping 通、ARP 正常**（MAC `00:08:dc:11:11:20/21`）。
+拒絕連線是因為**吊機程式已佔滿 X518 的連線數上限**——早上探測能連，正是因為當時程式沒跑。
+**關掉程式後 502 立刻恢復 OPEN，探測讀值 25.47/13.42 與故障前一致。**
+
+✅ **workaround 生效**（待辦表既有記載：「根因未知，workaround 是重開 crane 程式」）：
+正規關機（`exit` 走 console，非 `kill`）→ 連線釋放 → 重啟 → `tension_valid=1`。
+📌 **SD76 計米值 208/209 完好保留**（計數在裝置端，重啟不影響）。
+⚠️ **`set_motion_hz` 等 runtime 設定會遺失，重啟後必須重設。**
+
+📌 **`LOG_ERR` 那個修改在這裡是決定性的**：`[ERR] [DSZL:1] get_tension_kg: consecutive errors
+reached threshold` + 限流抑制訊息。沒有它只會看到一個沒有理由的 `tension=ERR`
+——正是待辦「crane 端偶發 read_fail，根因未知」當初查不下去的原因。
+🟡 但標籤是 `[DSZL:1]`，**左右 slave 都是 1，這條路徑分不出哪一側**（08-31 補的 `@L`/`@R` 沒涵蓋 `get_tension_kg`）。
+
+### 🔴🔴 10 cm 試走：左側 VFD 靜默沒啟動（08-31 那個缺陷的新形態）
+
+```
+[sync_start] Phase A setFreq err=0 / Phase B run err=0        ← 回報兩側都在跑
+[motion_rope] sync stop (leader=R) delta_L=0 delta_R=-10      ← 左側整個主迴圈沒動
+[ERR] [SE3:1@L] writeParam reg=0x1001 val=0x0002 comm fail    ← 真正的錯誤此時才浮出
+[fine_adjust] align-to-leader ... final L=198 R=198 — done    ← 靠收尾對齊救回來
+```
+**這是 08-31「VFD 寫入間歇失敗，會吃掉減速命令」的同一個缺陷，這次被吃掉的是啟動命令。**
+
+🔴 **修正一條先前的記載**：平衡機制在這個故障模式下**無效**。
+| 情境 | 長度差平衡控制器 |
+|---|---|
+| 一側**比較慢** | ✅ 有效（調頻率拉快落後側） |
+| 一側**根本沒啟動** | 🔴 **無效** —— 調一個沒在轉的馬達的頻率沒有意義 |
+救回來的是主迴圈**之後**的 `fine_adjust` align-to-leader，那是收尾對齊、不是即時平衡。
+且 `length_diff_max_cm=15` 沒觸發（差 10 < 15），**只差 5 cm 就會中止**。
+
+### 🎯 幾何標定（本日最有用的量測）：**0.8°/cm，繩距約 80 cm**
+
+三個觀測點反推：
+| L | R | R−L | roll |
+|---|---|---|---|
+| 208 | 209 | +1 | +0.09° |
+| 198 | 198 | 0 | −0.87° |
+| 170 | 167 | −3 | −3.12° |
+
+**換算出來的保護門檻真實含意**：
+| 機制 | 數值 | **對應傾斜** |
+|---|---|---|
+| 平衡控制器 deadband | 1 cm | **0.8°** |
+| 韌體 `length_diff_max_cm` | 15 cm | **≈ 11°** |
+| IMU 緊急停止 | 45° | **需 60 cm 繩差** |
+
+🔴🔴 **兩個結論**：
+① **在這個幾何下，IMU 的 45° 緊急停止實質上永遠不會先於繩長差保護觸發** —— 它不是第二道防線。
+② **`length_diff_max_cm=15` 允許機體歪到 11 度**。該門檻 08-31 訂下時就標了 🟡「待確認」，
+   **現在有換算依據了：若要守 ±1°，它應該是 1.25 cm 而不是 15 cm。**
+
+### ✅ `roll_correct` 實測有效，正負號確認
+
+`-delta = 左收右放 → roll 往正`（原始碼註解如此，實測相符）。
+`roll_correct -1` → L 170→168、R 167→169（R−L=+1）→ **roll −3.12° → +0.20°**，
+預測值 +0.09°，**模型準確**。
+📌 **順帶第二次佐證「小增量會走兩倍」**：下 `-1`，兩側各實走 **2 cm**
+——與早上 `pay_out_right 1` 回報 `moved=2cm` 同一現象。待辦表那條「單位換算未經驗證」現在有兩筆證據。
+
+### 🔴🔴 per user：±1° 是**移動全程**的要求 → 目前控制守不住
+
+```
+預算            ±1°  = ±1.25 cm 繩長差
+控制器 deadband  1 cm = 0.8°          ← 死區就吃掉 80% 預算
+第 1 段實測      3 cm = 2.4°          ← 規格的 2.4 倍（且該段兩側都正常啟動、非故障）
+```
+死區之外還有整條迴路延遲（tick 250ms → 調頻 → SE3 寫入 → 馬達反應 → 繩長改變）。
+🔴 **即使 deadband 設 0，延遲鏈仍會產生殘差。這需要調校甚至改控制律，不是改 config 能解決。**
+🔴 **且不該在機器懸空時試參數** —— 每次試都是一次真實升降。
+→ **依此中止收繩，機器留在 168/169（per user）。**
+
+### 📌 per user 提問：兩份 config（測試區／戶外）—— 機制已存在，但有兩個缺口
+
+`common/profile.h` 的路徑解析**已支援每份 profile 各自用環境變數指向不同檔案**：
+```cpp
+std::string var = "FCV_PROFILE_" + which;   // 例: FCV_PROFILE_axis_profile
+std::string path = getenv(var) ?: ("config/" + which + ".txt");
+```
+
+🔴 **但切分依據應是「變更理由」而非「地點」**（`profile.h` 檔頭自己訂的規則）：
+`axis_profile` 跟著**機器**走、`device_profile` 跟著**設備型號**走。
+導程 7.731 是機器性質，**換場地不會變** → 複製兩份 `axis_profile` 等於製造兩個會不同步的真相來源。
+→ 應新增第三份 **`site_profile`**（跟著**場地**走）。
+
+**缺口**：
+- 🔴 **吊機端完全沒有接 profile**（`Crane_control_PI/main.cpp` 零個 `profile::`），而平衡參數全在吊機
+- 🔴 **安全互鎖不可進 config**（`profile.h` 明訂）：`length_diff_max_cm` / `tension_max_kg` /
+  `IMU_EMERGENCY_DEG` 留在程式碼；只有 `balance_kp` / `deadband` / `cap_ratio` / 各種 hz 屬調校
+- ⚠️ **既存不一致**：`length_diff_max_cm` 與 `tension_max_kg` **目前已可用 `set_*` 執行期修改**，
+  這已違反「安全互鎖留在程式碼當斷言」那條規則。要不要收，是另一個決定。
+
+### ✅ Web GUI 部署（順帶修掉兩個會讓它連不上的錯）
+
+Pi 上 `~/projects/web_ver2/` 是舊版，兩個 IP 都錯：`CRANE_IP=192.168.1.101`（過期，repo 早已修為 `.1.10`）、
+`WASHROBOT_IP=192.168.1.100`（**實測不通**，有線網路是斷的）。
+→ 備份舊版（`server.js.bak-20260901`、`public.bak-20260901`）、部署 repo 版本，
+以 `WROBOT_IP=192.168.5.26 CRANE_IP=127.0.0.1` 啟動。
+✅ **端到端控制驗證**：瀏覽器 WebSocket → server.js → 兩支 C++ 程式，皆有回覆。
+→ 待辦表「Pi 上 web_ver2 落後 repo 一個 commit」**可結案**。
+
+### ⚠️ 工具面自記
+
+- **`pkill -f <字串>` 兩次殺到自己**：ssh 遠端命令列本身含有該字串 → 連線被砍、回 255。
+  遠端找 process 不要用會匹配到自己命令列的 pattern。
+- **讀吊機回覆不能只讀第一行**：EVT 進度廣播與最終 OK/ERR 走同一條連線，
+  第一次 `retract 10` 只讀到 `EVT motion_progress` 就關連線。已改為讀到 `OK`/`ERR` 開頭才停。
+- 新增 `retract_seg.py`（scratchpad → Pi）：並行監看 roll 與左右位移差，超標主動下 `stop`。
+  本日第 1 段即由它中止（roll −3.07° > 3.0°）。
+
+### 待完成
+
+- 🔴 **收繩回 0 位置尚未完成**（剩 168 cm）。先解決 ±1° 全程的控制問題再繼續。
+- 🔴 **±1° 全程可達性未知**：需在低處做「差距 vs 時間」響應量測（不同 kp/deadband），
+  找出殘差主導項是死區、增益、還是迴路延遲。**不要在懸空時試參數。**
+- 🔴 **`length_diff_max_cm=15` 應依 0.8°/cm 重新訂**（守 ±1° 需 1.25 cm）
+- 🟡 `site_profile` 設計 + 吊機接 profile + 參數/保護切分清單（計畫已在上方，待實作核准）
+- 🟡 SE3 VFD 寫入間歇失敗（本日重現，08-31 既有 🔴🔴）
+- 🟡 DSZL log 補 `@L`/`@R` 到 `get_tension_kg` 路徑
+- 🟡 X518 連線數上限的實際值未量（本日只知「程式佔用時外部無法連」）
+
+---
+
 ## 2026-09-01（續三）— 硬體盤點交付；兩項 per user 更正
 
 ### 交付：由原始碼盤出的硬體清單

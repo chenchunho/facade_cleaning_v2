@@ -309,12 +309,19 @@ bool WashRobot::init() {
     if (imu_.read_error.load())
         std::cerr << "[WARN] IMU read error on startup\n";
     else
+        // 🔴 [2026-09-01] 軸向修正（證據見 wash_robot_commands.cpp 的
+        // do_sync_imu_roll_correct_）：這行是 2026-08-26 垂直安裝時代的映射，
+        // 08-27 改回水平安裝後漏改。今天早上的啟動 log 就是證據：
+        // 印出 roll=-150.32 pitch=0.922852 —— -150 是 yaw，0.92 才是真正的 roll。
         std::cout << "[OK] IMU " << ep_imu
-                  << " roll=" << imu_.z << " pitch=" << imu_.x << "\n";
+                  << " roll=" << imu_.x << " pitch=" << imu_.y << "\n";
 
     // Start background threads
     imu_mon_running_ = true;
     imu_mon_thread_  = std::thread(&WashRobot::imu_monitor_loop_, this);
+    imu_push_running_ = true;
+    imu_push_thread_  = std::thread(&WashRobot::imu_push_loop_, this);
+    std::cout << "[OK] IMU roll push -> crane started (" << IMU_PUSH_PERIOD_MS << "ms)\n";
     std::cout << "[OK] IMU monitor started\n";
 
     crane_wd_running_ = true;
@@ -368,6 +375,8 @@ void WashRobot::stop() {
     motion_active_ = false;
     imu_mon_running_ = false;
     if (imu_mon_thread_.joinable()) imu_mon_thread_.join();
+    imu_push_running_ = false;
+    if (imu_push_thread_.joinable()) imu_push_thread_.join();
     imu_.stop();
     crane_wd_running_ = false;
     if (crane_wd_thread_.joinable()) crane_wd_thread_.join();
@@ -2793,6 +2802,51 @@ bool WashRobot::imu_take_baseline_() {
     imu_roll0_  = sum_roll  / n;
     imu_pitch0_ = sum_pitch / n;
     return false;
+}
+
+// [2026-09-01] 把 IMU roll 推給吊機，供其 IMU 驅動平衡迴路使用。
+//
+// 為什麼需要：吊機的平衡控制器原本以「計米器左右差」為誤差，而該訊號有兩道
+// 天花板都大於 per user 的 ±1° 規格 —— 1cm 量化，以及鋼索彈性遲滯
+// （2026-09-01 實測：同樣繩長 168/169 出現 roll +0.21° 與 +1.90°，差 1.69°）。
+// IMU 量的是真實姿態，繞過兩者。控制律不變，只換誤差來源。
+//
+// 設計要點：
+//  🔴 獨立執行緒 —— 不可以放進 imu_monitor_loop_（那是 45° 傾斜緊急停止的偵測
+//     迴圈，網路一卡就會延遲保護）。
+//  🔴 第三條連線 crane_cli_imu_ —— 不搶 crane_mtx_，因為 do_step_sync_ 期間
+//     主連線正阻塞在 pay_out_* 的回覆等待上（同 crane_cli_estop_ 的理由）。
+//  🔴 **一律推送，不只在移動中推**。原計畫寫「非移動中不推」，實作時改成一律推：
+//     這樣資料永遠是新鮮的，動作一開始就能用；而吊機端的過期退回機制
+//     （IMU_ROLL_STALE_MS）就只在**真正的故障**（本體掛掉／網路斷）時才觸發
+//     —— 那才是它該有的語意。成本是每 250ms 一行短指令，可忽略。
+//  🔴 失敗完全靜默且不重試 —— 這是「錦上添花」的資料流，不可以拖慢或吵到
+//     任何東西。吊機端資料過期就自動退回計米器路徑，本身就是安全的降級。
+void WashRobot::imu_push_loop_() {
+    while (imu_push_running_.load()) {
+        sleep_ms_(IMU_PUSH_PERIOD_MS);
+        if (!imu_push_running_.load()) break;
+        if (!crane_attached_.load())   continue;
+        if (imu_.read_error.load())    continue;   // 讀不到就不推，讓吊機端自然過期
+
+        const double roll = imu_.x - imu_roll0_;
+        std::ostringstream oss;
+        oss << "set_imu_roll " << std::fixed << std::setprecision(2) << roll << "\n";
+        const std::string line = oss.str();
+
+        std::lock_guard<std::mutex> lk(crane_imu_mtx_);
+        if (!crane_cli_imu_.isConnected()) {
+            if (!crane_cli_imu_.connectToServer(ep::host("CRANE", CRANE_IP),
+                                                ep::port("CRANE", CRANE_PORT)))
+                continue;   // 靜默重試於下一輪
+            crane_cli_imu_.set_quiet_reconnect_log(true);
+        }
+        if (!crane_cli_imu_.sendData(line.c_str(), (int)line.size(), 200)) continue;
+        // 讀掉回覆避免堆積在接收佇列 —— 2026-09-01 吊機端的 DSZL 失步
+        // （Recv-Q 卡 13 bytes、txid 對不上）就是沒把回覆讀乾淨造成的。
+        char buf[128];
+        crane_cli_imu_.receiveData(buf, sizeof(buf), 100);
+    }
 }
 
 void WashRobot::imu_monitor_loop_() {

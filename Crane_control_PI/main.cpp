@@ -204,6 +204,15 @@ static constexpr int PQW_WATER_TOTAL_CH = 8;   // 8-channel PQW board
 
 // Motion tunables (motion_flow.md §6)
 static constexpr int    MOTION_TIMEOUT_MS    = 120000;
+// [2026-09-01] dual_vfd_sync_start 的啟動驗證窗口（見該函式的說明）。
+// 🔴 500ms（原訂 200ms）—— **2026-09-01 首次實測就用掉 191ms**，只差 9ms 就會
+// 把正常啟動誤判成失敗。窗口是「最壞情況的容許」，不是「典型值」：
+// 每輪要做兩次 readStatusWord（各 10-50ms）＋ 25ms sleep，光輪詢開銷就可能
+// 逼近 200ms，再加上驅動器本身的反應延遲。
+// 500ms 仍遠短於原本要等 length_diff_max_cm 才發現的 0.6s／7cm。
+// ⚠️ 一旦兩側都回報 running 就立即跳出，所以放寬窗口**不會**讓正常啟動變慢。
+static constexpr int    START_VERIFY_WINDOW_MS = 500;
+static constexpr int    START_VERIFY_POLL_MS   = 25;
 static constexpr int    POLL_INTERVAL_MS     = 20;   // 50→20 (2026-05-15): motion_rope main loop tick. atomic cache load only, no extra bus traffic. Reduces stop-trigger lag at 30Hz/30cm-s motion: was ~50ms tick + 150ms cache lag = ~6cm worst, now ~20+100ms = ~3.6cm.
 static constexpr double MIDDLE_WINCH_RATIO_K = 1.00;
 static constexpr double CLV900_MAX_HZ        = 50.0;  // F8-03 default
@@ -254,6 +263,44 @@ static std::atomic<double> g_middle_winch_hz {MIDDLE_WINCH_HZ_DEFAULT};
 static constexpr double ROLL_CORRECT_HZ_DEFAULT  = 10.0;   // 2026-08-04 per user: 5→10
 static std::atomic<double> g_roll_correct_hz {ROLL_CORRECT_HZ_DEFAULT};
 
+// [2026-09-01] roll_correct 的收尾段 —— 與 cmd_side_measured 的 slow-approach 同構。
+//
+// 🔴 為什麼需要：實測 roll_correct 的**最小步階大於容許帶寬**，迭代永遠收不進去。
+//    指令 1cm 之下實走：10Hz → 每側 2cm（100% 過衝）；5Hz → 每側 1cm。
+//    per user 的規格是 roll ±1°（帶寬 2°），而實測 10Hz 一步就改變 ~3.3°、
+//    5Hz 一步 ~2.9° —— **一步跨過整個帶寬，只會在帶外換正負號來回跳**。
+//    這正是 FOLLOWER_ROLL_TOL_DEG 於 2026-08-04 由 1.0 被放寬到 2.0 的原因
+//    （註解原文：small tilts were triggering trim passes that then oscillated
+//    sign each pass）—— 當時治的是症狀，病因是步階太粗。
+//
+// 🔴 為什麼不能只把 roll_correct_hz 調慢：per user「5Hz 可能太慢，最低 10Hz」。
+//    大修正要快、收尾要準，是兩個需求 → 兩段式。
+//
+// 🔴 短程直接以 finish_hz 起步，**不做飛行中減速**（照 cmd_side_measured 於
+//    2026-08-31 學到的教訓）：當 abs_cm <= APPROACH 時減速條件第一輪就成立，
+//    等於把精度押在一筆飛行中的 Modbus 寫入上 —— 而 2026-09-01 當天就遇過
+//    [ERR] [SE3:1@L] writeParam comm fail。roll_correct 的典型修正量是 1~3cm，
+//    **絕大多數呼叫都落在短程分支**，所以這條規則才是主路徑而非邊界情況。
+//
+// 🔴 [2026-09-01 per user] **可設定範圍 5–50Hz，但實際操作建議 10–50Hz。**
+//    先前這裡把預設訂成 3.0Hz 是錯的（低於可設定下限）。已改為 10.0。
+//    ⚠️ **這使本收尾段在預設值下等於停用**（finish == roll_correct_hz == 10）。
+//    保留它的理由是：把 roll_correct_hz 調高（例如大角度修正用 30Hz）時，
+//    收尾降回 10Hz 仍然有意義。**但它解決不了下面那個量化下限。**
+//
+// 🔴🔴 **量化下限（本段最重要的一句）**：指令是整數 cm、計米器讀數也是整數 cm，
+//    而 roll_correct **兩側各走 |delta|** → 最小差動 = 2cm。
+//    實測 0.8~1.5°/cm → **最小步階約 2~3°，而 per user 的規格帶寬只有 2°（±1°）**。
+//    10Hz 下每側實走 2cm（過衝一倍）→ 最小步階更達 ~3.3~4°。
+//    **降速只能消除過衝，消除不了 1cm 的量化下限。**
+//    → 想在移動全程守 ±1°，正確方向不是把離散步階做細，而是
+//      **把平衡迴路的誤差來源由「計米器差」換成「IMU roll」**（連續頻率微調，
+//      不受 1cm 量化與鋼索彈性遲滯影響）。見 work_log 2026-09-01（續六）。
+static constexpr double VFD_MIN_SETTABLE_HZ      = 5.0;   // per user 2026-09-01：可設定下限
+static constexpr int    ROLL_CORRECT_APPROACH_CM = 2;     // 最後 Ncm 降到 finish_hz
+static constexpr double ROLL_FINISH_HZ_DEFAULT   = 10.0;  // per user：實際操作 10–50Hz
+static std::atomic<double> g_roll_finish_hz {ROLL_FINISH_HZ_DEFAULT};
+
 // Periodic progress EVT during long ops (motion_rope main loop + fine_adjust).
 // Lets washrobot's watchdog know crane is alive even while RPC reply is
 // pending (long pay_out can take 30+s if fine_adjust kicks in), and gives GUI
@@ -302,6 +349,15 @@ static constexpr bool PAY_OUT_INCREASES_DISPLAY = true;
 // Speed: fine_adjust_hz (runtime tunable; default 10Hz)
 // Timeout: 30 s (each side individually; loop bails if either side stalls)
 static constexpr int    FINE_ADJUST_TOLERANCE_CM = 2;
+// 🔴 [2026-09-01] **拆出「左右差」的容許值。**
+// FINE_ADJUST_TOLERANCE_CM 原本被用在兩件語意不同的事上：
+//   ① 每側「對目標的位置誤差」——高度精度，±2cm 無妨（user spec 2026-05-11）
+//   ② 左右「差」——**姿態**。而 2026-09-01 實測 **1cm 繩長差 ≈ 1° 傾斜**，
+//      所以 ±2cm 等於允許機體歪 ~2°，直接違反 per user 的 roll ±1° 規格。
+// 同一個數字兩種語意，正是 2026-08-31 減速遮罩那個缺陷的形狀。
+// 實例：2026-09-01 retract 40cm 收在 L=171 R=169，fine_adjust 判定
+// "diff=2 — within ±2, stopping both" 就不對齊了 → 終點 roll −1.63°（出規格）。
+static std::atomic<int> g_fine_adjust_diff_tol_cm {1};   // 左右差容許（cm）≈ 傾斜度數
 static constexpr double FINE_ADJUST_HZ_DEFAULT   = 10.0;  // 10→15→10 (2026-07-14: 15Hz 尾段雖快，但過衝大→IMU 微調 pass 變多、net 沒賺，改回 10。set_fine_adjust_hz 仍可 live 調)
 static constexpr int    FINE_ADJUST_TIMEOUT_MS   = 30000;
 static std::atomic<double> g_fine_adjust_hz {FINE_ADJUST_HZ_DEFAULT};
@@ -641,6 +697,55 @@ static std::atomic<bool>   g_balance_enabled  {true};
 static std::atomic<double> g_balance_kp        {BALANCE_KP_DEFAULT};
 static std::atomic<double> g_balance_trim_cap_ratio  {BALANCE_TRIM_CAP_RATIO_DEFAULT};
 static std::atomic<double> g_balance_deadband  {BALANCE_DEADBAND_DEFAULT};
+
+// ============ IMU-driven balance (2026-09-01) ============
+//
+// 🔴 **只換誤差來源，不換控制律。** 對稱分配 / cap / hz_min-max / tick 全部沿用。
+//
+// 為什麼要換：per user 的規格是**移動全程** roll ±1°（帶寬 2°），而計米器路徑
+// 有兩道天花板，兩道都比帶寬大：
+//   ① **量化**：指令與計米器讀數都是整數 cm；balance deadband 1cm ≈ 0.8-1.5°
+//   ② **鋼索彈性遲滯**：2026-09-01 實測，**同樣的繩長 168/169 出現 roll +0.21°
+//      與 +1.90° 兩個值（差 1.69°）**。原始碼早有記載（cmd_side_measured：
+//      「被拉伸的鋼索回彈，計米器量到的變化不全是捲筒轉動」）。
+// → 計米器差**在原理上**無法解析到 ±1°。IMU 量的是真實姿態，繞過兩者。
+//
+// 🔴 **用「度」而不是換算成 cm**：換算會憑空造出一個假的長度。那正是 2026-08-31
+//    減速遮罩那個缺陷的形狀 —— 同一個數字被當成兩種語意。單位要誠實，
+//    所以 IMU 路徑有自己的 kp（Hz/度）與 deadband（度）。
+//
+// 🔴🔴 **性質改變，不只是換輸入**：本檔原本明寫 balance is nice-to-have,
+//    not load-bearing（失敗只記 log）。改成 IMU 驅動之後，**一個錯誤的 roll 值
+//    會主動把機器弄歪**。因此下面兩項是本功能成立的**前提**，不是加分項：
+//      - IMU_ROLL_STALE_MS：資料過期一律**退回計米器路徑**（不是凍結、不是續用舊值）
+//      - IMU_ROLL_SANITY_DEG：離譜的值在 setter 就拒絕，不讓它進到控制律
+//
+// ⚠️ **解決不了**：一側 VFD 沒啟動時（2026-09-01 實測 delta_L=0 而回報 err=0），
+//    調頻率一樣救不了——馬達沒在轉，改它的頻率沒有意義。那條仍靠
+//    length_diff_max_cm 的中止保護與 fine_adjust 事後對齊。**兩者互補，不取代。**
+enum class BalanceSource { Meter, Imu };
+static std::atomic<BalanceSource> g_balance_source {BalanceSource::Meter};   // 預設 Meter＝與現行逐位元相同
+static constexpr double BALANCE_IMU_KP_DEFAULT       = 2.0;   // Hz / 度
+static constexpr double BALANCE_IMU_DEADBAND_DEFAULT = 0.5;   // 度（目標帶寬 ±1°，死區取一半）
+static constexpr int    IMU_ROLL_STALE_MS            = 750;   // 3 × BALANCE_TICK_MS
+static constexpr double IMU_ROLL_SANITY_DEG          = 20.0;  // setter 上界；超過視為壞資料
+static std::atomic<double> g_balance_imu_kp       {BALANCE_IMU_KP_DEFAULT};
+static std::atomic<double> g_balance_imu_deadband {BALANCE_IMU_DEADBAND_DEFAULT};
+static std::atomic<double> g_imu_roll_deg   {0.0};
+static std::atomic<int64_t> g_imu_roll_stamp_ms {0};   // steady_clock ms；0 = 從未收到
+
+static int64_t steady_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+// 資料是否新鮮到可以拿來驅動控制律
+static bool imu_roll_fresh(int64_t* out_age_ms = nullptr) {
+    const int64_t st = g_imu_roll_stamp_ms.load();
+    if (st == 0) { if (out_age_ms) *out_age_ms = -1; return false; }
+    const int64_t age = steady_now_ms() - st;
+    if (out_age_ms) *out_age_ms = age;
+    return age <= IMU_ROLL_STALE_MS;
+}
 static std::atomic<double> g_balance_hz_min           {BALANCE_HZ_MIN_DEFAULT};
 static std::atomic<double> g_balance_hz_max_offset    {BALANCE_HZ_MAX_OFFSET_DEFAULT};   // semantic: above base_hz
 
@@ -1134,7 +1239,49 @@ static bool dual_vfd_sync_start(double hz, bool left_pay_out, bool right_pay_out
         dual_vfd_concurrent([](CraneVFD& inv){ return inv.stopDecel();     });
         return true;
     }
-    HOLD_TRACE("sync_start EXIT OK (both running)");
+    // 🔴🔴 [2026-09-01] **啟動驗證** —— 在此之前，本函式只確認「寫入成功」就宣告
+    // "EXIT OK (both running)"，而那句話從來沒有被檢查過。
+    //
+    // 實例（2026-09-01 13:12，pay_out 40cm @50Hz）：
+    //   [ERR] [SE3:1@L] writeParam reg=0x1001 val=0x0004 comm fail
+    //   [sync_retry:sync_start.run] attempts=2/2 ... errL=0 errR=0     ← 重試回報成功
+    //   [sync_start] EXIT OK (both running)                            ← 宣稱兩側都在跑
+    //   → 左側馬達實際沒轉。0.6 秒後左右差 7cm、roll 6.8°，靠
+    //     length_diff_max_cm=5 才中止 —— **等機器已經歪了才發現**。
+    //
+    // 📌 `comm fail` 的定義是 sendModbus 收到 0 bytes（150ms 無回覆），
+    //    不是幀分片（那會走 "bad reply len=%d"）。所以問題不在 USR 網關的
+    //    _pt 打包時間（2026-08-28 已記錄該風險，證據不支持它是本案主因）。
+    //    本驗證**不修好**那個間歇無回應，但把偵測從「歪了 5cm」提前到「啟動當下」。
+    //
+    // 做法沿用同檔 fine_adjust 既有的 post-start 狀態讀取（readStatusWord bit0
+    // = running）——差別是 fine_adjust 只印出來當診斷，這裡拿來當判準。
+    // 給短輪詢窗口容許驅動器反應延遲，避免把「還沒來得及轉」誤判成失敗。
+    {
+        const auto vt0 = std::chrono::steady_clock::now();
+        bool l_run = false, r_run = false;
+        while (std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - vt0).count() < START_VERIFY_WINDOW_MS) {
+            uint16_t sl = 0, sr = 0;
+            if (!l_run && !vfd_left .readStatusWord(sl)) l_run = (sl & 0x01) != 0;
+            if (!r_run && !vfd_right.readStatusWord(sr)) r_run = (sr & 0x01) != 0;
+            if (l_run && r_run) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(START_VERIFY_POLL_MS));
+        }
+        const auto vms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - vt0).count();
+        if (!l_run || !r_run) {
+            std::cout << "[sync_start] 🔴 啟動驗證失敗 after " << vms << "ms — "
+                      << "L running=" << l_run << " R running=" << r_run
+                      << " → EMERGENCY stop both\n";
+            HOLD_TRACE("sync_start VERIFY FAIL -> EMERGENCY stop both -> EXIT");
+            dual_vfd_concurrent([](CraneVFD& inv){ return inv.emergencyStop(); });
+            dual_vfd_concurrent([](CraneVFD& inv){ return inv.stopDecel();     });
+            return true;
+        }
+        std::cout << "[sync_start] 啟動驗證通過 (" << vms << "ms, L+R running)\n";
+    }
+    HOLD_TRACE("sync_start EXIT OK (both running, verified)");
     return false;
 }
 
@@ -1208,7 +1355,23 @@ static bool middleStart(bool pay_out) {
 // Failure of setFreqHz is non-fatal — log and continue. The motion loop
 // already has timeout / abort / tension safety as guard rails; balance is
 // nice-to-have, not load-bearing.
-static void apply_balance_trim(double base_hz, int direction,
+// [2026-09-01] base_hz 由「單一值」改為「兩側各自」。
+//
+// 🔴 根因：原本呼叫端永遠傳 g_vfd_motion_hz，但 motion_rope 有**逐側獨立**的
+//    三段式煞車（motion_hz → motion_hz/2 @15cm → fine_adjust_hz @8cm）。減速後
+//    實際頻率已不是 motion_hz，平衡一寫入就把速度拉回去 —— 這才是原註解說的
+//    "would fight the freeze/slow freq back up toward motion_hz"。
+//    當時的處置是**在接近段整個關掉平衡**，代價是：
+//      40cm 移動 → 最後 15cm 無平衡（37%）；208cm → 7%。
+//    2026-09-01 實測 pay_out 40cm：0–25cm 左右差 ≤1cm（死區內，零筆 [BAL]），
+//    25–41cm 差距長到 **4cm、roll 3.6°** —— 偏差正是在無平衡窗口長出來的。
+//
+// ✅ 改法：傳入**當前實際生效的**每側 base，平衡就不再對抗減速，
+//    gate 也就不必再關掉接近段。兩側處於不同階段時（一側已減速、另一側還沒）
+//    **正是最需要平衡的時刻**，舊做法恰好在那時把它關掉。
+//
+// cap 取兩側較小的 base 計算 —— 對已減速那側才不會超調。
+static void apply_balance_trim(double base_hz_left, double base_hz_right, int direction,
                                 int32_t base_left, int32_t base_right,
                                 bool& was_trimmed) {
     auto reset_to_base = [&]() {
@@ -1219,39 +1382,90 @@ static void apply_balance_trim(double base_hz, int direction,
         // with 1 attempt / 0 backoff (BAL doesn't need retry — next tick will
         // re-issue on failure).
         dual_vfd_sync_retry(
-            [base_hz](CraneVFD& inv){ return inv.setFreqHz(base_hz, VFD_MAX_HZ); },
-            [base_hz](CraneVFD& inv){ return inv.setFreqHz(base_hz, VFD_MAX_HZ); },
+            [base_hz_left ](CraneVFD& inv){ return inv.setFreqHz(base_hz_left,  VFD_MAX_HZ); },
+            [base_hz_right](CraneVFD& inv){ return inv.setFreqHz(base_hz_right, VFD_MAX_HZ); },
             1, 0, "bal_reset");
         was_trimmed = false;
-        std::cout << "[BAL] reset to base " << base_hz << " Hz\n";
+        std::cout << "[BAL] reset to base L=" << base_hz_left
+                  << " R=" << base_hz_right << " Hz\n";
     };
 
     if (!g_balance_enabled.load())                                  { reset_to_base(); return; }
-    if (!g_length_left_valid.load() || !g_length_right_valid.load()){ reset_to_base(); return; }
 
-    const int32_t l_now = g_length_left .load();
-    const int32_t r_now = g_length_right.load();
-    const double progL = (double)direction * (double)(l_now - base_left);
-    const double progR = (double)direction * (double)(r_now - base_right);
-    const double err   = progL - progR;     // + = left ahead
+    // [2026-09-01] 誤差來源選擇。IMU 路徑需要資料**新鮮**才用；過期一律退回
+    // 計米器路徑（不是凍結、不是續用舊值——過期的姿態拿來驅動馬達比不修更危險）。
+    double err = 0.0, kp = 0.0, deadband = 0.0;
+    const char* src = "meter";
+    int64_t imu_age = -1;
+    const bool want_imu = (g_balance_source.load() == BalanceSource::Imu);
+    const bool use_imu  = want_imu && imu_roll_fresh(&imu_age);
 
-    if (std::fabs(err) <= g_balance_deadband.load()) { reset_to_base(); return; }
+    if (use_imu) {
+        // 🔴🔴 [2026-09-01] err_imu = **-direction × roll**。少了 direction 這一項
+        // 會讓放繩時的修正**反向、主動放大傾斜**（實測：pay_out 20cm 期間
+        // roll 由 -1.66° 單調惡化到 -5.18°，被監看中止）。收繩剛好方向對，
+        // 所以第一次測試（retract）看起來是對的 —— **單一方向的測試不足以驗證符號**。
+        //
+        // 推導（與計米器路徑的 err 語意對齊：err > 0 = 左側「進度較前」）：
+        //   計米器：err = direction × [(l-base_l) - (r-base_r)]
+        //           retract(dir=-1) 讀數下降、左收較多 → err>0 ✅
+        //           pay_out(dir=+1) 讀數上升、左放較多 → err>0 ✅
+        //   IMU：實測 (R-L) 越大 → roll 越正（2026-09-01，約 1°/cm）
+        //           roll>0 ⟺ L < R ⟺ 左繩較短
+        //           retract：左繩較短 = 左側**收得較多** = 進度較前 → err = +roll
+        //           pay_out：左繩較短 = 左側**放得較少** = 進度較後 → err = -roll
+        //         兩者合併即 err = -direction × roll（dir=-1 retract / +1 pay_out）
+        //
+        // 交叉驗算（2026-09-01 retract 實測，該趟結果正確）：
+        //   roll=-0.7, dir=-1 → err=-0.7 → trim=-1.4 → L=10.71 R=9.29
+        //   與當時 log 逐位元吻合。
+        err      = -(double)direction * g_imu_roll_deg.load();
+        kp       = g_balance_imu_kp.load();
+        deadband = g_balance_imu_deadband.load();
+        src      = "imu";
+    } else {
+        if (want_imu) {
+            // 想用 IMU 但資料不新鮮 —— 這件事必須看得見，否則會以為 IMU 在運作。
+            static int64_t last_warn_ms = 0;
+            const int64_t now = steady_now_ms();
+            if (now - last_warn_ms > 2000) {
+                last_warn_ms = now;
+                std::cerr << "[BAL] ⚠ balance_source=imu 但 roll 資料"
+                          << (imu_age < 0 ? "從未收到" : "已過期")
+                          << "（age=" << imu_age << "ms > " << IMU_ROLL_STALE_MS
+                          << "ms）→ 本輪退回計米器\n";
+            }
+        }
+        if (!g_length_left_valid.load() || !g_length_right_valid.load()){ reset_to_base(); return; }
+        const int32_t l_now = g_length_left .load();
+        const int32_t r_now = g_length_right.load();
+        const double progL = (double)direction * (double)(l_now - base_left);
+        const double progR = (double)direction * (double)(r_now - base_right);
+        err      = progL - progR;     // + = left ahead
+        kp       = g_balance_kp.load();
+        deadband = g_balance_deadband.load();
+    }
 
-    const double kp        = g_balance_kp.load();
+    if (std::fabs(err) <= deadband) { reset_to_base(); return; }
+
     const double cap_ratio = g_balance_trim_cap_ratio.load();
-    const double cap       = base_hz * cap_ratio;   // scales with motion speed
+    // [2026-09-01] cap 以**較慢側**的 base 計算：兩側階段不同時，用快側的 base
+    // 會讓慢側被推超過它該有的速度（減速段的意義就沒了）。
+    const double cap       = std::min(base_hz_left, base_hz_right) * cap_ratio;
     double trim = kp * err;
     if (trim >  cap) trim =  cap;
     if (trim < -cap) trim = -cap;
 
-    const double hz_min = g_balance_hz_min.load();
-    const double hz_max = base_hz + g_balance_hz_max_offset.load();   // dynamic: base + offset
-    double left_hz  = base_hz - trim / 2.0;
-    double right_hz = base_hz + trim / 2.0;
-    if (left_hz  < hz_min) left_hz  = hz_min;
-    if (left_hz  > hz_max) left_hz  = hz_max;
-    if (right_hz < hz_min) right_hz = hz_min;
-    if (right_hz > hz_max) right_hz = hz_max;
+    const double hz_min     = g_balance_hz_min.load();
+    const double hz_max_off = g_balance_hz_max_offset.load();
+    const double hz_max_l   = base_hz_left  + hz_max_off;   // 每側各自的上界
+    const double hz_max_r   = base_hz_right + hz_max_off;
+    double left_hz  = base_hz_left  - trim / 2.0;
+    double right_hz = base_hz_right + trim / 2.0;
+    if (left_hz  < hz_min)   left_hz  = hz_min;
+    if (left_hz  > hz_max_l) left_hz  = hz_max_l;
+    if (right_hz < hz_min)   right_hz = hz_min;
+    if (right_hz > hz_max_r) right_hz = hz_max_r;
 
     // [2026-05-29] Parallel L+R trim (was sequential). See reset_to_base comment.
     dual_vfd_sync_retry(
@@ -1259,8 +1473,13 @@ static void apply_balance_trim(double base_hz, int direction,
         [right_hz](CraneVFD& inv){ return inv.setFreqHz(right_hz, VFD_MAX_HZ); },
         1, 0, "bal_trim");
     was_trimmed = true;
-    std::cout << "[BAL] err=" << err << "cm trim=" << trim
-              << "Hz L=" << left_hz << " R=" << right_hz << "\n";
+    // [2026-09-01] 單位隨來源而變（meter=cm / imu=度）——寫死 "cm" 會在 IMU 模式
+    // 下把度誤讀成公分。同時印出來源，否則看 log 分不出走的是哪一條路徑。
+    std::cout << "[BAL] src=" << src << " err=" << err
+              << (use_imu ? "deg" : "cm") << " trim=" << trim
+              << "Hz L=" << left_hz << " R=" << right_hz;
+    if (use_imu) std::cout << " (roll_age=" << imu_age << "ms)";
+    std::cout << "\n";
 }
 
 // ============ Watchdog ============
@@ -1943,7 +2162,8 @@ static void hold_loop() {
             if (std::chrono::duration_cast<std::chrono::milliseconds>(
                     now_pt - last_balance_tick).count() >= BALANCE_TICK_MS) {
                 last_balance_tick = now_pt;
-                apply_balance_trim(g_vfd_hold_hz.load(), cur_sync_dir,
+                // hold 模式兩側同速，無三段式煞車 → 兩側 base 相同。
+                apply_balance_trim(g_vfd_hold_hz.load(), g_vfd_hold_hz.load(), cur_sync_dir,
                                    balance_base_left, balance_base_right, was_trimmed);
             }
         }
@@ -2009,11 +2229,13 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
     const int curR_init = (int)g_length_right.load();
     const int diff_init = curL_init - curR_init;
 
-    // Already within tolerance — no convergence needed, stop both
-    if (std::abs(diff_init) <= FINE_ADJUST_TOLERANCE_CM) {
+    // Already within tolerance — no convergence needed, stop both.
+    // [2026-09-01] 這裡比的是**左右差（姿態）**，用專屬的 diff 容許值，
+    // 不是每側位置誤差用的 FINE_ADJUST_TOLERANCE_CM（見該常數的說明）。
+    if (std::abs(diff_init) <= g_fine_adjust_diff_tol_cm.load()) {
         std::cout << "[fine_adjust] L=" << curL_init << " R=" << curR_init
-                  << " diff=" << diff_init << " — within ±" << FINE_ADJUST_TOLERANCE_CM
-                  << ", stopping both\n";
+                  << " diff=" << diff_init << " — within ±" << g_fine_adjust_diff_tol_cm.load()
+                  << " (diff_tol), stopping both\n";
         std::thread sL([]{ reliable_stop_one(vfd_left);  });
         std::thread sR([]{ reliable_stop_one(vfd_right); });
         sL.join();
@@ -2647,17 +2869,29 @@ static std::string motion_rope(int cm, bool is_retract) {
             middle_done = true;
         }
 
-        // Balance trim: tick every BALANCE_TICK_MS while NEITHER side is frozen
-        // AND neither side has entered EITHER slow-approach stage yet
-        // (2026-07-23). Once either freezes OR slows (half or fine), balance
-        // trim would fight the freeze/slow freq back up toward motion_hz.
-        if (!left_frozen && !right_frozen && !left_slowed && !right_slowed
-            && !left_half_slowed && !right_half_slowed) {
+        // Balance trim: tick every BALANCE_TICK_MS while NEITHER side is frozen.
+        //
+        // 🔴 [2026-09-01] **接近段的 gate 已解除。** 原本是
+        //    `!left_slowed && !right_slowed && !left_half_slowed && !right_half_slowed`
+        //    （2026-07-23 加），理由是「平衡會把減速後的頻率拉回 motion_hz」——
+        //    但那是因為呼叫端永遠傳 g_vfd_motion_hz 當 base。改成傳**各側當前
+        //    實際生效的 base** 之後，平衡不再對抗減速，就不需要關掉它。
+        //    舊行為的代價（2026-09-01 實測 pay_out 40cm）：0–25cm 左右差 ≤1cm，
+        //    25–41cm 無平衡 → 差距長到 4cm、roll 3.6°。208cm 全程只有 7% 受影響，
+        //    但 per user 的規格是**移動全程** ±1°，那 15cm 不能是空白。
+        //
+        // frozen 仍然排除：已經停下來的側，調它的頻率沒有意義。
+        if (!left_frozen && !right_frozen) {
             const auto now_pt = std::chrono::steady_clock::now();
             if (std::chrono::duration_cast<std::chrono::milliseconds>(
                     now_pt - last_balance_tick).count() >= BALANCE_TICK_MS) {
                 last_balance_tick = now_pt;
-                apply_balance_trim(g_vfd_motion_hz.load(), balance_dir,
+                // 各側當前實際生效的頻率 —— 與上方三段式煞車的 latch 一致。
+                const double mh = g_vfd_motion_hz.load();
+                const double fa = g_fine_adjust_hz.load();
+                const double bl = left_slowed  ? fa : (left_half_slowed  ? mh / 2.0 : mh);
+                const double br = right_slowed ? fa : (right_half_slowed ? mh / 2.0 : mh);
+                apply_balance_trim(bl, br, balance_dir,
                                    base_left, base_right, was_trimmed);
             }
         }
@@ -2786,9 +3020,20 @@ static std::string cmd_roll_correct(int delta_cm) {
     // [2026-07-23 per user] Uses g_roll_correct_hz, NOT g_vfd_motion_hz — this
     // is a small precision trim call, decoupled from the main auto pay_out/
     // retract speed so it can run slower independently of it.
-    if (dual_vfd_sync_start(g_roll_correct_hz.load(), left_pay, !left_pay)) {
+    // [2026-09-01] 兩段式：短程直接慢速起步，長程先快、最後 APPROACH cm 降速。
+    // 見 ROLL_CORRECT_APPROACH_CM 的說明。
+    const double start_hz = (abs_cm <= ROLL_CORRECT_APPROACH_CM)
+                          ? g_roll_finish_hz.load()     // 短程：全程慢速，不依賴飛行中的寫入
+                          : g_roll_correct_hz.load();
+    if (abs_cm <= ROLL_CORRECT_APPROACH_CM)
+        std::cout << "[roll_correct] 短程 " << abs_cm << "cm <= approach "
+                  << ROLL_CORRECT_APPROACH_CM << "cm → 直接以 " << start_hz
+                  << "Hz 起步（不走高速段）\n";
+    if (dual_vfd_sync_start(start_hz, left_pay, !left_pay)) {
         return "ERR vfd_start_fail\n";
     }
+    // slow-approach latch，兩側各自獨立（兩側走相反方向，但距離相同）
+    bool left_slowed = false, right_slowed = false;
 
     const auto start = std::chrono::steady_clock::now();
     bool left_done = false, right_done = false;
@@ -2840,6 +3085,21 @@ static std::string cmd_roll_correct(int delta_cm) {
                 break;
             }
         }
+
+        // [2026-09-01] Slow-approach：最後 ROLL_CORRECT_APPROACH_CM 降到 finish_hz，
+        // 讓停止時的減速滑行不要過衝。短程分支已在起步時就是 finish_hz，
+        // 此處的條件第一輪即成立、setFreqHz 是冪等寫入，因此無害（且 latch 只寫一次）。
+        auto slow_approach = [&](CraneVFD& inv, bool done, bool valid,
+                                 int32_t now, int32_t base, bool& slowed) {
+            if (done || slowed || !valid) return;
+            if (std::abs(now - base) >= abs_cm - ROLL_CORRECT_APPROACH_CM) {
+                if (!inv.setFreqHz(g_roll_finish_hz.load(), VFD_MAX_HZ)) slowed = true;
+            }
+        };
+        slow_approach(vfd_left,  left_done,  g_length_left_valid.load(),
+                      g_length_left.load(),  base_left,  left_slowed);
+        slow_approach(vfd_right, right_done, g_length_right_valid.load(),
+                      g_length_right.load(), base_right, right_slowed);
 
         // Each side stops when its displayed delta reaches abs_cm.
         if (!left_done && g_length_left_valid.load() &&
@@ -3378,6 +3638,21 @@ static std::string cmd_status() {
     oss << " freeze_hz="        << g_freeze_hz.load();
     oss << " kick_hz="          << g_kick_hz.load();
     oss << " roll_correct_hz="  << g_roll_correct_hz.load();
+    oss << " roll_finish_hz="   << g_roll_finish_hz.load();
+    oss << " fine_adjust_diff_tol_cm=" << g_fine_adjust_diff_tol_cm.load();
+    // [2026-09-01] IMU 平衡的可觀測性：來源、最後收到的 roll、資料年齡。
+    // 🔴 age 一定要出現在 status —— 只看 balance_source=imu 會誤以為它在運作，
+    //    實際上資料過期時走的是計米器路徑（見 apply_balance_trim）。
+    {
+        int64_t age = -1;
+        const bool fresh = imu_roll_fresh(&age);
+        oss << " balance_source=" << (g_balance_source.load() == BalanceSource::Imu ? "imu" : "meter");
+        oss << " balance_imu_kp=" << g_balance_imu_kp.load();
+        oss << " balance_imu_deadband=" << g_balance_imu_deadband.load();
+        oss << " imu_roll=" << g_imu_roll_deg.load();
+        oss << " imu_roll_age_ms=" << age;
+        oss << " imu_roll_fresh=" << (fresh ? 1 : 0);
+    }
     // Device availability — GUI uses these to grey out unavailable controls.
     oss << " dev_vfd_left="    << (g_dev_vfd_left.load()    ? 1 : 0);
     oss << " dev_vfd_right="   << (g_dev_vfd_right.load()   ? 1 : 0);
@@ -4046,6 +4321,53 @@ static std::string cmd_set_roll_correct_hz(double hz) {
     std::cout << "[crane] roll_correct_hz = " << hz << " Hz\n";
     return "OK\n";
 }
+// [2026-09-01] 本體在移動中以 ~4Hz 推送姿態。刻意做得極輕：只存值 + 時間戳，
+// **不取任何 motion 持有的鎖** —— 它必須能在 motion_rope 阻塞主連線時，
+// 由第二條連線（吊機 TCP server 是多連線、每連線一執行緒）即時服務。
+// 🔴 健全性上界在這裡擋，不讓壞值進到控制律（見 IMU_ROLL_SANITY_DEG 說明）。
+static std::string cmd_set_imu_roll(double deg) {
+    if (!(deg > -IMU_ROLL_SANITY_DEG && deg < IMU_ROLL_SANITY_DEG))
+        return "ERR roll_out_of_sanity_range\n";
+    g_imu_roll_deg.store(deg);
+    g_imu_roll_stamp_ms.store(steady_now_ms());
+    return "OK\n";
+}
+static std::string cmd_set_balance_source(const std::string& src) {
+    if (src == "meter")     g_balance_source.store(BalanceSource::Meter);
+    else if (src == "imu")  g_balance_source.store(BalanceSource::Imu);
+    else return "ERR expected_meter_or_imu\n";
+    std::cout << "[crane] balance_source = " << src << "\n";
+    return "OK\n";
+}
+static std::string cmd_set_balance_imu_kp(double v) {
+    if (!(v > 0.0) || v > 50.0) return "ERR out_of_range\n";
+    g_balance_imu_kp.store(v);
+    std::cout << "[crane] balance_imu_kp = " << v << " Hz/deg\n";
+    return "OK\n";
+}
+static std::string cmd_set_balance_imu_deadband(double v) {
+    if (v < 0.0 || v > IMU_ROLL_SANITY_DEG) return "ERR out_of_range\n";
+    g_balance_imu_deadband.store(v);
+    std::cout << "[crane] balance_imu_deadband = " << v << " deg\n";
+    return "OK\n";
+}
+static std::string cmd_set_fine_adjust_diff_tol(int cm) {
+    if (cm < 0 || cm > 20) return "ERR out_of_range\n";
+    g_fine_adjust_diff_tol_cm.store(cm);
+    std::cout << "[crane] fine_adjust_diff_tol_cm = " << cm << " cm\n";
+    return "OK\n";
+}
+static std::string cmd_set_roll_finish_hz(double hz) {
+    // [2026-09-01 per user] 可設定範圍 5–50Hz。低於 5 會被拒絕；
+    // 5~10 之間允許但不建議（實際操作範圍是 10–50），故只警告不拒絕。
+    if (hz < VFD_MIN_SETTABLE_HZ || hz > VFD_MAX_HZ) return "ERR hz_out_of_range\n";
+    if (hz < ROLL_FINISH_HZ_DEFAULT)
+        std::cout << "[crane] ⚠ roll_finish_hz = " << hz
+                  << " Hz 低於建議操作下限 " << ROLL_FINISH_HZ_DEFAULT << " Hz\n";
+    g_roll_finish_hz.store(hz);
+    std::cout << "[crane] roll_finish_hz = " << hz << " Hz\n";
+    return "OK\n";
+}
 static std::string cmd_set_freeze_hz(double hz) {
     if (hz <= 0 || hz > VFD_MAX_HZ) return "ERR hz_out_of_range\n";
     g_freeze_hz.store(hz);
@@ -4330,6 +4652,36 @@ static std::string dispatch(const std::string& line) {
         double v = 0; iss >> v;
         if (iss.fail()) return "ERR usage:set_roll_correct_hz_<hz>\n";
         return cmd_set_roll_correct_hz(v);
+    }
+    if (cmd == "set_imu_roll") {
+        double v = 0; iss >> v;
+        if (iss.fail()) return "ERR usage:set_imu_roll_<deg>\n";
+        return cmd_set_imu_roll(v);
+    }
+    if (cmd == "set_balance_source") {
+        std::string v; iss >> v;
+        if (v.empty()) return "ERR usage:set_balance_source_<meter|imu>\n";
+        return cmd_set_balance_source(v);
+    }
+    if (cmd == "set_balance_imu_kp") {
+        double v = 0; iss >> v;
+        if (iss.fail()) return "ERR usage:set_balance_imu_kp_<hz_per_deg>\n";
+        return cmd_set_balance_imu_kp(v);
+    }
+    if (cmd == "set_balance_imu_deadband") {
+        double v = 0; iss >> v;
+        if (iss.fail()) return "ERR usage:set_balance_imu_deadband_<deg>\n";
+        return cmd_set_balance_imu_deadband(v);
+    }
+    if (cmd == "set_fine_adjust_diff_tol") {
+        int v = 0; iss >> v;
+        if (iss.fail()) return "ERR usage:set_fine_adjust_diff_tol_<cm>\n";
+        return cmd_set_fine_adjust_diff_tol(v);
+    }
+    if (cmd == "set_roll_finish_hz") {
+        double v = 0; iss >> v;
+        if (iss.fail()) return "ERR usage:set_roll_finish_hz_<hz>\n";
+        return cmd_set_roll_finish_hz(v);
     }
     if (cmd == "status") return cmd_status();
     if (cmd == "stop")   return cmd_stop();
