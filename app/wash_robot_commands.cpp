@@ -3641,6 +3641,58 @@ std::string WashRobot::cmd_brush(bool on) {
     return "OK\n";
 }
 
+// [2026-09-01 per user] 繼電器現況回讀。見 WASH_ROBOT.h 的宣告說明。
+// 輸出所有 PQW_TOTAL_CH 個通道，並在已知用途的通道後面附上名稱，方便對照接線表。
+std::string WashRobot::cmd_relay_status() {
+    State cur = state_.load();
+    if (cur == State::Error) return state_violation_(cur);
+
+    const std::vector<bool> st = pqw_.readAllStatus();
+    if ((int)st.size() < PQW_TOTAL_CH) return "ERR relay_read_fail\n";
+
+    std::ostringstream oss;
+    oss << "OK";
+    for (int ch = 1; ch <= PQW_TOTAL_CH; ++ch) {
+        oss << " ch" << ch << "=" << (st[ch - 1] ? 1 : 0);
+    }
+    // 已知用途一併印出，讓這一行自己就能對照，不必去翻表。
+    oss << " | names ch" << CH_VALVE_RIGHT  << "=valve"
+        <<          " ch" << CH_PUMP_A       << "=pumpA"
+        <<          " ch" << CH_PUMP_B       << "=pumpB(未啟用)"
+        <<          " ch" << CH_BRUSH        << "=brush"
+        <<          " ch" << CH_BREAK_VACUUM << "=正壓閥"
+        <<          " ch" << CH_WATER_PUMP   << "=water_pump(未接管路)";
+    oss << "\n";
+    return oss.str();
+}
+
+// [2026-09-01 per user] 通用單通道繼電器控制（bring-up / 接線盤點用）。
+//
+// 🔴 狀態限制只放 Idle / Ready，理由見 WASH_ROBOT.h 的宣告說明：
+// CH1 是唯一一顆真空閥、CH6 是破真空閥，吸盤可能承重時開放 raw 控制
+// 等於提供一條讓機器脫落的捷徑。這不是保守，是這兩個通道的實際後果。
+std::string WashRobot::cmd_relay(int ch, bool on) {
+    if (ch < 1 || ch > PQW_TOTAL_CH) {
+        std::ostringstream oss;
+        oss << "ERR ch_out_of_range " << ch << " (1.." << PQW_TOTAL_CH << ")\n";
+        return oss.str();
+    }
+    State cur = state_.load();
+    if (cur != State::Idle && cur != State::Ready) return state_violation_(cur);
+
+    std::cout << "[relay] CH" << ch << " → " << (on ? "ON" : "OFF") << "\n";
+    if (pqw_.controlRelay(ch, on)) return "ERR relay_fail\n";
+
+    // 立刻回讀該通道 —— 「送出成功」不等於「繼電器真的動了」。2026-07/08 的
+    // CH_BRUSH 誤號事件（打到沒接東西的繼電器、log 完全看不出來）就是因為
+    // 呼叫端沒有回讀也沒檢查回傳值。
+    const std::vector<bool> st = pqw_.readAllStatus();
+    if ((int)st.size() < ch) return "ERR relay_set_but_readback_fail\n";
+    std::ostringstream oss;
+    oss << "OK ch" << ch << "=" << (st[ch - 1] ? 1 : 0) << "\n";
+    return oss.str();
+}
+
 std::string WashRobot::cmd_water_pump(bool on) {
     State cur = state_.load();
     if (cur == State::Error) return state_violation_(cur);

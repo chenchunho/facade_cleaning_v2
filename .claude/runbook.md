@@ -677,6 +677,8 @@ ssh user@192.168.5.25   'echo exit > ~/main_20260831/crane_in'
 #### 狀態、設定與腳本
 | 指令 | 說明 |
 |---|---|
+| `relay_status` | 🆕 2026-09-01 回讀 16 個 PQW 繼電器現況（FC 0x01），附已知用途名稱。**唯一安全的查法**——不要另開 TCP 直接查 `.20`，那條匯流排上還有 ZDT 推桿與程式輪詢 |
+| `relay <ch> <on\|off>` | 🆕 2026-09-01 通用單通道繼電器控制（bring-up／接線盤點）。送出後自動回讀該通道。🔴 **只允許 Idle / Ready** —— CH1 是唯一真空閥、CH6 是正壓閥，吸盤承重時開放 raw 控制等於提供一條讓機器脫落的捷徑 |
 | `ping` / `status` | 存活 / 狀態（⚠️ status 的壓力值**看不出是新鮮值還是 timeout 快取**） |
 | `get_settings` / `set_setting <key> <value>` / `save_settings` | 執行期設定 |
 | `set_first_step <left\|right>` / `set_follower_mode <imu\|meter>` | 步伐參數 |

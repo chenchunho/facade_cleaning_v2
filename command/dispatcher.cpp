@@ -312,6 +312,15 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
         }
         return "ERR usage:pwm_<set|save|status>\n";
     }
+    if (cmd == "relay_status") return robot.cmd_relay_status();
+    if (cmd == "relay") {
+        int ch = 0; std::string s2;
+        iss >> ch >> s2;
+        if (iss.fail()) return "ERR usage:relay_<ch>_<on|off>\n";
+        if (s2 == "on")  return robot.cmd_relay(ch, true);
+        if (s2 == "off") return robot.cmd_relay(ch, false);
+        return "ERR expected_on_or_off\n";
+    }
     if (cmd == "brush") {
         std::string s; iss >> s;
         if (iss.fail()) return "ERR usage:brush_<on|off>\n";

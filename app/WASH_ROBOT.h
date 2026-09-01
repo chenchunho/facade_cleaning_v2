@@ -128,6 +128,21 @@ public:
     std::string cmd_pump(bool on);                       // dp0105 vacuum pump (PQW CH1)
     std::string cmd_brush(bool on);                      // arm roller brush motor (PQW CH5)
 
+    // [2026-09-01 per user] 繼電器現況回讀 + 通用單通道控制（bring-up / 接線盤點用）。
+    //
+    // 為什麼需要：既有的繼電器指令全是**語意層**的（`vacuum`/`pump`/`brush`/`water_pump`），
+    // 只覆蓋 CH1/2/5/14；CH3/4/7/8 沒有任何指令碰得到，而 `cmd_status` 也不含繼電器欄位
+    // —— 實體到底 ON 沒 ON **只能靠「送過哪些指令」推斷**。要逐一驗證接線就必須有這兩支。
+    //
+    // ⚠️ **不要另開 TCP 連線直接查 `.20`**：那條匯流排上還有 ZDT 推桿 5~8 與程式自己的
+    // 輪詢，插入的幀會與運行中的交易搶匯流排（2026-09-01 的連線失步已經吃過這類虧）。
+    // 走這兩支指令＝走程式自己的 socket_mtx，是唯一安全的查法。
+    std::string cmd_relay_status();
+    // 🔴 只允許 Idle / Ready 兩個狀態。理由是安全而非潔癖：CH1 是**唯一**一顆真空閥，
+    // 貼牆時關掉它＝4 顆吸盤同時失去真空；CH6 是破真空閥，開它是主動灌氣解封。
+    // 任何「吸盤可能正在承重」的狀態下開放 raw 繼電器控制，等於給一條讓機器脫落的捷徑。
+    std::string cmd_relay(int ch, bool on);
+
     // QX-DO24 PWM (cli_22_ slave 6). Web panel "PWM 控制" 用。
     //   cmd_pwm_set : 暫存寫入 —— 寫 0x00~0x0F，斷電即還原，可無限次改
     //   cmd_pwm_save: 保存參數 —— 寫 flash 0x10，⚠ 壽命 1~2 千次、每次上電
@@ -363,7 +378,11 @@ private:
     // [2026-08-27 per user] 真空閥不再分左右——實體只剩一顆閥接在 CH1，同時控制
     // 全部 4 顆吸盤。CH_VALVE_LEFT 改為指向同一個 channel（保留這個名字，讓
     // 二十幾處既有呼叫點不必全部改寫；其中絕大多數本來就是左右同時設同一個值）。
-    // 若之後又改回兩顆獨立閥，只要把 CH_VALVE_LEFT 改回 3，所有邏輯自動還原。
+    // 🔴 [2026-09-01 實測推翻] 這裡原本寫著「若之後又改回兩顆獨立閥，只要把
+    // CH_VALVE_LEFT 改回 3，所有邏輯自動還原」——**照做會驅動真空幫浦 B 組**。
+    // 逐一切換 CH1~CH8 實測（`relay <ch> on|off` + `relay_status` 回讀）確認
+    // **CH3 是真空幫浦 B 組，不是空通道、更不是閥**。要改回雙閥必須另找空通道
+    // （CH4 / CH7 / CH8 實測為空），**不可挪用 CH3**。
     //
     // ⚠ 安全影響：「只放開單側」在硬體上已經不可能。
     // do_step_down_ / do_step_up_ / do_cross_obstacle_ 的核心前提是「一側解真空、
@@ -374,7 +393,16 @@ private:
     // v2 正式走法 do_step_sync_ 本來就是 4 顆同放同吸（只呼叫 vacuum_valve_("feet")），
     // 不受這個變更影響。
     static constexpr int CH_VALVE_RIGHT  = 1;  // VT307 全部吸盤（原右腳專用，現為唯一一顆閥）
-    static constexpr int CH_PUMP         = 2;  // dp0105 vacuum pump (always ON while running)
+    static constexpr int CH_PUMP         = 2;  // dp0105 真空幫浦 **A 組**（init 開啟，運行期間常開）
+    static constexpr int CH_PUMP_A       = CH_PUMP;  // 別名：明示 CH2 是 A 組，既有呼叫點不必改
+    // 🔴 [2026-09-01 per user 實測] CH3 = 真空幫浦 **B 組**。
+    // 本檔原本把 CH3 記成「空通道（原左腳閥，08-27 讓出）」——**是錯的**。
+    // ⚠️ **目前刻意未啟用**（per user 2026-09-01：「幫浦先用 A 組就好，B 之後再規劃」）。
+    // `init` 只開 CH_PUMP_A，所以**真空系統從開機到現在只有一半在運轉**。
+    // 📌 這很可能與吸盤密封長期要靠 smart_extend_subset_ 反覆補伸（最多推到 ~16cm）
+    // 才吸得住有關 —— 在查明之前不要再把那個現象直接歸因於機構或吸盤本身。
+    // 待辦見 .claude/work_log.md 待辦總表。
+    static constexpr int CH_PUMP_B       = 3;  // 真空幫浦 B 組（實測確認，尚未啟用）
     static constexpr int CH_VALVE_LEFT   = CH_VALVE_RIGHT;  // 2026-08-27: 3 → 同 CH1（單閥）
     // [2026-08-28 per user] 15 → 5，實體確認滾筒接在 CH5。2026-07-24 那次
     // 「5→15，arm now physically installed」是錯的 —— 依此送出的 controlRelay(15)
@@ -397,7 +425,12 @@ private:
     // Channel 沿革：CH16（bench 期）→ CH14（production）→ CH6（2026-08-27 per user）。
     // 搬到 CH6 時水泵已從 CH6 讓位到 CH14（見上方 CH_WATER_PUMP 的說明）——兩者
     // 絕不可同號，否則清洗時開水泵等於開破真空。
-    static constexpr int CH_BREAK_VACUUM = 6;   // 2026-08-27: 14→6 per user
+    // 🔴 [2026-09-01 per user 實測] 正確名稱是**正壓閥**，不只是「破真空」。
+    // 使用者說明：吸盤吸在玻璃上時，脫離**除了**關真空閥讓接口回到大氣壓，
+    // **也可以同時給正壓加速脫離**。CH6 **4 顆吸盤共用**（不分側，與 CH1 同）。
+    // 通電時間 per user 500 ms（＝ BREAK_VACUUM_TOTAL_ON_MS 現值，不必改）。
+    // 名稱保留 CH_BREAK_VACUUM 不改，避免動到既有呼叫點；語意以本註解為準。
+    static constexpr int CH_BREAK_VACUUM = 6;   // 正壓閥（4 顆共用）2026-08-27: 14→6 per user
     // [2026-06-05] CH_WATER_INLET 移除 — 進水球閥控制權搬到 crane 端 PQW
     // (192.168.1.34 slave 12 CH4)，washrobot 不再直接控制。所有原本走
     // pqw_.controlRelay(CH_WATER_INLET, x) / pqw_set_relay_verified_(CH_WATER_INLET, x)
