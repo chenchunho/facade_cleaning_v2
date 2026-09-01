@@ -700,8 +700,6 @@ void WashRobot::do_sync_imu_roll_correct_() {
 std::string WashRobot::do_step_down_(bool skip_cleaning_sweep,
                                       std::function<void()> after_feet_rail_hook,
                                       std::function<void()> before_feet_rail_hook,
-                                      std::function<void()> during_body_rail_hook,
-                                      std::function<void()> after_body_rail_hook,
                                       bool right_first) {
     // 🔴🔴 [2026-08-31] 停用：本函式假設「每側有獨立的真空閥」，而硬體沒有。
     // 真空幫浦一顆繼電器控 4 顆吸盤，三口二位閥也是一顆繼電器控 4 顆（per user）。
@@ -725,7 +723,6 @@ std::string WashRobot::do_step_down_(bool skip_cleaning_sweep,
     // use crane pay_out on that side. Arm cleaning sweep deferred (arm 未裝); the
     // v1 sweep-timing rail hooks are unused in v2.
     (void)after_feet_rail_hook; (void)before_feet_rail_hook;
-    (void)during_body_rail_hook; (void)after_body_rail_hook;
     std::lock_guard<std::mutex> lk(motion_mtx_);
     abort_flag     = false;
     motion_active_ = true;
@@ -1006,7 +1003,7 @@ std::string WashRobot::cmd_step_down(int cm) {
     set_state_(State::Running);
 
     // Single step → lead with the chosen first-step side.
-    std::string r = do_step_down_(false, {}, {}, {}, {}, first_step_right_.load());
+    std::string r = do_step_down_(false, {}, {}, first_step_right_.load());
     if (r.rfind("OK", 0) != 0) {
         std::cout << "[step_down] FAIL: " << r;
         set_state_(State::Error);
@@ -2995,7 +2992,7 @@ std::string WashRobot::cmd_run(int steps, int cm, const std::string& direction, 
             // chosen first-step side: step 1 = first_step_right_, then flips each step.
             const bool right_first = ((i % 2 == 1) == first_step_right_.load());
             r = is_up ? do_step_up_(false, {}, {}, right_first)
-                      : do_step_down_(false, {}, {}, {}, {}, right_first);
+                      : do_step_down_(false, {}, {}, right_first);
         }
         if (r.rfind("OK", 0) != 0) {
             motion_active_ = false;
@@ -3238,7 +3235,7 @@ std::string WashRobot::cmd_run_script(const std::string& csv, bool up, const std
             // chosen first-step side: step 1 = first_step_right_, then flips each step.
             const bool right_first = ((i % 2 == 1) == first_step_right_.load());
             r = up ? do_step_up_(false, {}, {}, right_first)
-                   : do_step_down_(false, {}, {}, {}, {}, right_first);
+                   : do_step_down_(false, {}, {}, right_first);
         }
         if (r.rfind("OK", 0) != 0) {
             {

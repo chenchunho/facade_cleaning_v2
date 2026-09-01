@@ -1207,10 +1207,11 @@ function readStepCm() {
 // 對應 HTML 同步刪除。後端 cross_obstacle_down / cross_obstacle_up 指令仍在，
 // 需要時可用 raw command 發送。
 // GUI 端已無任何跨障礙物入口：CSV 'x' 旗標（2026-08-26d）與 run_depth_avoid
-// 整套 UI（2026-08-26e）都已移除。**但後端仍保有自動 cross 的邏輯**——
-// cmd_run_depth_avoid 偵測到大障礙物時會自行改用 cross 步伐。目前前端沒有任何
-// 按鈕能啟動 run_depth_avoid，所以走不到那條路；若之後有人用 raw command 直接
-// 發 run_depth_avoid，機器仍可能自己跨障礙物，而前端已經不會顯示提示了。
+// 整套 UI（2026-08-26e）都已移除。
+// [2026-09-01] 先前這裡警告「後端仍保有自動 cross 的邏輯，raw command 仍打得到」
+// —— 該風險已消失：auto-cross 觸發於 2026-08-31 停用，cmd_run_depth_avoid 本體
+// 於 2026-09-01 整個移除，dispatcher 回 ERR removed_2026_09。
+// ⚠️ 但 cross_obstacle_down / _up 這兩個「手動」指令仍在後端（見上方註解）。
 
 // [2026-07-22] 同步步伐 — 4 顆吸盤同時放開/放繩/重伸。
 // [2026-08-26] 原註解寫「沒有清洗選項（純移動）」已不正確：do_step_sync_ 內含
@@ -1629,9 +1630,7 @@ function hideBalanceModal() { modalBalance.classList.add('modal-hidden'); }
 
 // [2026-08-26 per user] run_depth_avoid 的 modal 函式與 handler 全部移除
 // （modal-depth-obstacle / btn-run-depth-avoid / btn-depth-continue|stop）。
-// 後端 run_depth_avoid / depth_avoid_continue / depth_avoid_stop 指令仍在，
-// 需要時可用 raw command 發送。Camera panel 的 D435i 拍照顯示是獨立功能，
-// 見下方 "depth camera (snapshot-only)" 區塊，未受影響。
+// [2026-09-01 per user] 後端也整套移除，dispatcher 回 ERR removed_2026_09。
 
 //=========== press-and-hold helper ===========
 

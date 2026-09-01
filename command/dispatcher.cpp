@@ -168,18 +168,12 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
     if (cmd == "balance_calibrate_abort")  return "ERR removed_in_v2\n";
     if (cmd == "balance_calibrate_status") return "ERR removed_in_v2\n";
 
-    // [2026-07-20] D435i depth-camera continuous obstacle-avoid walk (v2 —
-    // new commands, distinct from the retired run_avoid/obstacle_response
-    // above since the reply semantics differ: no action/step_cm suggestion,
-    // pure candidate geometry + user-chosen next step_cm).
-    if (cmd == "run_depth_avoid") return robot.cmd_run_depth_avoid();
-    if (cmd == "depth_avoid_continue") {
-        int cm = 0;
-        iss >> cm;
-        if (iss.fail()) return "ERR usage:depth_avoid_continue_<cm>\n";
-        return robot.cmd_depth_avoid_continue(cm);
-    }
-    if (cmd == "depth_avoid_stop") return robot.cmd_depth_avoid_stop();
+    // [2026-09-01 per user] D435i depth-camera obstacle-avoid removed entirely
+    // (code + service + todos). Kept as explicit rejections so an old GUI or a
+    // saved run_script gets a clear answer instead of "unknown command".
+    if (cmd == "run_depth_avoid")     return "ERR removed_2026_09\n";
+    if (cmd == "depth_avoid_continue")return "ERR removed_2026_09\n";
+    if (cmd == "depth_avoid_stop")    return "ERR removed_2026_09\n";
 
     // [2026-05-29] Runtime settings (wall-tune) — see WashRobot::Settings struct.
     if (cmd == "get_settings") {

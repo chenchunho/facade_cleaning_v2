@@ -184,6 +184,10 @@ app/                 # ── 任務層：機器人編排（步態、狀態機�
                      #    ⚠️ 2026-08-30 依原檔既有分節切成兩個 TU（5,213 + 4,275 行）
                      ↓ 工程單位（cm / kg / 度）
 mechanism/           # ── 🆕 機構層：虛擬軸。rope_axis.h
+                     #    🟡 [2026-09-01 實測] **目前只有 Crane_control_PI 在用，app/ 完全不碰**
+                     #       → 上圖畫的 app → mechanism → user_lib 那條鏈**現在是斷的**，
+                     #       app/ 直接打 user_lib。本體沒有繩軸，這對本體合理；
+                     #       但吊機的閉環也還沒搬進來（見下方 🟡）
                      #    🔴 一條吊機繩 = SE3（速度輸出）+ SD76（位置回授）+ DSZL（力回授）
                      #       ＝ 三個裝置、三條匯流排。參考架構的「一裝置一軸」在此不成立
                      ↓ 裝置命令
@@ -194,6 +198,9 @@ transport/           # ── 傳輸層：與硬體種類無關
                      #    TCP_client / TCP_server / Serial_port
 
 common/              # 橫切支援：endpoints.h（端點注入）、profile.h（設定檔載入）
+                     #    log_utils.h（統一 log 格式）🆕 2026-09-01 由 user_lib/ 搬來
+                     #    🔴 搬家理由：transport/ 三個檔也 include 它 → 最底層反向依賴驅動層，
+                     #       且直接牴觸下方「user_lib/ 只放裝置驅動」那條規則。使用者 15+3
 config/              # 🆕 設定檔。axis_profile（機構標定，帶 provenance）
                      #    🔴 不存在也完全正常——沒有它就走編譯進去的常數，行為逐位元相同
                      #    🔴 12 個安全互鎖**不放這裡**，見 common/profile.h 檔頭
@@ -248,14 +255,30 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 > 第二個會被 guard 靜默吃掉**，症狀是「某個 class 莫名找不到」，沒有任何錯誤訊息指向真因。
 > 因此 `SerialPort.h` **刻意留在 `user_lib/`、不併入 `transport/`**，避免兩套並存的假象。
 >
-> 🔴 **`user_lib/` 只放裝置驅動。** 2026-08-27 之前 `WASH_ROBOT.{h,cpp}`（15,321 行，
+> 🔴 **`user_lib/` 只放裝置驅動。** ✅ **2026-09-01 這條規則重新成立**：`log_utils.h`
+> （統一 log 格式，橫切基礎設施不是驅動）已移到 `common/`。搬家前 `transport/` 的
+> `TCP_client`／`TCP_server`／`Serial_port` 都 include 它 → **最底層反向依賴驅動層**。
+> 📌 用 `#include` 圖掃出來的，不是看出來的——**分層宣稱要能被機器驗證**。
+> 2026-08-27 之前 `WASH_ROBOT.{h,cpp}`（15,321 行，
 > 佔全專案 37%）也放在這裡，但它是**編排層不是驅動**——放著會讓「`user_lib` 是裝置驅動」
 > 這句話（下方「模組邊界」節的前提）當場失效。已移到 `app/`。
 >
-> ⚠️ **建置設定**：8 個組態裡**只有 `Debug|ARM64` 設了 `AdditionalIncludeDirectories`**
-> （`..\app;..\user_lib`），其餘 7 個原本就沒有、也編不起來。實際使用的就是這一個
-> （Pi 是 aarch64，部署到 `bin/ARM64/Debug/`）。**移動檔案時要記得同步這一行，
-> 只改 `ClCompile`/`ClInclude` 不夠——標頭會找不到。**
+> ⚠️ **建置設定**：8 個組態裡**只有 `Debug|ARM64` 設了 `AdditionalIncludeDirectories`**，
+> 其餘 7 個原本就沒有、也編不起來。實際使用的就是這一個（Pi 是 aarch64，部署到
+> `bin/ARM64/Debug/`）。**移動檔案時要記得同步這一行，只改 `ClCompile`/`ClInclude` 不夠
+> ——標頭會找不到。**
+> 📌 **2026-09-01 更正**（原記為 `..\app;..\user_lib`，已過期）四個專案的實際值：
+>
+> | 專案 | `AdditionalIncludeDirectories` |
+> |---|---|
+> | `facade_cleaning_v2` | `..\app;..\command;..\common;..\transport;..\user_lib` |
+> | `Crane_control_PI` | `..\common;..\transport;..\user_lib` |
+> | `Linux_test` | `..\common;..\transport;..\user_lib` ← 🆕 **09-01 補上 `..\common`** |
+> | `cleaning_arm` | `..\user_lib`（自成一格，不用 `common/`） |
+>
+> 🔴 **`Linux_test` 那次補漏就是這個坑的實例**：`log_utils.h` 搬到 `common/` 時，
+> 三個專案裡只有它的 include 路徑沒有 `..\common` → **g++ 那條命令列有 `-Icommon` 所以照編，
+> 但 VS 遠端建置會找不到標頭**。兩套建置路徑不一致時，只驗一套等於沒驗。
 
 ## Architecture
 
@@ -295,11 +318,13 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 | 位址 | 機器 | 帳號 | 備註 |
 |---|---|---|---|
 | `192.168.1.100` / `192.168.5.26` | 本體 `washrobot` | `nexuni` | 有線／WiFi |
-| `192.168.1.10` / `192.168.5.17` | 吊機 `raspberry-cran` | `user` | 🔴 **有線是 `.10` 不是 `.101`** |
+| `192.168.1.10` / `192.168.5.25` | 吊機 `raspberry-cran` | `user` | 🔴 **有線是 `.10` 不是 `.101`**；WiFi **會漂**（`.17`→`.25`，2026-08-31） |
 
-⚠️ **三份文件對吊機 IP 的說法不一致**：`web_backend/server.js` 的 `CRANE_IP` 預設值仍是
-`192.168.1.101`（過期）、`runbook.md` 的表也寫 `.101`、只有 08-27 實測記到 `.10`。
-現行程式實際走的是 `app/WASH_ROBOT.h` 的 `CRANE_IP = "192.168.5.17"`（**WiFi**）。
+✅ **2026-09-01 更正：先前記的「三份文件說法不一致」已經解決，本段原文已過期。**
+- `web_backend/server.js` 的 `CRANE_IP` **早已是 `192.168.1.10`**（`f4e0d02` 修，08-29 複查確認）
+- **`app/WASH_ROBOT.h` 不再寫死**：08-31 起 `resolve_crane_ip_()` 開機**先探測有線
+  `CRANE_IP_ETH = 192.168.1.10`（300ms 有界、非阻塞 + `SO_ERROR`），通了就用，不通才退
+  WiFi `CRANE_IP = 192.168.5.25`** → WiFi 再漂也只影響備援路徑。
 
 ### 匯流排拓樸（as-built，2026-08-28 由原始碼確認）
 
@@ -307,7 +332,21 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 
 #### 網關本身的設定（2026-08-28 由網頁後台實查，先前沒有任何記錄）
 
-`.20` 與 `.22` 都是 **USR-TCP232-304**，設定**完全一致**：
+📌 **2026-09-01 per user：五台 USR 網關全部都是 `USR-TCP232-304`，後台帳密一律 `admin` / `admin`。**
+先前只有 `.20` / `.22` 經 08-28 網頁後台實查，`.30` / `.31` / `.34`（吊機側）的型號沒有記錄
+——現已補齊。下表為 `.20` / `.22` 的實查值：
+
+| 網關 | 位址 | 掛什麼 |
+|---|---|---|
+| USR #1 | `192.168.1.20` | 本體 動力 + 滑台 bus（ZDT ×4、PQW、DM2J） |
+| USR #3 | `192.168.1.22` | 本體 感測 bus（JC-100 ×4、QX-DO24、DY-500 ×2、XKC） |
+| USR_A | `192.168.1.30` | 吊機 SE3 左（獨佔一條 bus） |
+| USR_B | `192.168.1.31` | 吊機 SE3 右（獨佔一條 bus） |
+| USR_M | `192.168.1.34` | 吊機 SD76 ×2 + PQW slave 12 |
+
+⚪ `192.168.1.21` 同型但 v2 已退役（見下），08-28 實測不可達。
+
+`.20` 與 `.22` 的實查設定**完全一致**（其餘三台推定相同，未逐台實查）：
 
 | 項目 | 值 | 備註 |
 |---|---|---|
@@ -327,8 +366,13 @@ v1 時代 ZDT 掛在這台，v2 已退役（`app/WASH_ROBOT.h`：`.21/cli_21_ re
 
 📌 **網關之外的實體網路**（不由程式控制，但斷了什麼都連不上）：
 外部訊號 →（2-wire tether 雙絞線）**Fathom-X Tether Interface Board** →（Ethernet）
-**8 Port PoE Switch** → 兩台 Pi、全部 USR 網關、以及 **PoE 防水 2MP 攝影機 × 4**
-（左上/左下/右上/右下；`frame_capture/` 走 RTSP，預設 cam1 `.110` / cam2 `.111`）。
+**8 Port PoE Switch** → 兩台 Pi、全部 USR 網關。
+
+⚰️ **攝影機不列入本版架構（2026-09-01 per user：「這個版本不用」）。**
+先前這裡記著「PoE 防水 2MP 攝影機 ×4（左上/左下/右上/右下），`frame_capture/` 走 RTSP，
+cam1 `.110` / cam2 `.111`」——**實體或許還掛在 switch 上，但本版程式不使用**：
+2D 相機路線 2026-08-27 已作廢（`scripts/wr.sh` 的 cam1/cam2 window 早已註解），
+D435i 深度相機 2026-09-01 整套移除。**盤點硬體時不要再把它們算進來。**
 
 #### 本體 washrobot（權威：`app/WASH_ROBOT.h` + `WashRobot::init()`）
 

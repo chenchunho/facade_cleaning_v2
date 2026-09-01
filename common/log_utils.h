@@ -1,8 +1,15 @@
-#ifndef USER_LIB_LOG_UTILS_H
-#define USER_LIB_LOG_UTILS_H
+#ifndef COMMON_LOG_UTILS_H
+#define COMMON_LOG_UTILS_H
 
 // ============================================================================
-// Unified log format for user_lib drivers
+// Unified log format — crosscutting infrastructure, NOT a device driver.
+//
+// [2026-09-01] Moved user_lib/ -> common/. It was in user_lib/ while
+// transport/{TCP_client,TCP_server,Serial_port}.cpp also include it, which
+// made the LOWEST layer depend on the driver layer — a reverse dependency,
+// and a direct contradiction of CLAUDE.md's "user_lib/ 只放裝置驅動".
+// common/ is where crosscutting support lives (endpoints.h, profile.h).
+// Users: 15 in user_lib/, 3 in transport/.
 //
 // Format:  [HH:MM:SS.mmm] [LEVEL] [DEVICE:ID] <message>
 // Levels:  ERR / WRN / INF / DBG

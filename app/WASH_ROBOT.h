@@ -198,126 +198,6 @@ public:
     // can use the same regex.
     std::string cmd_obstacle_detect(bool on);
 
-    // [2026-06-04] Single-shot obstacle check: run obstacle_combine.py on the
-    // four currently-cached frame paths (/tmp/cam{3,4}_{before,after}.jpg).
-    // Caller is responsible for capturing those frames beforehand (typically
-    // via bench_capture_motion.sh or the upcoming cmd_run_avoid loop).
-    // Returns: "OK action=<a> step_cm=<n> reason=<...>" or "ERR <reason>".
-    std::string cmd_obstacle_check();
-
-    // [2026-06-04] RUN with obstacle avoidance.
-    // Loop:
-    //   1. Snap current frames as "before" (cp /tmp/cam{3,4}_latest.jpg)
-    //   2. Crane probe: retract 1cm + sleep 1s + pay_out 1cm — generates
-    //      camera position offset needed for motion-parallax detection
-    //   3. Snap current frames as "after"
-    //   4. Run obstacle_combine.py (via FrameAnalyzer)
-    //   5. Broadcast EVT obstacle_ask, set obstacle_ask_pending_=true
-    //   6. Wait for cmd_obstacle_response (or emergency_stop / timeout)
-    //   7. If confirmed: do_step_down_(step_cm from detector)
-    //      If cancelled / blocked: break loop
-    //   8. Repeat
-    std::string cmd_run_avoid();
-
-    // GUI sends 1=confirm, 0=cancel. Releases the run_avoid wait loop.
-    std::string cmd_obstacle_response(int v);
-
-    // run_avoid synchronization (set by run_avoid loop, cleared by response/abort)
-    std::atomic<bool> obstacle_ask_pending_{false};
-    std::atomic<int>  obstacle_user_response_{-1};  // -1=pending, 0=cancel, 1=confirm
-    static constexpr int OBSTACLE_ASK_TIMEOUT_S = 300;  // 5 min before auto-abort
-
-    // [2026-07-20] D435i depth-camera continuous obstacle-avoid walk (v2 —
-    // BEFORE/AFTER captures bracket the whole step call, not step-internal
-    // hooks, so they work the same regardless of which gait engine runs
-    // inside). [2026-07-28 per user] normal steps now call do_step_sync_
-    // (both sides move together) instead of do_step_down_'s alternating
-    // inchworm gait — see cmd_run_depth_avoid's step loop; the auto
-    // cross-obstacle branch is unchanged (still do_cross_obstacle_).
-    // Per Sadie's design (2026-07-20):
-    //   - Every step (including the first, fixed at DEPTH_AVOID_FIRST_STEP_CM)
-    //     captures before/after via the hooks during ITS OWN tail motion, then
-    //     that step's result is shown to the user before deciding the NEXT step
-    //     (act-then-review, simpler than v1's decide-before-acting bootstrap).
-    //   - No automatic step_cm suggestion — user decides every time, optionally
-    //     typing a custom cm instead of the current default step_cm_.
-    //   - candidates whose height_cm > DEPTH_BIG_OBSTACLE_HEIGHT_CM additionally
-    //     get a photo shown (served via /snap/depth, see depth_cam_service.py).
-    // Loop: step -> depth_cam AFTER result -> EVT depth_obstacle_result ->
-    //       wait cmd_depth_avoid_continue(cm) / cmd_depth_avoid_stop() -> repeat.
-    std::string cmd_run_depth_avoid();
-    // GUI: user typed/kept a cm value and pressed Continue. Validates
-    // STEP_CM_MIN..STEP_CM_MAX same as cmd_step_down.
-    std::string cmd_depth_avoid_continue(int cm);
-    // GUI: user pressed Stop — end the loop after this point.
-    std::string cmd_depth_avoid_stop();
-
-    // Reuses obstacle_ask_pending_ / obstacle_user_response_ above for the
-    // wait — response value doesn't carry the cm (continue always ships one
-    // via depth_avoid_next_step_cm_), so 1=continue(see next_step_cm_), 0=stop.
-    std::atomic<int> depth_avoid_next_step_cm_{0};
-    std::atomic<int> depth_last_candidates_{0};
-    std::atomic<double> depth_last_max_height_cm_{0.0};
-    std::atomic<double> depth_last_max_protrusion_cm_{0.0};
-    // [2026-07-21] Raw slant range (camera optical axis -> closest point of
-    // the closest candidate) from depth_cam_service.py, plus the along-
-    // travel remaining-clearance figure derived from it — see
-    // cmd_run_depth_avoid's min_distance_cm parsing for the trig.
-    std::atomic<double> depth_last_min_distance_cm_{0.0};
-    std::atomic<double> depth_last_remaining_travel_cm_{0.0};
-    static constexpr int    DEPTH_AVOID_FIRST_STEP_CM     = 5;    // fixed first step (per user 2026-07-20) — no prior frame data before this
-    static constexpr double DEPTH_BIG_OBSTACLE_HEIGHT_CM  = 10.0; // candidate height_cm above this -> attach photo, per user spec
-    // [2026-07-21] Camera mount geometry — used to convert
-    // depth_cam_service.py's raw slant-range reading into "how much further
-    // can the robot travel before its leading edge reaches the obstacle",
-    // along the direction of travel:
-    //   horizontal_cm   = sqrt(min_distance_cm^2 - DEPTH_CAM_STANDOFF_CM^2)
-    //   remaining_cm    = horizontal_cm - DEPTH_CAM_LEAD_OFFSET_CM
-    // (right-triangle: camera sits DEPTH_CAM_STANDOFF_CM perpendicular off
-    // the wall, tilted down/forward; horizontal_cm is the projection of the
-    // slant range onto the wall along the tilt/travel direction.)
-    //
-    // [2026-07-21] Original measurement: standoff 50cm + tilt ~35° ->
-    // predicted slant range ~61cm, matched a real bench reading of 62.3cm —
-    // confirmed the STANDOFF/tilt geometry (the d/H relationship) was right.
-    //
-    // [2026-07-23] LEAD_OFFSET_CM was still off by ~2x: with a real
-    // candidate at center_distance_m=61.5cm (see depth_reflection_bench.py's
-    // center_distance_m — the earlier near_m-based reading's off-axis-pixel
-    // bug was already fixed by then), the formula gave remaining_travel_cm
-    // =19.8cm with the old LEAD_OFFSET_CM=16, but the user's own on-site
-    // tape measurement of camera-to-actual-sucker-leading-edge was only
-    // 3-4cm at that point — solving backward (35.8 - remaining ≈ offset)
-    // pointed at ~32cm, not 16. User re-measured and confirmed: the correct
-    // leading-edge offset is 32cm (the original 16cm likely measured to
-    // some other reference point, not the true sucker leading edge). Same
-    // re-measurement also updated the standoff itself, 50cm -> 56cm — both
-    // constants below are the corrected 2026-07-23 measurements.
-    static constexpr double DEPTH_CAM_STANDOFF_CM    = 56.0; // camera height above wall, perpendicular
-    static constexpr double DEPTH_CAM_LEAD_OFFSET_CM = 32.0; // robot leading edge (actual sucker front) is this much CLOSER to the wall-ahead than the camera mount
-
-    // [2026-07-22] Cross-obstacle step suggestion, per user spec: when the
-    // normal remaining clearance is too tight to keep taking small steps
-    // (< DEPTH_AVOID_LOW_CLEARANCE_CM), suggest one bigger step that clears
-    // the WHOLE obstacle instead — near edge to obstacle + the obstacle's
-    // own thickness along the travel direction (candidate height_cm, "how
-    // much the sill occupies along the path") + a full sucker diameter (so
-    // the NEXT sucker placement lands with full contact area past the far
-    // edge, not straddling it) + a small safety margin. Clamped to
-    // STEP_CM_MAX — never suggest more than the robot can physically step.
-    // Suggestion only (fills the GUI's default next-step-cm field) — per
-    // the 2026-07-20 "no automatic step_cm suggestion" design still in
-    // force, the user can always type a different value before Continue.
-    static constexpr double DEPTH_AVOID_LOW_CLEARANCE_CM = 20.0; // remaining_travel_cm below this -> suggest crossing instead of another small step
-    static constexpr double DEPTH_AVOID_SUCKER_DIAMETER_CM = 20.0; // 吸盤直徑
-    static constexpr double DEPTH_AVOID_CROSS_MARGIN_CM = 5.0;     // extra safety buffer on top of near+thickness+sucker
-
-    // [2026-06-04] Step shortfall tracking for vacuum_retry compensation.
-    // do_step_down_ writes after Phase A complete; cmd_run_avoid reads to add
-    // missed cm to next step's planned distance.
-    std::atomic<double> last_step_planned_cm_{0.0};
-    std::atomic<double> last_step_achieved_cm_{0.0};
-
     // [2026-06-04] First-step bootstrap probe — body 2cm out + return, captures
     // before/after frames so iter 1 of run_avoid has detector input.
     // Uses same patterns as step_down (two-stage retract, disable_seal extend).
@@ -467,11 +347,6 @@ private:
     // M1|M2 ENABLE|DISABLE|HOLD|UNHOLD|ZERO. See cleaning_arm/main_api.h.
     static constexpr const char* ARM_IP   = "127.0.0.1";
     static constexpr int         ARM_PORT = 9527;
-
-    // Depth-camera obstacle detection — standalone D435i service on the same
-    // Pi. TCP commands: BEFORE / AFTER / PING. See frame_capture/depth_cam_service.py.
-    static constexpr const char* DEPTH_CAM_IP   = "127.0.0.1";
-    static constexpr int         DEPTH_CAM_PORT = 9530;
 
     // PQW relay channels (slave 12, now 16CH physically)
     // [2026-08-29 merge 6523b54] CH_BRUSH 15 → 5：對方實體確認 15 是 2026-07-24 誤改、
@@ -1320,11 +1195,6 @@ private:
     // Cleaning arm — separate TCP connection to local motor_api service (127.0.0.1:9527)
     TCP_client arm_cli_;
     std::mutex arm_mtx_;
-    // Depth-camera (D435i) obstacle-detection service — separate TCP connection
-    // to local depth_cam_service.py (127.0.0.1:9530). Same lazy-connect +
-    // background-reconnect pattern as arm_cli_.
-    TCP_client depth_cli_;
-    std::mutex depth_mtx_;
     // Dedicated 2nd connection for emergency stop sent from weight-monitor thread
     // during in-flight retract. Bypasses crane_mtx_ to avoid deadlock with the
     // main thread holding it for the long-running retract reply wait.
@@ -1800,20 +1670,22 @@ private:
     // 呼叫一次（給 cmd_step_down_sweep_before_after 用來 join pre-feet sweep round）。
     // 2026-05-27 加入。
     //
-    // [2026-06-04] run_avoid probe hooks (Phase A body rail DM2J 移動相關):
-    // during_body_rail_hook: DM2J move 進行中、約 80% 完成時，被 background thread
-    //   呼叫一次。給 cmd_run_avoid 用來拍 "before" frame（rail 接近 step_cm 處）。
-    // after_body_rail_hook: DM2J move 完成、rail 已到 step_cm 後呼叫一次。
-    //   給 cmd_run_avoid 用來拍 "after" frame（rail 在 step_cm = 下一步起點）。
-    // 兩個 hook 構成 motion parallax 的 before/after pair，給下一輪 detector 用。
+    // ✅ [2026-09-01] during_body_rail_hook / after_body_rail_hook 已移除。
+    // 它們是 cmd_run_avoid 的 motion-parallax before/after 取像點（Phase A body
+    // rail DM2J 80%／100% 時各呼叫一次），隨攝影機避障一併作廢，且所有呼叫端
+    // 一律傳 {}。移除後 do_step_down_ 與 do_step_up_ 的簽名一致。
+    // ⚠️ 仍在簽名上的 after_feet_rail_hook / before_feet_rail_hook **確實有呼叫端
+    // 傳入非空值**（cmd_step_*_sweep_after_feet / _before_after），但 v2 的兩支
+    // do_step_*_ 內部把它們 cast 成 (void) 就沒再用了 —— 也就是「傳了不會觸發」，
+    // 不是「沒人傳」。⚠️ 這件事目前被更上游的問題蓋住：兩支 do_step_*_ 開頭即
+    // return ERR alt_gait_disabled_single_valve（2026-08-31 停用交替步伐），
+    // 所以整條路徑都到不了。要恢復 sweep 分段時，這兩個 hook 得先真的接回去。
     // right_first (2026-07-09): which side leads this step. true = right side is the
     // datum (方案B meter) + left is the IMU-leveled follower; false = swapped. Multi-
     // step runs alternate it each step; single step = true (right first).
     std::string do_step_down_(bool skip_cleaning_sweep = false,
                               std::function<void()> after_feet_rail_hook = {},
                               std::function<void()> before_feet_rail_hook = {},
-                              std::function<void()> during_body_rail_hook = {},
-                              std::function<void()> after_body_rail_hook = {},
                               bool right_first = true);
     // mirror of do_step_down_; skip_cleaning_sweep=true 給 cmd_step_up_with_sweep 用（sweep 由背景 thread 接手）。
     // after_feet_rail_hook：非空時，在 feet phase 的 rail DM2J move 完成那刻呼叫一次
@@ -1985,12 +1857,6 @@ private:
     // causing motor_api to see 3 simultaneous source-port connections + ~30s
     // recovery (bench 2026-06-03).
     std::string arm_cmd_(const std::string& line, int timeout_sec = 30);
-    // Mirrors arm_cmd_ exactly (lazy connect + background reconnect via
-    // TCP_client, 2-attempt retry, no retry on recv timeout). Longer default
-    // timeout than arm_cmd_ — AFTER runs optical flow + plane fit + connected
-    // components, can take longer than a simple motor status round-trip.
-    std::string depth_cam_cmd_(const std::string& line, int timeout_sec = 10);
-
     // [arm rope protect TEMP 2026-05-21] — gated by ARM_ROPE_PROTECTION.
     // Both return true on error, false on success / no-op.
     // ctx string is just for log clarity ("body_pre_pay_out" etc.).

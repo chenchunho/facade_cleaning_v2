@@ -293,7 +293,19 @@ v2 的 `do_feet_realign_`/`cmd_realign` 只處理 4 顆 feet，**全程不解真
 
 ---
 
-## 8. 深度相機（D435i）窗框偵測
+## 8. 深度相機（D435i）窗框偵測 ⚰️ **已移除（2026-09-01）**
+
+> 🔴 **本節描述的功能已不存在。** per user「沒有要用」，2026-09-01 整套移除：
+> `cmd_run_depth_avoid` / `depth_cam_cmd_` / `DEPTH_CAM_*` 常數 / `depth_cli_`（C++）、
+> `frame_capture/depth_cam_service.py`＋`depth_cam_test_client.py`＋`depth_reflection_bench.py`
+> （已從版控刪除）、`wr.sh` 的 depth window、harness 的 `depthcam` 假端點。
+> dispatcher 對三個指令回 `ERR removed_2026_09`。
+>
+> **本節保留的理由是方法論教訓，不是操作說明**——尤其 8.3 那條「公式邏輯對不代表數字準，
+> 常數本身是實體量測值，必須跟現場皮尺交叉驗證」，在這個專案已經重複應驗多次
+> （2026-08-28 上滑台導程 7.7 倍、2026-08-31 推桿 `CUP_PULSE_PER_CM`）。
+> **不要照著本節的檔名或函式名去找程式碼，它們都不在了。**
+
 
 窗框避障原本用 RGB 相機 + motion parallax（3.3節）+ NPU/LUT，2026-07-16 起探索用 Intel RealSense D435i 深度相機取代，理論上不需要手動校正 LUT。**戶外強光風險是這條路線最大的未知數，見最前面的「尚未解決事項 #4」。**
 

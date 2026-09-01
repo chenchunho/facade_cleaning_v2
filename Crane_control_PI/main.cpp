@@ -645,14 +645,39 @@ static std::atomic<double> g_balance_hz_min           {BALANCE_HZ_MIN_DEFAULT};
 static std::atomic<double> g_balance_hz_max_offset    {BALANCE_HZ_MAX_OFFSET_DEFAULT};   // semantic: above base_hz
 
 // DSZL-107 raw → kg scale per side (atomic for runtime adjustment via
-// set_dsz_scale). Default NEGATIVE — bench observation 2026-05-08:
-// "force ↑ → raw ↓" on left cell (right untested but assumed same wiring).
+// set_dsz_scale). Default NEGATIVE — "force ↑ → raw ↓".
 // Sign-flip via negative scale is equivalent to swapping the differential
 // signal pair on X518's input terminal, but doesn't require unwiring.
 //
-// Magnitude 0.01 matches the DSZL_107 driver default; once a known weight
-// has been hung on each cell, recompute as `kg / (loaded_raw - zero_raw)`
-// (signed) and update via GUI.
+// SIGN: verified on BOTH cells 2026-09-01 (Linux_test/dszl_sign_test.py,
+// read-only FC03 probe, machine on the ground, hand-applied downward pull —
+// only the DIRECTION of the force is needed, not its magnitude):
+//     left   rest -1.2  → loaded -402.8   (delta -401.6)
+//     right  rest 67.0  → loaded -235.6   (delta -302.6)
+// Both negative against a rest-state spread of 1-2 counts, and both returned
+// to rest on release (negative control). The pre-2026-09-01 note here said
+// "right untested but assumed same wiring" — the assumption was correct, but
+// it is now a measurement. Consequence: r_kg goes POSITIVE under load, so the
+// `r_kg > max_kg` overload check in tension_safety_check_values() does fire.
+// A flipped right cell would have made that check dead silently (and a
+// right-only overload trips neither it nor the fabs() diff check).
+//
+// MAGNITUDE: still UNCALIBRATED. 0.01 is merely the DSZL_107 driver default
+// (DSZL_107.cpp:46) — no known weight has ever been hung. kg readings are
+// therefore NOT absolute; the thresholds built on them (TENSION_MAX_KG,
+// RETRACT_TENSION_STOP_KG, UP_STOP_TOTAL_KG) are relative-comparison values
+// only. To calibrate: hang a known weight on each cell and recompute as
+// `kg / (loaded_raw - zero_raw)` (signed), then update via GUI.
+// ⚠ Left and right will almost certainly need DIFFERENT magnitudes (separate
+// cells); this single shared constant only survives because the two SIGNS
+// match. Split into per-side constants when the magnitudes are measured.
+//
+// ⚠ X518 unit register 0x0614 (1=t 2=kg 3=g 4=kN 5=N 6=lb, factory default
+// 5=N) scales the raw counts. init() calls set_unit_kg(), but set_unit writes
+// RAM only and we never save_params() it (see the note at the setScale call
+// below) — so a power-cycled X518 that is read WITHOUT running this program
+// first can come back in N, ~9.8x off, with no visible symptom. Both cells
+// read unit=2 (kg) during the 2026-09-01 sign test.
 static constexpr double DSZL_SCALE_DEFAULT  = -0.01;
 static std::atomic<double> g_dsz_left_scale  {DSZL_SCALE_DEFAULT};
 static std::atomic<double> g_dsz_right_scale {DSZL_SCALE_DEFAULT};

@@ -31,7 +31,7 @@
   埠 5001 遲遲不開。原因是 `crane_connect_if_needed_()` 是 blocking `connect()`，
   對**不存在的主機**（封包被丟棄、沒有 RST）會卡滿 TCP SYN timeout。
   ⚠️ **runbook 原本寫的「連不到會 WARN 但不擋 boot」只在對方送 RST 時成立**（例如 `127.0.0.1` 的
-  arm／depth_cam，那兩個是瞬間 WARN）；主機整台不在時它**會擋 boot 兩分鐘**。
+  arm，它是瞬間 WARN；depth_cam 已於 2026-09-01 移除）；主機整台不在時它**會擋 boot 兩分鐘**。
   📌 **上機前先 `ping` 吊機確認 IP**，不要直接開跑然後對著卡住的 log 猜。
 - 🔴 **`~/.ssh/config` 的 `IdentityFile` 是列舉式的，新 IP 要手動加**（2026-08-31 踩到）：
   金鑰 08-31 由 `id_ed25519` 更名為 `claudeuser` 之後 SSH 不再自動嘗試它，
@@ -447,11 +447,11 @@ right 同理，另加兩行 `[WARN] ... init failed` 路徑（正常不會出現
 吊機 `UP_STOP_TOTAL_KG_DEFAULT` 50 → 70（**這是安全門檻**）。
 ⚠️ 對方的 commit message 自己寫著「**實機行為全部未驗證**」。
 
-### 尚未決定的一項
+### ~~尚未決定的一項~~ ✅ 2026-09-01 已決並執行
 
-`scripts/wr.sh` 仍會開一個 window 跑 `depth_cam_service.py`（深度相機）。攝影機路線
-2026-08-27 已永久移除，那個 window 只會失敗，不影響主程式。**要不要註解掉待使用者決定**
-（待辦總表已有此條）。
+~~`scripts/wr.sh` 仍會開一個 window 跑 `depth_cam_service.py`~~ →
+**per user「沒有要用」，深度相機整套移除**：`wr.sh` 的 depth window 與 `WR_DEPTH_CAM`
+全數拔除，`frame_capture/depth_cam_service.py` 等 3 支已從版控刪除。
 
 ---
 
@@ -686,7 +686,7 @@ ssh user@192.168.5.25   'echo exit > ~/main_20260831/crane_in'
 | `run_script [up\|down] [alt\|sync] <csv>` / `run_saved <name> [up\|down] [alt\|sync]` | 執行腳本 |
 | `return_home <descent_cm>` | 召回 |
 | `init` / `shutdown` | 初始化 / 關閉主程式 |
-| `run_depth_avoid` / `depth_avoid_continue <cm>` / `depth_avoid_stop` | 深度避障（⚠️ 相機路線已作廢，這幾個的實際可用性未驗） |
+| ~~`run_depth_avoid` / `depth_avoid_continue <cm>` / `depth_avoid_stop`~~ | **2026-09-01 整套移除**，dispatcher 回 `ERR removed_2026_09` |
 
 #### ⚰️ 已移除（送出只會得到 `ERR removed_in_v2`，**不要再寫進文件**）
 `move`、`tilt_mode`、`confirm_balance`、`wheels`、`wheels_attached`、

@@ -673,8 +673,9 @@
        「🛡️ RUN (avoid 障礙)」按鈕與 run_avoid modal。
        [2026-08-26 per user] D435i 的「📷 AUTO RUN - 深度相機避障行走」panel 也一併
        移除——「現在不用攝影機避開障礙物了」。連同 run_depth_avoid modal、EVT 處理
-       與 depth_avoid_continue/stop 的 handler 一起刪。後端 run_depth_avoid /
-       depth_avoid_continue / depth_avoid_stop 指令仍在，需要時可用 raw command。
+       與 depth_avoid_continue/stop 的 handler 一起刪。
+       [2026-09-01 per user] 後端也整套移除了（C++ / service / harness 假端點）。
+       dispatcher 現在回 ERR removed_2026_09——raw command 也發不動了。
        Camera panel 裡的 D435i 拍照顯示是獨立功能（只是看畫面），未移除。 -->
 
   <section class="panel panel-emergency" data-page="home">
@@ -707,8 +708,8 @@
        原本這裡是 Camera 分頁的 panel（CAM1/CAM2 的 MJPEG 串流 + D435i 深度
        相機拍照）。連同 sidebar 的 Camera 分頁按鈕、app.js 的 wireCamera /
        depth snapshot 區塊、server.js 的 CAMERAS 對照表與 /snap /mjpeg 反向
-       代理路由一併刪除。washrobot Pi 上的 frame_capture.py /
-       depth_cam_service.py 本身不受影響（沒人再連它們而已）。 -->
+       代理路由一併刪除。frame_capture.py 本身不受影響（沒人再連它而已）；
+       depth_cam_service.py 已於 2026-09-01 從版控刪除。 -->
 
   <section class="panel panel-settings" data-page="settings">
     <h2>⚙️ Wall-tune Settings</h2>

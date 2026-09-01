@@ -112,11 +112,11 @@
     <ClInclude Include="..\user_lib\SE3_inverter.h" />
     <ClInclude Include="..\user_lib\MH300_inverter.h" />
     <ClInclude Include="..\user_lib\QX_DO24.h" />
-    <ClInclude Include="..\user_lib\log_utils.h" />
+    <ClInclude Include="..\common\log_utils.h" />
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\transport;..\user_lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\common;..\transport;..\user_lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>-I$(RemoteRootDir)/../user_lib %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>

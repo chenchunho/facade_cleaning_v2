@@ -97,7 +97,7 @@
     <ClInclude Include="..\user_lib\SE3_inverter.h" />
     <ClInclude Include="..\transport\TCP_client.h" />
     <ClInclude Include="..\transport\TCP_server.h" />
-    <ClInclude Include="..\user_lib\log_utils.h" />
+    <ClInclude Include="..\common\log_utils.h" />
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>

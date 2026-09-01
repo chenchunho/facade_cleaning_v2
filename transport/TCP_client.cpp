@@ -153,7 +153,7 @@ void TCP_client::reconnectLoop() {
 			// 🔴 [2026-08-31] 但「無條件」在對端長時間離線時會洗版：每 500ms 兩行
 			//    （reconnecting + reconnect failed），實測吊機關機 45 秒 = 107 組，
 			//    把 log 裡其他訊息整個沖掉（2026-08-31 上機時親眼看到）。
-			//    ⚠️ 不採用 quiet_reconnect_log_ 的理由：arm / depth_cam 是「已知還沒裝、
+			//    ⚠️ 不採用 quiet_reconnect_log_ 的理由：arm 是「已知還沒裝、
 			//    永遠不會接上」＝純噪音；而**吊機離線是該被看見的事件**，靜音會把該看的也藏掉。
 			//    → 改為「保留狀態轉換、限流重複失敗」：頭幾次照印，之後每
 			//    RECONN_SUMMARY_MS 一行摘要（含累計次數與離線時長），恢復時一定印。

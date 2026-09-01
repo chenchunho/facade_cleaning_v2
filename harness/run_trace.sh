@@ -38,7 +38,8 @@ start_bus 15033 tcp     # X518    — DSZL right
 # ── 假的吊機 / 手臂（行導向文字協定）──────────────────────────────────────
 # 沒有它們，crane_cmd_ / arm_cmd_ 會對連不上的位址無界重試，而關閉序列裡就有
 # 這些呼叫 → 程式被砍掉時跑到哪裡由時序決定，軌跡尾端就不確定。
-for pn in "15002 crane" "15527 arm" "15530 depthcam"; do
+# [2026-09-01] depthcam(15530) 已移除 —— 主程式不再連它（深度相機整套拔除）。
+for pn in "15002 crane" "15527 arm"; do
   set -- $pn
   python3 "$HERE/fake_text_server.py" --port "$1" --name "$2" 2>>"$OUT/fakes.log" &
   PIDS+=($!)
@@ -95,7 +96,6 @@ export FCV_EP_USR20_HOST=127.0.0.1  FCV_EP_USR20_PORT=15020
 export FCV_EP_USR22_HOST=127.0.0.1  FCV_EP_USR22_PORT=15022
 export FCV_EP_CRANE_HOST="${FCV_EP_CRANE_HOST:-127.0.0.1}"  FCV_EP_CRANE_PORT="${FCV_EP_CRANE_PORT:-15002}"
 export FCV_EP_ARM_HOST="${FCV_EP_ARM_HOST:-127.0.0.1}"    FCV_EP_ARM_PORT="${FCV_EP_ARM_PORT:-15527}"
-export FCV_EP_DEPTHCAM_HOST="${FCV_EP_DEPTHCAM_HOST:-127.0.0.1}" FCV_EP_DEPTHCAM_PORT="${FCV_EP_DEPTHCAM_PORT:-15530}"
 
 "$BIN" >"$OUT/stdout.log" 2>"$OUT/trace.raw" &
 APP=$!

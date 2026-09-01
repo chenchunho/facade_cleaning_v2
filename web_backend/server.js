@@ -46,7 +46,7 @@ const ARM_PORT        = 9527;
 // depth_after/depth_live_depth → washrobot Pi 的 5004/5005/5008），下面還有
 // proxyToCam() 與 /snap/:cam_id、/mjpeg/:cam_id 兩條路由。前端的 Camera
 // 分頁與 app.js 的 wireCamera/wireDepthCamera 也一併刪除。
-// washrobot Pi 上的 frame_capture.py / depth_cam_service.py 本身沒動。
+// frame_capture.py 本身沒動；depth_cam_service.py 已於 2026-09-01 刪除。
 
 const RECONNECT_MS = 1000;   // 2026-04-29: 3000 → 1000 配合前端 panel-disabled 3s debounce，瞬斷情境總計約 1s 即恢復、UI 不會 flicker
 

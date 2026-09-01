@@ -78,7 +78,8 @@ sudo apt install -y g++          # 只需一次；本機目前沒有
 | `confirm_balance` `continue` `resume` `pause` `skip` `recover` | **要先處在特定狀態**才有意義，單獨送只會拿到 ERR；要測得先設計一段有狀態的腳本 |
 | `balance_calibrate_*` | 同上，而且是多步驟互動流程 |
 | `run` `run_saved` `run_script` `step_down*` `step_up*` `cross_obstacle_*` | **整趟步態**，一次數十秒到數分鐘。值得做，但要獨立的長時腳本與更長的逾時 |
-| `obstacle_*` `depth_avoid_*` `run_avoid` `run_depth_avoid` `arm_clean_sweep` | 攝影機路線。後端仍活著（見待辦），但實體相機未接，跑起來只會走 timeout 分支 |
+| `obstacle_*` `run_avoid` `arm_clean_sweep` | 2D 攝影機路線。dispatcher 硬回 `ERR removed_in_v2`，實體相機未接 |
+| `depth_avoid_*` `run_depth_avoid` | **2026-09-01 整套移除**（程式碼 + service + harness 假端點）。dispatcher 回 `ERR removed_2026_09` |
 
 ### ⚠️ 覆蓋率的意義要講清楚
 

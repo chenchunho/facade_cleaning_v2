@@ -98,8 +98,9 @@ public:
 	// arm's motor_api before the arm is physically mounted) spams that log
 	// every ~500ms with nothing actionable in it. This mutes just those three
 	// lines for a specific instance without touching the unconditional-log
-	// design for instances you DO want it for (e.g. depth_cam during active
-	// testing). Does not affect reconnect behavior itself, only the logging.
+	// design for instances you DO want it for. Does not affect reconnect
+	// behavior itself, only the logging. (The original example instance,
+	// depth_cam, was removed 2026-09-01; arm_cli_ is the live user.)
 	void set_quiet_reconnect_log(bool quiet) { quiet_reconnect_log_ = quiet; }
 
 private:
