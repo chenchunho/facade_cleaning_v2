@@ -135,6 +135,16 @@ private:
 	int64_t reconn_last_log_ms_   = 0;   // 上次印摘要的時間
 	std::atomic<bool> connected;
 
+	// [2026-09-01] 連續接收逾時的計數器 —— 見 .cpp 的 note_rx_timeout()。
+	// 只有原子交易 API（sendAndReceive / sendAndReceiveQuiet）會動它：
+	// 那兩支的逾時明確代表「這一筆請求沒被回答」。裸 receiveData() **刻意不計**
+	// ——crane_cli_ / arm_cli_ / crane_cli_estop_ / crane_cli_imu_ 是文字協定的
+	// 輪詢迴圈，逾時是常態（就是在等對方推播），計進去會把好端端的連線扯斷。
+	std::atomic<int> rx_timeout_streak_{0};
+	static constexpr int RX_TIMEOUT_DISCONNECT_N = 10;
+	void note_rx_ok() { rx_timeout_streak_.store(0); }
+	void note_rx_timeout();
+
 	std::string last_ip;
 	int last_port;
 	std::string _log_tag;

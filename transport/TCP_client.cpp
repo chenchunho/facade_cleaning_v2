@@ -112,6 +112,7 @@ bool TCP_client::connectToServer(const std::string& ip, int port, bool debug) {
 
 	apply_keepalive(sock);
 	connected = true;
+	rx_timeout_streak_.store(0);
 	LOG_INF(_log_tag, "Connected to %s:%d", ip.c_str(), port);
 	startMonitor();
 	return true;
@@ -248,6 +249,7 @@ void TCP_client::reconnectLoop() {
 				apply_keepalive(new_sock);
 				sock = new_sock;
 				connected = true;
+				rx_timeout_streak_.store(0);
 				// 狀態轉換一定印，而且帶上「斷了多久／試了幾次」——這兩個數字正是
 				// 被舊版洗版沖掉、事後最想知道的東西。
 				if (!quiet_reconnect_log_) {
@@ -427,6 +429,33 @@ int TCP_client::drainRx()
 	return total;
 }
 
+// [2026-09-01] 連續接收逾時達門檻 → 主動斷線，讓背景 reconnectLoop 收拾。
+//
+// 為什麼需要：**單次**逾時不該斷線（慢裝置是常態，見 receiveData() 的說明），
+// 但「永遠逾時」和「這次比較慢」在 recv 這一層長得一模一樣。而 RTU 沒有交易序號，
+// 一旦回覆遲到就會落入**自我延續的失步**：
+//   t=0   送 A → 150ms 逾時（A 的回覆還在路上）
+//   t=190 排空（緩衝區還是空的）→ 送 B
+//   t=200 A 的回覆抵達 → recv 立刻拿到它，當成 B 的回覆
+// 同型別的請求（讀狀態 vs 讀狀態）連 CRC 都會過 → **靜默採用錯誤資料且永遠慢一筆**；
+// 不同型別則永遠 bad reply。兩種都不會自己好，因為送出前排空永遠早一步。
+// 2026-09-01 左側 SE3 就是這樣卡死（keepalive 0/50、socket 仍 ESTAB、Recv-Q 卡著
+// 一筆完整回覆），連續 5 次起步量測全都停在 ERR vfd_start_fail。
+//
+// 斷線會重建 socket，核心緩衝區隨之丟棄 —— 這是唯一能清掉失步的手段。
+//
+// 門檻取 10 而不是 3~5：SE3 的 reliable_*_one 單次操作內含 8 次重試，門檻若低於它，
+// 一叢本來就會失敗的重試會在叢內觸發斷線，把「這次操作失敗」變成「連線也被拆掉」。
+// 10 次 × 150ms ≈ 1.5 秒 —— 相對於「永遠不會好」已經夠快。
+void TCP_client::note_rx_timeout()
+{
+	const int streak = rx_timeout_streak_.fetch_add(1) + 1;
+	if (streak < RX_TIMEOUT_DISCONNECT_N) return;
+	LOG_ERR(_log_tag, "連續 %d 次接收逾時 —— 主動斷線以清除可能的失步", streak);
+	rx_timeout_streak_.store(0);
+	connected = false;
+}
+
 int TCP_client::sendAndReceive(const char* tx_buf, int tx_len,
                                char* rx_buf, int rx_size,
                                int send_timeout_ms, int recv_timeout_ms)
@@ -491,11 +520,14 @@ int TCP_client::sendAndReceive(const char* tx_buf, int tx_len,
 	int received = recv(sock, rx_buf, rx_size - 1, 0);
 	if (received <= 0) {
 		// == 0: orderly remote close, real disconnect. < 0: timeout/EWOULDBLOCK,
-		// just "no reply yet" — see receiveData()'s comment for why only the
-		// former should demote `connected`.
-		if (received == 0) connected = false;
-		return (received == 0) ? -1 : 0;
+		// just "no reply yet" — see receiveData()'s comment for why a SINGLE
+		// one of those must not demote `connected`; note_rx_timeout() handles
+		// the "it never comes back" case that comment doesn't cover.
+		if (received == 0) { connected = false; rx_timeout_streak_.store(0); return -1; }
+		note_rx_timeout();
+		return 0;
 	}
+	note_rx_ok();
 	LOG_HEX(_log_tag, "RX", rx_buf, received);
 	rx_buf[received] = 0;
 	return received;
@@ -601,6 +633,7 @@ int TCP_client::sendAndReceiveQuiet(const char* tx_buf, int tx_len,
 		}
 		if (got == 0) {             // orderly remote close = real disconnect
 			connected = false;
+			rx_timeout_streak_.store(0);
 			return (total > 0) ? total : -1;
 		}
 		// got < 0 = timeout/EWOULDBLOCK. With bytes in hand this is the normal
@@ -608,7 +641,8 @@ int TCP_client::sendAndReceiveQuiet(const char* tx_buf, int tx_len,
 		break;
 	}
 
-	if (total <= 0) return 0;
+	if (total <= 0) { note_rx_timeout(); return 0; }
+	note_rx_ok();
 	LOG_HEX(_log_tag, "RX", rx_buf, total);
 	rx_buf[total] = 0;
 	return total;
