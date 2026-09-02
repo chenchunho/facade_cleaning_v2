@@ -87,6 +87,12 @@ public:
 	// 使能 / 儲存 / 清警報（真實指令以手冊 §5.3.2/5.3.3 為準，舊版註解有誤）
 	bool motor_enable();                   // 0x000F (Pr0.07) = 1: 軟體強制使能
 	bool motor_disable();                  // 0x000F (Pr0.07) = 0: 解除強制 (交回 DI1)
+	// 🔴 [2026-09-02] DI1 端子功能（Pr4.02 / 0x0145）。出廠 136(0x88) = 使能(8h) + 常閉(bit7)。
+	// 「常閉 + DI1 未接線」⇒ 訊號恆為觸發 ⇒ **馬達永遠使能，Pr0.07=0 也關不掉**。
+	// 改成 0x08（使能功能、常開）後，未接線 = 未觸發，使能就完全由 Pr0.07 決定。
+	// ⚠️ 手冊明載「配置完输入功能后，保存断电重启有效」——必須 save_params() + 斷電重啟。
+	bool set_di1_function(uint16_t code);  // 0x0145 (Pr4.02)
+	bool read_di1_function(uint16_t& code);
 	bool save_params();                    // 0x1801 = 0x2211: 儲存所有參數到 EEPROM
 	bool reset_alarm();                    // 0x1801 = 0x1111: 復位當前報警
 

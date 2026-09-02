@@ -144,9 +144,51 @@ public:
     // Mirrored in user_lib/WASH_ROBOT.h (ARM_M2_TOOL_LEFT_MM / _RIGHT_MM) — that
     // copy drives verify_arm_deploy_'s expected-θ check, so the two MUST stay in
     // sync or DEPLOY verification will compare against the wrong angle.
-    static constexpr float TOOL_EXT_LEFT_MM   = 134.07f;
+    // 🔴 [2026-09-02 per user 實機三點量測] LEFT 134.07→192.37、RIGHT 148.09→204.32。
+    //   量法：推桿 10cm、四吸盤 -66/-67 kPa 密封固定站位，M1 斷電由使用者手壓到
+    //   「完全貼合」，讀 M1 角度（各讀 6 次，極差 0.0004 / 0.0003）：
+    //       滾筒(RIGHT) θ=0.5728    刮刀(LEFT) θ=0.6006
+    //   換算用 CENTER 已驗收的壓力條件（命令角超出貼合角 0.294 rad → 19 Nm、per user 認可）：
+    //       TOOL_EXT = 520 - PASSIVE_EXT(86.46) - 490*sin(θ + 0.294 - 0.38)
+    //
+    // 📌 **兩個值都少了約 57mm，而且是同一個量** —— 兩工具的相對差（實測 11.95mm
+    //   vs 舊值 14.02mm）幾乎沒錯，⇒ 08-18 那次左右對調是對的，錯的是共同偏移。
+    //   來源幾乎確定是今天的 ARM_LENGTH_MM 320→490：這兩個值是在**舊臂長**下反推的，
+    //   把臂長誤差整個吸收進去了。**日後再動 ARM_LENGTH_MM，這兩個必須一起重量。**
+    //
+    // 🟡 **CENTER 的 160.00 未經同樣的驗證**（per user「CENTER 用原本的就可以，沒差」）。
+    //   它現在是三者中唯一沒被實測過的，也是 wall_mm=520 的錨點——自洽但未獨立驗證。
+    static constexpr float TOOL_EXT_LEFT_MM   = 192.37f;
     static constexpr float TOOL_EXT_CENTER_MM = 160.00f;
-    static constexpr float TOOL_EXT_RIGHT_MM  = 148.09f;
+    static constexpr float TOOL_EXT_RIGHT_MM  = 204.32f;
+
+    // 🔴 [2026-09-02 per user 斷電手轉實測] M2 兩個工作位置的**絕對**角度。
+    //   斷電手轉到工作位置後讀值，各讀 5 次、極差皆為 0.0000：
+    //       滾筒(RIGHT) = +0.5316    CENTER = -0.4099    刮刀(LEFT) = -1.0115
+    //   零點確認**撐得過 motor_api 重啟**（重啟前後 M1/M2 讀值差 0.0000，
+    //   解掉 08-13 註解裡「看起來會但沒驗證」那個問題）⇒ 絕對值可以當常數用。
+    //   ⚠️ 但 lr_calibrate_slot 會**重設零點**，跑過校正後這兩個值即失效。
+    //
+    // 📌 **刻意不再由 lr_half_range 對稱推導**：舊式 LEFT=-half+0.05 / RIGHT=+half-0.1，
+    //   兩邊退讓量本來就不一樣大（0.05 vs 0.10）——那正是機構不對稱的證據，卻被硬塞
+    //   進對稱模型。實測中點在 -0.2400、半幅 0.7716，與假設的 0(中點)/0.7275 都不符。
+    static constexpr float M2_SLOT_LEFT_RAD  = -1.0115f;  // 刮刀
+    static constexpr float M2_SLOT_RIGHT_RAD =  0.5316f;  // 滾筒
+
+    // 🔴 [2026-09-02] 同樣兩個工作位置，改以**正向機械停點**為基準表示。
+    //   實測（LR_CALIBRATE Phase 1）：正向停點 = **+0.7204**（tau 3.44，明確撞到）。
+    //       滾筒 0.5316 − 0.7204 = −0.1888     刮刀 −1.0115 − 0.7204 = −1.7319
+    //
+    // 📌 **為什麼要有這一組**：上面的絕對值只在零點不變時成立。停點是**真實的機械
+    //   特徵**，零點怎麼變它都在那裡 ⇒ 只要校正找得到它，slot 目標就能自動還原。
+    //   `lr_move_to_slot_impl` 優先用這組，`lr_stop_valid` 為 false 時才退回絕對值。
+    //
+    // ⚠️ **只用正向那一個停點**，不用「兩個停點取中點」的舊模型：實測負向走到
+    //   −1.2831 仍在 0.5 rad/s 前進、tau 僅 −1.8（純摩擦），2 rad 預算用盡而 abort
+    //   ⇒ **該側在可及範圍內沒有停點**，中點模型對這個機構不成立。
+    static constexpr float M2_SLOT_LEFT_FROM_STOP  = -1.7319f;  // 刮刀
+    static constexpr float M2_SLOT_RIGHT_FROM_STOP = -0.1888f;  // 滾筒
+    static constexpr float M2_SLOT_CENTER_FROM_STOP = -0.7204f; // CENTER（絕對 0 相對於停點）
 
     // ---- M2 / small motor constants (左右軸) --------------------------------
     static constexpr float ZERO_OFFSET = 0.8f;   // M2 only: calibration back-off / lr slot offset
@@ -244,6 +286,51 @@ public:
     // 淨力到 ~4.5 Nm，仍略低於 pos≈0.83 實測的 ≥4.6 Nm 靜摩擦；2.5 讓淨力到
     // ~5.5 Nm 才真的越過。仍遠低於馬達額定，且只在低速時生效（fade 機制），
     // 中高速段完全不參與，所以不會加劇過衝。
+    // ❌ [2026-09-02 試過、無可量測效果，已還原] **斜坡參考領先量夾制
+    //    （M1_RAMP_MAX_LEAD_RAD=0.05）。不要在沒有更好的量測方法前重試。**
+    //
+    // 現象：從 PARK（pos≈0.047）起步時手臂震一下。`MOVETO 0.45 0.15` 的峰值速度：
+    //
+    //     夾制前 0.4335 (2.9x)    夾制後 0.5067 (3.4x)    還原後 0.4823 (3.2x)
+    //
+    // 🔴 **三次的散布 ±0.04 蓋過了三者的差距 ⇒ 這個實驗沒有結論。**
+    //    當下我曾據此宣稱「夾制讓情況更糟」——**那是單次比較下的過度推論，已收回。**
+    //    真正能說的只有：**夾制沒有帶來可量測的改善**，而且無論改不改，
+    //    峰值都穩定落在 0.43~0.51，**始終高於 M1_VEL_SAFETY_LIMIT(0.4)**。
+    //
+    // ⚠️ 0.4335 正是 2026-08-18 記下的同一個數字 ⇒ 現象可重現，而且當日的重力模型
+    //    修正（K 20.87→16.09）沒有消除它 —— **成因不在重力前饋。**
+    //
+    // 夾制的構想與它的疑慮（保留供日後參考，但兩者都未經證實）：
+    //   構想 — pos < M1_GRAVITY_MIN_VALID_RAD(0.20) 時重力前饋硬設為 0，而該區靜摩擦
+    //          約 2.3 Nm → 手臂卡住、斜坡 move_cur 仍往前跑 → kp*誤差 累積 → 掙脫時
+    //          一次釋放。限制領先量即可避免累積。
+    //   疑慮 — 夾住之後扭力會**持續**維持在 kp*lead(=4.5 Nm)，遠高於運動摩擦，
+    //          可能把一次性衝擊換成持續過推（終端速度 ≈ kp*lead/kd = 0.9 rad/s）。
+    //
+    // 📌 **下一步不要再加補償機制、也不要再調夾制值。** 兩件事要先做：
+    //    ① **改善量測**：單次峰值的散布太大，需要多次重複取統計量才分辨得出效果。
+    //    ② **驗證增益本身**：kp=90 是當日為了補償**錯誤的重力模型**從 34 一路加到 90 的。
+    //       重力已修正，kp=90 / kd=5 這組很可能過度欠阻尼 —— 先查阻尼比。
+
+    // ❌ [2026-09-02 試過並移除] **接觸後快轉斜坡（M1_CONTACT_* / ramp step x3）——
+    //    無時間效益，卻提高施力速率，已收回。**
+    //
+    // 構想：wall_mm 是超量命令，DEPLOY 520 的命令角 0.969 比手臂能到的 ~0.65 多 0.29 rad，
+    //   斜坡要以 0.3 rad/s 爬完那段永遠走不到的距離。偵測到位置停滯就把 step x3。
+    // 結果：工具切換 8.0 / 12.1 / 11.8 s，改前 11.4 / 11.0 s ——**同一散布內，無改善**；
+    //   而 tau 由 ~12 升到 13.5~13.8（快轉確實生效，只是不影響總時間）。
+    //
+    // 🔴 **為什麼沒用（密集取樣量出來的真因）**：伸出段的速度在 0 與 0.31 之間反覆跳動
+    //   （+0.104 +0.128 +0.214 +0.006 +0.263 … -0.018 +0.311 …）＝ **黏滑 stick-slip**。
+    //   手臂卡住→力矩累積→掙脫竄一下→再卡住。0.50→0.69 rad 花 2.6s，
+    //   **平均僅 0.07 rad/s，遠低於命令的 0.3** ⇒ 手臂根本沒在跟隨斜坡，加快斜坡自然無效。
+    //   per user 現場描述「切換工具靠上時 M1 都會震一下」，指的就是這個。
+    //
+    // 📌 **真正的方向是靜摩擦**：M1_FRICTION_TAU=2.5 是用來破靜摩擦的，
+    //   但程式碼他處記載某些角度的靜摩擦 **>=4.6 Nm**，補償明顯不足。
+    //   ⚠️ 未量測前不要調——當日已有三次「憑假設改參數、被量測推翻」。
+
     static constexpr float M1_FRICTION_TAU          = 2.5f;    // 靜摩擦隨角度 1.0~4.6，取能越過高端的值
     static constexpr float M1_FRICTION_FADE_VEL     = 0.10f;   // rad/s，此速度以上完全不補
     static constexpr float M1_FRICTION_DEADBAND_RAD = 0.02f;   // rad，誤差小於此不補
@@ -350,6 +437,10 @@ private:
         // update this constant, or restore the ZERO_OFFSET default and re-run
         // LR_CALIBRATE.
         float lr_half_range { 0.7275f };
+        // [2026-09-02] 正向機械停點在當前座標系的位置，與其有效性旗標。
+        // 由 lr_calibrate_slot 的 Phase 1 寫入（僅正向 seek 時）；set_zero 後同步平移。
+        float lr_stop_pos { 0.0f };
+        bool  lr_stop_valid { false };
 
         // [2026-08-14 per user] M2 only: true once lr_half_range holds a value we
         // actually trust (either a converged two-sided LR_CALIBRATE, or a manual

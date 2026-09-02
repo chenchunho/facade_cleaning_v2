@@ -1845,9 +1845,16 @@ std::string WashRobot::do_arm_clean_sweep_(int wall_mm, int rounds) {
             // 兩處必須一起改，否則手動 CLEAN SWEEP 跟步伐內建清洗會用相反的工具頭。
             std::ostringstream oss_brush;
             oss_brush << "DEPLOY " << wall_mm << " RIGHT";   // RIGHT = 滾筒側
+            // 🔴 [2026-09-02 per user] 滾筒繼電器改到 DEPLOY **之前** 打開。
+            //   原本是「先把滾筒壓上玻璃、再讓它開始轉」——靜止的滾筒頂著玻璃才起轉，
+            //   對滾筒與玻璃都不好，而且清洗段的頭幾公分等於乾磨。
+            //   本段與 do_step_sync_rail_sweep_ 是複製關係，**該處 08-28 就已改對**，
+            //   這一份被落下（又一次「兩份只改一份」）。政策一併對齊那邊：
+            //   開關窗口 = 「DEPLOY RIGHT 之前開 → DEPLOY LEFT 之前關」，
+            //   **DEPLOY RIGHT 失敗不提早關**，關閉點的閘改用 init_ok（見下方兩處）。
+            pqw_.controlRelay(CH_BRUSH, true);
             deployed = (arm_cmd_(oss_brush.str(), 30).rfind("OK", 0) == 0);
             if (deployed) {
-                pqw_.controlRelay(CH_BRUSH, true);
                 sleep_ms_(2500);
             } else {
                 std::cerr << "[arm_clean_sweep] arm deploy RIGHT (brush) failed — rail sweep only, no brush\n";
@@ -1862,14 +1869,19 @@ std::string WashRobot::do_arm_clean_sweep_(int wall_mm, int rounds) {
                                DM2J_ARM_STEP_SWEEP_RPM, DM2J_ARM_STEP_SWEEP_ACC, DM2J_ARM_STEP_SWEEP_DEC,
                                DM2J_ARM_STEP_SWEEP_EST_MS);
         if (check_abort_()) {
-            if (deployed) {
-                pqw_.controlRelay(CH_BRUSH, false);
-                arm_cmd_("PARK", 30);
-            }
+            // 🔴 [2026-09-02] CH_BRUSH 無條件關（對齊 do_step_sync_rail_sweep_ 的
+            //   08-28 政策：「沒開過時關它是 no-op，開著沒關才是問題」）。
+            //   原本 gate 在 deployed —— DEPLOY RIGHT 失敗時滾筒會一直轉沒人關。
+            pqw_.controlRelay(CH_BRUSH, false);
+            if (init_ok) arm_cmd_("PARK", 30);
             return "ERR aborted\n";
         }
 
-        if (deployed) {
+        // 🔴 [2026-09-02] 換邊條件 deployed → init_ok（對齊 08-28 的同型修正：
+        //   per user 當時回報「從頭到尾都是 DEPLOY RIGHT 沒換」，成因就是
+        //   DEPLOY RIGHT 失敗 ⇒ deployed=false ⇒ 整段含 DEPLOY LEFT 被跳過，
+        //   手臂停在原位、滑台空掃兩趟，而且滾筒沒人關）。
+        if (init_ok) {
             pqw_.controlRelay(CH_BRUSH, false);
             // [2026-08-26 per user] 刮刀側 RIGHT → LEFT（同上）
             std::ostringstream oss_squeegee;
@@ -2165,6 +2177,17 @@ std::string WashRobot::do_arm_clean_sweep_continuous_(int wall_mm,
             // 2026-06-09h: 將 no_reply (arm_cmd_ 非 OK，常見於 M2 馬達 lr_move_to_slot
             // FAIL — water damage intermittent) 也納入 retry，PARK + 500ms 重置 M2
             // state，多次嘗試讓 transient M2 fail 自動恢復而不打擾 user。
+            // 🔴 [2026-09-02 per user] 滾筒繼電器改到 DEPLOY **之前** 打開（原本在
+            //   verify 之後）。理由同 do_arm_clean_sweep_：靜止的滾筒頂著玻璃才起轉。
+            //   ⚠️ 開了就必須在下面每一條失敗出口關掉（!deploy_ok / verify 障礙）。
+            //   🟡 乾式那輪（!water_on）仍是明確關閉滾筒——那個 gate 是否合理，
+            //      per user 表示之後再處理，本次不動。
+            if (water_on) {
+                if (pqw_set_relay_verified_(CH_BRUSH, true)) {
+                    std::cerr << "[arm_clean_sweep_cont] pqw ON brush FAIL\n";
+                    return false;
+                }
+            }
             std::ostringstream oss;
             oss << "DEPLOY " << wall_mm << " " << m2_slot;
             const std::string deploy_str = oss.str();
@@ -2199,6 +2222,7 @@ std::string WashRobot::do_arm_clean_sweep_continuous_(int wall_mm,
                 }
             }
             if (!deploy_ok) {
+                if (water_on) pqw_.controlRelay(CH_BRUSH, false);   // [2026-09-02] 別讓滾筒空轉
                 std::cerr << "[arm_clean_sweep_cont] DEPLOY " << m2_slot << " no_reply (timeout or motor_api busy)\n";
                 {
                     std::lock_guard<std::mutex> lk(arm_sweep_obstacle_mtx_);
@@ -2209,6 +2233,7 @@ std::string WashRobot::do_arm_clean_sweep_continuous_(int wall_mm,
                 return false;
             }
             if (verify_arm_deploy_(m2_slot, wall_mm)) {
+                if (water_on) pqw_.controlRelay(CH_BRUSH, false);   // [2026-09-02] 別讓滾筒空轉
                 std::cerr << "[arm_clean_sweep_cont] DEPLOY " << m2_slot << " obstacle\n";
                 {
                     std::lock_guard<std::mutex> lk(arm_sweep_obstacle_mtx_);
@@ -2225,10 +2250,7 @@ std::string WashRobot::do_arm_clean_sweep_continuous_(int wall_mm,
                 //    std::cerr << "[arm_clean_sweep_cont] pqw ON water_pump FAIL\n";
                 //    return false;
                 //}
-                if (pqw_set_relay_verified_(CH_BRUSH, true)) {
-                    std::cerr << "[arm_clean_sweep_cont] pqw ON brush FAIL\n";
-                    return false;
-                }
+                // [2026-09-02] 原本的 brush ON 已移到 DEPLOY 之前（見上），此處不再開。
             }
         }   // end !skip_deploy
         // [2026-05-28] Single sweep to target_cm. fire-and-forget pattern unchanged

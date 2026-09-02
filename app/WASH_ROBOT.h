@@ -107,7 +107,43 @@ public:
     std::string cmd_delete_script(const std::string& name);
     std::string cmd_run_saved(const std::string& name, bool up = false, const std::string& gait = "alt");   // up=false → down (default); gait see cmd_run_script
 
-    std::string cmd_arm_sweep();  // public: acquires motion_mtx_
+    std::string cmd_arm_sweep();
+
+    // 🔴 [2026-09-02 per user] 上滑台的手動指令。日誌自 09-02 起就標著
+    //   「上滑台：**無指令可讀位置或設零點** ⇒ 設零點的唯一路徑是跑完整 cmd_init，
+    //     而它會關真空閥。**測滑台前要先解決這個。**」——這三支就是解那一條。
+    //
+    // ⚠️ **不要改用 Pi 上那支獨立的 rail_pos/rail_move_drv 工具來替代**：它們會對
+    //   `.20` 另開一條 TCP 連線，而滑台(slave 14)與 ZDT 推桿 5~8、PQW 12 同在該匯流排，
+    //   兩個客戶端的 RTU 幀會在核心緩衝區錯位 —— 那正是 09-01 匯流排卡死的成因。
+    // acc/dec 單位為 **ms/1000rpm**（斜坡時間 = acc x rpm/1000 毫秒）。
+    // 值越大 = 斜坡越長 = 起停越柔。<=0 表示沿用 ARM_SWEEP_ACC/DEC(=100)。
+    // rpm/acc/dec 傳 <=0 表示沿用 ARM_SWEEP_RPM / ARM_SWEEP_ACC / ARM_SWEEP_DEC。
+    std::string cmd_rail_move(double target_cm, int rpm = 0, int acc = 0, int dec = 0);  // 絕對定位（0=左端，正向往右）
+    std::string cmd_rail_pos();                            // 讀目前座標
+    std::string cmd_rail_zero();                           // 設當前位置為零點
+    // 🔴 [2026-09-02 per user] 手動歸零流程用的使能控制：
+    //     rail_disable → 人手把滑台推到左端硬限位 → rail_enable → rail_zero
+    //   比「開機當下的位置就是 0」可靠得多——左端硬限位是**真實的物理基準**，
+    //   而舊做法的零點取決於上次斷電前有沒有照流程移回 0（流程保證，非機制保證）。
+    // 📌 [2026-09-02 per user] **煞車與使能是分開的** —— 煞車是斷電煞車，
+    //   只在斷電時咬住，伺服失能不會鎖軸 ⇒ **上電狀態下手推得動**。
+    //   （我原本擔心「煞車咬住手推不動」，per user 澄清此顧慮不成立，已移除。）
+    // ⚠️ 仍未驗證：`motor_disable()` 寫的是 0x000F=0，驅動註解說是
+    //   「解除強制使能（交回 DI1）」—— 是否真的鬆開取決於 DI1 的接線狀態。
+    // 📌 使用時機：**只在上電後有需要時手動歸零**，不是每次動作前都做。
+    std::string cmd_rail_enable(bool on);
+
+    // 🔴 [2026-09-02 per user] 一次性的驅動器組態：讓 Pr0.07 真的能關閉使能。
+    //   背景：DI1 出廠 = 使能功能 + **常閉**，而 DI1 **沒接線** ⇒ 訊號恆觸發
+    //   ⇒ 寫 Pr0.07=0「交回 DI1」的結果永遠是使能，軟體關不掉（09-02 實測證實）。
+    //   做法：Pr4.02(0x0145) 136(0x88) → **0x08**（保留使能功能、只改成常開），
+    //   未接線 = 未觸發，使能就完全由 Pr0.07 決定。
+    //   同時把 Pr0.07 存成 1，否則重啟後驅動器會是失能狀態、滑台不動。
+    // ⚠️ 手冊明載「配置完输入功能后，保存断电重启有效」⇒ **必須斷電重啟驅動器**。
+    // ✅ 不會變磚：失能狀態下 Modbus 仍可通（09-02 實測 rail_pos 讀得到），
+    //    真的卡住就下 Pr0.07=1 救回來。
+    std::string cmd_rail_cfg_soft_enable();  // public: acquires motion_mtx_
     std::string cmd_tilt_mode(bool on);
 
     // [2026-08-27 per user] 單獨重取 IMU 水平基準，不跑完整 init。
@@ -637,7 +673,14 @@ private:
     //
     // 🟡 **殘餘風險（流程保證，不是機制保證）**：異常斷電／停電來不及回 0 時，
     //    下次 init 會把當時的位置當成零點，**整個座標系偏移且不會有任何訊息**。
-    static constexpr double ARM_RAIL_TRAVEL_MAX_CM   = 48.0;
+    // 🔴 [2026-09-02 per user] 48.0 → 138.0。手動歸零後的零點起算尚可移動 **140cm**，
+    //    per user 指定上限即 140（要能下到 140 的指令）⇒ **不留安全餘裕**，
+    //    與先前 50→48 留 2cm 的慣例不同，這是 per user 的選擇。
+    //    **舊值 48 是錯的** —— 它的 provenance 寫
+    //    「實體行程 50cm」，與實測差近三倍，來源不明。
+    //    （設計彙整當初就寫「滑台有效行程建議 1.2m 以上」，140 才對得上。）
+    // ⚠️ 這是**指令座標**的守衛，不是機械極限——開迴路失步時兩者會漂開。
+    static constexpr double ARM_RAIL_TRAVEL_MAX_CM   = 140.0;
 
     static constexpr int DM2J_ARM         = 14;   // cli_20_ (2026-08-28 per user)
 
@@ -802,9 +845,30 @@ private:
     //    —— 當時以為 1000rpm = 16.7 cm/s，用實測導程 7.731 換算實際是 **128.8 cm/s**。
     //    2026-08-28 實機已發生失步（使用者回報並手動調回）。
     //    250 rpm 實際線速度 = 32.2 cm/s；若仍失步，這裡還要再往下調。
-    static constexpr int ARM_SWEEP_RPM = 250;   // [2026-08-28 per user] 1000→250，與步伐用值統一（原註解沿革：2026-05-26 bench menu28: 2300; 2026-05-27: 2300→2000→1000 因仍觀察失步）
-    static constexpr int ARM_SWEEP_ACC = 100;    // start ramp (ms/1000rpm) — 2026-05-26: 100→200; 2026-05-27: 200→100 配合 RPM 1000
-    static constexpr int ARM_SWEEP_DEC = 100;    // stop ramp (ms/1000rpm) — 2026-05-26: 100→200; 2026-05-27: 200→100 配合 RPM 1000
+    // 🔴 [2026-09-02 per user] 250 → 400。09-02 實機以 `rail` 指令在全行程 0↔140cm
+    //   逐段試過 100 / 250 / 350 / 400（皆搭配 acc/dec=3000），per user 決定用 400。
+    //   線速度 400 x 7.731 / 60 = **51.5 cm/s**，全行程單程 3.9s。
+    // ⚠️ **400 的失步未經驗證。** 已知參考點只有：250 先前在用、
+    //   **500 實測累積失步 0.2~0.3mm/橫越（不可用，2026-08-28）**。400 落在兩者之間。
+    //   驅動器的位置讀數是**指令脈衝計數**，失步一律讀不出來 ⇒ 要驗只能滑台做記號拿尺量。
+    // 📌 未主動安排該驗證：08-31 per user 已否決「跑多趟找 RPM 上限」，
+    //   理由是開迴路下該值只對當下負載成立，負載一變就要重驗，故由現場視情況調整。
+    // 📌 邊際效益遞減：350→400 全程只快 0.2s（4.1→3.9s），因為斜坡時間隨轉速線性增長
+    //   （acc x rpm/1000），加速段吃掉大部分增益。
+    // （原註解沿革：2026-05-26 bench menu28 2300; 05-27 2300→2000→1000 因仍觀察失步;
+    //   08-28 per user 1000→250）
+    static constexpr int ARM_SWEEP_RPM = 400;
+    // 🔴 [2026-09-02 per user 實機調參] 100 → 3000。單位 ms/1000rpm ⇒ 斜坡時間 = acc x rpm/1000。
+    //   舊值在實際運轉速度下等於**幾乎瞬間起停**：100 @250RPM = 25ms、@100RPM = 10ms。
+    //   （沿革註解寫「200→100 配合 RPM 1000」——那是 RPM 還是 1000 的時代，
+    //     08-28 per user 已把速度降到 250，斜坡值卻沒跟著回頭檢討。）
+    //   09-02 實機以 `rail` 指令逐段試：100 → 1000 → 3000 @100RPM，再以 250RPM 驗證，
+    //   per user 判定 **250RPM + acc/dec 3000（斜坡 0.75s）可以**。
+    //   全行程 0↔140cm 落點 139.999906 / 0.000000，5.1s。
+    // ⚠️ 必須與下方 DM2J_ARM_STEP_SWEEP_ACC/DEC 一起改——同一根軸，
+    //    08-26 就發生過「改一個漏改另一個」（ARM_SWEEP_CM 那次）。
+    static constexpr int ARM_SWEEP_ACC = 3000;   // start ramp (ms/1000rpm)
+    static constexpr int ARM_SWEEP_DEC = 3000;   // stop ramp (ms/1000rpm)
 
     // [2026-07-23 per user] do_step_sync_ 專用的小行程滑台掃動（0→-10cm→0 來回一次）
     // — 跟上面 ARM_SWEEP_* 是完全不同的動作/參數組，行程短很多（10cm vs 55cm）所以
@@ -829,9 +893,12 @@ private:
     //   顯示 PR_move_cm_nowait -8.000）。2026-08-27 per user 補上，兩個常數現在
     //   都是 17，方向同為正 → 0 → 17 → 0。日後改行程請同時改這兩處。
     static constexpr double DM2J_ARM_STEP_SWEEP_CM  = 17.0;  // 0 → 此值 → 0，一次來回 (2026-08-27 per user: -8→17，補上 08-26 漏改; 2026-07-27 per user: -6→-8; 2026-07-24 per user: -10→-6→-4→-6)
-    static constexpr int    DM2J_ARM_STEP_SWEEP_RPM = 250;    // 2026-07-27 per user: 300→250 稍微放慢；300→600→500→400→300 (2026-07-24 per user)
-    static constexpr int    DM2J_ARM_STEP_SWEEP_ACC = 100;
-    static constexpr int    DM2J_ARM_STEP_SWEEP_DEC = 100;
+    // 🔴 [2026-09-02 per user] 250 → 400，與 ARM_SWEEP_RPM 同步（同一根軸，理由見該處）。
+    //   （沿革：2026-07-27 per user 300→250；300→600→500→400→300 於 2026-07-24）
+    static constexpr int    DM2J_ARM_STEP_SWEEP_RPM = 400;
+    // 🔴 [2026-09-02 per user] 100 → 3000，與 ARM_SWEEP_ACC/DEC 同步（同一根軸，理由見該處）。
+    static constexpr int    DM2J_ARM_STEP_SWEEP_ACC = 3000;
+    static constexpr int    DM2J_ARM_STEP_SWEEP_DEC = 3000;
     // [2026-07-23 per user] 估計單趟 (10cm @ 600rpm, 1cm/rev 螺桿換算同
     // ARM_SWEEP_EST_MS 的公式) 走完所需時間：加速斜坡 ~60ms(0.3cm) + 巡航
     // ~940ms(9.4cm) + 減速斜坡 ~60ms(0.3cm) + fire retry/緩衝 ~150ms ≈ 1.5s。
@@ -1698,8 +1765,11 @@ private:
     // [2026-08-18 per user] LEFT/RIGHT SWAPPED to match the physical tool heads
     // being swapped left-for-right. Was LEFT=148.09 / RIGHT=134.07. Kept in sync
     // with cleaning_arm/main_api.h TOOL_EXT_LEFT_MM / TOOL_EXT_RIGHT_MM.
-    static constexpr float ARM_M2_TOOL_LEFT_MM     = 134.07f;
-    static constexpr float ARM_M2_TOOL_RIGHT_MM    = 148.09f;
+    // 🔴 [2026-09-02] 與 cleaning_arm/main_api.h 的 TOOL_EXT_LEFT/RIGHT_MM 同步
+    //    （134.07→192.37、148.09→204.32，實機手壓量測，換算與理由見該處註解）。
+    //    這份複本供 verify_arm_deploy_ 的預期角度檢查用，**兩份不同步 DEPLOY 驗證就會比錯角度**。
+    static constexpr float ARM_M2_TOOL_LEFT_MM     = 192.37f;
+    static constexpr float ARM_M2_TOOL_RIGHT_MM    = 204.32f;
     static constexpr float ARM_DEPLOY_POS_TOL_RAD  = 0.15f;   // ~8.6° / ~48mm (2026-05-22: 0.10 → 0.15, motor PD variance ~0.10 rad 自然 jitter 會誤判)
 
     // Set by crane_cmd_ when an EVT tension_alarm / tension_total_limit line is

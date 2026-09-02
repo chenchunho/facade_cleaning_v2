@@ -675,6 +675,34 @@ bool DM2J_RS570::motor_disable()
 	return writeSingle(0x000F, 0x0000);
 }
 
+bool DM2J_RS570::set_di1_function(uint16_t code)
+{
+	LOG_INF(_log_tag, "set_di1_function (Pr4.02 / 0x0145)");
+	return writeSingle(0x0145, code);
+}
+
+bool DM2J_RS570::read_di1_function(uint16_t& code)
+{
+	if (!client) return true;
+	uint8_t tx[8];
+	tx[0] = slaveID;
+	tx[1] = 0x03;
+	tx[2] = 0x01;     // 0x0145
+	tx[3] = 0x45;
+	tx[4] = 0x00;
+	tx[5] = 0x01;
+	uint16_t crc = crc16(tx, 6);
+	tx[6] = crc & 0xFF;
+	tx[7] = crc >> 8;
+
+	uint8_t rx[32] = { 0 };
+	int len = txn_frame_(tx, 8, rx, sizeof(rx), 7);
+	if (len < 0) return true;
+
+	code = (rx[3] << 8) | rx[4];
+	return false;
+}
+
 bool DM2J_RS570::save_params()
 {
 	LOG_INF(_log_tag, "save_params (0x1801 = 0x2211, save to EEPROM)");

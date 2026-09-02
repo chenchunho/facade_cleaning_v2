@@ -384,6 +384,164 @@ std::string WashRobot::cmd_arm_sweep() {
     return do_arm_sweep_();
 }
 
+// ============================================================
+//  上滑台手動指令（2026-09-02 per user）
+// ============================================================
+// 座標系：0 = 左端硬限位，正方向 = 往右（2026-08-29 實機確認，與 WASH_ROBOT.h:624 一致）。
+// ⚠️ 開迴路、無回授也無原點感測器：零點是 init 當下的位置，靠「斷電前先移回 0」的
+//    作業流程保證。異常斷電來不及回 0 時，下次 init 會把當時位置當零點——這是流程
+//    保證不是機制保證，所以才需要 rail_pos 讓人能實際確認。
+std::string WashRobot::cmd_rail_move(double target_cm, int rpm, int acc, int dec) {
+    State cur = state_.load();
+    if (cur == State::Error) return state_violation_(cur);
+
+    if (target_cm < 0.0 || target_cm > ARM_RAIL_TRAVEL_MAX_CM)
+        return "ERR rail_target_out_of_range (0.0.." + std::to_string((int)ARM_RAIL_TRAVEL_MAX_CM) + " cm)\n";
+    // 上限 500：08-28 實測 500 RPM 累積失步 0.2~0.3mm/橫越，已不可用；再高沒有意義。
+    // 常用值 250（ARM_SWEEP_RPM）。⚠️ 不要在這裡「搜尋可用 RPM 上限」——
+    // 08-31 per user 已拍板否決，開迴路下該值只對當下負載成立，由現場自行調整。
+    if (rpm <= 0) rpm = ARM_SWEEP_RPM;   // 省略時沿用預設速度
+    if (rpm < 10 || rpm > 500) return "ERR rail_rpm_out_of_range (10..500)\n";
+    // 🔴 [2026-09-02 per user] 加減速開放為參數，方便現場調而不必每次重建。
+    // 單位 ms/1000rpm ⇒ 實際斜坡時間 = acc x rpm/1000 毫秒。
+    // 例：acc=100 @100RPM 只有 10ms（很急）；acc=1000 @100RPM 則是 100ms。
+    // 上限 10000：@500RPM 等於 5 秒斜坡，再長沒有實務意義。
+    if (acc <= 0) acc = ARM_SWEEP_ACC;
+    if (dec <= 0) dec = ARM_SWEEP_DEC;
+    if (acc > 10000 || dec > 10000)
+        return "ERR rail_acc_dec_out_of_range (1..10000, ms/1000rpm)\n";
+
+    // try_lock 而非 lock_guard：這是人手下的測試指令，撞到進行中的動作應該立刻
+    // 回報忙碌，而不是安靜排隊到幾秒後才動（比照 cmd_hold 的 08-31 修正）。
+    std::unique_lock<std::mutex> lk(motion_mtx_, std::try_to_lock);
+    if (!lk.owns_lock()) return "ERR busy: another motion holds motion_mtx_\n";
+
+    // 用 _nowait + dm2j_wait_done_ 而非 blocking 的 PR_move_cm：後者的 status poll
+    // 會占住 socket，與同匯流排上的 JC100 壓力讀互撞（見 WASH_ROBOT.cpp:1200 註解）。
+    // 🔴 [2026-09-02] 逾時要依行程長度算，不能用 dm2j_wait_done_ 的預設 20000ms。
+    //    實測 0→140cm @50RPM 耗時 20.6s，剛好超過預設值 ⇒ 動作明明成功卻回 ERR
+    //    （落點 139.999906）。線速度 = rpm x ARM_RAIL_LEAD_CM_PER_REV / 60 cm/s。
+    //    取 2 倍預估時間 + 5s 餘裕（涵蓋 acc/dec 斜坡與匯流排爭用），上限 180s。
+    double from_cm = 0.0;
+    if (D_(DM2J_ARM).read_position_cm(from_cm)) from_cm = 0.0;   // 讀不到就當 0，只影響逾時長度
+    const double lead_cm  = ARM_RAIL_LEAD_CM_PER_REV;
+    const double speed_cs = (double)rpm * lead_cm / 60.0;        // cm/s
+    int wait_ms = 20000;
+    if (speed_cs > 0.0) {
+        double est_s = std::fabs(target_cm - from_cm) / speed_cs;
+        double ramp_s = ((double)acc + (double)dec) * (double)rpm / 1000.0 / 1000.0;
+        wait_ms = (int)((est_s + ramp_s) * 2000.0) + 5000;
+        if (wait_ms < 20000)  wait_ms = 20000;
+        if (wait_ms > 180000) wait_ms = 180000;
+    }
+
+    if (D_(DM2J_ARM).PR_move_cm_nowait(0, 1, rpm, target_cm, acc, dec))
+        return "ERR rail_move_command_failed\n";
+    // 🔴 [2026-09-02] dm2j_wait_done_ 遵循本專案慣例（projects/CLAUDE.md：
+    //    **無異常回傳 false**）：完成 → false，通訊錯誤／故障／逾時 → true。
+    //    初版寫成 `if (!dm2j_wait_done_(...))`，變成**動作成功時才回 ERR**
+    //    ——實測 `rail 3 100` 位置精準到 3.7µm 卻回 ERR。
+    //    ⚠️ 該函式把「通訊錯誤／驅動器故障／逾時」三種情況都壓成同一個 true，
+    //       所以這裡的訊息不能宣稱是哪一種。
+    if (dm2j_wait_done_(DM2J_ARM, wait_ms))
+        return "ERR rail_move_not_confirmed (通訊錯誤／驅動器故障／逾時，"
+               "指令已送出，滑台可能仍在移動；用 rail_pos 確認實際位置)\n";
+
+    double cm = 0.0;
+    if (D_(DM2J_ARM).read_position_cm(cm))
+        return "OK rail_move target=" + std::to_string(target_cm) + " (pos read failed)\n";
+    return "OK rail_move target=" + std::to_string(target_cm)
+         + " pos=" + std::to_string(cm)
+         + " rpm=" + std::to_string(rpm)
+         + " acc=" + std::to_string(acc) + " dec=" + std::to_string(dec) + "\n";
+}
+
+// 🔴 [2026-09-02 per user] **這不是量測值，是指令脈衝計數。**
+// 上滑台無回授（per user：「因為沒有回授」），驅動器的位置暫存器數的是**送出去的脈衝**，
+// 不是實際位置。後果：
+//   · 伺服失能後用手推動滑台，**這個讀數完全不會變**（09-02 實測：手推前後皆 0.000000）
+//     ⇒ 手動歸零流程結束後**必須** rail_zero，不能靠讀數判斷推到哪了。
+//   · **失步一律偵測不到**（08-28 實測 500 RPM 累積 0.2~0.3mm/橫越，只能拿尺量出來）。
+// 📌 `ARM_RAIL_LEAD_CM_PER_REV` 的 provenance 早就寫著「驅動器只數脈衝不可信」，
+//    但那件事一直沒有反映在本指令的介面上。
+std::string WashRobot::cmd_rail_pos() {
+    double cm = 0.0;
+    if (D_(DM2J_ARM).read_position_cm(cm)) return "ERR rail_pos_read_failed\n";
+    return "OK rail_cm=" + std::to_string(cm) + "\n";
+}
+
+std::string WashRobot::cmd_rail_zero() {
+    // 寫 0x6002 = 0x0021「設當前位置為零」。這不是 homing——本機無原點感測器，
+    // home_start()(0x0020) 沒有東西可觸發（2026-08-29 per user 更正）。
+    std::unique_lock<std::mutex> lk(motion_mtx_, std::try_to_lock);
+    if (!lk.owns_lock()) return "ERR busy: another motion holds motion_mtx_\n";
+    if (D_(DM2J_ARM).home_set_current_pos_zero()) return "ERR rail_zero_failed\n";
+    return "OK rail_zero (目前位置已設為 0)\n";
+}
+
+// 手動歸零流程：rail_enable off -> 人手推到左端硬限位 -> rail_enable on -> rail_zero
+std::string WashRobot::cmd_rail_enable(bool on) {
+    std::unique_lock<std::mutex> lk(motion_mtx_, std::try_to_lock);
+    if (!lk.owns_lock()) return "ERR busy: another motion holds motion_mtx_\n";
+    bool fail = on ? D_(DM2J_ARM).motor_enable() : D_(DM2J_ARM).motor_disable();
+    if (fail) return std::string("ERR rail_") + (on ? "enable" : "disable") + "_failed\n";
+    if (on) return "OK rail_enable\n";
+    // 失能後仍讀得到座標（編碼器供電不受使能影響），手推時可用 rail_pos 觀察。
+    // 但那個座標是否仍對應真實位置，正是無回授系統無法保證的事 —— 手推完務必歸零。
+    return "OK rail_disable (若推不動，見 WASH_ROBOT.h 該處註解的 DI1/煞車兩點)\n";
+}
+
+// 一次性驅動器組態：讓 Pr0.07 真的能關閉使能（背景見 WASH_ROBOT.h 該處註解）。
+std::string WashRobot::cmd_rail_cfg_soft_enable() {
+    std::unique_lock<std::mutex> lk(motion_mtx_, std::try_to_lock);
+    if (!lk.owns_lock()) return "ERR busy: another motion holds motion_mtx_\n";
+
+    uint16_t before = 0;
+    if (D_(DM2J_ARM).read_di1_function(before)) return "ERR rail_cfg: read Pr4.02 failed\n";
+
+    // 0x08 = 使能(SRV-ON) 功能 + bit7=0(常開)。出廠 0x88 是同功能但常閉。
+    if (D_(DM2J_ARM).set_di1_function(0x0008)) return "ERR rail_cfg: write Pr4.02 failed\n";
+
+    uint16_t after = 0;
+    if (D_(DM2J_ARM).read_di1_function(after)) return "ERR rail_cfg: readback Pr4.02 failed\n";
+    if (after != 0x0008)
+        return "ERR rail_cfg: Pr4.02 readback mismatch (want 8, got "
+             + std::to_string(after) + ")\n";
+
+    // 必須一起存 Pr0.07=1：DI1 改常開後不再提供使能，若 Pr0.07 仍是 0，
+    // 斷電重啟後驅動器會是失能狀態、滑台完全不動。
+    if (D_(DM2J_ARM).motor_enable()) return "ERR rail_cfg: write Pr0.07=1 failed\n";
+
+    if (D_(DM2J_ARM).save_params()) return "ERR rail_cfg: save command failed\n";
+
+    // 🔴 [2026-09-02] 存檔狀態要重試：驅動器寫 EEPROM 期間不回應 Modbus，
+    // 初版只等 500ms 就讀，實測回 read save status failed。
+    // ⚠️ 手冊：0x1901 **只有存檔後第一次讀得到 0x5555，之後變回 0x1111** ——
+    //    所以讀不到 0x5555 不代表沒存成功，只代表**沒確認到**。
+    //    唯一可靠的驗證是斷電重啟後看 Pr4.02 是否仍為 8（本函式回報的 before 值）。
+    uint16_t save_st = 0;
+    bool st_ok = false;
+    for (int i = 0; i < 5; ++i) {
+        sleep_ms_(1000);
+        if (!D_(DM2J_ARM).read_save_status(save_st)) { st_ok = true; break; }
+    }
+    std::string head = "OK rail_cfg_soft_enable  Pr4.02 " + std::to_string(before) + " -> 8, Pr0.07=1";
+    if (!st_ok)
+        return head + "，存檔指令已送出但**未確認**(0x1901 讀取 5 次皆失敗，"
+                      "驅動器寫 EEPROM 期間不回應屬正常)。"
+                      "🔴 斷電重啟驅動器後再跑一次本指令：若回報的 Pr4.02 before=8 就是存成功了，"
+                      "=136 表示沒存到、要重跑。\n";
+    if (save_st != 0x5555)
+        return head + "，存檔狀態 0x1901=" + std::to_string(save_st)
+             + "(非 21845=0x5555；21845 只有存檔後第一次讀得到，17=0x1111 是已被讀過或從未存過)。"
+               "🔴 一樣以斷電重啟後的 Pr4.02 為準。\n";
+
+    return "OK rail_cfg_soft_enable  Pr4.02 " + std::to_string(before)
+         + " -> 8, Pr0.07=1, saved to EEPROM (0x5555). "
+           "MUST power-cycle the drive to take effect; then verify with rail_enable off.\n";
+}
+
+
 // [2026-08-26 per user] 乾式清洗（bench 測試用）——見 WASH_ROBOT.h 的說明。
 // 完整 DEPLOY + 滾筒 + 上滑台 + PARK，不噴水、不移動機器人。
 std::string WashRobot::cmd_arm_clean_sweep_dry() {

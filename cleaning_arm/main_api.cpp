@@ -179,7 +179,15 @@ bool DamiaoAPI::init(const char* port,
 	// ---- M2 slot ----
 	m2_.id = MotorSlot::SlotId::M2;
 	m2_.name = "M2";
-	m2_.lower_bound = -ZERO_OFFSET; // allow RIGHT slot at -ZERO_OFFSET
+	// 🔴 [2026-09-02 per user 手轉實測] -ZERO_OFFSET(-0.8) → -1.05。
+	// 斷電手轉量到的三個工作位置（各讀 5 次、極差 0.0000）：
+	//   滾筒(RIGHT) = +0.5316   CENTER = -0.4099   刮刀(LEFT) = -1.0115
+	// **刮刀在 -1.0115，超出舊下界 0.2115 rad** ⇒ MOVETO/LR_SLOT 一律被夾在 -0.8，
+	// 程式從來沒有真正把刮刀轉到工作位置過（差 19.1°）。
+	// -1.05 只比實測位置多 0.04 —— 那個位置是使用者徒手轉到的，不是頂到停點，
+	// 所以這點餘裕不會撞機構；刻意不放更寬，因為**真正的機械停點在哪還沒量過**
+	// （lr_calibrate 給的 half_range=0.7275 描述不了 -1.0115 的行程，那個值是錯的）。
+	m2_.lower_bound = -1.05f;
 	// upper_bound keeps default 1e9f (unconstrained)
 	//old : 8, 3, 0.5
 	// [2026-06-09v] hold_kp 4 → 2
@@ -470,6 +478,17 @@ bool DamiaoAPI::approach_wall_slot(MotorSlot& s, float clearance_mm, float speed
 // 🔴 **2026-09-02 實測顯示嚴重度被低估了一個數量級**：長行程收回時
 //    |vel| 達 **1.5069 / 1.5690 / 2.2283 rad/s**（三次獨立量測），是限制值的 3.8~5.6 倍，
 //    全程沒有任何 [M1 SAFETY] 觸發。08-18 記的只有 0.4335（超出 8%）。
+// 🔴 [2026-09-02] 維持 0.4。曾為了「手臂靠上去太慢」暫時放到 1.0 做量測，**數據不支持放寬**：
+//   自由空間 θ0.10↔0.55 往返，命令 vs 實際（峰值 / 落點誤差）：
+//       0.30 -> 0.4335, 0.6532 / 誤差 0.030, 0.006
+//       0.50 -> 1.0073, 0.6654 / 誤差 0.055, 0.053
+//       0.70 -> 1.1905, 0.9585 / 誤差 0.073, 0.045
+//   ① **追蹤本來就不乾淨**：命令 0.30 的峰值就有 0.4335（2.2 倍）——與當日起步震動
+//      量到的是同一個數字，**09-02 的重力模型修正並未消除超速**。
+//   ② 落點誤差隨速度惡化，0.70 時 0.073 rad 已逼近 DEPLOY 收斂容差 0.08。
+//   ③ 換來的時間很少：單程 1.57→0.94s，**全程 11s 裡只省 0.6s（5%）**。
+//   ⇒ 真正的瓶頸不在這裡（分段量測：收回 2.5s / 換 slot 2.3s / 伸出 ~3.1s / settle ~3s），
+//      **settle 那 ~3s 才是可下手處**——壓在玻璃上永遠收斂不了，那段等待是純損失。
 static const float M1_VEL_SAFETY_LIMIT   = 0.4f;   // rad/s；超過即緊急煞車
 static const float M1_EMERGENCY_BRAKE_KD = 5.0f;   // 協定上限（20.0 會被 clamp 成這個值）
 
@@ -1306,6 +1325,15 @@ bool DamiaoAPI::lr_calibrate_slot(MotorSlot& s, bool seek_left)
 		return false;
 	}
 	float p_stop_1 = p_stop;
+	// 🔴 [2026-09-02] 記下正向機械停點——本機構唯一找得到的真實物理基準
+	// （負向在 2 rad 內沒有停點，見 main_api.h 的 M2_SLOT_*_FROM_STOP 說明）。
+	// 即使後面 Phase 1B/2 失敗提早 return，這個值仍然有效且已存下。
+	if (seek_left) {   // seek_left=true ⇒ dir=+1 ⇒ 正向
+		s.lr_stop_pos = p_stop_1;
+		s.lr_stop_valid = true;
+		std::cout << "[" << s.name << " calibrate] 正向停點已記錄 lr_stop_pos="
+			<< p_stop_1 << " (slot 目標改以此為基準)\n";
+	}
 	std::cout << "[" << s.name << " calibrate] Phase 1 stop at pos=" << p_stop_1
 		<< "  legacy target zero (assumed sym.)=" << (p_stop_1 - dir * ZERO_OFFSET) << "\n";
 
@@ -1494,6 +1522,9 @@ bool DamiaoAPI::lr_calibrate_slot(MotorSlot& s, bool seek_left)
 		s.move_cur = 0.0f;
 		s.move_target = 0.0f;
 		s.hold_err_integral = 0.0f;
+		// [2026-09-02] 零點搬到 midpoint ⇒ 舊座標的停點位置要同步平移，
+		// 否則 lr_move_to_slot_impl 會拿舊座標的基準去算新座標的目標。
+		if (s.lr_stop_valid) s.lr_stop_pos -= midpoint;
 	}
 
 	// set_zero response is CMD=0x12 (adapter confirm), which does NOT update state_q.
@@ -1744,8 +1775,20 @@ bool DamiaoAPI::lr_move_to_slot_impl(MotorSlot& s, int slot, float speed_rad_s)
 	// 取代寫死的 ZERO_OFFSET——如果實際可動範圍比假設的 0.8 小，target 會自動
 	// 跟著縮小，不會再往一個量測不到的位置硬推。margin 維持原本 LEFT/RIGHT
 	// 不對稱的調法（0.05 / 0.1）。
-	if (slot < 0) target = -s.lr_half_range + 0.05f;   // LEFT
-	else if (slot > 0) target = s.lr_half_range - 0.1f;   // RIGHT
+	// 🔴 [2026-09-02 per user] 改用斷電手轉實測的**絕對**位置，不再由 lr_half_range
+	//    對稱推導（理由見 main_api.h 的 M2_SLOT_*_RAD 宣告）。
+	// ⚠️ 舊式在 -0.8 的 lower_bound 下，LEFT 目標 -0.6775 比真正的工作位置 -1.0115
+	//    少了 0.334 rad（19.1°）——刮刀從來沒真正轉到位過。
+	// 🔴 [2026-09-02] 優先用「相對正向機械停點」的表示法——零點若被重設，
+	// 只要跑過一次校正找到停點，目標就自動還原（見 main_api.h 的說明）。
+	// 沒有有效停點時才退回絕對值（那組只在零點未變時成立）。
+	if (s.lr_stop_valid) {
+		if (slot < 0)      target = s.lr_stop_pos + M2_SLOT_LEFT_FROM_STOP;    // 刮刀
+		else if (slot > 0) target = s.lr_stop_pos + M2_SLOT_RIGHT_FROM_STOP;   // 滾筒
+		else               target = s.lr_stop_pos + M2_SLOT_CENTER_FROM_STOP;  // CENTER
+	}
+	else if (slot < 0) target = M2_SLOT_LEFT_RAD;    // 刮刀
+	else if (slot > 0) target = M2_SLOT_RIGHT_RAD;  // 滾筒
 	else               target = 0.0f;           // CENTER
 
 	// [2026-06-11e] 實驗：MIT_KP 10 → 20、加 FRICTION_TAU 1.5、測 motor 是否真飽和
@@ -2380,7 +2423,8 @@ bool DamiaoAPI::wait_for_move(MotorSlot& s, int timeout_ms)
 // ============================================================
 //  cmd_init_sequence()  -- INIT
 //  M1: ENABLE → HOME → CALIBRATE
-//  M2: ENABLE → HOME → LR_CALIBRATE RIGHT
+//  M2: ENABLE → HOME → LR_CALIBRATE（正向；2026-09-02 更正：舊註解寫 RIGHT，
+//      但 cmd_init_sequence 實際傳的是 seek_left=true）
 // ============================================================
 std::string DamiaoAPI::cmd_init_sequence()
 {
@@ -2423,14 +2467,27 @@ std::string DamiaoAPI::cmd_init_sequence()
 	enable_slot(m2_);
 
 	// Safety guard: M2 encoder offset can survive a crash and come back wildly wrong
-	// (e.g. -12 rad). Physical travel is ~±0.76 rad; beyond 3 rad is stale — force
-	// set_zero before calibration so lr_calibrate_slot() starts from a sane baseline.
+	// (e.g. -12 rad) — force set_zero before calibration so lr_calibrate_slot()
+	// starts from a sane baseline.
+	//
+	// 🔴 [2026-09-02] **門檻 1.5 → 3.0，並更正註解裡錯誤的行程描述。**
+	//   舊註解寫「Physical travel is ~±0.76 rad; beyond 3 rad is stale」，
+	//   但程式碼判的是 1.5 —— **註解與程式碼本來就不一致**（註解說 3、碼寫 1.5）。
+	//   而 ±0.76 這個前提也是錯的：2026-09-02 實測 LR_CALIBRATE 得到
+	//       正向機械停點 = **+0.7204**（tau 3.44，明確撞到）
+	//       負向 = 走到 **−1.2831** 仍以 0.5 rad/s 前進、tau 僅 −1.8（純摩擦），
+	//              max_travel(2.0) 用盡而 abort ⇒ **該側在 2 rad 內沒有停點**
+	//   ⇒ 真實行程**嚴重不對稱**，跨距至少 2.0 rad，遠不是 ±0.76。
+	//
+	//   後果：M2 停在 −1.6 這種**完全合法**的位置時，舊門檻會判定「陳舊」並**就地
+	//   set_zero**，把零點設在任意位置 —— 那正是會讓 09-02 手轉實測的
+	//   M2_SLOT_*_RAD 絕對值全部作廢的路徑。改用註解本來就宣稱的 3.0。
 	{
 		bool did_reset = false;
 		{
 			std::lock_guard<std::mutex> lk(motor_mutex_);
 			float pos = m2_.motor->Get_Position();
-			if (std::abs(pos) > 1.5f) {
+			if (std::abs(pos) > 3.0f) {
 				std::cerr << "[DamiaoAPI] INIT: M2 pos=" << pos
 					<< " rad — out of range, forcing set_zero\n";
 				dm_->set_zero_position(*m2_.motor);
@@ -2549,16 +2606,18 @@ std::string DamiaoAPI::cmd_deploy_sequence(const std::string& params)
 	if (!m2_.enabled) return "ERR DEPLOY: M2 not enabled";
 
 	// Step 1: M1 retract to home (0 rad).
-	// [2026-07-27 per user] use_park_profile=true — reverses the 2026-07-24
-	// decision below: user now explicitly wants this LEFT/RIGHT-switch retract
-	// to use the SAME profile as PARK (park_kp/park_kd/park_speed), slower than
-	// before. If slot-switching feels too slow again, this is the line to flip
-	// back to false (see the retained rationale comment for why it was false).
-	// [2026-07-24 per user] use_park_profile=false — this is an internal
-	// retract-before-re-extend, NOT the user-facing PARK command. Must keep the
-	// original fast DEPLOY-matching speed/torque; it must not inherit PARK's
-	// slow/gentle tuning (that regression made switching LEFT/RIGHT slots feel
-	// much slower, which was never the intent).
+	// ❌ [2026-09-02 試過並還原] 曾把這行翻成 false（fast profile），**量測不支持**：
+	//   改後工具切換 9.7 / 12.3 / 11.8 s，改前 11.4 / 11.0 s —— 散布蓋過差距。
+	//   分段量測顯示收回只佔 **2.5s**（全程 11s 中），根本不是瓶頸：
+	//       ① M1 收回 2.5s  ② M2 換 slot 2.3s  ③ M1 伸出靠上 ~3.1s + settle ~3s
+	//   而 ③ 的 3.1s = 0.92 rad ÷ touch_wall 速度 0.3 rad/s，**那才是可調的地方**，
+	//   但 0.3 已逼近 M1_VEL_SAFETY_LIMIT(0.4)，要更快得先動那個安全閥。
+	//   ⇒ 維持 07-27 per user 明確要求的 true。**不要再因為「感覺慢」翻這一行。**
+	//
+	// [2026-07-27 per user] use_park_profile=true — 推翻 07-24，
+	//   要求換 slot 的收回用與 PARK 相同的 profile（park_kp/kd/speed），比以前慢。
+	// [2026-07-24 per user] false — 這是內部的「收回再伸出」，不是使用者層的 PARK 指令，
+	//   必須保持原本與 DEPLOY 相稱的快速/力矩，不該繼承 PARK 的慢速柔和調校。
 	go_home_slot(m1_, /*use_park_profile=*/true);
 	// Wait for physical convergence (now effective since hold bias is zeroed)
 	for (int i = 0; i < 40; ++i) {
@@ -3095,7 +3154,10 @@ std::string DamiaoAPI::dispatch_motor(MotorSlot& s, const std::string& line)
 		for (auto& c : dir_str) c = static_cast<char>(::toupper(c));
 		if (!dir_str.empty() && dir_str != "LEFT" && dir_str != "RIGHT")
 			return "ERR usage: LR_CALIBRATE [LEFT|RIGHT]";
-		lr_calibrate_slot(s, dir_str != "RIGHT");
+		// 🔴 [2026-09-02] 回傳值原本被丟掉，校正失敗也回 OK —— 與 08-29 修過的
+		// trigger_sync_move() 同一類。2026-09-02 實測 Phase 1B abort，指令仍回 OK。
+		if (!lr_calibrate_slot(s, dir_str != "RIGHT"))
+			return "ERR LR_CALIBRATE: stop not found or did not converge (see log)";
 		return "OK";
 	}
 

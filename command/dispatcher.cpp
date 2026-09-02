@@ -95,6 +95,30 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
         return robot.cmd_step_down_sweep_before_after(cm);
     }
     if (cmd == "arm_sweep")      return robot.cmd_arm_sweep();
+    // [2026-09-02 per user] 上滑台手動指令
+    if (cmd == "rail") {
+        double cm; int rpm = 0, acc = 0, dec = 0;
+        iss >> cm;
+        if (iss.fail()) return "ERR usage:rail_<target_cm>_[rpm]_[acc]_[dec]\n";
+        // 🔴 [2026-09-02] 三個參數一律用 0 表示「沿用預設」，由 cmd_rail_move 解析。
+        // 初版把 250 寫死在這裡、註解卻寫「沿用 ARM_SWEEP_RPM」——改了常數也不會生效
+        // （實測改成 400 後 rail 仍回 rpm=250 才發現）。分派器看不到那些私有常數，
+        // 唯一正確的做法就是把預設值的決定權留在成員函式裡。
+        iss >> rpm;
+        iss >> acc;
+        iss >> dec;
+        return robot.cmd_rail_move(cm, rpm, acc, dec);
+    }
+    if (cmd == "rail_pos")  return robot.cmd_rail_pos();
+    if (cmd == "rail_zero") return robot.cmd_rail_zero();
+    if (cmd == "rail_cfg_soft_enable") return robot.cmd_rail_cfg_soft_enable();
+    if (cmd == "rail_enable") {
+        std::string v; iss >> v;
+        if (iss.fail()) return "ERR usage:rail_enable_<on|off>\n";
+        if (v == "on")  return robot.cmd_rail_enable(true);
+        if (v == "off") return robot.cmd_rail_enable(false);
+        return "ERR expected_on_or_off\n";
+    }
     if (cmd == "shutdown")       return robot.cmd_shutdown();
     if (cmd == "status")         return robot.cmd_status();
     if (cmd == "emergency_stop") return robot.cmd_emergency_stop();
