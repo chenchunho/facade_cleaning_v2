@@ -51,6 +51,8 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <vector>
+#include <chrono>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -418,7 +420,15 @@ private:
 
         float hold_ki          { 0.0f };   // integral gain; 0 = disabled
         float hold_err_integral{ 0.0f };   // integrator state (protected by motor_mutex_)
-        static constexpr float HOLD_I_MAX = 2.0f;   // anti-windup clamp (N·m)
+        // ❌ [2026-09-02 試過並還原] 曾把此值 2.0 → 5.0，想讓 M2 的積分上限
+        //   從 1.2 Nm 提到 3.0 Nm 以跨過摩擦。**實測完全無效，因為瓶頸不是上限、是累積速率**：
+        //       積分每 tick 增加 err x dt = 0.07 x 0.02 = 0.0014
+        //       ⇒ 繞到 5.0 要 **71 秒**（舊上限 2.0 也要 28 秒）
+        //   實測等 6 秒時 tau=0.64 = hold_kp x err(0.49) + tau_i(0.25)，與此完全吻合。
+        //   ⇒ **要改的是 hold_kp（或 hold_ki），不是這個 clamp。** 已還原。
+        // ⚠️ 命名誤導：本值 clamp 的是**積分狀態（rad·s）**，不是 N·m；
+        //   實際力矩上限是 hold_ki x HOLD_I_MAX。
+        static constexpr float HOLD_I_MAX = 2.0f;   // anti-windup clamp (積分狀態，非 N·m)
 
         // [2026-08-13 per user] M2 only: measured half-range from lr_calibrate_slot's
         // two-sided seek (Phase 1 + Phase 1B), replacing the old fixed ZERO_OFFSET
@@ -486,6 +496,20 @@ private:
                                 float clearance_mm, float speed_rad_s);
     bool        lr_calibrate_slot(MotorSlot& s, bool seek_left);   // 2026-07-27: true = converged, false = stop not found / MAX_TRAVEL / Phase 2 not converged
     bool        lr_move_to_slot_impl(MotorSlot& s, int slot, float speed_rad_s);   // 2026-06-06: true=converged
+
+    // 🔴 [2026-09-02 per user] M1 診斷記錄器 —— 查「啟動時頓一下」的成因。
+    //   **必須在控制迴圈內記錄**：透過 TCP 輪詢 STATUS 只有 ~10-20 Hz，
+    //   而黏滑週期與控制迴圈都是 50 Hz，輪詢抓到的是混疊值
+    //   （09-02 曾據此算出正負號互相矛盾的「掙脫力矩」）。
+    //   純記錄，不改變任何控制行為。指令：DIAG ON / DIAG OFF（OFF 時寫出 CSV）。
+    // [2026-09-02] 擴充為雙軸：M2 的黏滑是「M1 起步踢擊 / 換 slot 慢 / 掃動中被帶著跑」的共同根因，
+    //   要動它的增益之前先取得同等品質的波形（M1 的成功經驗就是先量再改）。
+    struct DiagRow { float t, pos, vel, tau, cmd; unsigned char flags; unsigned char motor; };
+    std::atomic<bool> diag_on_{ false };
+    std::vector<DiagRow> diag_rows_;
+    std::mutex diag_mtx_;
+    std::chrono::steady_clock::time_point diag_t0_;
+
     bool        calibrate_arm_slot(MotorSlot& s);
 
     // ---- compound sequences (blocking -- run on client_thread) --------------

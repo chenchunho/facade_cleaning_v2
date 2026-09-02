@@ -14,5 +14,5 @@
 ARM_RAIL_LEAD_CM_PER_REV = 7.731
 ARM_RAIL_LEAD_CM_PER_REV.provenance = 實測 2026-08-28；上滑台為皮帶軸；最小平方 實際=7.731×指令-0.615，殘差全在 ±0.15cm 內；⚠ 拿尺量兩次，驅動器只數脈衝不可信
 
-ARM_RAIL_TRAVEL_MAX_CM = 140.0
-ARM_RAIL_TRAVEL_MAX_CM.provenance = 2026-09-02 per user 現場告知：由手動歸零後的零點起算，尚可移動 140cm。per user 指定上限即 140（要能下到 140 的指令）⇒ **不留安全餘裕，指令可直接下到行程末端**，與先前 50→48 留 2cm 的慣例不同，這是 per user 的選擇。**舊值 48 是錯的**（其 provenance 寫「實體行程 50cm」，與實測 140 差近三倍，來源不明）。守的是指令座標，非機械極限
+ARM_RAIL_TRAVEL_MAX_CM = 130.0
+ARM_RAIL_TRAVEL_MAX_CM.provenance = 2026-09-02 per user 現場告知：由手動歸零後的零點起算，尚可移動 140cm。2026-09-02 稍後 per user 由 140 改為 **130**（在手動歸零、零點確定落在左端硬限位之後）。先前 140 是「零點起算尚可移動的距離」，不留餘裕；130 起實際保留約 10cm。**舊值 48 是錯的**（其 provenance 寫「實體行程 50cm」，與實測 140 差近三倍，來源不明）。守的是指令座標，非機械極限

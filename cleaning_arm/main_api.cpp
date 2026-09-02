@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <iomanip>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -200,11 +201,25 @@ bool DamiaoAPI::init(const char* port,
 	// kd 對抑制過衝最有效，而 M2 的 3.0 距離上限還有空間沒用（M1 是撞到 5.0 才
 	// 沒得加）。這也順便讓 HOLD 更穩。注意 5.0 是 damiao MIT 編碼的硬上限，
 	// 再往上寫會被 clamp（2026-08-17c 之前甚至會繞回成更小的值）。
+	// ❌ [2026-09-02 試過並還原] hold_kp 7 → 20，想讓 M2 補完最後 0.07 rad。**無效**：
+	//       kp=7   落點誤差 0.069 / 0.078   停滯 tau 0.64 / 0.92
+	//       kp=20  落點誤差 0.068 / 0.073   停滯 tau 1.57 / 1.58
+	//   **力矩增為 2.4 倍，位置幾乎不動。**
+	//   ⇒ 若是庫倫摩擦 F，平衡條件 kp*err = F ⇒ 誤差應隨 kp 反比縮小（0.07→0.024），
+	//     實測沒有 ⇒ **不是力矩受限，是位置受限**：某個東西讓 M2 就停在
+	//     ≈+0.463（滾筒側）/ ≈-0.937（刮刀側）。
+	// 🔴 **但這與兩件已知事實矛盾，尚未解開**：
+	//     ① per user 徒手轉得到 +0.5316 / -1.0115（09-02 手轉實測，各讀 5 次極差 0.0000）
+	//     ② LR_CALIBRATE 量到的正向機械停點是 **+0.7204**，遠在 0.463 之外
+	//   ⇒ 既不是機械極限、也不是單純摩擦。**下一步應在 lr_move_to_slot_impl 的斜坡段
+	//     錄 M2 的 50Hz 波形**，看它究竟在哪一刻、以多大力矩停住。
 	m2_.hold_kp = 7.0f;
 	m2_.hold_kd = 5.0f;
 	m2_.park_kp = m2_.hold_kp;   // M2 PARK/DEPLOY unchanged — user only asked to split M1
 	m2_.park_kd = m2_.hold_kd;
-	m2_.hold_ki = 0.6f;   // ki*HOLD_I_MAX=0.6*2.0=1.2 Nm > ~0.8 Nm friction; eliminates ~0.1 rad offset
+	// ⚠️ 這行原註解的前提是錯的：「> ~0.8 Nm friction」——09-02 實測 M2 摩擦約 2 Nm。
+	// 但真正的限制是**積分累積速率**（繞到上限要數十秒），不是上限值本身，見 main_api.h。
+	m2_.hold_ki = 0.6f;   // 積分只用來消掉長時間的殘餘偏移，扛不了摩擦
 	m2_.motor = std::make_unique<damiao::Motor>(cfg2.type, cfg2.slave_id, cfg2.master_id);
 	dm_->addMotor(m2_.motor.get());
 
@@ -523,7 +538,23 @@ bool DamiaoAPI::touch_wall_slot(MotorSlot& s, float wall_dist_mm,
 			std::lock_guard<std::mutex> lk(motor_mutex_);
 			cur_pos = s.motor->Get_Position();
 		}
-		float probe_setpt = cur_pos + (theta_target > cur_pos ? 0.3f : -0.3f);
+		// 🔴 [2026-09-02 per user 50Hz 診斷] 探測偏移 0.3 → **0.05**，與 go_home_slot
+		//   （本檔另一處，早已改成 0.05）一致。**這就是「M1 起步頓一下」的元兇。**
+		//
+		// 診斷證據（t02_1.csv，取樣 22ms）：
+		//     t=1.75  M2 停穩（vel→0、tau 由 1.58 掉到 0.07）
+		//     t=1.88  M1 仍完全靜止 +0.0490 / vel -0.0061 / tau -0.147
+		//     t=1.90  **M1 突然 +0.0712、vel +0.7998** —— 而 M2 已靜止 150ms
+		//     t=1.94  進入 MOVE，tau=17.534
+		//   ⇒ 衝擊發生在「M2 停穩之後、move 開始之前」的空檔 ⇒ **是本探測造成的**，
+		//     與 M2 的機械耦合無關（當日一度誤判為 M2 到位的衝擊）。
+		//
+		// 算術：0.3 rad x hold_kp(90) = **27 Nm** 持續 60ms（3 幀 x 20ms）。
+		//   而本探測只需確認 |tau| > TAU_LIVE_THRESHOLD(0.3 Nm)；
+		//   0.05 x 90 = **4.5 Nm**，是門檻的 15 倍，判定能力完全足夠。
+		// 📌 本檔註解早就記著「±1.0 rad probe ... produced a visible jerk right before
+		//   every move」，當時只把 go_home_slot 那一處改小，**touch_wall 這處被落下**。
+		float probe_setpt = cur_pos + (theta_target > cur_pos ? 0.05f : -0.05f);
 		float last_tau = 0.0f;
 		for (int k = 0; k < 3; ++k) {
 			{
@@ -1828,7 +1859,34 @@ bool DamiaoAPI::lr_move_to_slot_impl(MotorSlot& s, int slot, float speed_rad_s)
 	// [2026-06-09bb] CONV_TOL 0.1 → 0.15：motor LEFT 方向實測能到 ±0.5、
 	// target -0.6 用 0.1 容忍 (5.7°) 卡很可惜 (差 0.012 rad 就過關)。
 	// 0.15 (8.6°) 給夠 margin、一次 converged。sweep 對角度精度要求不高。
-	const float CONV_TOL = 0.15f;
+	// 🔴 [2026-09-02 per user 診斷] 0.15 → 0.05。**這是整條 M2 疑案的答案。**
+	//   50Hz 波形顯示：斜坡是**自己平順減速停下的**（進 creep 區後 vel 由 -0.30 降到 0），
+	//   停在距目標 0.078 rad 處，HOLD 接手只需 0.6 Nm 維持 ⇒ **根本沒有人在往目標推**。
+	//   ⇒ 當日「M2 摩擦飽和」「位置受限」的所有推論都是這個容差造成的假象；
+	//     把 hold_kp 由 7 加到 20（力矩 x2.4）位置紋風不動，正是因為它早已「收斂」。
+	//
+	// 📌 **06-09 放寬到 0.15 的兩個前提，今天都不成立了**：
+	//   ① 「motor LEFT 方向實測只能到 ±0.5」——那是 `lower_bound = -0.8` 把 LEFT 目標
+	//      夾死造成的（09-02 已修為 -1.05）。**成因消失，容差卻留著。**
+	//   ② 「sweep 對角度精度要求不高」——09-02 起 `TOOL_EXT_*` 是在「工具頭確實位於
+	//      slot 位置」的前提下標定的，差 8.6° 就改變接觸幾何。
+	//
+	// ⚠️ 失敗模式：收斂不了會讓 lr_move_to_slot_impl 回 false ⇒ DEPLOY 直接中止。
+	//   0.05 的依據：09-02 實測落點誤差穩定在 0.068~0.078，收緊後應能被推進到 0.05 內；
+	//   若實測發現推不到，**要回報實際可達精度，不要再把容差放寬回去掩蓋它**。
+	// 逐段收緊的實測（每檔 4 次，全部真收斂、回 OK，耗時不變 4.2~5.1s）：
+	//     0.15（原始）  落點誤差 0.069~0.078   停滯 tau 0.6~0.9
+	//     0.05          落點誤差 0.038~0.041   停滯 tau 0.29~0.40
+	//     0.02（定案）  落點誤差 **0.0103~0.0126**  停滯 tau 0.06~0.17
+	//   ⇒ 誤差始終約為容差的一半 ⇒ **仍是容差限制、不是物理極限**，機構還有餘裕。
+	//     停在 0.02（≈1.1°）是因為 0.011 rad ≈ 0.6° 已遠低於工具幾何在意的量級，
+	//     再收緊只是壓縮邊界條件（低溫、負載變化）的餘裕。
+	//
+	// ✅ **壓力驗證（確認 TOOL_EXT 標定沒被作廢）**：M2 由原本落在 0.4576 推進到 0.5175~0.5198，
+	//   而 `DEPLOY 520 RIGHT` 的 M1 θ 0.6525 → 0.6548（+0.0023 ≈ 1.1mm）、
+	//   tau 11.77 → 11.48~11.58，**落在 09-02 十週期測試中 per user 接受的 11.48~11.58 內**
+	//   ⇒ TOOL_EXT 標定仍然有效，不需重做。
+	const float CONV_TOL = 0.02f;
 	const float DT       = 0.02f;
 	// [2026-08-28 per user] MAX_LOOPS 100 → 150（2s → 3s）。
 	//
@@ -2086,6 +2144,26 @@ void DamiaoAPI::feedback_loop()
 			if (log_tau_this_tick) t_last_tau_log = t_now;
 
 			for (MotorSlot* s : { &m1_, &m2_ }) {
+				// 🔴 [2026-09-02] 診斷記錄放在 enabled 檢查**之前**（純記錄，不影響控制）。
+				//   `lr_move_to_slot_impl` / `go_home_slot` / `lr_calibrate_slot` 進場時都會
+				//   `s.enabled.exchange(false)` 把該軸從本迴圈摘出去自行控制，
+				//   記錄點若放在檢查之後，**那些自帶斜坡的區段會完全錄不到**
+                //   （先前 M2 波形從 t=0.28 直接跳到 2.72 的空隙就是整個斜坡）。
+                //   位置/速度/扭力來自 CAN 接收執行緒，與本迴圈是否服務該軸無關，
+                //   所以停用期間照樣是真實資料。
+				if (diag_on_.load(std::memory_order_relaxed)) {
+					DiagRow r;
+					r.t   = std::chrono::duration<float>(t_now - diag_t0_).count();
+					r.pos = s->motor->Get_Position();
+					r.vel = s->motor->Get_Velocity();
+					r.tau = s->motor->Get_tau();
+					r.cmd = s->move_act ? s->move_cur : s->hold_pos;
+					r.flags = (unsigned char)((s->move_act ? 1 : 0) | (s->hold_en ? 2 : 0));
+					r.motor = (unsigned char)((s->id == MotorSlot::SlotId::M1) ? 1 : 2);
+					std::lock_guard<std::mutex> dk(diag_mtx_);
+					if (diag_rows_.size() < 200000) diag_rows_.push_back(r);
+				}
+
 				if (!s->enabled) continue;
 
 				if (s->move_act) {
@@ -2618,16 +2696,54 @@ std::string DamiaoAPI::cmd_deploy_sequence(const std::string& params)
 	//   要求換 slot 的收回用與 PARK 相同的 profile（park_kp/kd/speed），比以前慢。
 	// [2026-07-24 per user] false — 這是內部的「收回再伸出」，不是使用者層的 PARK 指令，
 	//   必須保持原本與 DEPLOY 相稱的快速/力矩，不該繼承 PARK 的慢速柔和調校。
+	// 🔴 [2026-09-02 per user 診斷確認] use_park_profile true → **false**。
+	//   50Hz 內部記錄（DIAG）在 3 次 DEPLOY 上抓到：
+	//       #1 起步 pos=0.0952  第一 tick vel=+0.7387  tau=+18.02  → 立刻反向 -0.62
+	//       #2 起步 pos=0.0956  第一 tick vel=+0.7021  tau=+18.02  → 立刻反向 -0.57
+	//       #3 起步 pos=0.0448  無尖峰（tau 2.59）
+	//   ⇒ **#1/#2 起步位置 0.095 遠高於下面的 0.05 門檻，代表那 2 秒等待逾時了**，
+	//     手臂還沒收回定位、甚至還在動，touch_wall 就開始下命令 → 18 Nm / 0.74 rad/s
+	//     的一踢再反彈。**這就是 per user 回報的「M1 啟動時頓一下」，2/3 機率發生。**
+	//   成因是 park_kp=5.0 推不動 M1（friction），收回根本完成不了。
+	//
+	// ❌ **據此改成 false 試過，反而更糟，已還原**（維持 07-27 per user 的 true）：
+	//       改前 起步 pos 0.095/0.096/0.045  第一tick tau 18.0/18.0/2.3  max|vel| 0.70  出現 2/3
+	//       改後 起步 pos 0.079/0.083/0.079  第一tick tau 16.2/16.5/16.3 max|vel| 1.09~1.12  出現 3/3
+	//   kp 5→90 讓手臂更硬地衝到 0，隨後被推開時反彈更大。
+	//
+	// 🔴 **原本的診斷只對了一半**：改後「收回逾時」記錄 **0 次**（pos<0.05 且 |vel|<0.05 都達成），
+	//   **但起步時 pos 已是 0.079** ⇒ **收回完成之後、touch_wall 開始之前，有東西把 M1
+	//   往外推了約 0.03 rad** —— 那段時間正是 **M2 在換 slot**。
+	//   ⇒ 真正待查的是「M2 旋轉工具頭時對 M1 的機械耦合」，不是收回的力矩權限。
+	//   ⚠️ 查清楚之前**不要再動這一行**（09-02 已翻面兩次、兩次都被量測推翻）。
 	go_home_slot(m1_, /*use_park_profile=*/true);
 	// Wait for physical convergence (now effective since hold bias is zeroed)
+	// 🔴 [2026-09-02] 逾時不再靜默：等不到就記錄實際位置/速度
+	//   （本專案「讓失敗看得見」原則；當日已修過 trigger_sync_move、LR_CALIBRATE 兩個同型缺陷）。
+	//   同時**位置與速度都要穩**才算收回完成——只看位置門檻會讓仍在移動的手臂通過。
+	bool retract_ok = false;
+	float retract_pos = 0.0f, retract_vel = 0.0f;
 	for (int i = 0; i < 40; ++i) {
 		float actual;
 		{
 			std::lock_guard<std::mutex> lk(motor_mutex_);
 			actual = m1_.motor->Get_Position();
 		}
-		if (actual < 0.05f) break;   // go_home_slot targets 0 rad, not VERTICAL_OFFSET_RAD
+		float vel_now;
+		{
+			std::lock_guard<std::mutex> lk(motor_mutex_);
+			vel_now = m1_.motor->Get_Velocity();
+		}
+		retract_pos = actual; retract_vel = vel_now;
+		// go_home_slot targets 0 rad, not VERTICAL_OFFSET_RAD
+		if (actual < 0.05f && std::abs(vel_now) < 0.05f) { retract_ok = true; break; }
 		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	}
+	if (!retract_ok) {
+		std::cerr << "[DEPLOY] ⚠ Step1 收回未完成即逾時（2s）：pos=" << retract_pos
+			<< " vel=" << retract_vel << "（要求 pos<0.05 且 |vel|<0.05）。"
+			" touch_wall 將從未定位的狀態起步——這正是 09-02 診斷到的"
+			" 18 Nm / 0.74 rad/s 起步踢擊來源。\n";
 	}
 
 	// Step 2: M2 move to target slot
@@ -2642,6 +2758,50 @@ std::string DamiaoAPI::cmd_deploy_sequence(const std::string& params)
 		return "ERR DEPLOY: M2 slot move did not converge";
 	if (!wait_for_move(m2_))
 		return "ERR DEPLOY: M2 slot timeout";
+
+	// 🔴 [2026-09-02 per user，50Hz DIAG 診斷確認] 等 M1 靜下來再進 touch_wall。
+	//
+	// 量到的事實（fix1.csv，取樣 22ms）：
+	//     t=1.69  pos=0.0048  vel=-0.0061   ← 已穩穩停在 0.0048 超過 1.2 秒
+	//     t=1.71  pos=0.0486  vel=+2.8632   ← **一個取樣間隔內跳 +0.044 rad**
+	//     t=1.73  pos=0.0776  vel=+0.7753
+	//     t=1.75  進入 MOVE，第一個 tick tau=+16.166（手臂仍以 0.48 rad/s 甩動）
+	//   全程 hold_en=1、cmd=0.0000 ⇒ **M1 一直被保持在 0，是被外力踢的**；
+	//   該時刻唯一在動的是**剛到位的 M2**。
+	//   ⇒ **M2 到達 slot 時透過機構把衝擊傳給 M1**，而 touch_wall 只隔 40ms 就起步，
+	//     於是從一個「正在以 0.48 rad/s 移動」的狀態開始下位置命令 → 16~18 Nm 的踢擊。
+	//     **這就是 per user 回報的「M1 起步頓一下」，實測 2/3~3/3 會發生。**
+	//
+	// 📌 當日先後試過三個修法（斜坡快轉、放寬速度安全閥、收回改 fast profile），
+	//   **全部被量測推翻**——因為它們針對的都不是這個成因。
+	// 🔴 **M1 與 M2 都要靜止**（第一版只等 M1，只擋住 2/3）。
+	//   `wait_for_move(m2_)` 只確認 M2 的**軟體斜坡**跑完，**不代表 M2 實體停了**——
+	//   M2 有摩擦飽和（保持力上限 ~2 Nm < 實測摩擦 ~2 Nm），會持續爬行數秒，
+	//   它到位/卡住的那一下正是打到 M1 的衝擊來源。
+	// ⚠️ 只等速度、不等位置：M1 本來就該停在 go_home 的落點，位置門檻已在上一段檢查過。
+	{
+		const int   SETTLE_MAX_LOOPS = 60;    // 60 x 25ms = 1.5s
+		const float SETTLE_VEL       = 0.05f; // rad/s
+		const int   SETTLE_CONSEC    = 4;     // 連續 4 次才算穩（單次讀值有雜訊）
+		int consec = 0; bool settled = false; float v1 = 0.0f, v2 = 0.0f;
+		for (int i = 0; i < SETTLE_MAX_LOOPS; ++i) {
+			{
+				std::lock_guard<std::mutex> lk(motor_mutex_);
+				v1 = m1_.motor->Get_Velocity();
+				v2 = m2_.motor->Get_Velocity();
+			}
+			if (std::abs(v1) < SETTLE_VEL && std::abs(v2) < SETTLE_VEL) {
+				if (++consec >= SETTLE_CONSEC) { settled = true; break; }
+			} else {
+				consec = 0;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(25));
+		}
+		if (!settled)
+			std::cerr << "[DEPLOY] ⚠ 換 slot 後 1.5s 內未同時靜止：|M1 vel|="
+				<< std::abs(v1) << " |M2 vel|=" << std::abs(v2)
+				<< "（門檻 " << SETTLE_VEL << "）。touch_wall 仍會起步，起步踢擊可能重現。\n";
+	}
 
 	// Step 3: M1 touch wall
 	if (!touch_wall_slot(m1_, wall_mm, m2_slot_idx, clearance, spd))
@@ -2884,6 +3044,44 @@ std::string DamiaoAPI::dispatch_motor(MotorSlot& s, const std::string& line)
 	if (kw == "ENABLE") { enable_slot(s);  return "OK"; }
 	if (kw == "DISABLE") { disable_slot(s); return "OK"; }
 	if (kw == "ZERO") { set_zero_slot(s); return "OK"; }
+
+	// 🔴 [2026-09-02] DIAG ON / DIAG OFF —— 以控制迴圈速率記錄 M1，查黏滑成因。
+	if (kw == "DIAG") {
+		std::string arg;
+		{ std::istringstream ps(params); ps >> arg; }
+		for (auto& ch : arg) ch = (char)::toupper(ch);
+		if (arg == "ON") {
+			{
+				std::lock_guard<std::mutex> dk(diag_mtx_);
+				diag_rows_.clear();
+				diag_rows_.reserve(60000);
+				diag_t0_ = std::chrono::steady_clock::now();
+			}
+			diag_on_ = true;
+			return "OK DIAG ON";
+		}
+		if (arg == "OFF") {
+			diag_on_ = false;
+			std::vector<DiagRow> rows;
+			{
+				// 換出緩衝再寫檔——不要握著鎖做檔案 I/O，那會卡住控制迴圈。
+				std::lock_guard<std::mutex> dk(diag_mtx_);
+				rows.swap(diag_rows_);
+			}
+			const char* path = "/home/nexuni/bringup/m1_diag.csv";
+			std::ofstream f(path);
+			if (!f) return "ERR DIAG: cannot open output file";
+			f << "motor,t,pos,vel,tau,cmd,move_act,hold_en\n";
+			f << std::fixed << std::setprecision(5);
+			for (const auto& r : rows)
+				f << (r.motor == 1 ? "M1" : "M2") << ',' << r.t << ',' << r.pos << ','
+				  << r.vel << ',' << r.tau << ',' << r.cmd << ','
+				  << ((r.flags & 1) ? 1 : 0) << ',' << ((r.flags & 2) ? 1 : 0) << '\n';
+			std::ostringstream o; o << "OK DIAG OFF rows=" << rows.size() << " -> " << path;
+			return o.str();
+		}
+		return "ERR usage: DIAG <ON|OFF>";
+	}
 
 	if (kw == "HOME") {
 		if (!s.enabled) return "ERR motor not enabled; send ENABLE first";
@@ -3206,6 +3404,25 @@ std::string DamiaoAPI::dispatch_motor(MotorSlot& s, const std::string& line)
 	}
 
 	if (kw == "LR_SLOT") {
+		// 🔴 [2026-09-02 per user] **要先離開玻璃，再切換工具。**
+		//   工具頭貼著玻璃橫轉會刮傷玻璃與工具。`cmd_deploy_sequence` 的 Step 1
+		//   本來就會先把 M1 收回，但**裸的 LR_SLOT 指令沒有任何保護** ——
+		//   09-02 我自己錄波形時就在 M1=0.5713（伸出貼牆）的狀態下轉了 M2。
+		//   ⚠️ 這個守衛只擋外部指令；DEPLOY 走的是 lr_move_to_slot_impl，不受影響。
+		{
+			float m1_pos;
+			{
+				std::lock_guard<std::mutex> lk(motor_mutex_);
+				m1_pos = m1_.motor->Get_Position();
+			}
+			const float M1_CLEAR_RAD = 0.20f;   // 保守值：PARK 約 0.05，貼牆約 0.65
+			if (m1_pos > M1_CLEAR_RAD) {
+				std::ostringstream o;
+				o << "ERR LR_SLOT refused: M1 未離開玻璃 (pos=" << m1_pos
+				  << " > " << M1_CLEAR_RAD << ")。請先 PARK 或 M1 MOVETO 0.05，再切換工具。";
+				return o.str();
+			}
+		}
 		if (s.id != MotorSlot::SlotId::M2) return "ERR LR_SLOT is M2-only";
 		if (!s.enabled) return "ERR motor not enabled; send ENABLE first";
 		std::string slot_str;
