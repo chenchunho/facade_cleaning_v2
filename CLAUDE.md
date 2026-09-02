@@ -34,7 +34,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 #### `.claude/` 完整索引 —— 🔴 **新增檔案必須在這裡加一列**
 
-📌 **2026-08-28 建立。動機**：`summaries/`（8 份手冊摘要、1,228 行）在此之前**沒有出現在任何索引裡**，
+📌 **2026-08-28 建立。動機**：`summaries/`（**9 份**手冊摘要，2026-09-02 增 QX-DO24）在此之前**沒有出現在任何索引裡**，
 接手的人只能靠 driver 現有程式碼反推協定——**那正是 DM2J 那次踩雷的方式**。
 一份沒被指到的文件等於不存在。
 
@@ -75,7 +75,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 #### `.claude/summaries/` — 寫 driver 之前先來這裡
 
 📌 **原始 PDF 手冊不在 repo 裡**（放在 Windows 端 `D:\洗窗戶機器人\電控設備資料\`），
-所以這 8 份摘要對只有 repo 的人來說**就是手冊本身**。動任何 `user_lib/` 的 driver 之前先查這裡，
+所以這 9 份摘要對只有 repo 的人來說**就是手冊本身**。
+⚠️ **原始 PDF 請放 `doc/`，不要放 `tmp/`** —— 兩者都不進版控，但 `tmp/` **不在雲端鏡像範圍內**
+（2026-08-31 的 SD76-C 與 2026-09-02 的 QX-DO24 都是從 `tmp/` 搬到 `doc/` 的）。動任何 `user_lib/` 的 driver 之前先查這裡，
 不要憑 driver 現有的程式碼反推協定 —— 那正是 DM2J 那次踩雷的方式。
 
 | 檔案 | 裝置 | 特別值得看的 |
@@ -88,6 +90,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `JC_100_MODBUS_SUMMARY.md` | JC-100 真空壓力表 | 量程與單位（0.1 kPa int16 signed） |
 | `PQW_IO_MODBUS_SUMMARY.md` | PQW 繼電器模組 | 線圈位址、暫存器圖、輸出模式 |
 | `ZS_DIO_MODBUS_SUMMARY.md` | ZS-DIO 繼電器（已被 SE3 取代） | 保留作歷史對照 |
+| 🆕 `QX_DO24_MODBUS_SUMMARY.md` | QX-DO24 四路 PWM（`.22` slave 9，風扇） | **頻率 ≤65535 可用 FC `0x06` 單寫 `0x05`（8 bytes），不必用 FC `0x10`（13 bytes）** —— 驅動只實作了後者；`0x00~0x0F` 無限次改寫、其餘暫存器**實時寫 flash 且壽命僅 1~2 千次**；`VCC/GND` 緊鄰 `A/B`，保修條款明列「電源錯接到 485 導致 485 段燒毀」；`0xFF00`=`0xFFFF` 是恢復出廠（會打回 9600/addr 1） |
 
 🔴 **一個具體例子**：既有待辦「VFD 故障碼顯示是壞的（`vfd_fault` 一邊報假警一邊讀不到）」，
 它要的 SE3 錯誤碼對照表**就在 `SE3_INVERTER_MODBUS_SUMMARY.md` 的
@@ -354,7 +357,7 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 | 本地埠 | `4001` | TCP server 模式（`cmode=0`） |
 | 最大連線數 | `4` (`_cnum`) | ⚠️ 多個 client 同時發指令會讓回覆錯位；實查當下**只有本體 `.1.100` 一條連線** |
 | **Modbus 閘道模式** | **關閉**（`mdm=0` / `mde=0`） | 純透明傳輸 → **封包邊界完全由字元間隔決定** |
-| **串口打包時間** | **`_pt = 0`（自動）** | 🔴 115200 下字元間隔僅約 0.3ms → **這是 2026-08-28b 那個「回覆被切成兩個 TCP 段」的結構性根源**。設成 5ms 可從根本解決，代價是每筆交易多 ≤5ms（`status` 讀 4 顆 → +20ms）。**尚未改**——目前量到的失敗是 `no reply` 不是 `too short`，在沒有證據指向分片前不動共用設定 |
+| **串口打包時間** | **`_pt = 0`（自動）— 兩台皆是** | 115200 下字元間隔僅約 0.3ms → 「回覆被切成兩個 TCP 段」的結構性根源。🧪 **2026-09-02 在 `.22` 上實測過 5ms，量不到效果，已改回 0。** 當時的故障是 `QX:9` 寫入全滅（`_pt` 0 與 5 各測 5 次，**都是 0/5**），而該故障後來查明與分片無關（見下方風扇干擾）；同一批量測裡 JC100 在改之前就已經乾淨，所以**「5ms 有沒有用」這件事等於沒被真正測到** —— 要測它必須挑一個**確實由分片造成**的故障（症狀是 `SHORT_FRAME`，見 `JC_100_METER.cpp` 2026-09-02 的結構檢查）。🔴 **結構性暴露仍在**：`.20`/`.22` 皆 115200，而**七支驅動裡只有 `QX_DO24` 用會累積分片的 `sendAndReceiveQuiet`**，其餘六支（ZDT/PQW/DM2J/JC100/XKC/DY500）全無防護。📌 **改法**（下次要動時不必再摸索）：`system.cgi?dname=..&wport=..&uname=..&upwd=..&pt=N&plen=..&ndrset=..` **七個欄位要全帶**，存完必須 `manage.cgi?reset=1&rup=0&rfp=0` 重開機才生效 —— `system.shtml` 顯示的是**執行中**的值，存完直接回讀會以為沒寫進去。⚠️ `manage.cgi` 的另兩個參數是 `rup=1`（恢復使用者預設）與 `rfp=1`（**恢復出廠**，會清掉 IP 與波特率），**絕不可誤送**。實測 `pt` 會寫進 flash（撐過整台斷電） |
 | 串口打包長度 | `_plen = 400` | |
 | 韌體 | `V1.1.03` | |
 | 後台 | `http://<ip>/`，`admin` / `admin` | per user：不是重要裝置，可記錄。頁面：`port.shtml`（序列埠）／`system.shtml`（打包參數）／`modbus.shtml`／`status.shtml`（連線與流量） |
@@ -401,8 +404,14 @@ Raspberry Pi 5（本體主控）
 📌 **2026-08-28 兩處異動（來自 main 的 bench 修正，合併進來）**：
 - **DM2J 上滑台 `.22` → `.20`**：實體接線一直在 `.20`，程式卻對 `.22` 發指令 →
   每次掃動 `writeMulti no response` ×3，而流程照印「rail sweep done」。
-  ⚠️ 現在滑台與 ZDT 推桿共用 `.20`，靠 `TCP_client::socket_mtx` 序列化（幀不交錯）；
-  但 `pusher_two_stage_retract_` 持有的是 `zdt_bus_mtx_`，**DM2J 不拿那把鎖**——安全但不互斥。
+  ⚠️ 現在滑台與 ZDT 推桿共用 `.20`；`pusher_two_stage_retract_` 持有的是 `zdt_bus_mtx_`，
+  **DM2J 不拿那把鎖**——沒有交易級互斥。
+  🔴 **2026-09-01 更正**：這裡原本寫「靠 `TCP_client::socket_mtx` 序列化（幀不交錯）」，
+  **那句話只有 per-call 成立**。`socket_mtx` 是「每次呼叫」原子、不是「每筆交易」原子，
+  所以走 `sendData()` + 自己接收的裸對驅動，send 與 recv 之間鎖是放開的 → 交易會交錯、
+  幀當然也會。✅ **`.20` 與 `.22` 上的驅動已全部改用原子交易**
+  （ZDT `txn()` 09-01 上機驗證，DM2J／PQW／XKC／DY-500 同日跟進）→ **現在這句話成立了**，
+  但它成立的原因是 `sendAndReceive()`，不是 `socket_mtx` 本身。
 - **QX-DO24 PWM `slave 6` → `9` 並解除停用**：6 撞上改號後的 JC100 右腳下吸盤真空表。
   ⚠️ `app/WASH_ROBOT.h:1082` 的成員註解仍寫「`.22 = ... arm-rail ...`」，**已過期**。
 
@@ -414,12 +423,22 @@ Raspberry Pi（吊機主控）
   ├─ USR_B  192.168.1.31 ── SE3 變頻器（右鋼索）        ← 控制 bus
   ├─ USR_M  192.168.1.34 ── SD76 計米 ×2 + PQW slave 12  ← 感測 bus
   │                          PQW CH4 = 水箱進水球閥
-  ├─ X518   192.168.1.32:502 ── DSZL-107 左張力（原生 Modbus TCP，非 :4001）
-  └─ X518   192.168.1.33:502 ── DSZL-107 右張力
+  └─ X518   192.168.1.33:502 ── DSZL-107 張力 **一台雙通道**（原生 Modbus TCP，非 :4001）
+                                 CH1 (0x0A00) = 右 ／ CH2 (0x0A02) = 左
 ```
 
+🔴 **2026-09-01 per user：X518 由兩台改一台。** 原本左 `.32` / 右 `.33` 各一台、各只用 CH1；
+現在移除一台，剩 `.33` 一台接兩個通道。程式仍保留**兩個 `DSZL_107` 物件**共用 `cli_C`
+（各自要有獨立的 scale、錯誤計數、last-valid 快取與 `@L`/`@R` 標記，而上層 `read_tensions()`／
+`cmd_tension`／歸零／安全檢查全建立在左右對稱結構上）。`cli_D` 刻意保留不刪——沒有
+`connectToServer` 就不連線、成本為零，刪掉會連帶動到 `g_gw_d_ok` 與 GUI 正在解析的 status 欄位。
+⚠️ **X518 只允許一條 TCP 連線**：外部探測工具（`Linux_test/x518_*.py`）**必須先停吊機程式**，
+否則一律被拒。踩過：`ping` 通但 `502` 拒連，差點誤判成裝置沒起來。
+🔴 **`do_zero_ch1()` 是個坑**：共用一台之後，直接呼叫它會讓左側物件去歸零右側的通道，
+**而且完全不會報錯**（Modbus 寫入本身成功）。一律用通道感知的 `do_zero()`。
+
 📌 **左右 SE3 各佔一條 bus**（不是共線）：半雙工 RTU 下兩台共線會序列化，2026-05-15 量到
-200-300ms drift，拆開後降到 ~30-50ms。張力計各自獨佔一條，避免 X518 高採樣率被別的輪詢拖慢。
+200-300ms drift，拆開後降到 ~30-50ms。
 
 ⚠️ **`CRANE_VFD_IS_SE3`（`main.cpp:116`）目前是 `1`——bench 實際仍在跑 SE3，不是 MH300。**
 MH300 driver 已存在但遷移未完成（故障碼那段仍讀 SE3 的 H1007/H1008）。
@@ -525,7 +544,7 @@ Socket timeouts: 100-500ms per device. TCP monitor thread: 500ms reconnect polli
 | `TCP_client` | TCP socket abstraction | WinSock2/BSD | Cross-platform TCP with auto-reconnect & monitor thread |
 | `TCP_server` | TCP listener | WinSock2/BSD | washrobot :5001 / crane :5002，多 client、line-buffered |
 | `Serial_port` | Serial port (Windows/Linux) | Native | TTL serial communication (8N1, multiple baud rates) |
-| `DM2J_RS570` | 步進馬達驅動器 × 1（v2 只剩上滑台） | Modbus-TCP (RS485_1 .20 slave 14) | **上滑台（乘載機械手臂）@ 192.168.1.20 slave 14**（2026-08-28 per user 確認實體接在 .20）。cm 精度，PR/JOG/Home 模式，PPR=10000（1cm=10000 pulses，與 ZDT 的 3000/cm 不同）。<br>bus 沿革：.20 slave 5 → 2026-05-26 搬到 .22 slave 14（v1 時代為了讓 arm sweep 跟 feet rail 並行不撞 bus）→ **2026-08-28 搬回 .20 slave 14**。在搬回之前程式對 .22 發指令而實體在 .20，每次掃動都是 `writeMulti no response` × 3，且流程仍照印「rail sweep done」（fire-and-forget 不看回傳值，已一併修正）。<br>⚠ 現在與 ZDT 推桿 5~8 / PQW 12 共用 .20：rail sweep 是背景執行緒、與主執行緒伸腳並行，靠 `TCP_client::socket_mtx` 序列化（幀不會交錯），但注意 `pusher_two_stage_retract_` 持有的是 `zdt_bus_mtx_`，DM2J 不拿那把鎖。<br>v1 的左腳/左輪/右腳/右輪 @ RS485_1 slave 1~4 在 v2 已移除 |
+| `DM2J_RS570` | 步進馬達驅動器 × 1（v2 只剩上滑台） | Modbus-TCP (RS485_1 .20 slave 14) | **上滑台（乘載機械手臂）@ 192.168.1.20 slave 14**（2026-08-28 per user 確認實體接在 .20）。cm 精度，PR/JOG/Home 模式，PPR=10000（1cm=10000 pulses，與 ZDT 的 3000/cm 不同）。<br>bus 沿革：.20 slave 5 → 2026-05-26 搬到 .22 slave 14（v1 時代為了讓 arm sweep 跟 feet rail 並行不撞 bus）→ **2026-08-28 搬回 .20 slave 14**。在搬回之前程式對 .22 發指令而實體在 .20，每次掃動都是 `writeMulti no response` × 3，且流程仍照印「rail sweep done」（fire-and-forget 不看回傳值，已一併修正）。<br>⚠ 現在與 ZDT 推桿 5~8 / PQW 12 共用 .20：rail sweep 是背景執行緒、與主執行緒伸腳並行，而 `pusher_two_stage_retract_` 持有的是 `zdt_bus_mtx_`，DM2J 不拿那把鎖。**2026-09-01 起本驅動全面改用 `TCP_client::sendAndReceive()` 原子交易**（私有 `txn_frame_()`），交易層不再交錯；先前寫的「靠 socket_mtx 序列化」只有 per-call 成立（見架構章的更正）。<br>v1 的左腳/左輪/右腳/右輪 @ RS485_1 slave 1~4 在 v2 已移除 |
 | `ZDT_motor_control` | 閉環步進驅動卡 × 9 | Modbus-TCP (RS485_2) | 驅動 SMC LEYG25 推桿，encoder 回饋，堵轉保護 |
 | `JC_100_METER` | 真空氣壓感測器 × 9 | Modbus-TCP (RS485_3) | 讀取壓力 (0.1 kPa)，裝於各推桿末端吸盤 |
 | `DY_500_weight_sensor` | 鋼索重量感測器 × 2 | Modbus-TCP (RS485_3) | 讀取重量 (int32/float)，裝於機體與鋼索連接處 |
@@ -533,7 +552,7 @@ Socket timeouts: 100-500ms per device. TCP monitor thread: 500ms reconnect polli
 | `WT901BC_TTL` | 九軸姿態儀 | USB→TTL Serial 115200 | 背景執行緒連續讀取，checksum 驗證；Roll+Pitch 平衡監控 |
 | `damiao` (header-only) + `SerialPort` | damiao 清潔手臂馬達 × 2 (M1+M2) | USB-CAN (/dev/ttyACM0 @ 921600) | M1 大臂 DM10010L (slave 0x01) + M2 工具頭 DM4340_48V (slave 0x02)；廠商驅動 header-only，由獨立服務 `cleaning_arm/motor_api` 使用，TCP :9527 對外。washrobot 透過 `arm_cmd_` 跨 process 下指令 (127.0.0.1:9527)。整個專案唯一走 CAN 的裝置 |
 | `SD76_length_meters` | 計米器 × 3 | Modbus-TCP (USR_M 感測 bus, .34) | 左 (USR_M.34 slave 1) / 右 (USR_M.34 slave 2) / 中間 (USR_M.34 slave 4, 未安裝)；2026-05-15 re-layout 全部 SD76 移到此 bus，int32 讀取，支援 pause/resume/zero。2026-06-05 起此 bus 多了 PQW slave 12（進水球閥）共用 |
-| `DSZL_107` | 張力感測器 × 2（X518 採集板） | Modbus-TCP (獨佔 gateway) | 左 (USR_C.32 slave 1) / 右 (USR_D.33 slave 1)，各獨佔一條 RS485 bus；scale factor 預設 0.01（待實機校正）。Washrobot 透過 `crane_cmd_("tension")` 跨 PI 拿 kg。 |
+| `DSZL_107` | 張力感測器 × 2 通道（X518 採集板 **一台**） | Modbus-TCP (獨佔 gateway) | **2026-09-01 per user 由兩台改一台雙通道**：`192.168.1.33:502`，CH1 = 右 / CH2 = 左（`set_channel()`，讀值暫存器 `0x0A00` / `0x0A02`）。<br>🎯 **刻度已於 2026-09-01 用 4.16 kg 已知重量校正**（先前兩側共用的 `-0.01` 是 placeholder 且是錯的）：右 `-0.0236364`、左 `-0.0205816`，寫在 `Crane_control_PI/main.cpp` 的 `DSZL_SCALE_RIGHT` / `DSZL_SCALE_LEFT`。**kg 讀值自此有絕對意義**，整機總重實測約 94 kg。<br>⚠️ 左側雜訊是右側的 3 倍（±3.5 vs ±1 count）；單點校正（過原點），4.16kg 外推到工作範圍 30~60kg 的線性度未驗。<br>Washrobot 透過 `crane_cmd_("tension")` 跨 PI 拿 kg。 |
 | `CLV900_inverter` | 變頻器 × 1 | Modbus-TCP (USR_A.30 slave 3) | 中間絞盤變頻器，控制 bus 上（未安裝） |
 | `SE3_inverter` | 士林變頻器 × 2 | Modbus-TCP (USR_A 控制 bus) | 左 (USR_A.30 slave 1) / 右 (USR_A.30 slave 2)；2026-05-07 取代原 ZS_DIO_R_RLY 繼電器；2026-05-15 re-layout 右 SE3 從 USR_B 移到 USR_A、slave 1→2；hold 預設 20Hz / 自動運動 30Hz；reg 0x1101 控制位元、0x1002 頻率（RAM）、0x100A 輸出頻率 |
 | `QX_DO24` | 4 路 PWM 輸出模組 × 1（新硬體，2026-08） | Modbus-TCP (RS485_3 .22 **slave 9**) | 四川旗芯 QX-DO24，4 通道獨立占空比/頻率/控制（0=關/65535=持續輸出/1~65534=脈衝數）。**安全限制（driver 強制）**：占空比鎖 5~10%（5%=停止/10%=全速）、頻率鎖 50Hz——兩者連動，只鎖一個等於沒鎖。`Linux_test` menu 34 + Web GUI「PWM 控制」panel 已接（`pwm set/save/status`）。**bench 用廠商工具 USB-485 直連驗證過**：通道1 @ 50Hz / 占空比 5~10% 驅動馬達成功。<br>**slave 沿革（2026-08-28 per user 已改為 9）**：原本選 6 的前提是「v2 的 JC100 只用 1~4」，但 2026-08-27 把吸盤編號改成 5-8 之後 **slave 6 就撞上右腳下吸盤的真空表**，bench 出現 `[ERR] [QX:6] device rejected FC 0x10: err 0x7C`（0x7C 不是合法 Modbus exception code，那是 JC100 的回覆被 PWM driver 撿走）。撞號不只是雜訊：FC 0x10 會把 write-multiple 打進 JC100 的組態暫存器，而 JC100 壓力值是步伐的放腳判準 → 掉落風險。user 已用 USB-485 直連把模組改成 **slave 9**（cli_22_ 上 5-8 JC100／10,11 DY500／13 XKC／14 DM2J，9 是空的）。<br>**波特率（2026-08-28 per user 更正）**：模組 115200，且 **.22 這條 bus 上所有裝置都是 115200** —— 先前記載的「其他裝置 9600、必須把模組改回 9600」**不正確**，已作廢。<br>✅ **2026-08-28 已證實接在 gateway 上**：`pwm status` 有回應（`ch1=5,50,65535,1 ch2=... ch3=ERR ch4=50,1000,0,0 duty_min=5 duty_max=10 freq_lock=50`）。⚠️ 兩件待追：`ch3=ERR`（其餘三通道正常）；`ch4` 存著 `duty=50/freq=1000`，**在 driver 安全鎖（5~10% / 50Hz）之外**，那是模組殘留的廠商測試組態，啟用 ch4 前要先覆蓋。📌 `init()` 的 `presence not probed` 永遠證明不了這件事 —— 它不發包 |

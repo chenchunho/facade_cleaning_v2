@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <thread>
 #include <chrono>
+#include <iostream>   // [2026-09-02] 0xEE 通訊錯誤的診斷輸出需要 std::cerr
 
 // Windows 沒有 usleep；統一用 std::this_thread::sleep_for
 #ifndef usleep
@@ -201,6 +202,13 @@ namespace damiao
         float state_q = 0;
         float state_dq = 0;
         float state_tau = 0;
+        // 🔴 [2026-09-02] 馬達自報的錯誤狀態。MIT 回授幀的 data[0] 是 (ERR<<4)|ID，
+        // 而 ERR 那半在此之前**從未被讀取過**（解析只取 q/dq/tau，data[0] 只在
+        // canId==0x00 的分支用 &0x0f 取 ID）。錯誤碼定義見本檔 CAN_Receive_Frame
+        // 的註解：8 超壓 / 9 欠壓 / A 過流 / B MOS過溫 / C 線圈過溫 / D 通訊丟失 / E 過載。
+        // 動機：cleaning_arm 的「M1 突然 passive」自 2026-08-17 起原因未明，只能靠
+        // 「tau < 0.3 Nm」間接猜 —— 而馬達其實每一幀都在報，只是沒有人接。
+        uint8_t state_err = 0;
         Limit_param limit_param{};
         DM_Motor_Type Motor_Type;
 
@@ -233,11 +241,13 @@ namespace damiao
             this->limit_param = damiao::limit_param[DM4310];
         }
 
-        void receive_data(float q, float dq, float tau)
+        // err 給預設值，既有呼叫點不受影響（accumulative change，見 CLAUDE.md 介面契約）
+        void receive_data(float q, float dq, float tau, uint8_t err = 0)
         {
             this->state_q = q;
             this->state_dq = dq;
             this->state_tau = tau;
+            this->state_err = err;
         }
 
         DM_Motor_Type GetMotorType() const { return this->Motor_Type; }
@@ -271,6 +281,14 @@ namespace damiao
          * @return motor torque 电机实际输出扭矩
          */
         float Get_tau() const { return this->state_tau; }
+
+        /*
+         * @brief 🔴 [2026-09-02] get motor error nibble 取得馬達自報的錯誤碼
+         * @return 0 = 正常；8 超壓 / 9 欠壓 / A 過流 / B MOS過溫 / C 線圈過溫 / D 通訊丟失 / E 過載
+         * ⚠️ 0 只代表「這一幀沒報錯」，不保證馬達健康 —— 若 passive 的成因不是
+         *    馬達自報的保護動作（例如 CAN 幀遺失），這裡會一直是 0。
+         */
+        uint8_t Get_err() const { return this->state_err; }
 
         /*
          * @brief get limit param 获取电机限制参数
@@ -634,6 +652,9 @@ namespace damiao
                 uint16_t q_uint = (uint16_t(data[1]) << 8) | data[2];
                 uint16_t dq_uint = (uint16_t(data[3]) << 4) | (data[4] >> 4);
                 uint16_t tau_uint = (uint16_t(data[4] & 0xf) << 8) | data[5];
+                // 🔴 [2026-09-02] data[0] = (ERR<<4)|ID。低半是 ID（下方 canId==0x00
+                // 的分支本來就在用），**高半是錯誤碼，在此之前整個專案都沒有讀過**。
+                const uint8_t recv_err = uint8_t(data[0] >> 4);
                 if (receive_data.canId != 0x00)   //make sure the motor id is not 0x00
                 {
                     if (motors.find(receive_data.canId) == motors.end())
@@ -646,7 +667,7 @@ namespace damiao
                     float receive_q = uint_to_float(q_uint, -limit_param_receive.Q_MAX, limit_param_receive.Q_MAX, 16);
                     float receive_dq = uint_to_float(dq_uint, -limit_param_receive.DQ_MAX, limit_param_receive.DQ_MAX, 12);
                     float receive_tau = uint_to_float(tau_uint, -limit_param_receive.TAU_MAX, limit_param_receive.TAU_MAX, 12);
-                    m->receive_data(receive_q, receive_dq, receive_tau);
+                    m->receive_data(receive_q, receive_dq, receive_tau, recv_err);
                 }
                 else //why the user set the masterid as 0x00 ???
                 {
@@ -660,7 +681,7 @@ namespace damiao
                     float receive_q = uint_to_float(q_uint, -limit_param_receive.Q_MAX, limit_param_receive.Q_MAX, 16);
                     float receive_dq = uint_to_float(dq_uint, -limit_param_receive.DQ_MAX, limit_param_receive.DQ_MAX, 12);
                     float receive_tau = uint_to_float(tau_uint, -limit_param_receive.TAU_MAX, limit_param_receive.TAU_MAX, 12);
-                    m->receive_data(receive_q, receive_dq, receive_tau);
+                    m->receive_data(receive_q, receive_dq, receive_tau, recv_err);
                 }
                 return;
             }
@@ -678,7 +699,14 @@ namespace damiao
             }
             else if (receive_data.CMD == 0xEE) // communication error
             {
-                /* code */
+                // 🔴 [2026-09-02] 原本是空殼 —— 通訊錯誤整條被靜默吞掉。
+                // 依本檔 CAN_Receive_Frame 的註解，此時「格式段」帶錯誤碼。
+                // 這裡只印出來，不改變任何控制行為（純觀測）。
+                std::cerr << "[damiao] CMD=0xEE communication error"
+                          << "  canId=0x" << std::hex << receive_data.canId
+                          << "  fmt=0x" << unsigned(receive_data.canDataLen)
+                          << std::dec << "  (8 超壓/9 欠壓/A 過流/B MOS過溫/"
+                             "C 線圈過溫/D 通訊丟失/E 過載)\n";
             }
         }
 

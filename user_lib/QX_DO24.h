@@ -94,6 +94,13 @@ public:
 	// 只有這個函式會動到 flash。
 	bool saveOutputAsDefault();
 
+	// 🔴 [2026-09-02] 送出模組重啟命令（reg 0xFF00 = 0x0001，FC 0x06 的 8-byte 短幀）。
+	// 不接受參數：同一個暫存器寫 0xFFFF 是**恢復出廠設置**（地址→1、波特率→9600，
+	// 模組會直接從匯流排上消失），值寫死才不可能誤送。
+	// ⚠️ 模組收到後立刻重啟、很可能來不及回應 ⇒ 回 false 只代表「無法確認」，不代表失敗。
+	//    確認方式是等幾秒後重讀 getVersion()。
+	bool restartModule();
+
 	// 讀回 (FC 0x03)
 	bool getPWM_Duty(int channel, double& duty_percent);
 	bool getPWM_Freq(int channel, uint32_t& freq);
@@ -127,6 +134,9 @@ private:
 	//   `device rejected` 是模組明確拒絕，重試沒有意義，也可能是真的參數不對。
 	bool sendAndReceive(const std::vector<uint8_t>& request, std::vector<uint8_t>& response);
 	bool sendAndReceiveOnce_(const std::vector<uint8_t>& request, std::vector<uint8_t>& response);
+
+	// FC 0x06 單一保持暫存器寫入。供 setPWM_Freq 的 FC0x06 退路與 restartModule() 共用。
+	bool writeSingleReg_(uint16_t addr, uint16_t value);
 
 public:
 	// 最近一次失敗的原因。讓呼叫端能把「通訊失敗」和「參數超出安全範圍」分開講 ——

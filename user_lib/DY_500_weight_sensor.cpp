@@ -125,11 +125,24 @@ bool DY_500_weight_sensor::modbus_read(uint16_t addr, uint16_t quantity,
 
 	LOG_HEX(_log_tag, "TX read", req, 8);
 
-	if (!client->sendData((char*)req, 8, 100))
-		return true;
-
+	// 🔴 [2026-09-01] 原子交易，取代原本的 sendData + receiveData 裸對。
+	//
+	// 為什麼非改不可：本感測器（slave 10/11）與 JC-100 5~8、QX-DO24 9、XKC 13
+	// 共用 `.22` 這條匯流排。裸對之間 TCP_client 的 socket_mtx 是放開的 → 別條
+	// 執行緒的交易可以插進來造成回覆錯位；而一旦有一筆回覆遲到落在下一次的
+	// recv 窗口內，就會**永久落後一筆**，只有重連救得回來
+	//（2026-09-01 於 `.20` 實測過同一個機制，見 TCP_client::drainRx 的說明）。
+	//
+	// ⚠️ **本裝置未實體安裝、polling 關閉**（見 app/WASH_ROBOT.h 的匯流排表），
+	// 所以這裡跟 08-28 的回覆驗證一樣，是**把這一類問題關掉，不是修一個活的 bug**。
+	// 但也正因為它不存在，日後若有人打開 polling，每一筆都會逾時 —— 屆時
+	// TCP_client 的「連續 10 次接收逾時 → 主動斷線」守衛會開始看到它。
+	// 該守衛的計數每條連線共用但**成功一次就歸零**，所以只要同條 bus 上的
+	// JC-100／XKC 還在正常交易，缺件的 DY-500 不會把整條 bus 扯斷。
+	//
+	// 逾時沿用原值（send 100 / recv 400），不趁機改時序。
 	char buf[128];
-	int n = client->receiveData(buf, sizeof(buf), 400);
+	const int n = client->sendAndReceive((const char*)req, 8, buf, sizeof(buf), 100, 400);
 	if (n < 5) return true;          // slave + fc + bc + crc(2) is the shortest legal reply
 
 	LOG_HEX(_log_tag, "RX read", buf, n);
@@ -210,11 +223,10 @@ bool DY_500_weight_sensor::modbus_write_long(uint16_t addr, int32_t value)
 
 	LOG_HEX(_log_tag, "TX write_long", req, (int)sizeof(req));
 
-	if (!client->sendData((char*)req, sizeof(req), 100))
-		return true;
-
+	// [2026-09-01] 原子交易，理由同 read_reg_long()。逾時沿用原值（send 100 / recv 300）。
 	char buf[32];
-	int n = client->receiveData(buf, sizeof(buf), 300);
+	const int n = client->sendAndReceive((const char*)req, (int)sizeof(req),
+	                                     buf, sizeof(buf), 100, 300);
 	return n < 8;
 }
 
@@ -343,11 +355,10 @@ bool DY_500_weight_sensor::do_clear()
 	req[11] = crc & 0xFF;
 	req[12] = crc >> 8;
 
-	if (!client->sendData((char*)req, sizeof(req), 100))
-		return true;
-
+	// [2026-09-01] 原子交易，理由同 read_reg_long()。逾時沿用原值（send 100 / recv 200）。
 	char buf[32];
-	int n = client->receiveData(buf, sizeof(buf), 200);
+	const int n = client->sendAndReceive((const char*)req, (int)sizeof(req),
+	                                     buf, sizeof(buf), 100, 200);
 	return n < 8;
 }
 

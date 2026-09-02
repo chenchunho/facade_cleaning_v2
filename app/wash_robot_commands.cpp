@@ -3910,6 +3910,35 @@ std::string WashRobot::cmd_pwm_save() {
 // Reports all 4 channels for the panel. freq_ok=0 flags "frequency is not the
 // locked value", which invalidates the 5~10% duty mapping — the module reverts
 // to 1000Hz on every power cycle, so this is the normal state after a reboot.
+// 🔴 [2026-09-02] 送模組重啟命令。動機見 WASH_ROBOT.h 的宣告說明。
+//
+// 📌 回傳語意刻意分三種，不要壓成 OK/ERR 兩種：
+//    模組收到 0xFF00=0x0001 之後會立刻重啟，**很可能來不及回應那一幀** ——
+//    把「沒有回覆」判成失敗會誤導（它其實可能成功了）。所以送出之後一律等 2 秒
+//    再讀版本號，用「模組回不回得了話」來判定，而不是用那一幀的回覆。
+std::string WashRobot::cmd_pwm_restart() {
+    State cur = state_.load();
+    if (cur != State::Idle && cur != State::Ready) return state_violation_(cur);
+    if (!PWM_ENABLED) return "ERR pwm_disabled\n";
+
+    const bool acked = pwm_.restartModule();   // false ＝ 無法確認，不等於失敗
+    sleep_ms_(2000);                            // 模組重啟需要時間
+
+    uint16_t ver = 0;
+    const bool alive = pwm_.getVersion(ver);
+
+    std::ostringstream oss;
+    if (alive) {
+        oss << "OK pwm_restarted acked=" << (acked ? 1 : 0) << " version=" << ver << "\n";
+    } else {
+        // 重啟命令可能根本沒送進去，也可能送進去了但模組沒回來 —— 這兩者
+        // 從這裡分不出來，所以據實說「無回應」，不要猜。
+        oss << "ERR pwm_restart_unconfirmed acked=" << (acked ? 1 : 0)
+            << " (重啟後 2s 仍讀不到版本號 — 可能命令沒送進去，也可能模組沒起來)\n";
+    }
+    return oss.str();
+}
+
 std::string WashRobot::cmd_pwm_status() {
     // PWM 停用時在這裡也擋一道，不是只靠 init 不做 —— driver 的 client 指標
     // 若被別的路徑設起來，寫入就會落到那個 slave 號的裝置上（2026-08-27 撞號
@@ -4030,7 +4059,7 @@ std::string WashRobot::cmd_water_level() {
     return oss.str();
 }
 
-std::string WashRobot::cmd_pusher(const std::string& group, const std::string& pos) {
+std::string WashRobot::cmd_pusher(const std::string& group, const std::string& pos, double cm) {
     State cur = state_.load();
     if (cur == State::Error) return state_violation_(cur);
 
@@ -4098,8 +4127,27 @@ std::string WashRobot::cmd_pusher(const std::string& group, const std::string& p
         // 依預設脈衝分組。四顆同值時只有一組 → 一次 sync 觸發、四顆同時動。
         // 若日後常數分歧，退化成逐組依序移動**並印出提示**，而不是靜默地只採用
         // 其中一個值（那正是 CH_BRUSH 5/15 那類「送出成功但打錯地方」的形狀）。
+        // 🔴 [2026-09-02] cm > 0 ⇒ 四顆同用指定距離（校正用）；cm == 0 ⇒ 沿用各 slave
+        // 預設脈衝，與先前逐位元相同。上限 16cm 有實測依據（WASH_ROBOT.h:320）。
         std::map<int, std::vector<int>> by_pulse;
-        for (int s : slaves) by_pulse[preset_extend_pulse_for_slave_(s)].push_back(s);
+        if (cm > 0.0) {
+            // 上限 20.0 ＝ SMC LEYG25 的額定行程 200mm（WASH_ROBOT.h 標定段證據 5：
+            // 「3000 → 60000 脈衝 = 20cm ✅；2857 → 60000 = 21cm ❌ 超出實體行程」）。
+            // ⚠️ 先前寫 16.0 是誤把「某次 extend 尋封停在 47994 脈衝 = 16cm」當成極限，
+            //    那只是尋封的停止點，不是機構限制。
+            // ⚠️ ≥19.5cm 已接近機械底，高速撞底的風險見 PUSHER_RETRACT_PULSE 的註解。
+            if (cm < 0.5 || cm > 20.0) {
+                std::ostringstream e;
+                e << "ERR extend_raw_cm_out_of_range " << cm << " (allowed 0.5~20.0)\n";
+                return e.str();
+            }
+            const int pulse_cm = (int)std::lround(cm * CUP_PULSE_PER_CM);
+            std::cout << "[pusher extend_raw] ⚠ 指定距離 " << cm << "cm (" << pulse_cm
+                      << " pulse) —— 覆蓋各 slave 預設值\n";
+            for (int s : slaves) by_pulse[pulse_cm].push_back(s);
+        } else {
+            for (int s : slaves) by_pulse[preset_extend_pulse_for_slave_(s)].push_back(s);
+        }
         if (by_pulse.size() > 1)
             std::cout << "[pusher extend_raw] ⚠ 預設脈衝不一致，分 " << by_pulse.size()
                       << " 組依序移動（非同時）\n";

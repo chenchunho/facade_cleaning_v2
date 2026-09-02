@@ -169,9 +169,83 @@ bool QX_DO24::setPWM_Freq(int channel, int freq) {
 	req.push_back(crc & 0xFF); req.push_back(crc >> 8);
 
 	std::vector<uint8_t> res;
-	if (!sendAndReceive(req, res)) return false;
-	// FC 0x10 std reply is 8 bytes
-	return (res.size() >= 8 && res[1] == 0x10 && res[3] == (addr & 0xFF));
+	if (sendAndReceive(req, res)
+	    && res.size() >= 8 && res[1] == 0x10 && res[3] == (addr & 0xFF)) {
+		return true;   // FC 0x10 std reply is 8 bytes
+	}
+
+	// 🔴 [2026-09-02] FC 0x06 退路 —— 只有頻率這一支用 FC 0x10，而它是三個寫入裡
+	// **請求最長的那個**（13 bytes，另外兩支 setPWM_Duty / setPWM_Control 都是 8 bytes）。
+	//
+	// 手冊（`.claude/summaries/QX_DO24_MODBUS_SUMMARY.md`，P4 第 2 條）明寫：
+	//   「若頻率低於 65535，則保持 0x04 的值為 0，只改 0x05 的值即可」
+	// ⇒ freq ≤ 0xFFFF 時可以改用兩筆 FC 0x06 單寫（各 8 bytes）達成同一件事。
+	//
+	// 為什麼是退路而不是主路：FC 0x10 一筆交易就寫完兩個暫存器，是原子的；
+	// 拆成兩筆會有「高位已清零、低位還是舊值」的中間態。健康的匯流排上沒有理由放棄它。
+	//
+	// 🔴 **這條路被走到，本身就是一個症狀，不是一個功能** —— 2026-09-02 現場
+	// `pwm set` 全數失敗於 `pwm_freq_write_failed`，而三個寫入裡只有這支是長幀，
+	// 短幀的讀取卻偶爾成功 ⇒ 判斷是「長幀送不進模組」（模組接收端／A-B 線）。
+	// 所以走到這裡一律 LOG_WRN，不要讓它靜默地把硬體故障蓋掉。
+	if (freq > 0xFFFF) {
+		LOG_ERR(_log_tag, "setPWM_Freq FC0x10 failed and freq %d > 65535 — no single-write fallback",
+		        freq);
+		return false;
+	}
+	LOG_WRN(_log_tag, "setPWM_Freq FC0x10 failed — 改走 FC0x06 單寫退路（freq %d ≤ 65535）。"
+	                  "⚠ 這代表長幀送不進模組，請查 A/B 接線與模組接收端", freq);
+
+	// 順序：先把高位寫 0，再寫低位 —— 反過來的話中間態會是「新低位 + 舊高位」，
+	// 那是一個可能很大的錯誤頻率；這個順序的中間態只會是舊低位，有界。
+	if (!writeSingleReg_(addr, 0x0000)) {
+		LOG_ERR(_log_tag, "FC0x06 fallback: high word (reg 0x%04X) write failed", addr);
+		return false;
+	}
+	if (!writeSingleReg_((uint16_t)(addr + 1), (uint16_t)(freq & 0xFFFF))) {
+		LOG_ERR(_log_tag, "FC0x06 fallback: low word (reg 0x%04X) write failed", addr + 1);
+		return false;
+	}
+	LOG_INF(_log_tag, "setPWM_Freq %d Hz 由 FC0x06 退路寫入成功（ch%d）", freq, channel + 1);
+	return true;
+}
+
+//=========== utility: single holding-register write (FC 0x06) ===========
+
+// 供 setPWM_Freq 的退路與 restartModule() 共用。FC 0x06 的回覆是**原樣回應請求**，
+// 所以驗證方式就是逐位元組比對（與 setPWM_Duty / setPWM_Control 一致）。
+bool QX_DO24::writeSingleReg_(uint16_t addr, uint16_t value) {
+	if (!client) { last_fail_ = Fail::NotReady; return false; }
+
+	std::vector<uint8_t> req = {
+		(uint8_t)deviceID, 0x06,
+		(uint8_t)(addr >> 8), (uint8_t)(addr & 0xFF),
+		(uint8_t)(value >> 8), (uint8_t)(value & 0xFF)
+	};
+	uint16_t crc = modbusCRC(req.data(), (int)req.size());
+	req.push_back(crc & 0xFF); req.push_back(crc >> 8);
+
+	std::vector<uint8_t> res;
+	return (sendAndReceive(req, res) && res == req);
+}
+
+//=========== control: module restart (0xFF00 = 0x0001) ===========
+
+// 🔴 [2026-09-02] 手冊 P8：特殊命令暫存器 `0xFF00`
+//     寫 `0x0001` = 重啟設備
+//     寫 `0xFFFF` = **恢復出廠設置**（地址打回 1、波特率打回 9600）
+//
+// 🔴🔴 這兩個值差一個位元組、後果天差地遠。本函式**不接受參數**，值寫死 0x0001，
+//      讓「誤送 0xFFFF」在型別上就不可能發生。要恢復出廠請另外寫一支並且取個嚇人的名字。
+//
+// 📌 為什麼值得有這支：它是 FC 0x06 的 **8-byte 短幀**。在「長幀送不進去」的故障下
+//    （見 setPWM_Freq 的退路說明），它可能是唯一還遞得進模組的命令。
+//
+// ⚠️ 回傳值語意：模組收到後會立刻重啟，**很可能來不及回應**。因此「沒有回覆」
+//    不代表失敗，只代表**無法確認**。呼叫端該做的是等幾秒後重讀 getVersion()。
+bool QX_DO24::restartModule() {
+	LOG_INF(_log_tag, "送出重啟命令（reg 0xFF00 = 0x0001）— 模組可能來不及回應，需事後複查");
+	return writeSingleReg_(0xFF00, 0x0001);
 }
 
 //=========== control: PWM Control (0x06) ===========
@@ -319,8 +393,21 @@ bool QX_DO24::sendAndReceiveOnce_(const std::vector<uint8_t>& request, std::vect
 	// sendAndReceive(). 05a3c7e moved this call to the atomic API and, in doing
 	// so, silently dropped the accumulate-fragments loop that used to live right
 	// here. That commit justified it with "8 byte frames arrive in one piece in
-	// practice (JC100/SD76/SE3 all do this)" — true for those three, because they
-	// are all 9600 baud. THIS module is 115200, the only one in the project.
+	// practice (JC100/SD76/SE3 all do this)" — because they are all 9600 baud,
+	// and THIS module is 115200, the only one in the project.
+	//
+	// 🔴 [2026-09-02] **那個理由有一半是錯的，而錯的那一半正是防護沒有擴散出去的原因。**
+	// 實查兩個網關後台（`http://192.168.1.2x/port.shtml`）：
+	//   .20 → `_br = 115200` 8N1     .22 → `_br = 115200` 8N1     兩者 `_pt = 0`
+	// 透明傳輸只有一組序列埠設定 ⇒ **掛在 .22 上的 JC100 5~8 / XKC 13 也是 115200**，
+	// 不是 9600。（SD76 / SE3 在吊機的 .30/.31/.34，未查，可能確實是 9600。）
+	// ⇒ 本模組**不是**唯一暴露在分片下的裝置：.20/.22 上的七支驅動裡，
+	//   **只有這一支用 Quiet 變體**，其餘六支（ZDT / PQW / DM2J / JC100 / XKC / DY500）
+	//   都是普通 `sendAndReceive`，同樣的截斷風險完全沒有防護。
+	// 📌 症狀不會長成「分片」的樣子：截斷的幀在 JC100 會表現成 **CRC error**
+	//   （CRC 算在錯的範圍上），2026-09-02 現場就是這樣。
+	// 🔧 真正的源頭修法是把網關的 `_pt` 由 0 改成 ~5ms（見 CLAUDE.md 網關設定表），
+	//   一次覆蓋兩條匯流排的七支驅動；本函式的 Quiet 變體是單點補強，不是通解。
 	// The USR-TCP232 packs by inter-character gap (~3.5 char times): ~3.6ms at
 	// 9600 (frame long complete → one recv) but only ~0.3ms at 115200, so the
 	// gateway can forward the first few bytes and send the rest as a SECOND TCP

@@ -81,7 +81,19 @@ bool DamiaoAPI::init(const char* port,
 	// 這裡同步改成協定內的最大值 5.0（相對於先前實際生效的 0.50 是 10 倍阻尼，
 	// 首次上機請慢速 + 有人在旁）。若 5.0 仍不夠穩，只能往 kp（範圍 0~500，
 	// 現在才用 34，空間還很大）或 tau_ff 重力前饋去要，不要再動 kd。
-	m1_.hold_kp = 34.0f;
+	// 🔴 [2026-09-02 per user] 34 → 60，直接回應「是不是馬達出力不夠」。
+	// **不是馬達**：DM10010L 的 TAU_MAX = 200 Nm（damiao.h limit_param，並由當日
+	// 所有 tau 讀值量化在 400/4096 = 0.0977 Nm 的階梯上反證），而實測峰值僅約 7 Nm
+	// ⇒ **只用到 3.5% 的能力**。手臂停在「kp*err 平衡（被高估的）重力前饋」的位置，
+	// 而 kp=34 時 kp*err 只有 2.4 Nm —— 它不是推不動，是沒被要求去推。
+	// 本檔談 kd 上限的註解早已指出這個槓桿：「只能往 kp（範圍 0~500，現在才用 34，
+	// 空間還很大）或 tau_ff 去要」。
+	// ⚠️ **2026-08-14 曾以 40.0/6.0 發生失控震盪**（過 0.38 附近 vel 衝到 1.5 rad/s、
+	//    tau −15Nm）。但當時的 kd=6.0 因 MIT 編碼溢位**實際只有 1.00 Nm**（08-17 才修），
+	//    現在 kd=5.0 是真值 ⇒ 阻尼是當時的 5 倍，這是敢往上調的依據。
+	// 🔴 仍未解：重力前饋在工作區高估約 25%。提高 kp 只是用更大的位置誤差力去抵銷
+	//    一個錯的前饋，殘差會變小但不會歸零。**這不是重力模型的替代品。**
+	m1_.hold_kp = 90.0f;   // 2026-09-02: 34→60→90（per user：+40mm 壓入仍嫌不足；手壓基準本身偏淺）
 	m1_.hold_kd = 5.0f;   // was 5.5 (= 0.50 after wrap-around); 5.0 is the protocol ceiling
 	// [2026-07-24 per user] PARK 一路調過 12→8→14→11→9→10→16→14，速度也調過
 	// 0.45→0.30→0.22→0.16→0.10——最後 user 決定直接跟 DEPLOY 用同一組（kp/kd/speed
@@ -126,6 +138,38 @@ bool DamiaoAPI::init(const char* port,
 	// 約 1.0s，瓶頸已從 creep 移回主速度，所以這次動這裡才有效。
 	// 可用 `M1 SET_PARK_SPEED <v>` 在 bench 現場掃最佳值，不必重編。
 	m1_.park_speed = 0.35f;
+	// 🔴 [2026-09-02 per user] M1 積分項由 0（預設＝關閉）改為 0.6 —— 與 M2 同值。
+	//
+	// 為什麼需要：DEPLOY 的落點**系統性短於目標**，且短少量隨目標角度擴大
+	// （當日實測 wall=300 短 0.070 rad、wall=320 短 0.121 rad）。代入控制律：
+	//     θ=0.4885 時 tau_ff = 20.87*sin(0.4885-3.317) = -6.43 Nm
+	//                 kp*err = 34 * 0.1234            = +4.20 Nm
+	//                 合計 -2.23 Nm，實測 tau = -2.39 Nm（吻合）
+	// 手臂靜止代表那 +4.20 Nm 被靜摩擦吃掉 —— 與 2026-08-18 註解記載的
+	// 「static friction at that angle is ≥4.6 Nm」對得上。
+	//
+	// 🔴 **HOLD 分支缺兩個能突破靜摩擦的機制，而 M1 兩個都沒有**：
+	//   ① 摩擦前饋（M1_FRICTION_TAU，隨 |vel|→0 淡入）**只存在於 MOVE 分支**
+	//   ② 積分項 —— `hold_ki` 預設 0，而 **M2 早就設了 0.6**，其註解正是
+	//      「eliminates ~0.1 rad offset」，與 M1 今天的下垂同一量級。
+	//   ⇒ ramp 結束交給 HOLD 之後，助力全失，kp*err 打不過靜摩擦就永遠停在那。
+	//
+	// 取 0.6 而非更大：`tau_i = hold_ki * hold_err_integral`，而 `HOLD_I_MAX = 2.0`
+	// 把積分箝在 ±2.0 ⇒ **額外扭力上限 0.6×2.0 = 1.2 Nm**。突破靜摩擦只需約 0.4 Nm
+	// 餘裕（4.6 − 4.2），1.2 有備而不過量。**DEPLOY 是順重力方向，積分過大會把手臂
+	// 推進玻璃**，所以刻意不調快。
+	// ⚠️ 代價是**慢**：err≈0.07 rad 時要約 10 秒才累積到 0.4 Nm。
+	//    觀察時要等移動結束後再看 15~20 秒，不能只讀 DEPLOY 的當下回傳值。
+	// 🔴 [2026-09-02] 移除（當日稍早才加，同日移除）。
+	// 加它的理由是 DEPLOY 落點系統性短於目標，積分確實把殘差由 0.093 壓到 0.069。
+	// **但它在「頂住玻璃」時是有害的**：位置誤差永遠不會消失（命令角遠在玻璃後方），
+	// 積分因此持續累積，實測貼合後 10 秒內 tau 由 +0.24 爬到 +1.51 且未停，
+	// 壓入量跟著一路增加 —— **貼合狀態不是穩定狀態，校 wall_mm 等於對著移動目標校**。
+	// 🔧 要重新啟用必須先做 anti-windup on contact（誤差長時間不下降就停止累積）；
+	//    在那之前寧可保留可預測的靜態誤差，也不要不可預測的持續加壓。
+	// 📌 M2 的 hold_ki=0.6 不受影響 —— 它是水平軸、不會頂在牆上累積。
+	// m1_.hold_ki 維持預設 0（見 main_api.h MotorSlot::hold_ki）
+
 	// DEPLOY 起步值比 PARK 保守（順重力、失控會被重力持續加速），可用
 	// `M1 SET_DEPLOY_SPEED <v>` 在執行期微調，不必重編。
 	m1_.deploy_speed = 0.15f;
@@ -416,6 +460,19 @@ bool DamiaoAPI::approach_wall_slot(MotorSlot& s, float clearance_mm, float speed
 // ============================================================
 //  touch_wall_slot()  -- M1: move to slot-tool-tip just at wall
 // ============================================================
+// 🔴 [2026-09-02] M1 速度安全閥的常數，由 feedback_loop() 內部的區域常數抽到檔案範圍。
+//
+// 抽出來的理由不是整潔，是**同一個保護必須覆蓋所有驅動路徑**：原本它只存在於
+// feedback_loop() 的 HOLD/MOVE 分支，而 `go_home_slot()` 進入時會把 s.enabled 設為 false，
+// feedback_loop 因此 `continue` 跳過 M1 —— **整段 ramp 完全沒有速度保護**。
+// 2026-08-18 的註解就記過這個缺口（「實際速度衝到 -0.4335…而 go_home_slot 這條路徑
+// 沒有速度安全閥」），但只是記下來、沒有補。
+// 🔴 **2026-09-02 實測顯示嚴重度被低估了一個數量級**：長行程收回時
+//    |vel| 達 **1.5069 / 1.5690 / 2.2283 rad/s**（三次獨立量測），是限制值的 3.8~5.6 倍，
+//    全程沒有任何 [M1 SAFETY] 觸發。08-18 記的只有 0.4335（超出 8%）。
+static const float M1_VEL_SAFETY_LIMIT   = 0.4f;   // rad/s；超過即緊急煞車
+static const float M1_EMERGENCY_BRAKE_KD = 5.0f;   // 協定上限（20.0 會被 clamp 成這個值）
+
 bool DamiaoAPI::touch_wall_slot(MotorSlot& s, float wall_dist_mm,
 	int m2_slot, float clearance_mm,
 	float speed_rad_s)
@@ -765,7 +822,27 @@ bool DamiaoAPI::go_home_slot(MotorSlot& s, bool use_park_profile)
 			}
 		}
 
-		{
+		// 🔴 [2026-09-02] 速度安全閥 —— 補上 go_home 這條路徑長期缺少的保護。
+		// 與 feedback_loop() 用同一組常數、同一種煞車手法（kp=0、只留 kd 阻尼，
+		// 並保留重力前饋 —— 08-17 已證實煞車時把 tau_ff 歸零等於放掉重力補償，
+		// 數學上撐不住手臂）。
+		// 只對 M1 生效：M2 是水平軸，沒有重力失控的路徑。
+		if (s.id == MotorSlot::SlotId::M1 && std::abs(vel) > M1_VEL_SAFETY_LIMIT) {
+			float brake_tau_ff = 0.0f;
+			if (pos > M1_GRAVITY_MIN_VALID_RAD)
+				brake_tau_ff = M1_GRAVITY_K * std::sin(pos - M1_GRAVITY_PHASE_RAD);
+			{
+				std::lock_guard<std::mutex> lk(motor_mutex_);
+				dm_->control_mit(*s.motor, 0.0f, M1_EMERGENCY_BRAKE_KD, 0.0f, 0.0f, brake_tau_ff);
+			}
+			// 把 ramp 參考點重新錨定到真實位置，否則煞車結束後命令會突然「追進度」。
+			// 與 feedback_loop 的 `s->move_cur = real_pos_now` 同樣理由。
+			cur_cmd = pos;
+			std::cerr << "[" << s.name << " go_home SAFETY] vel=" << vel
+				<< " rad/s exceeds " << M1_VEL_SAFETY_LIMIT
+				<< " — emergency brake (kd=" << M1_EMERGENCY_BRAKE_KD
+				<< ", tau_ff=" << brake_tau_ff << ") engaged, pos=" << pos << "\n";
+		} else {
 			std::lock_guard<std::mutex> lk(motor_mutex_);
 			dm_->control_mit(*s.motor,
 				kp, kd,
@@ -1757,7 +1834,30 @@ bool DamiaoAPI::lr_move_to_slot_impl(MotorSlot& s, int slot, float speed_rad_s)
 	// If tau stays below threshold → motor passive → re-enable.
 	{
 		const float TAU_LIVE_THRESHOLD = 0.3f;
-		const float probe_setpt = cur_cmd + (target > cur_cmd ? 1.0f : -1.0f);
+		// 🔴 [2026-09-02] 偏移量 1.0 → 0.05 rad，並在區塊末尾無條件刷新 cur_cmd。
+		//
+		// **這兩道 go_home_slot 早在 2026-08-14 就做了，只是沒有擴散到這裡。**
+		// 見該函式同名探針的註解：「縮小成 0.05 rad…實際造成的移動量小很多」與
+		// 「the probe (whether or not it triggered re-enable) may have moved the
+		//   motor; starting the ramp from a stale reference is exactly what
+		//   caused the erratic-move bug」。
+		//
+		// 2026-09-02 現場證據（四次 M2 slot 移動，兩個方向都對得上）：
+		//   start=+0.0090 target=0 → 探針設在 -0.991（負向）→ 實際落點 **-0.1444**
+		//   start=-0.0013 target=0 → 探針設在 +0.999（正向）→ 實際落點 **+0.1421**
+		//   start=-0.1692 target=0 → 探針朝目標 → 落點 -0.0261（正常）
+		//   start=+0.1329 target=0 → 探針朝目標 → 落點 +0.0090（正常）
+		// **過衝方向與探針方向完全一致**，且只在「幾乎不用動」的短距離發作：
+		// 長距離時探針正好朝目標、那 60ms 會被後續軌跡吸收；短距離時目標就在腳邊，
+		// 探針把馬達踹到目標另一側，而 creep 段只有 0.20 rad/s（每步 0.004 rad）拉不回來。
+		//
+		// 🔴 更糟的是它**回報成功**：兩次落點 0.142/0.144 都剛好卡在 CONV_TOL=0.15 內，
+		// 所以印的是 `(converged)`。DEPLOY 之後 M2 停在 -0.119、tau≈2.0 由 hold 迴圈硬拉，
+		// 根因就在這裡。
+		//
+		// 為什麼 0.05 仍足以判定 passive：MIT_KP=31 × 0.05 = 1.55 Nm，
+		// 遠高於 TAU_LIVE_THRESHOLD(0.3)；活著的馬達必然超過，passive 的仍然是 ~0。
+		const float probe_setpt = cur_cmd + (target > cur_cmd ? 0.05f : -0.05f);
 		float last_tau = 0.0f;
 		for (int k = 0; k < 3; ++k) {
 			{
@@ -1783,11 +1883,18 @@ bool DamiaoAPI::lr_move_to_slot_impl(MotorSlot& s, int slot, float speed_rad_s)
 				}
 				std::this_thread::sleep_for(std::chrono::milliseconds(20));
 			}
-			// Refresh cur_cmd after warmup (motor may have moved during warmup)
+		}
+		// 🔴 [2026-09-02] 刷新移到 if 之外 —— 原本只在 passive 分支內刷新，
+		// 而**馬達活著的正常情況同樣被探針推走了**，卻拿探針前的舊值當 ramp 起點。
+		// 與 go_home_slot 的作法一致（"whether or not it triggered re-enable"）。
+		// ⚠️ Get_Position() 是快取值，但探針的 control_mit 剛交換過幀，所以是新的。
+		{
+			std::lock_guard<std::mutex> lk(motor_mutex_);
 			cur_cmd = s.motor->Get_Position();
 		}
 	}
 
+	// start_pos 宣告在探針區塊之後，因此會自動取到上面刷新過的值（僅供 log 用）。
 	const float start_pos    = cur_cmd;
 
 	// [2026-06-09s] Original simple loop: trajectory ramps cur_cmd, PD with
@@ -1959,12 +2066,12 @@ void DamiaoAPI::feedback_loop()
 					// is still unconfirmed (geometric estimate ~0.75 rad disagrees
 					// with the curve-fit's implied ~0.18 rad), so rather than guess
 					// the physics more precisely, intervene earlier and harder.
-					const float M1_VEL_SAFETY_LIMIT = 0.4f;   // was 0.7f
+					// [2026-09-02] 改用檔案範圍的共用常數（見其宣告處），原本是這裡的區域常數
 					// [2026-08-17] 20.0 → 5.0：這不是把煞車調弱，而是讓數字誠實。
 					// kd 的協定編碼上限就是 5.0（詳見 init() 裡 m1_.hold_kd 的說明），
 					// 送 20.0 進去實際上也只會被截成 ~5.0——這個 20 從來沒有生效過，
 					// 留著只會讓人誤以為煞車比實際強 4 倍。行為不變，僅修正表述。
-					const float M1_EMERGENCY_BRAKE_KD = 5.0f;   // protocol ceiling; 20.0 silently became this
+					// M1_EMERGENCY_BRAKE_KD 同上，已抽為共用常數
 
 					float real_vel_check = s->motor->Get_Velocity();
 					bool  emergency_brake = (s->id == MotorSlot::SlotId::M1)
@@ -2640,9 +2747,36 @@ std::string DamiaoAPI::cmd_park_sequence()
 	return "OK";
 }
 
+// 🔴 [2026-09-02] 把 damiao 的錯誤碼翻成看得懂的字串。
+//
+// 錯誤碼定義在 user_lib/damiao.h 的 CAN_Receive_Frame 註解裡，而 MIT 回授幀的
+// data[0] = (ERR<<4)|ID —— 那半個位元組在此之前**整個專案都沒有讀過**，所以
+// 「M1 突然 passive」自 2026-08-17 起只能靠 tau<0.3 間接推斷，根因一直未明。
+//
+// ⚠️ **`0` 只代表「這一幀沒有報錯」，不等於馬達健康。** 若 passive 的成因不是
+//    馬達自報的保護動作（例如 CAN 幀遺失、韌體層靜默失效），這裡會恆為 0 ——
+//    那仍是有價值的排除，但不會直接給答案。不要把 err=0 當成「一切正常」的證據。
+static std::string err_name(uint8_t e)
+{
+	switch (e) {
+	case 0x0: return "0";
+	case 0x8: return "8:OVER_VOLT";
+	case 0x9: return "9:UNDER_VOLT";
+	case 0xA: return "A:OVER_CURRENT";
+	case 0xB: return "B:MOS_OVERTEMP";
+	case 0xC: return "C:COIL_OVERTEMP";
+	case 0xD: return "D:CAN_LOST";
+	case 0xE: return "E:OVERLOAD";
+	default: {
+		std::ostringstream o; o << "0x" << std::hex << unsigned(e); return o.str();
+	}
+	}
+}
+
 std::string DamiaoAPI::cmd_status_sequence()
 {
 	float pos_1, vel_1, tau_1;
+	uint8_t err_1 = 0, err_2 = 0;   // [2026-09-02] 馬達自報錯誤碼
 	float pos_2, vel_2, tau_2;
 	std::ostringstream oss;
 	{
@@ -2653,14 +2787,20 @@ std::string DamiaoAPI::cmd_status_sequence()
 		pos_2 = m2_.motor->Get_Position();
 		vel_2 = m2_.motor->Get_Velocity();
 		tau_2 = m2_.motor->Get_tau();
+		// 🔴 [2026-09-02] 馬達自報的錯誤碼。先前整個專案都沒有讀過這半個位元組，
+		// 導致「M1 突然 passive」只能靠 tau<0.3 間接猜（2026-08-17 起原因未明）。
+		err_1 = m1_.motor->Get_err();
+		err_2 = m2_.motor->Get_err();
 	}
 	oss << std::fixed << std::setprecision(4)
 		<< "[M1] pos=" << pos_1 << " vel=" << vel_1 << " tau=" << tau_1
 		<< " hold=" << (m1_.hold_en.load() ? 1 : 0)
-		<< " moving=" << (m1_.move_act.load() ? 1 : 0) << " | "
+		<< " moving=" << (m1_.move_act.load() ? 1 : 0)
+		<< " err=" << err_name(err_1) << " | "
 		<< "[M2] pos=" << pos_2 << " vel=" << vel_2 << " tau=" << tau_2
 		<< " hold=" << (m2_.hold_en.load() ? 1 : 0)
-		<< " moving=" << (m2_.move_act.load() ? 1 : 0);
+		<< " moving=" << (m2_.move_act.load() ? 1 : 0)
+		<< " err=" << err_name(err_2);
 
 	return oss.str();
 }

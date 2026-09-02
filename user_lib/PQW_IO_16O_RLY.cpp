@@ -168,9 +168,9 @@ void PQW_IO_16O_RLY::printHex(const std::vector<uint8_t>& data, const std::strin
 	LOG_HEX(_log_tag, tag.c_str(), data.data(), (int)data.size());
 }
 
-//=========== utility: read echo ===========
+//=========== utility: atomic transaction ===========
 
-std::vector<uint8_t> PQW_IO_16O_RLY::readEcho()
+std::vector<uint8_t> PQW_IO_16O_RLY::txn(const std::vector<uint8_t>& cmd, int send_timeout_ms)
 {
 	// [2026-08-29] Null-client guard: the constructor leaves `client` as nullptr
 	// and only init() sets it, so a call on an un-init'd (or failed-init)
@@ -179,7 +179,8 @@ std::vector<uint8_t> PQW_IO_16O_RLY::readEcho()
 	// remembering to be careful — the driver must not be a landmine.
 	if (!client) return {};
 	uint8_t buf[32];
-	int n = client->receiveData((char*)buf, sizeof(buf), 200);
+	const int n = client->sendAndReceive((const char*)cmd.data(), (int)cmd.size(),
+	                                     (char*)buf, sizeof(buf), send_timeout_ms, 200);
 
 	if (n <= 0) return {};
 
@@ -256,20 +257,21 @@ bool PQW_IO_16O_RLY::controlRelay(int id, bool status)
 	auto cmd = buildSingleRelayCmd(id, status);
 	printHex(cmd, "TX single relay");
 
-	// Send the relay command. Genuine TCP send failure (gateway down) → real
-	// error reported via return true.
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	if (!client->sendData((char*)cmd.data(), cmd.size(), 50))
-		return true;
-
-	// Drain echo for log-only diagnostic. PQW firmware echo format is
+	// Send the relay command and take the echo in one atomic transaction.
+	//
+	// Echo is drained for log-only diagnostics. PQW firmware echo format is
 	// non-standard (TX `... 05 ...` echoed as RX `... 00 ...`) so we DO NOT
 	// parse it for verification — physical relay LED is the source of truth.
 	// The previous read-back-then-compare path triggered intermittent false
 	// failures (e.g. step_down body_valve_off_fail) that trapped the robot
 	// mid-sequence with no recoverable path. See work_log 2026-04-23
 	// "PQW relay module 回應格式異常" + 2026-04-27 trap on step_down feet rail.
-	auto echo = readEcho();
+	//
+	// ⚠️ [2026-09-01] 因此**不能**拿空回覆當錯誤：原本的 `sendData` 失敗才回
+	// `true`，而 txn() 把「送出失敗」與「沒有回覆」都表示成空 vector。
+	// 這一站維持原本的寬鬆語意（只有 client 不存在才算錯），不趁機收緊 ——
+	// 收緊等於讓非標準 echo 重新變成中途卡死的來源。
+	auto echo = txn(cmd, 50);
 	printHex(echo, "RX echo");
 
 	return false;
@@ -283,13 +285,10 @@ bool PQW_IO_16O_RLY::controlAll(bool status)
 	auto cmd = buildAllRelayCmd(status);
 	printHex(cmd, "TX all relay");
 
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	if (!client->sendData((char*)cmd.data(), cmd.size(), 100))
-		return true;
-
-	auto echo = readEcho();
+	auto echo = txn(cmd, 100);
 	printHex(echo, "RX echo ALL");
 
+	// 送出失敗與無回覆在這一站本來就都算失敗（下面的 size 檢查已涵蓋兩者）。
 	if (echo.size() < 8) return true;
 	return false;
 }
@@ -302,10 +301,7 @@ std::vector<bool> PQW_IO_16O_RLY::readAllStatus()
 	auto cmd = buildReadCmd();
 	printHex(cmd, "TX read status");
 
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	client->sendData((char*)cmd.data(), cmd.size(), 100);
-
-	auto resp = readEcho();
+	auto resp = txn(cmd, 100);
 	printHex(resp, "RX read status");
 
 	return parseReadResponse(resp);

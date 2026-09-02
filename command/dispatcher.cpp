@@ -301,16 +301,19 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
     // 占空比 5~10% 與頻率鎖 50Hz 由 QX_DO24 driver 強制，這裡只解析參數。
     if (cmd == "pwm") {
         std::string sub; iss >> sub;
-        if (iss.fail() || sub.empty()) return "ERR usage:pwm_<set|save|status>\n";
+        if (iss.fail() || sub.empty()) return "ERR usage:pwm_<set|save|status|restart>\n";
         if (sub == "status") return robot.cmd_pwm_status();
         if (sub == "save")   return robot.cmd_pwm_save();
+        // 🔴 [2026-09-02] 模組重啟（reg 0xFF00=0x0001）。FC 0x06 短幀，
+        // 在「長幀送不進模組」的故障下可能是唯一遞得進去的命令。
+        if (sub == "restart") return robot.cmd_pwm_restart();
         if (sub == "set") {
             int ch = 0, hz = 0, control = 0; double duty = 0;
             iss >> ch >> hz >> control >> duty;
             if (iss.fail()) return "ERR usage:pwm_set_<ch1-4>_<hz>_<control>_<duty%>\n";
             return robot.cmd_pwm_set(ch, hz, control, duty);
         }
-        return "ERR usage:pwm_<set|save|status>\n";
+        return "ERR usage:pwm_<set|save|status|restart>\n";
     }
     if (cmd == "imu_level")    return robot.cmd_imu_level();
     if (cmd == "relay_status") return robot.cmd_relay_status();
@@ -346,8 +349,11 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
     if (cmd == "water_level")    return robot.cmd_water_level();
     if (cmd == "pusher") {
         std::string g, p; iss >> g >> p;
-        if (iss.fail()) return "ERR usage:pusher_<group>_<extend|retract|extend_raw>\n";
-        return robot.cmd_pusher(g, p);
+        if (iss.fail()) return "ERR usage:pusher_<group>_<extend|retract|extend_raw>_[cm]\n";
+        // 🔴 [2026-09-02] 第三個參數可選：extend_raw 時指定公分（0.5~16.0）。
+        // 不給就沿用各 slave 預設脈衝（行為與先前相同）。校正牆距用。
+        double cm = 0.0; iss >> cm;   // 解析失敗時 cm 維持 0.0
+        return robot.cmd_pusher(g, p, cm);
     }
     if (cmd == "zdt_pusher") {
         int s = 0; std::string a;

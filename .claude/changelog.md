@@ -1,3 +1,414 @@
+## [2026-09-02f] cleaning_arm 重力模型重擬 + go_home 安全閥 + wall_mm 定案
+
+### Fixed
+- **`cleaning_arm/main_api.h`：`M1_GRAVITY_K` 20.87 → 16.09**（振幅高估 30%）、
+  `M1_GRAVITY_PHASE_RAD` 3.317 → 3.3190。由 **12 點雙向慢掃**（0.42~0.64 rad、0.15 rad/s、
+  往返 3 趟、`G=−(T_out+T_in)/2` 消摩擦）擬合，殘差 RMS 0.163 Nm。
+  舊值出處註明只用「兩個外側乾淨點」，靜態量測混入了 0.39~1.86 Nm 的摩擦。
+  ⇒ **自由平衡下垂由 0.0695 rad 降到 0.0025~0.0060（12~28 倍），`arm_deploy` 首次回 `OK`。**
+- **`cleaning_arm/main_api.cpp`：`go_home_slot` 的 ramp 迴圈補上速度安全閥**。
+  該段因 `s.enabled=false` 而被 `feedback_loop` 跳過 ⇒ 原本整段無保護。
+  實測失控速度達 1.51~2.23 rad/s（限制 0.4 的 3.8~5.6 倍）。
+  煞車用 kp=0 + kd=5.0 並**保留重力前饋**，事後重錨定 `cur_cmd`。
+- **`app/WASH_ROBOT.h`：`ARM_M1_LENGTH_MM` 320 → 490**，補上與 `cleaning_arm` 那份的互相標註。
+  （當日臂長修正只改了手臂側，本體這份是我製造的分岔。）
+
+### Changed
+- **`ARM_WALL_MM_DEFAULT` 530 → 520**：`arm_deploy 520` → θ=0.6750、tau=+18.90，
+  與使用者認可的貼合姿態差 0.0019 rad ≈ 0.9mm。
+- `M1_VEL_SAFETY_LIMIT` / `M1_EMERGENCY_BRAKE_KD` 由區域常數提升為檔案範圍共用。
+
+### Notes
+- 🔴 **`verify_arm_deploy_` 自 2026-06-06 起就是無條件 `return false`**，障礙偵測三個月沒在跑。
+  仍不能直接打開：壓玻璃時命令角與實際角的 0.29 rad 落差**是壓力來源**，
+  需改為比對「校正過的預期接觸角」。未做。
+- 📌 修正一個當日稍早的錯誤說法：**`wall_mm` 超量命令不是誤用**——
+  `TOUCHWALL` 是對可壓縮接觸下的位置命令，壓力必然來自位置誤差
+  （設成幾何真值 388 時 tau 僅 +0.34 Nm ＝ 輕觸）。
+
+## [2026-09-02e] Claude Code — 馬達自報的錯誤碼一直被丟掉（純觀測，不改控制行為）
+
+### 修改檔案
+- `user_lib/damiao.h`
+  - `Motor` 新增 `state_err` + `Get_err()`；`receive_data()` 加第四個參數 `uint8_t err = 0`
+    （**帶預設值＝累加式改動**，既有呼叫點不受影響，見 CLAUDE.md 的介面契約節）
+  - MIT 回授解析取出 `data[0] >> 4`，兩個分支都傳入
+  - `CMD == 0xEE`（通訊錯誤）由 `{ /* code */ }` 空殼改為實際輸出錯誤碼
+  - 新增 `#include <iostream>`（診斷輸出需要）
+- `cleaning_arm/main_api.cpp`
+  - 新增 file-local `err_name()`：把錯誤碼翻成 `A:OVER_CURRENT` 這類可讀字串
+  - `STATUS` 兩顆馬達各加 `err=` 欄位
+
+### 原因
+
+`cleaning_arm` 的 **「M1 突然 passive」自 2026-08-17 起原因未明**，程式碼只能靠
+「`tau < 0.3 Nm` 而位置誤差擴大」**間接推斷**，並為此做了 re-enable 看門狗
+（"Video evidence showed M1 going fully passive mid-HOLD"）。
+
+🔴 **而馬達其實每一幀都在報自己的狀態，只是沒有人接。** damiao 的 MIT 回授幀
+`data[0] = (ERR<<4) | ID`，解析程式碼只取 `q/dq/tau`，`data[0]` 僅在
+`canId == 0x00` 的分支用 `& 0x0f` 取 ID —— **`>> 4` 的錯誤碼那半從未被讀取**，
+`Motor` 也沒有對應欄位。錯誤碼定義**就寫在同一個檔案** `CAN_Receive_Frame` 的註解裡：
+
+```
+8 超壓 / 9 欠壓 / A 過流 / B MOS過溫 / C 線圈過溫 / D 通訊丟失 / E 過載
+```
+
+其中 **A / B / C / E 正好涵蓋「持續高扭力導致保護鎖住」** 這個假說 ——
+2026-09-02 的 DEPLOY 中 M1 的 `tau` 曾持續在 −4.2 ~ −5.1 Nm 抵抗重力數秒。
+而同檔對 M2 的同類現象早有記載：「damiao M2 sometimes latches into passive state
+after being held against a stop with high torque（over-current/thermal → fault →
+MIT frames "ACK" but no torque applied）」。
+
+第二條通道同樣被吞：`CMD == 0x01/0x02/0xEE` 三個分支**全是空殼**。
+
+### 設計決定
+- **純觀測**：不動 MIT 命令、增益、軌跡或任何控制邏輯，只把已經收到的位元組解出來。
+- **`receive_data` 用預設參數而非改簽名** —— 累加式改動，不動既有呼叫點。
+- **`err_name()` 輸出可讀字串**而非裸數字：`err=A` 沒人看得懂，`err=A:OVER_CURRENT` 才有用。
+- 🔴 **註解明確警告 `err=0` 不等於健康**：它只代表「這一幀沒報錯」。若 passive 的成因
+  不是馬達自報的保護動作（CAN 幀遺失、韌體層靜默失效），這裡會恆為 0。
+  **不可把 `err=0` 當成「一切正常」的證據** —— 那會變成今天已經踩過四次的
+  「看起來正常」假象的第五個。
+
+### ✅ 驗證狀態
+- 本機 `g++ -fsyntax-only` 通過；Pi 上建置成功並部署
+- `STATUS` 實測輸出 `err=0`（兩顆閒置健康）
+- 🔴 **尚未被真實故障觸發過** —— 要等下次 DEPLOY 讓 M1 再度 passive 才知道
+  它到底是「馬達自報的保護」還是「其他機制」。**兩種結果都有價值，但這個改動
+  只保證看得到前者。**
+
+### 部署
+`~/bringup/motor_api` 已更新。舊版留四份：`motor_api.old_e3c8820`（= main HEAD）、
+`motor_api.prev_0902`、`motor_api.maxloops_only`、`motor_api.probefix`。
+
+---
+
+## [2026-09-02d] Claude Code — `lr_move_to_slot_impl` 的 passive 探針把 M2 踹過頭（短距離移動落點差 0.14 rad）
+
+### 修改檔案
+- `cleaning_arm/main_api.cpp` `lr_move_to_slot_impl()`
+  - passive 探針偏移量 **`±1.0` → `±0.05` rad**
+  - 探針區塊末尾**無條件刷新 `cur_cmd`**（原本只在 passive 分支內刷新）
+
+### 症狀
+M2 的 slot 移動在**移動距離極短**時，落點固定偏離目標約 0.14 rad，
+而且因為 `CONV_TOL = 0.15`，**兩次都剛好卡在容許內、回報 `(converged)`**。
+2026-09-02 現場四筆：
+
+| start | target | 探針方向 | 落點 | 誤差 |
+|---|---|---|---|---|
+| +0.0090 | 0 | −0.991（負） | **−0.1444** | 0.144 🔴 |
+| −0.0013 | 0 | +0.999（正） | **+0.1421** | 0.142 🔴 |
+| −0.1692 | 0 | 正（朝目標） | −0.0261 | 0.026 ✅ |
+| +0.1329 | 0 | 負（朝目標） | +0.0090 | 0.009 ✅ |
+
+**兩次過衝的方向與探針方向完全一致**，長距離則正常。
+下游後果：`DEPLOY` 之後 M2 停在 −0.119、`tau≈2.0` 由 hold 迴圈硬拉，根因即在此。
+
+### 機制
+探針原本把位置命令設在 `cur_cmd ± 1.0 rad`，以 `MIT_KP=31` 驅動 60ms
+（≈31 Nm 命令扭力，實際飽和輸出）—— 註解自稱 "light frames"，**但它不輕**。
+方向恆為「越過目標」的那一側。
+
+- **長距離**：探針正好朝目標，那 60ms 被後續多秒軌跡吸收 → 無感
+- **短距離**：目標就在腳邊，探針把馬達踹到目標另一側；而 creep 段只有
+  0.20 rad/s（每步 0.004 rad），在 `MAX_LOOPS` 內拉不回來
+
+**而 `cur_cmd` 只在 passive 分支刷新** ⇒ 馬達活著的正常情況下，
+ramp 從一個探針前的舊起點開始，與馬達實際位置脫鉤。
+
+### 🔴 這兩道修正 `go_home_slot` 早在 2026-08-14 就做了，只是沒有擴散過來
+同一個檔案裡的同名探針，該處註解逐字寫著：
+- 「縮小成 0.05 rad…配合 kp/kd 仍足夠產生超過 `TAU_LIVE_THRESHOLD` 的扭力差異，
+  但實際造成的移動量小很多」
+- 「the probe (whether or not it triggered re-enable) may have moved the motor;
+  starting the ramp from a stale reference **is exactly what caused the erratic-move bug**」
+
+📌 **本次不是新設計，是把已驗證的修法補到漏掉的第二個呼叫點。**
+
+### 為什麼 0.05 仍足以判定 passive
+`MIT_KP=31 × 0.05 = 1.55 Nm`，遠高於 `TAU_LIVE_THRESHOLD=0.3`；
+活著的馬達必然超過，passive 的仍然是 ~0。（與 `go_home_slot` 的推理一致。）
+
+### ✅ 實機驗證（2026-09-02）
+部署後以 `arm_init` 觸發一次 0.035 rad 的短距離移動（正是發作區間）：
+
+```
+[M2 lr_move_to_slot] Done.  pos=0.0338  target=0.0000  start=0.0338 (converged)
+```
+
+**過衝 0**（修正前同類移動是 0.14）。且 `start` 欄現在與馬達實際位置相符，不再是舊值。
+
+⚠️ **殘留（非迴歸）**：落點 0.0338 而非 0 —— `err < CONV_TOL(0.15)` 時摩擦前饋不介入，
+`kp×0.034 ≈ 1.1 Nm` 與靜摩擦相當推不動，剩餘偏移由 hold 迴圈積分（`ki=0.6`，上限 1.2 Nm）
+慢慢收斂（同日觀察到 −0.0231 → −0.0097 即此機制）。
+
+### 部署
+`~/bringup/motor_api` 已重建部署。舊版留三份：`motor_api.old_e3c8820`（= main HEAD）、
+`motor_api.prev_0902`、`motor_api.maxloops_only`。
+
+---
+
+## [2026-09-02c] Claude Code — QX-DO24：FC 0x06 頻率退路 + 模組重啟命令
+
+### 修改檔案
+- `user_lib/QX_DO24.{h,cpp}`
+  - `setPWM_Freq()`：FC `0x10` 失敗且 `freq ≤ 65535` 時，改走**兩筆 FC `0x06` 單寫**
+    （先寫高位 `addr`=0、再寫低位 `addr+1`）。走到退路一律 `LOG_WRN`
+  - 新增私有 `writeSingleReg_(addr, value)` —— FC `0x06`，供退路與重啟命令共用
+  - 新增 `restartModule()` —— reg `0xFF00` 寫 `0x0001`（重啟設備）
+- `app/WASH_ROBOT.h` / `app/wash_robot_commands.cpp`：新增 `cmd_pwm_restart()`
+- `command/dispatcher.cpp`：新增 `pwm restart`
+
+### 原因
+2026-09-02 現場 `pwm set` 連續失敗 **0/22**，全部掛在 `pwm_freq_write_failed`。
+`setChannel()` 的三個寫入裡**只有 `setPWM_Freq` 用 FC `0x10`（請求 13 bytes）**，
+另外兩支（`setPWM_Duty`/`setPWM_Control`）都是 FC `0x06`（8 bytes）——
+而它在第一步就 `return false`，**後面兩個短幀根本沒被測到**。
+同時期短幀的**讀取**偶爾成功 ⇒ 判斷是「長幀送不進模組」。
+
+手冊（`.claude/summaries/QX_DO24_MODBUS_SUMMARY.md` P4）明寫：
+「若頻率低於 65535，則保持 `0x04` 的值為 0，只改 `0x05` 即可」
+⇒ 本專案鎖 50Hz，可用兩筆 8-byte 單寫取代一筆 13-byte。
+
+### 設計決定
+- **退路不是主路。** FC `0x10` 一筆交易寫完兩個暫存器是原子的；拆兩筆會有
+  「高位已清零、低位還是舊值」的中間態。健康的匯流排上沒有理由放棄它。
+- **寫入順序：先高位後低位。** 反過來的中間態是「新低位 + 舊高位」＝可能極大的錯誤頻率；
+  這個順序的中間態只會是舊低位，有界。
+- 🔴 **走到退路一律 `LOG_WRN`** —— 它是**症狀不是功能**，不能讓它靜默把硬體故障蓋掉。
+- **`restartModule()` 不接受參數，值寫死 `0x0001`** —— 同一個暫存器寫 `0xFFFF` 是
+  **恢復出廠設置**（地址→1、波特率→9600，模組直接從 `.22` 消失）。
+  兩個值差一個位元組、後果天差地遠，**寫死才讓誤送在型別上不可能發生**。
+- **`cmd_pwm_restart` 回傳分三種而非 OK/ERR 兩種**：模組收到重啟後很可能來不及回應那一幀，
+  把「沒有回覆」判成失敗會誤導。改為送出後等 2s 重讀版本號，用「回不回得了話」判定，
+  並在訊息中分開標示 `acked=`（那一幀有沒有回）與最終結論。
+
+### 🔴 驗證狀態
+- ✅ 本機 `g++ -fsyntax-only` 三個檔全過；Pi 上 16 TU 重建 + 連結成功；已部署（`prev8` 留存）
+- 🔴🔴 **退路一次都沒被觸發過。** 部署後 QX-DO24 恰好自行恢復（讀 8/8、寫 15/15），
+  FC `0x10` 直接成功 ⇒ **本次改動與該故障的排除無關，不可宣稱它有效。**
+- 🔴 **`pwm restart` 未測。** 刻意不在硬體剛恢復時拿未驗證的重啟命令去戳它。
+
+---
+
+## [2026-09-02b] Claude Code — JC100 回覆結構檢查：拆開「CRC error」，並修掉例外回覆被當成功的缺陷
+
+### 修改檔案
+- `user_lib/JC_100_METER.cpp` `send_command()`
+  - CRC 比對之前加入四道結構檢查，順序為 **例外 → 位址 → 功能碼 → 長度 → CRC**
+  - 失敗訊息統一改為 `<KIND> (a/b) len=N head=XX XX XX XX (連續失敗 N 次)`
+  - 新增 `expect_len`：FC `0x03` = `5 + 2×暫存器數`（本驅動一律讀 1 個 ⇒ 7）、FC `0x06` = 8（回應原幀）
+
+### 原因
+
+**① 一句「CRC error」蓋住三種病因。** 2026-09-02 `JC100:7` 間歇 CRC error，
+但「CRC 對不上」可能是：真雜訊／**回覆被切成兩段只收到前半**／前一筆交易的遲到回覆。
+三者處置完全不同（查接地與終端／改 USR 網關 `_pt`／查交易同步），而驅動分不出來。
+🔴 **這直接卡住一條既有待辦**：CLAUDE.md 網關設定表記著 `_pt=0` 是「回覆被切成兩個 TCP 段」
+的結構性根源，待辦寫著「目前量到的失敗是 no reply 不是 too short，**在沒有證據指向分片前
+不動共用設定**」—— 而 `SHORT_FRAME(len=5,expect=7)` 正是那個證據該長的樣子。
+📌 hex dump 要開 driver debug，而 `WR_DRIVER_DEBUG` **只在啟動時讀一次**
+⇒ 「下次再發生要有證據」等於「必須事先就開著跑」。所以訊息一律附前 4 個位元組，
+**不開 debug 也判得出來**。
+
+**② 🔴 Modbus 例外回覆被當成成功（既有缺陷，非本次引入）。**
+例外回覆是 `[id][func|0x80][code][crc][crc]` ＝ **正好 5 bytes**（通過 `len < 5` 那道）
+**且 CRC 正確**（通過 CRC 比對）→ `read_pressure()` 取 `r[3]`/`r[4]`，
+而那是 **CRC 的兩個位元組**，被當成壓力值往上傳。
+**裝置明確回報錯誤，上層卻收到一個看起來正常的數字。**
+與 CLAUDE.md 記載的 QX-DO24 `err 0x7C` 同一類（撞號時 JC100 的回覆被 PWM driver 撿走）。
+⚠️ 而壓力值是放腳的判準之一 —— 這條路徑上的假數字有實體後果。
+
+### 設計決定
+- **結構檢查排在 CRC 之前。** 截斷的幀 CRC 一定也對不上，但報 `SHORT_FRAME(len=5,expect=7)`
+  比報 `CRC` 有用得多。代價：若剛好是位址那個位元組被雜訊打壞會報成 `ADDR_MISMATCH`
+  → 以「訊息附上前 4 個位元組」補償，不必開 debug 就判得出來。
+- **不改回傳語意**：所有新分支一律 `return true`（本專案慣例 true=失敗），
+  節流邏輯沿用既有的 `!_fast_fail_noted || probe`，與原 CRC 分支一致。
+- **行為改變只有一處且是修正**：例外回覆由「回成功＋垃圾值」改為「回失敗」，
+  上層 `read_pressure()` 會走既有的 `return _last_pressure` 降級路徑。
+
+### 驗證狀態
+- ✅ 本機 `g++ -fsyntax-only -std=c++17 -Icommon -Itransport -Iuser_lib` 通過
+- 🔴 **尚未建置、尚未部署、尚未實機驗證** —— 改動當下本體 Pi 正在跑 10 週期測試，
+  刻意不在測試進行中換執行檔。跑完後才建置。
+- 🔴 **新訊息尚未被任何真實故障觸發過** —— 它能不能真的分辨那三種病因，
+  要等 `JC100:7` 下次再犯才知道。
+
+---
+
+## [2026-09-02a] Claude Code — `cycle_test.py` 兩道守衛：輸出可觀測性 + 真空源前置檢查
+
+### 修改檔案
+- `Linux_test/cycle_test.py`
+  - `import os`（新的 `ALLOW_NO_PUMP` 環境變數要用）
+  - 檔頭加 `sys.stdout.reconfigure(line_buffering=True)`
+  - 前置檢查新增第三道：開跑前送 `relay_status` 回讀真空幫浦 A 組，OFF 就擋下不跑；
+    以 `ALLOW_NO_PUMP=1` 明示放行時，標題列印【無真空對照組】警告
+
+### 原因（兩件事在同一天各咬了一口）
+
+**① 全緩衝讓 20 分鐘的測試全程沒有可觀測性。**
+stdout 導向檔案是全緩衝，而本腳本整輪產出才約 4.7KB —— 一個 4KB 緩衝區都填不滿，
+log 從頭到尾停在 0 bytes。2026-09-02 上午就這樣誤判過一輪：測試明明在跑（pid 在、機器在動），
+log 卻是空的。這與 `runbook.md` §A4 對兩支 C++ 記過的 `stdbuf -oL` 是同一個坑。
+📌 **設在腳本裡而不是靠呼叫端記得加 `python3 -u`** —— 呼叫端會忘，2026-09-02 就忘了。
+⚠️ 這不影響「會不會留下紀錄」（中止路徑本來就會在解譯器結束時 flush），
+影響的是「跑的當下看不看得到」。
+
+**② 既有兩道前置檢查，沒有一道碰得到「真空源在不在」。**
+2026-09-02 上午整輪 10 週期是在**沒有真空幫浦**的情況下跑完的。成因是一條職責分界：
+開幫浦的是 `init` 這支 **TCP 指令**（`cmd_init` 送 `controlRelay(CH_PUMP, true)`，
+印 `[init] PQW relays → pump ON`），**不是**程式啟動時的驅動 `init()`
+——後者底下那五行 relay 設定是註解掉的（`app/WASH_ROBOT.cpp:359-363`）。
+本腳本不送 `init`，而 `state=idle` 在幫浦沒開時照樣成立
+⇒ 「起點在頂端」與「本體 ready/idle」兩道檢查**都不會發現**。
+
+🔴 續十已經寫過「程式重啟後所有繼電器都是 OFF，『泵浦運行期間常開』只在 `init` 跑過之後成立」。
+**那是給人看的紀錄，不是給腳本看的守衛** —— 寫下來的知識沒有變成程式碼裡的檢查，
+就會在下一次重開機之後原地復發。這次還多疊了一層：當天 Pi 整台重開過。
+
+### 設計決定
+- **擋下來，不自動補送 `init`。** 與既有的「起點不在頂端」同一套判準：不猜。
+  自動送 `init` 等於在操作者不知情的狀態下啟動幫浦。
+- **通道編號從 `relay_status` 自己的 `names` 欄推導，不寫死 `2`。**
+  CH3 那次（2026-09-01 續十）的教訓就是通道對應會變，而寫死的數字不會跟著變。
+- **保留 `ALLOW_NO_PUMP=1` 的明示放行**：無真空對照組是有價值的實驗
+  （可以隔離「左右差惡化」與吸附有沒有關係），但必須是刻意的、而且要印在報表標題上，
+  不能是忘了開幫浦。
+
+### 尚未做
+- 🔴 本次兩處改動**只在本機工作區**，尚未同步到吊機 Pi 的 `~/bringup/cycle_test.py`
+  （當下那份正在跑，刻意不動）。下次上機前要 rsync 並複驗。
+
+---
+
+## [2026-09-01b] Claude Code — `fine_adjust` 水平參考偏移 + 吊機冷啟動驗證
+
+### 修改檔案
+- `Crane_control_PI/main.cpp`
+  - 新增 `g_fine_adjust_level_diff_cm`（預設 **0 ＝ 與先前逐位元相同**）：
+    `motion_fine_adjust_sync()` 的收斂目標由寫死的「左右讀值相等」改為 `L - R = level_diff`。
+    做法是把左側讀值先減掉 `level_diff` 成 `curL_adj`，之後 `diff_init` / `target_cm` /
+    `left_needs` / `L_distance` 全在「已對齊」座標裡比較；**只有 `L_stop_at` 要把
+    `level_diff` 加回去**（收斂迴圈比的是原始 `curL`，漏掉這一項偏移會被抵銷＝等於沒設）。
+  - 新增指令 `set_fine_adjust_level_diff <cm>`（範圍 ±20cm）與 status 欄位
+    `fine_adjust_level_diff_cm`。範圍上限的理由：0.85°/cm 之下 20cm 已是 17°，
+    比任何合理的水平偏移都大得多，超出幾乎必然是打錯或量錯。
+
+### 原因
+`fine_adjust` 在**每一次 `motion_rope` 的結尾都會跑**，而它原本把「左右讀值相等」當收斂目標。
+那個目標與「機器水平」沒有定義好的關係，原因有兩層、彼此獨立：
+① **重心偏左** —— 機器要水平，兩條繩就不等長（2026-09-01 實測，0.85°/cm）；
+② **兩支 SD76 的零點各自獨立** —— 絕對讀值差裡混著一個與繩長無關的固定偏移
+（08-31 靜止不動就差 13cm，`length_diff_max_cm` 那條守衛當天已改成比相對位移差，
+**`fine_adjust` 沒有跟著改**）。
+⇒ 先前收斂點接近水平只是現行零點偏移剛好抵銷；**任何一次計米器歸零都會靜默移動這個目標**。
+
+🔴 **實測佐證這不是裝飾性修正**：重啟後 `L-R=3` 時 `raw_x=+0.91°`，
+配上 0.85°/cm ⇒ `level_diff=0`（舊行為）會把機器收斂到約 **+3.5°**，遠出 ±1° 規格。
+
+### 目前值與它的出處
+執行期已設 **`level_diff=4`**，推導：現況 `L-R=3` @ `raw_x=+0.91°`（IMU 基準乾淨，
+`roll=0.89` vs `raw_x=0.91` ⇒ 偏移僅 0.02°），要讓 roll 歸零需 `Δ(L-R)=+0.91/0.854≈+1.07`
+⇒ 水平約在 `L-R≈4.07`。**這是一次 1cm 的外插**（斜率本身是今日 5cm 跨距的兩點量測），
+不是直接量到的：`roll_correct` 的最小可執行步約 5cm > 誤差帶，沒辦法真的把 roll 調到 0 再讀。
+⚠️ **尚未做運動驗證，且目前只在記憶體**（編譯預設仍是 0）。
+
+### 驗證
+- 建置：吊機 ✅（`26ecbbfe`）。
+- **冷啟動實測**（20:39 重啟，pid 27004）：`up_stop_total_kg=130` / `retract_tension_stop_kg=75`
+  **從編譯預設生效** ✅；`dsz_left=1 dsz_right=1` ✅（避開 X518 單連線的坑）；
+  五個網關全 OK；SD76 `(resumed)`、`L=50 R=47` 未歸零 ✅；
+  張力 59.11/34.51 對比重啟前 59.13/34.53 ⇒ **載重中的零點完整保留** ✅。
+- 指令：`set_fine_adjust_level_diff 4` → `OK`，status 顯示 4；負向對照 `99` → `ERR out_of_range` ✅。
+- 📌 **PQW 那則 `init presence probe failed`（`pqw_water=0`）是既有狀況不是回歸** ——
+  舊版 19:43:15 與新版 20:39:20 逐字相同（`.34` 上的進水球閥本來就沒接）。
+  順帶這也是 PQW driver 改成原子交易後的一個等價性佐證。
+- ⚠️ **啟動後 5 秒內有 4 筆 SE3 comm fail**（`readParam 0x1007`、`clearAlarm 0x1101` ×3），
+  20:39:23 之後不再出現，keepalive 兩側 `ok=50 fail=0 clears=0`。
+  判定為**快速重啟後 USR 網關清理舊 session 的瞬態**（SE3 走 cli_A/cli_B 專屬網關，
+  不在本次改動的驅動之列，transport 也未動）。**若下次重啟仍出現，要回頭查而不是照抄這個結論。**
+
+## [2026-09-01] Claude Code — 張力門檻常數化 + 最後四支裸對驅動改原子交易
+
+### 修改檔案
+- `Crane_control_PI/main.cpp`
+  - `RETRACT_TENSION_STOP_KG_DEFAULT` 50 → **75**
+  - `UP_STOP_TOTAL_KG_DEFAULT` 70 → **130**
+    —— 兩者是 2026-09-01 DSZL-107 刻度校正（4.16 kg 已知重量）當日在記憶體裡改的值，
+    只活在 `set_*` 指令裡，**重開程式會回到舊值並直接擋住收繩**。本次寫進常數。
+  - `TENSION_MAX_KG_DEFAULT`(100) / `TENSION_DIFF_MAX_KG_DEFAULT`(50) **值不動**
+    （per user 2026-09-01「維持」），但補上校正後才成立的兩點說明：
+    ① 整機才 94 kg → 單側 100 kg 的 HARD alarm **一條繩承擔全部重量也不會觸發**；
+    ② 水平時左右本來就差 25 kg（重心偏左）→ 正常狀態就用掉 50 kg 預算的一半。
+- `app/WASH_ROBOT.h`
+  - `ATTACH_PAYOUT_TARGET_KG`(10) 加警告：這是**校正前**的單位，新單位約 21~24 kg。
+    值不動——使用它的 attach pay_out 整段自 2026-08-27 起是 `#if 0`。
+    ⚠️ 把那段改回 `#if 1` 之前必須先換算，否則 pay_out 會一路放到上限才停且無訊息。
+- `user_lib/DM2J_RS570.{h,cpp}`
+  - `recv_frame_()` 拆成 `validate_frame_()`（純驗證）+ 新的 `txn_frame_()`（原子交易）。
+    六個讀取站點與 `sendRecv()`（writeMulti / 廣播 writeSingle_sync）全部改走
+    `TCP_client::sendAndReceive()`。逾時沿用原值；`read_pulse_per_rev` 原本
+    「send + sleep 200ms + recv(200)」改為 recv 逾時 400ms（等值總等待，不縮短寬限）。
+  - 順帶更正 `validate_frame_` 的過期註解：上滑台在 `cli_20_` 不是 `cli_22_`（2026-08-28 搬回）。
+- `user_lib/PQW_IO_16O_RLY.{h,cpp}`
+  - `readEcho()` → `txn(cmd, send_timeout_ms)`，三個站點改走原子交易。
+    ⚠️ **回覆仍不驗證**：PQW 韌體 echo 格式非標準（TX `05` 回成 `00`），歷史上拿它驗證
+    造成過 step_down 中途卡死。`controlRelay` 也維持原本的寬鬆語意（不把空回覆當錯誤）
+    —— 收緊等於讓非標準 echo 重新變成卡死的來源。
+- `user_lib/XKC_Y25_RS485.cpp`
+  - `sendRecv()` 改原子交易（唯一的讀取漏斗）。`set_address` 一併改（回覆仍不驗證，
+    `== 0` 才算失敗＝只有送出失敗算錯）。
+  - 🔴 **`set_baud_rate` 刻意保留裸 `sendData`**：感測器對它不回覆（手冊 §1.8），
+    改成原子交易只會白等一個 recv 逾時，還會把「本來就沒有回覆」記成接收逾時去推
+    `TCP_client` 的斷線守衛。純送出不配對接收，本來就不會失步。
+  - 🔴 **補上回覆的 slave id 與 FC 檢查**（既有缺陷，見下方「新發現」）。
+- `user_lib/DY_500_weight_sensor.cpp`
+  - 三個站點（`read_reg_long` / 兩個 write）改原子交易。逾時全部沿用原值。
+- `user_lib/ZDT_motor_control.h`
+  - 標頭註解「本體這 5 支裸對驅動從未跟進」補上結案：剩下四支已全部跟進。
+- `CLAUDE.md`
+  - 架構章「靠 `TCP_client::socket_mtx` 序列化（幀不交錯）」**更正**：那句只有 per-call
+    成立；現在成立了，但成立的原因是 `sendAndReceive()` 不是 `socket_mtx`。
+  - 吊機匯流排圖與 `DSZL_107` 驅動表更新為 **X518 一台雙通道**（`.33`，CH1=右/CH2=左）
+    與已校正的 scale ——那是 2026-09-01 稍早的硬體與程式異動，先前只寫在 work_log。
+- `Linux_test/fake_slaves/test_stage2.cpp`
+  - 新增 `xkc`。它是這批改動裡**唯一沒有假從站覆蓋**的驅動（dm2j/pqw 本來就在這支，
+    dy500 有自己的 `test_dy500`）。剛改完傳輸路徑、又不上機就驗不到的那一支，
+    正是最需要 bench 測試的那一支。
+
+### 原因
+`.20` 與 `.22` 都是多裝置共用的匯流排，而 `TCP_client::socket_mtx` 是**每次呼叫**原子、
+不是**每筆交易**原子 —— 走 `sendData()` + 自己接收的裸對驅動，send 與 recv 之間鎖是放開的：
+① 別條執行緒可以把自己的交易插進來，兩邊的回覆在核心緩衝區裡錯位；
+② 一筆遲到的回覆會落在下一次的 recv 窗口內被讀走 → **永久落後一筆，只有重連救得回來**。
+2026-09-01 ZDT 先改（實機 34 公尺驗證：ZDT 錯誤 0、七個 socket `Recv-Q` 全 0），
+本次把剩下的 DM2J / PQW / XKC / DY-500 四支補完。
+附帶效益：四支都納入 `TCP_client` 的「連續 10 次接收逾時 → 主動斷線」守衛（只掛在原子
+交易 API 上）。該守衛的計數每條連線共用但**成功一次就歸零**，所以同一條 bus 上還有別的
+裝置在正常交易時，單一裝置故障（例如未安裝的 DY-500）不會把整條 bus 扯斷。
+
+### 🔴 新發現：XKC 收到別的 slave 的回覆會照單全收
+新增的 `test_stage2 xkc wrongslave` **當場抓到**：本驅動原本只驗長度與 CRC，而寫給別的
+slave 的回覆帶著完全合法的 CRC → 被當成自己的收下。這正是 2026-08-28 driver 稽核在 DM2J
+修掉的同一類問題，當時漏了 XKC。它與 JC-100 5~8 / QX-DO24 9 / DY-500 10/11 共用 `.22`，
+收到鄰居的回覆是這條匯流排上真實會發生的事。已補 slave id + FC 0x03 檢查。
+📌 **這條是「加測試才看得到」的典型**——改傳輸層時順手加的一支測試，抓到的卻是既有缺陷。
+
+### 驗證
+- **建置**：吊機 `crane_control_PI.out` ✅；本體 **16/16 TU + 連結成功** ✅；
+  `Linux_test` ✅（三個目標都編，跨模組契約兩端都驗）。皆在 Pi 上以 g++ 14.2 實建，
+  看產物時間戳與 md5 而非管線離開碼。
+- **假從站迴歸**：`test_stage2` × 5 驅動（pqw/dm2j/xkc/zdt/se3）× 5 模式
+  （normal/badcrc/wrongslave/shortframe/drop）＝ **25/25 PASS，0 WRONG**；
+  `test_dy500` × 5 模式全 PASS；`test_dm2j`（機構標定＋行程守衛）全 PASS，
+  且假從站的 `req#` 證實被拒絕的指令**沒有送出任何位元組**。
+  XKC 另加 `badfc` 模式驗證新的 FC 檢查。全程只連 `127.0.0.1`，不碰真 485 匯流排。
+- ⚠️ **尚未上機**：兩支程式都還沒部署、沒重啟。門檻常數化要重啟才會生效。
+
 ## [2026-08-29] Claude Code — 上滑台方向確認工具 + homing 註解更正
 
 ### 修改檔案

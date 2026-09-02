@@ -74,6 +74,13 @@ bool DSZL_107::init(TCP_client& extClient, int ID, bool debug)
     this->slaveID    = (uint8_t)ID;
     this->debug_mode = debug;
     _log_tag         = "DSZL:" + std::to_string(ID);
+    // 🔴 [2026-09-01] 把 set_log_side() 設定的側別併回來。
+    // 先前 init 直接覆蓋 _log_tag，**set_log_side() 在 init 之前呼叫等於無效** ——
+    // 而標頭的註解卻寫著「側別存在 _log_side，由 init 併進 tag」，實作根本沒做。
+    // 結果 08-31 加這個功能就是為了解決「兩顆 slave 都是 1、log 分不出哪一顆」，
+    // 而功能本身是壞的：2026-09-01 整份 log 裡 @L / @R 各出現 0 次。
+    // 新架構下一台裝置服務兩個通道，不標側別完全無法診斷，所以這行是必要的。
+    if (!_log_side.empty()) _log_tag += "@" + _log_side;
     return false;
 }
 
@@ -329,7 +336,11 @@ bool DSZL_107::read_reg_long(uint16_t addr, int32_t& out)
 
 bool DSZL_107::get_tension_long(int32_t& outValue)
 {
-    return read_reg_long(0x0A00, outValue);
+    // [2026-09-01] CH1 = 0x0A00、CH2 = 0x0A02（與 get_both_long 一次讀 4 個暫存器
+    // 的解析位移一致：ch2 在 byte offset 4 ＝ 2 個暫存器）。
+    // 預設 channel_=1，不呼叫 set_channel() 就完全維持舊行為。
+    const uint16_t addr = (channel_ == 2) ? 0x0A02 : 0x0A00;
+    return read_reg_long(addr, outValue);
 }
 
 bool DSZL_107::get_both_long(int32_t& ch1, int32_t& ch2)
@@ -389,6 +400,10 @@ bool DSZL_107::get_tension_kg(double& outKg)
 }
 
 //=========== control: zero ===========
+
+// 🔴 [2026-09-01] 依 set_channel() 歸零對應通道。呼叫端一律用這支——直接呼叫
+// do_zero_ch1() 會讓「左側」物件去歸零右側的通道（兩個物件現在共用同一台裝置）。
+bool DSZL_107::do_zero()     { return (channel_ == 2) ? do_zero_ch2() : do_zero_ch1(); }
 
 bool DSZL_107::do_zero_ch1() { return modbus_write_long(0x0A20, 1); }
 bool DSZL_107::do_zero_ch2() { return modbus_write_long(0x0A20, 2); }

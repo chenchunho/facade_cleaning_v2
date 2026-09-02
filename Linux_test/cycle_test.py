@@ -27,7 +27,16 @@
 #
 # usage: cycle_test.py [cycles] [steps_per_cycle] [step_cm] [roll_trip] [diff_trip]
 
-import re, socket, sys, threading, time
+import os, re, socket, sys, threading, time
+
+# 🔴 [2026-09-02] stdout 導向檔案時是**全緩衝**，整輪產出才約 4.7KB
+# → 一個 4KB 緩衝區都填不滿，log 會從頭到尾停在 0 bytes，看起來像腳本沒跑。
+# 2026-09-02 上午就是這樣：測試明明在跑（pid 在、機器在動），log 卻是空的。
+# 這與 runbook §A4 對兩支 C++ 記過的 `stdbuf -oL` 是同一個坑。
+# 靠呼叫端記得加 `python3 -u` 不可靠 —— 在這裡設，怎麼叫都有效。
+# ⚠️ 中止路徑（bail / cleanup）本來就會在解譯器結束時 flush，所以這不影響「會不會留下紀錄」，
+#    影響的是「跑的當下看不看得到」——耐久測試一跑 20 分鐘，這就是全部的可觀測性。
+sys.stdout.reconfigure(line_buffering=True)
 
 CRANE  = ("127.0.0.1", 5002)
 WROBOT = ("192.168.5.26", 5001)
@@ -231,6 +240,40 @@ ws0 = ask(WROBOT, "status", 10)
 if "state=ready" not in ws0 and "state=idle" not in ws0:
     print("🔴 本體狀態非 ready/idle：%s" % ws0[:90]); sys.exit(1)
 print("起點 L=%.0f  本體 %s\n" % (L0, re.search(r"state=\w+", ws0).group(0)))
+
+# 🔴 [2026-09-02] 真空幫浦在不在，開跑前必須實際回讀。
+#
+# 為什麼補這一條：2026-09-02 上午整輪 10 週期是在**沒有真空源**的情況下跑完的。
+# 開幫浦的是 `init` 這支 TCP 指令（cmd_init 送 controlRelay(CH_PUMP, true)），
+# **不是**程式啟動時的驅動 init —— 後者底下那五行 relay 設定是註解掉的。
+# 本腳本不送 init，而 `state=idle` 在幫浦沒開時照樣成立 ⇒ 既有的兩道前置檢查
+# （起點在頂端 / 本體 ready-idle）**沒有一道碰得到這件事**。
+# 續十已經寫過「程式重啟後所有繼電器都是 OFF」，但那是給人看的紀錄，不是給腳本看的守衛。
+#
+# 📌 判準與「起點不在頂端」同一套：不猜、不自動補送 init（那會在不知情的狀態下
+#    啟動幫浦），只擋下來並印出該送什麼。
+# 📌 通道編號**從 relay_status 自己的 names 欄推導**，不寫死 2 —— CH3 那次的教訓就是
+#    通道對應會變，而寫死的數字不會跟著變。
+ALLOW_NO_PUMP = os.environ.get("ALLOW_NO_PUMP") == "1"
+rs = ask(WROBOT, "relay_status", 15)
+if not rs.startswith("OK"):
+    print("🔴 讀不到繼電器狀態：%s" % rs[:90]); sys.exit(1)
+_st_part, _, _names_part = rs.partition("|")
+_m = re.search(r"ch(\d+)=pumpA", _names_part)
+if not _m:
+    print("🔴 relay_status 沒有 pumpA 欄位，無法確認真空源：%s" % rs[:120]); sys.exit(1)
+_pump_ch = _m.group(1)
+_pump_on = re.search(r"\bch%s=1\b" % _pump_ch, _st_part) is not None
+if not _pump_on:
+    if not ALLOW_NO_PUMP:
+        print("🔴 真空幫浦 A 組（ch%s）是 OFF —— 沒有真空源，吸盤全程不會吸住。" % _pump_ch)
+        print("   先送 `init` 給本體（它會開幫浦並印 [init] PQW relays → pump ON），或")
+        print("   確定要跑無真空的對照組就用 ALLOW_NO_PUMP=1 重跑（這會記進標題列）。")
+        sys.exit(1)
+    print("⚠️ 【無真空對照組】幫浦 A 組（ch%s）是 OFF，經 ALLOW_NO_PUMP=1 明示放行。" % _pump_ch)
+    print("   本輪的壓力欄與吸附行為不可與有真空的輪次比較。\n")
+else:
+    print("真空幫浦 A 組（ch%s）ON ✅\n" % _pump_ch)
 
 ask(CRANE, "set_motion_hz %d" % DOWN_HZ, 15)
 

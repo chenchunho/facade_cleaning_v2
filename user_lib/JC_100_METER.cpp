@@ -102,14 +102,59 @@ bool JC_100_METER::send_command(uint8_t func, uint16_t reg, uint16_t data, std::
 
 	LOG_HEX(_log_tag, "RX", rxBuf, len);
 
+	// [2026-09-02] 回覆的結構檢查 —— 原本這裡只算 CRC，造成兩個問題：
+	//
+	// ① **一句「CRC error」蓋住三種病因**（真雜訊／回覆被切成兩段只收到前半／
+	//    前一筆交易的遲到回覆）。三者處置完全不同：雜訊要查接地與終端、
+	//    分片要改 USR 網關的 `_pt`（見 CLAUDE.md 網關設定表，那條待辦至今
+	//    卡在「沒有證據指向分片」）、遲到回覆要查交易同步。
+	//    分不出來就只能猜，而 hex dump 要開 driver debug 才有 —— 那是啟動時
+	//    才讀的環境變數，等於「下次再發生時要有證據，必須事先就開著」。
+	//
+	// ② 🔴 **Modbus 例外回覆會被當成成功**：`[id][func|0x80][code][crc][crc]`
+	//    正好 5 bytes（通過上面的 `len < 5`）且 CRC 正確（通過下面的比對）
+	//    → `read_pressure()` 取 `r[3]`/`r[4]`，而那是 **CRC 的兩個位元組**，
+	//    被當成壓力值往上傳。**裝置明確回報錯誤，上層收到一個看起來正常的數字。**
+	//    與 CLAUDE.md 記載的 QX-DO24 `err 0x7C` 同一類（撞號時 JC100 的回覆
+	//    被 PWM driver 撿走）。
+	//
+	// 檢查順序是「結構優先於 CRC」：截斷的幀 CRC 一定也對不上，但報
+	// SHORT_FRAME(len=5,expect=7) 比報 CRC 有用得多。代價是若剛好是位址那個
+	// 位元組被雜訊打壞，會報成 ADDR_MISMATCH —— 所以訊息一律附上前 4 個位元組，
+	// 不必開 debug 就判得出來。
+	const int expect_len = (func == 0x03) ? (5 + 2 * (int)data)   // [id][fc][bc][data..][crc][crc]
+	                     : (func == 0x06) ? 8                      // echo of the request
+	                     : 0;                                      // 0 = 不檢查長度
+	const uint8_t r0 = (uint8_t)rxBuf[0];
+	const uint8_t r1 = (uint8_t)rxBuf[1];
+
+	// 共用的失敗收尾：計數 + 節流後輸出。訊息由呼叫處組好。
+	auto fail_with = [&](const char* kind, int a, int b) -> bool {
+		error_flag = 1;
+		++_consec_fail;   // 任何一種通訊失敗都要計數 — 同樣不該霸佔 bus
+		if (!_fast_fail_noted || probe)
+			LOG_ERR(_log_tag, "%s (%d/%d) len=%d head=%02X %02X %02X %02X (連續失敗 %d 次)",
+			        kind, a, b, len,
+			        r0, r1,
+			        len > 2 ? (uint8_t)rxBuf[2] : 0,
+			        len > 3 ? (uint8_t)rxBuf[3] : 0,
+			        _consec_fail);
+		return true;
+	};
+
+	if (r1 == (uint8_t)(func | 0x80))            // 裝置回報例外 — 不是通訊失敗，是它拒絕了
+		return fail_with("MODBUS_EXCEPTION", (int)r1, len > 2 ? (uint8_t)rxBuf[2] : -1);
+	if (r0 != (uint8_t)_slaveID)                 // 別人的回覆（撞號／遲到）
+		return fail_with("ADDR_MISMATCH", (int)r0, _slaveID);
+	if (r1 != func)                              // 功能碼不符 — 同樣是接錯了回覆
+		return fail_with("FUNC_MISMATCH", (int)r1, (int)func);
+	if (expect_len && len != expect_len)         // 截斷或多餘 — 分片的直接證據
+		return fail_with("SHORT_FRAME", len, expect_len);
+
 	uint16_t cCrc = modbusCRC((uint8_t*)rxBuf, len - 2);
 	uint16_t rCrc = (uint8_t)rxBuf[len - 2] | ((uint8_t)rxBuf[len - 1] << 8);
-	if (cCrc != rCrc) {
-		error_flag = 1;
-		++_consec_fail;   // CRC 錯也算通訊失敗 — 同樣不該霸佔 bus
-		if (!_fast_fail_noted || probe) LOG_ERR(_log_tag, "CRC error (連續失敗 %d 次)", _consec_fail);
-		return true;
-	}
+	if (cCrc != rCrc)                            // 結構對但位元被打壞 = 真的 CRC 錯
+		return fail_with("CRC", (int)cCrc, (int)rCrc);
 
 	if (_fast_fail_noted) {
 		LOG_INF(_log_tag, "通訊恢復（先前連續失敗 %d 次）— 回到正常 timeout %dms",

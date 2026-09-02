@@ -99,7 +99,28 @@ public:
 
     //=========== read ===========
 
-    // CH1 reading as raw int32 from register 0x0A00 (the left/right slave only uses CH1).
+    // 🔴 [2026-09-01] 通道選擇（1 或 2）。**預設 1，不呼叫就完全維持舊行為。**
+    //
+    // 沿革：原本左右各一台 X518（`.32` 左 / `.33` 右），兩台都只用 CH1，所以驅動
+    // 通篇寫死 CH1。2026-09-01 per user **移除一台，剩下的 `.33` 一台接兩個通道：
+    // CH1 = 右、CH2 = 左**。兩個 DSZL_107 物件共用同一條 TCP_client，靠本設定分流。
+    //
+    // 📌 為什麼保留兩個物件而不是改用單物件 + get_both_long()：每個物件各自持有
+    //    **獨立的 scale、錯誤計數、last-valid 快取、@L/@R log 標記**，而上層的
+    //    read_tensions() / cmd_tension / 歸零 / 張力安全檢查全都建立在左右對稱結構上。
+    //    而且左右**幾乎必然需要不同 scale**（2026-09-01 實測兩側張力差 2.4 倍），
+    //    那個結構正是要保留的東西。
+    //
+    // ⚠️ **單點故障**：兩側張力現在來自同一台裝置，它一掛 `tension_valid=0`，
+    //    **左右過載保護同時失效**。先前一台壞只影響一側。
+    // ⚠️ **X518 只允許一條 TCP 連線**：外部探測工具必須先停吊機程式，否則一律被拒絕
+    //    （2026-09-01 踩過：ping 通但 502 拒連，差點誤判成裝置沒起來）。
+    void set_channel(int ch) { channel_ = (ch == 2) ? 2 : 1; }
+    int  get_channel() const { return channel_; }
+
+    // 讀值暫存器：CH1 = 0x0A00、CH2 = 0x0A02（與 get_both_long 一次讀 4 個暫存器一致）。
+    // 原註解寫「the left/right slave only uses CH1」，2026-09-01 起不再成立。
+    // CH1 reading as raw int32 from register 0x0A00 （實際讀的通道由 set_channel 決定）。
     bool get_tension_long(int32_t& outValue);
 
     // CH1 reading converted to kg via current scale factor (graceful degradation:
@@ -117,6 +138,10 @@ public:
     //   value = 7 -> zero all channels
     // NOTE: zero only affects RAM. To persist across X518 power-cycle, call
     // save_params() after zeroing.
+    // 🔴 [2026-09-01] 依 set_channel() 的設定歸零對應通道。**呼叫端一律用這支**，
+    // 不要再直接呼叫 do_zero_ch1() —— 那會讓「左側」物件去歸零右側的通道。
+    bool do_zero();
+
     bool do_zero_ch1();
     bool do_zero_ch2();
     bool do_zero_all();
@@ -172,6 +197,8 @@ private:
     /***********************
      * 換算 / 容錯狀態
      ***********************/
+    uint8_t     channel_ = 1;  // [2026-09-01] 1 或 2，見 set_channel()
+
     double scaleToKg;          // raw * scaleToKg = kg (default 0.01)
     double lastValidKg;
     int    errorCount;

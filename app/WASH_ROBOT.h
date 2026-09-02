@@ -153,6 +153,11 @@ public:
     std::string cmd_pwm_set(int ch, int hz, int control, double duty_pct);
     std::string cmd_pwm_save();
     std::string cmd_pwm_status();
+    //   cmd_pwm_restart: 送模組重啟命令（reg 0xFF00=0x0001）。🔴 [2026-09-02] 新增。
+    //     這是 FC 0x06 的 8-byte 短幀 —— 在「長幀送不進模組」的故障下
+    //     （2026-09-02 現場：pwm set 全滅於 FC 0x10 的頻率寫入，而短幀讀取偶爾成功），
+    //     它可能是唯一還遞得進去的命令。模組重啟後不一定回應，故指令會自行複查版本號。
+    std::string cmd_pwm_restart();
     std::string cmd_water_pump(bool on);                 // water tank pump (PQW CH6)
     std::string cmd_water_inlet(bool on);                // water inlet ball valve [2026-06-05 控制權移到 crane PQW (.34 slave 12 CH4)]
     std::string cmd_water_level();                       // XKC-Y25 一次性讀取水位 (2026-06-06)
@@ -161,7 +166,15 @@ public:
     //   extend_raw  = 🆕 2026-09-01 推到預設脈衝就停，**不驗真空度**。
     //                 現場條件：有些玻璃面有縫隙，吸盤落在縫上本來就吸不住，
     //                 尋封在那種面上是徒勞且會把推桿推到接近行程極限。
-    std::string cmd_pusher(const std::string& group, const std::string& pos);
+    // 🔴 [2026-09-02] `extend_raw` 新增可選的公分參數（預設 0 ＝ 沿用各 slave 的
+    // 預設脈衝，行為與先前逐位元相同）。
+    // 動機：校正牆距時需要把四顆推到任意距離當幾何基準，而先前唯一的辦法是改
+    // `PUSHER_EXTEND_FEET_PULSE` —— 那個常數是**步伐流程與週期測試共用**的，
+    // 改它等於靜默地把機器日常清洗的站位也一起改掉。
+    // 這裡採累加式（見 CLAUDE.md 介面契約）：加參數、不動既有行為。
+    // ⚠️ 上限 20cm ＝ SMC LEYG25 額定行程 200mm（見本檔標定段證據 5）。
+    //    先前一度寫 16cm，那是誤把某次 extend 尋封的停止點當成機構極限。
+    std::string cmd_pusher(const std::string& group, const std::string& pos, double cm = 0.0);
     // [2026-09-01 per user] 單獨執行同步步伐的 IMU 差動校平（見 .cpp 的說明）。
     std::string cmd_imu_level();
     std::string cmd_zdt_pusher(int slave, const std::string& action);   // single-slave manual extend/retract (slave 1..9)
@@ -871,7 +884,70 @@ private:
     // 📌 2026-08-29 順帶更正：下面原本的註解寫著「— separate from
     //    ARM_CLEAN_WALL_MM(330)」，那在 2026-07-24 寫下時是對的，但那個常數
     //    後來一路調到 400，註解卻沒跟著動 —— 讀的人會以為兩者現在差 70mm。
-    static constexpr int ARM_WALL_MM_DEFAULT = 400;  // 2026-08-28 per user: 380→400；2026-07-27: 360→380
+    // 🔴 [2026-09-02] 400 → 380（**退回 2026-08-28 那次的調整**）。
+    //
+    // 當日以「手動壓貼 + 讀編碼器角度」直接量到三個狀態（M1 disable、tau≈0 純幾何，
+    // 8 次讀值離散 0.0000）：
+    //     剛碰到（幾何牆距）  θ=0.5018 → 285.3 mm
+    //     **真正貼平（工作點）θ=0.5613 → 304.2 mm**   ← per user 目視確認貼平
+    //     工具壓縮行程                    18.9 mm
+    // ⚠️ 量法要點：**disable 之後 `Get_Position()` 回傳凍結快取**，每次讀取前必須送
+    //    `M1 MIT 0 0 0 0 0` 觸發 CAN 交換刷新（`main_api.h` 對 M2 記載過同一手法）。
+    //
+    // 實測 `arm_deploy 376` 落在 θ=0.5598，距貼平僅 **−1.2 mm**；依當日量到的下垂斜率
+    // 反推「剛好貼平」對應 **wall_mm ≈ 378** ⇒ 取回 380。
+    //
+    // 🔴 **為什麼 400 是錯的**：手臂落點系統性短於命令角度（下垂，成因見下），
+    // 而 330→360→380→400 這四次調高，本質是**用幾何參數去補償控制誤差**。
+    // 380 已經補到位（378），400 再多推 0.07 rad ⇒ 過壓，且 DEPLOY 永遠回
+    // `ERR touch_wall did not converge`。
+    //
+    // ⚠️ **380 不是幾何牆距（那是 285），是「補償下垂後剛好貼平」的值。**
+    // 它只在目前牆距與負載下成立；換高度、換工具、或修好下垂之後都必須重設。
+    // 🔴 **下垂的根因**：重力前饋在工作區高估約 25%（0.43~0.47 雙向掃描實測，
+    //    摩擦已相消），使 `kp*err` 必須抵銷多出來的前饋才能平衡 → 落點短少。
+    //    治本是重擬 `M1_GRAVITY_K`/`M1_GRAVITY_PHASE_RAD`（需 0.75~0.85 掃描空間）。
+    //    在那之前，DEPLOY 的回傳值與 `verify_arm_deploy_` 的障礙偵測都不可信
+    //    —— 它每次都停得比預期早，真的撞到障礙時反而看不出來。
+    // 🔴 [2026-09-02 定案] **530** —— per user 在機上逐步加壓、目視確認「完全貼合」後定的。
+    //
+    // 沿革與當日的兩次改動：400 →（實測反推）380 →（幾何模型修正後重測）**530**。
+    // 380 那一步是基於**舊的錯誤幾何**（ARM_LENGTH=320）反推的；同日查出 ARM_LENGTH
+    // 實測應為 490（cleaning_arm/main_api.h 有三點量測），換算全變，故重測。
+    //
+    // 當日在「四顆推桿 extend_raw 10cm + 吸盤吸附平整玻璃」這個站位上實測：
+    //   wall_mm  壓入量(相對手壓貼平角 θ=0.5419)  靜置 tau
+    //     440        +46.2 mm                      3.86 Nm
+    //     470        +52.0 mm                      8.55 Nm
+    //     510        +61.2 mm                     14.99 Nm
+    //     530        +63.0 mm                     19.0  Nm   ← 定案
+    // 🔴 **530 之後進入剛度牆**：每 +1mm 壓入的代價由 0.7 Nm 跳到 2.2 Nm，
+    //    再往上換到的主要是「力」不是「貼合」。這是收手點的依據，不是隨意取值。
+    //
+    // ⚠️ **為什麼壓入量遠大於工具行程（手壓量到 first-touch→flat 僅 18.9mm）**：
+    //    工具裝在旋轉手臂末端，**M1 的角度同時決定滾筒相對玻璃的傾角**。
+    //    per user 現場觀察：滾筒上端先貼、下端有縫，必須再推進讓它轉正才會平行。
+    //    所以「手壓貼平」量到的是輕觸姿態，不是工作姿態 —— 手推不到工作壓力。
+    //
+    // ⚠️ 這仍是**補償值不是幾何值**：同日量到的真實幾何牆距（推桿10cm站位）約 325。
+    //    差距來自下垂（重力前饋在工作區高估約 25%）。**修好重力模型後必須重設此值。**
+    // ⚠️ 也與 `hold_kp=90` 綁定（cleaning_arm/main_api.cpp，當日由 34 調上來）。改一個就要重測另一個。
+    // 📌 吸盤在 19 Nm 反作用力下毫無衰退（四顆全程 −66~−68 kPa），不是限制因素。
+    // 🔴 [2026-09-02 最終] 530 → **520**：重力模型修正後重測的值。
+    //   `arm_deploy 520` → θ=0.6750、tau=+18.90 Nm，與 per user 認可的貼合姿態
+    //   （θ=0.6731、tau≈19.0）差 0.0019 rad ≈ 0.9mm。
+    //
+    // 📌 **為什麼修好下垂之後這個值幾乎沒變（530→520）**：
+    //   `TOUCHWALL` 是對「可壓縮接觸」下的**位置**命令，壓力來自
+    //   `kp × (命令角 − 實際角)`。目標若設在幾何真值（388），誤差趨近零 ⇒ **沒有壓力**
+    //   （實測 `arm_deploy 388` 落在 0.5941、tau 僅 +0.34 Nm ＝ 輕觸）。
+    //   ⇒ **超量命令是產生壓力的唯一方式，這不是誤用參數。**
+    //   （當日稍早我把「wall_mm 被當成力道旋鈕」寫成錯誤，那個說法要修正。）
+    //
+    // 🔴 **真正被修好的是自由空間的準確度**：下垂由 0.0695 rad 降到 **0.0025~0.0060**
+    //   （重力模型 K 由 20.87 改為實測的 16.09）⇒ 手臂碰不到東西時，**命令角＝實際角**，
+    //   `arm_deploy` 首次回傳 `OK`。**障礙偵測需要的正是這一段。**
+    static constexpr int ARM_WALL_MM_DEFAULT = 520;  // 2026-09-02 最終；當日 400→380→530→520
 
     // [2026-07-24 per user] LEFT/RIGHT deploy wall_mm for this sync-step sweep.
     // 建立時刻意與 ARM_CLEAN_WALL_MM 分開（當時 330 vs 360）；2026-08-29 起兩者
@@ -1146,6 +1222,13 @@ private:
     // (網頁「收繩軟停張力」, same knob step_up/step_down retract uses for its soft
     // tension stop) — one knob covers both. The constant below is a FALLBACK only,
     // used when the crane status read / parse fails.
+    // 🔴 [2026-09-01] 這個值是**校正前**的單位。DSZL-107 於 2026-09-01 完成刻度校正
+    // （4.16 kg 已知重量），同一實體張力的讀數變成舊值的 2.1~2.4 倍 → 10 kg 在新單位
+    // 下大約要寫成 21~24 kg。目前不動，因為使用它的整段 attach pay_out 自 2026-08-27
+    // 起是 `#if 0`（見 wash_robot_commands.cpp）＝死碼。
+    // ⚠️ **把那段 `#if 0` 改回 `#if 1` 之前，先把這個值換算到新單位** ——
+    //    否則 fallback 目標會比預期低一半以上，pay_out 會一路放到 ATTACH_PAYOUT_MAX_CM
+    //    的上限才停（多放約 50 cm 的鬆繩），而且不會有任何錯誤訊息。
     static constexpr double ATTACH_PAYOUT_TARGET_KG  = 10.0;  // fallback target (kg) — runtime value comes from crane status
     static constexpr int    ATTACH_PAYOUT_MAX_CM     = 50;    // safety cap — abort pay_out if tension never reaches target
     static constexpr int    ATTACH_PAYOUT_SETTLE_MS  = 300;   // dwell after each 1cm pay_out for tension to settle
@@ -1599,7 +1682,16 @@ private:
     //   usable    = ARM_ROPE_PROTECT_WALL_MM - total_ext
     //   expected  = ARM_M1_VERTICAL_OFF_RAD + asin(usable / ARM_M1_LENGTH_MM)
     // If these change in motor_api (main_api.h), update mirrors here too.
-    static constexpr float ARM_M1_LENGTH_MM        = 320.0f;
+    // 🔴 [2026-09-02] 320 → 490。**這是 `cleaning_arm/main_api.h` 的 ARM_LENGTH_MM 的複本。**
+    //
+    // 兩份必須同步，但**不能真的共用** —— `cleaning_arm` 是刻意的獨立服務邊界
+    // （見 CLAUDE.md「自成一格：不使用 user_lib，自建 socket 層」）。
+    // 🔴 **今天就親身示範了分岔**：2026-09-02 在 cleaning_arm 側把臂長由 320 改成 490
+    //    （三點實測擬合，殘差 <0.1mm），而這一份**沒有跟著改**，直到查 verify_arm_deploy_
+    //    才發現。本檔 CUP_SLAVE_FIRST 的註解早就寫過同一條教訓：
+    //    「同一個範圍寫在兩個地方 = 遲早分岔」。
+    // ⚠️ **改任何一份，另一份也要改。** 量測依據見 cleaning_arm/main_api.h 的 ARM_LENGTH_MM。
+    static constexpr float ARM_M1_LENGTH_MM        = 490.0f;   // 2026-09-02: 320→490（與 cleaning_arm 同步）
     static constexpr float ARM_M1_PASSIVE_EXT_MM   = 86.46f;
     static constexpr float ARM_M1_VERTICAL_OFF_RAD = 0.38f;
     static constexpr float ARM_M2_TOOL_CENTER_MM   = 160.00f;

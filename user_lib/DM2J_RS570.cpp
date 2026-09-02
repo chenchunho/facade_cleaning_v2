@@ -24,7 +24,7 @@ DM2J_RS570::~DM2J_RS570()
 	}
 }
 
-//=========== utility: receive + validate one RTU frame ===========
+//=========== utility: validate one RTU frame ===========
 //
 // [2026-08-28] Added by the driver audit. Every read site previously did
 // `receiveData(rx, 32, 200)` followed by nothing but a length check — a
@@ -34,15 +34,8 @@ DM2J_RS570::~DM2J_RS570()
 // Verifies the RTU CRC and the slave id. Safe for every call site that uses
 // it — the one broadcast path (writeSingle_sync, slave 0x00) goes through
 // sendRecv() instead, so it is unaffected by the address check.
-int DM2J_RS570::recv_frame_(uint8_t* rx, int min_len)
+int DM2J_RS570::validate_frame_(const uint8_t* rx, int len, int min_len)
 {
-	// [2026-08-29] Null-client guard: the constructor leaves `client` as nullptr
-	// and only init() sets it, so a call on an un-init'd (or failed-init)
-	// instance dereferences nullptr and takes the whole process down.
-	// Application layers already gate these calls, but that is the caller
-	// remembering to be careful — the driver must not be a landmine.
-	if (!client) return -1;
-	int len = client->receiveData((char*)rx, 32, 200);
 	if (len < min_len) return -1;
 
 	const uint16_t rx_crc = (uint16_t)rx[len - 2] | ((uint16_t)rx[len - 1] << 8);
@@ -53,10 +46,10 @@ int DM2J_RS570::recv_frame_(uint8_t* rx, int min_len)
 
 	// A reply addressed to a different slave carries a perfectly valid CRC, so
 	// the check above cannot catch it. This matters here: the arm rail is
-	// slave 14 on cli_22_, sharing the bus with JC100 5-8 / XKC 13 / DY500
-	// 10-11, and bus contention on that gateway is a known, logged symptom.
-	// Safe to check at this level — the broadcast path (writeSingle_sync,
-	// slave 0x00) goes through sendRecv(), not here.
+	// slave 14 on cli_20_ (moved back from cli_22_ on 2026-08-28), sharing the
+	// bus with ZDT pushers 5-8 and PQW 12, and bus contention on that gateway
+	// is a known, logged symptom. Safe to check at this level — the broadcast
+	// path (writeSingle_sync, slave 0x00) goes through sendRecv(), not here.
 	if (rx[0] != (uint8_t)slaveID) {
 		LOG_ERR(_log_tag, "reply slave %d != %d — frame dropped",
 		        (int)rx[0], (int)slaveID);
@@ -71,6 +64,28 @@ int DM2J_RS570::recv_frame_(uint8_t* rx, int min_len)
 		return -1;
 	}
 	return len;
+}
+
+//=========== utility: atomic transaction ===========
+//
+// 🔴 [2026-09-01] 見標頭的完整說明。取代原本的 drainRx + sendData + recv_frame_
+// 三段式 —— 那個組合在 send 與 recv 之間會放開 socket_mtx，共用匯流排的別條
+// 執行緒可以把自己的交易插進來造成回覆錯位，而且抓不到「在 recv 窗口內才抵達」
+// 的遲到回覆（＝永久失步，只有重連救得回來）。
+int DM2J_RS570::txn_frame_(const uint8_t* tx, int tx_len, uint8_t* rx, int rx_size, int min_len,
+                           int recv_timeout_ms)
+{
+	// [2026-08-29] Null-client guard: the constructor leaves `client` as nullptr
+	// and only init() sets it, so a call on an un-init'd (or failed-init)
+	// instance dereferences nullptr and takes the whole process down.
+	// Application layers already gate these calls, but that is the caller
+	// remembering to be careful — the driver must not be a landmine.
+	if (!client) return -1;
+
+	const int len = client->sendAndReceive((const char*)tx, tx_len,
+	                                       (char*)rx, rx_size, 200, recv_timeout_ms);
+	if (len <= 0) return -1;
+	return validate_frame_(rx, len, min_len);
 }
 
 bool DM2J_RS570::init(const std::string& ip, int port, int ID, bool debug)
@@ -531,11 +546,8 @@ bool DM2J_RS570::read_version(uint16_t& ver1, uint16_t& ver2)
 	tx[6] = crc & 0xFF;
 	tx[7] = crc >> 8;
 
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	client->sendData((char*)tx, 8, 200);
-
 	uint8_t rx[32];
-	int len = recv_frame_(rx, 9);
+	int len = txn_frame_(tx, 8, rx, sizeof(rx), 9);
 	if (len < 0) return true;
 
 	ver1 = (rx[3] << 8) | rx[4];
@@ -570,11 +582,8 @@ bool DM2J_RS570::read_status(uint32_t& status)
 
 	LOG_HEX(_log_tag, "TX read_status", tx, 8);
 
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	client->sendData((char*)tx, 8, 200);
-
 	uint8_t rx[32] = { 0 };
-	int len = recv_frame_(rx, 7);   // slave+fn+bc+2data+2crc
+	int len = txn_frame_(tx, 8, rx, sizeof(rx), 7);   // slave+fn+bc+2data+2crc
 	if (len < 0) return true;
 
 	LOG_HEX(_log_tag, "RX read_status", rx, len);
@@ -614,11 +623,8 @@ bool DM2J_RS570::read_error_code(uint16_t& errCode)
 	tx[6] = crc & 0xFF;
 	tx[7] = crc >> 8;
 
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	client->sendData((char*)tx, 8, 200);
-
 	uint8_t rx[32] = { 0 };
-	int len = recv_frame_(rx, 7);
+	int len = txn_frame_(tx, 8, rx, sizeof(rx), 7);
 	if (len < 0) return true;
 
 	errCode = (rx[3] << 8) | rx[4];
@@ -641,11 +647,8 @@ bool DM2J_RS570::read_save_status(uint16_t& saveStatus)
 	tx[6] = crc & 0xFF;
 	tx[7] = crc >> 8;
 
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	client->sendData((char*)tx, 8, 200);
-
 	uint8_t rx[32] = { 0 };
-	int len = recv_frame_(rx, 7);
+	int len = txn_frame_(tx, 8, rx, sizeof(rx), 7);
 	if (len < 0) return true;
 
 	saveStatus = (rx[3] << 8) | rx[4];
@@ -702,11 +705,8 @@ bool DM2J_RS570::read_motor_position(int32_t& pos)
 
 	LOG_HEX(_log_tag, "TX read_pos", tx, 8);
 
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	client->sendData((char*)tx, 8, 200);
-
 	uint8_t rx[32];
-	int len = recv_frame_(rx, 9);
+	int len = txn_frame_(tx, 8, rx, sizeof(rx), 9);
 	if (len < 0) return true;
 
 	LOG_HEX(_log_tag, "RX read_pos", rx, len);
@@ -736,11 +736,11 @@ bool DM2J_RS570::read_pulse_per_rev(uint16_t& ppr)
 
 	LOG_HEX(_log_tag, "TX read_ppr", tx, 8);
 
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	client->sendData((char*)tx, 8, 200);
-	std::this_thread::sleep_for(std::chrono::milliseconds(200));
 	uint8_t rx[32];
-	int len = recv_frame_(rx, 7);
+	// [2026-09-01] recv 逾時 400ms —— 原本是「send + sleep 200ms + recv(200ms)」，
+	// 合成原子交易後 sleep 沒有容身之處（它夾在 send 與 recv 中間）。改用等值的
+	// 總等待時間，不縮短這一站原有的寬限。
+	int len = txn_frame_(tx, 8, rx, sizeof(rx), 7, 400);
 	if (len < 0) return true;
 
 	LOG_HEX(_log_tag, "RX read_ppr", rx, len);
@@ -849,12 +849,12 @@ bool DM2J_RS570::sendRecv(const std::vector<uint8_t>& tx, std::vector<uint8_t>& 
 {
 	if (!client) return true;
 
-	client->drainRx();   // [2026-09-01] 交易開頭排空：無此行則一筆遲到回覆會造成永久失步（見 TCP_client::drainRx 說明）
-	if (!client->sendData((const char*)tx.data(), tx.size(), 50))
-		return true;
-
+	// 🔴 [2026-09-01] 原子交易（見 txn_frame_ 的說明）。這條路徑同樣走共用匯流排，
+	// 原本的 drainRx + sendData + receiveData 三段式在 send 與 recv 之間會放開
+	// socket_mtx。逾時沿用原值（send 50 / recv 50）。
 	uint8_t buf[256] = { 0 };
-	int r = client->receiveData((char*)buf, sizeof(buf), 50);
+	const int r = client->sendAndReceive((const char*)tx.data(), (int)tx.size(),
+	                                     (char*)buf, sizeof(buf), 50, 50);
 	if (r <= 0) return true;
 
 	// [2026-08-28] CRC check added by the driver audit. This path had no

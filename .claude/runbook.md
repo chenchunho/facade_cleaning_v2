@@ -311,7 +311,25 @@ ssh user@192.168.5.25 'who; ss -ltn | grep -E ":(5002|8080)"; ps -eo pid,etime,c
 🔴 **判斷程式在不在用 `ss -ltn` 看埠或 `ps -eo comm` 比執行檔名，絕不用 `pkill -f`／`pgrep -f`**
 ——它會比中執行它的那條 SSH 指令自己（2026-08-27 踩過）。
 
-### 1. 建置（在 Pi 上，另開目錄，不碰現有部署）
+### 1. 建置（在 Pi 上）
+
+> 🔴🔴 **2026-09-01 更正：本節標題原本寫「另開目錄，不碰現有部署」——那是錯的。**
+> 實測兩台的程式**就是直接跑在 `~/bringup/` 底下**
+>（`/proc/<pid>/exe` → `~/bringup/crane_control_PI.out`／`~/bringup/facade_cleaning_v2.out`，
+> `cwd` 也是 `~/bringup`）。所以下面這幾條 `g++ -o ...` **會覆蓋掉正在服役的執行檔**。
+>
+> 執行中的行程不受影響（它握著舊 inode，`ls -l /proc/<pid>/exe` 會顯示 `(deleted)`），
+> 但**下一次啟動就是新版**——不管那次啟動是計畫內的還是意外的。
+>
+> 🔴 **因此建置前先留回滾點**，而且只能在舊行程還活著時留（inode 隨行程結束消失）：
+> ```
+> cp /proc/<pid>/exe ~/bringup/<name>.prevN
+> ```
+> 既有慣例：吊機 `crane_control_PI.prevN`、本體 `facade_cleaning_v2.prevN`。
+>
+> 📌 **這條的副作用是好的也是壞的**：好處是「改完就等於部署完」，壞處是
+> **你以為只是編一下，其實已經換掉了機器下次會跑的程式**。2026-09-01 就是這樣
+> 在無意間完成部署的——所幸方向是對的（新版才是要的），但那是運氣不是設計。
 
 ```
 rsync -a --delete <repo>/{common,config,mechanism,transport,user_lib,Crane_control_PI} user@192.168.5.25:~/bringup/

@@ -118,7 +118,24 @@ private:
 
 	std::vector<bool> parseReadResponse(const std::vector<uint8_t>& resp);
 
-	std::vector<uint8_t> readEcho();
+	// 🔴 [2026-09-01] 原子交易：drain → send → recv 全程握住 TCP_client 的
+	// socket_mtx，取代原本的「drainRx() + sendData() + readEcho()」三段式。
+	//
+	// 為什麼非改不可：本模組（slave 12）與 ZDT 推桿 5~8、DM2J 上滑台 14 共用
+	// `.20` 這條匯流排，而三段式的鎖在 send 與 recv 之間是放開的 → 別條執行緒
+	// 可以把自己的交易插進來，兩邊的回覆在核心緩衝區裡錯位。08-28 補的
+	// `drainRx()` 只清得掉已經躺在緩衝區的位元組，抓不到「在 recv 窗口內才抵達」
+	// 的遲到回覆 —— 那一筆會被下一次交易讀走，從此永久落後一筆。
+	//
+	// 附帶效益：納入 TCP_client 的「連續 10 次接收逾時 → 主動斷線」守衛
+	//（只掛在原子交易 API 上）。該守衛的計數每條連線共用但成功一次就歸零。
+	//
+	// ⚠️ 回覆**不做驗證**，維持原本 readEcho() 的語意：PQW 韌體的 echo 格式非標準
+	// （TX `... 05 ...` 會被回成 RX `... 00 ...`），歷史上拿它做驗證造成過
+	// step_down 中途卡死（見 controlRelay() 的註解）。這裡只負責把 bytes 取回來。
+	// 逾時沿用各站點原本的數字（recv 一律 200，send 由呼叫端指定）。
+	// 回傳空 vector = 送出失敗或無回覆。
+	std::vector<uint8_t> txn(const std::vector<uint8_t>& cmd, int send_timeout_ms);
 	void printHex(const std::vector<uint8_t>& data, const std::string& tag);
 
 	bool checkAllStatus(bool target);

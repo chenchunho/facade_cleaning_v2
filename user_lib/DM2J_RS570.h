@@ -121,11 +121,32 @@ private:
 	double  pulse_to_cm_(int32_t pulse, uint16_t ppr) const;
 	bool    travel_reject_(double cm, const char* what);   // true = 超出範圍（已記錄）
 
-	// [2026-08-28] Single receive path for all six read sites: reads into a
-	// 32-byte frame, enforces a minimum length and verifies the RTU CRC.
-	// Returns the frame length, or -1 if nothing usable arrived. Private —
+	// [2026-08-28] Single receive path for all six read sites: enforces a
+	// minimum length, verifies the RTU CRC, the slave id and the function code.
+	// Returns the frame length, or -1 if the frame is unusable. Private —
 	// no public API change (see CLAUDE.md "模組邊界").
-	int recv_frame_(uint8_t* rx, int min_len);
+	int validate_frame_(const uint8_t* rx, int len, int min_len);
+
+	// 🔴 [2026-09-01] 原子交易：drain → send → recv 全程握住 TCP_client 的
+	// socket_mtx，取代原本的「drainRx() + sendData() + recv_frame_()」三段式。
+	//
+	// 為什麼非改不可：`.20` 這條匯流排同時掛著 ZDT 推桿 5~8、PQW 繼電器 12 與
+	// 本驅動（上滑台 slave 14），而 app 層的 `zdt_bus_mtx_` 只有 ZDT 的群組操作在拿
+	// —— DM2J 完全不拿那把鎖。三段式的鎖在 send 與 recv 之間是放開的，所以別的
+	// 執行緒可以把自己的 send 插進來，**兩邊的回覆在核心緩衝區裡就此錯位**。
+	// 08-28 補的 `drainRx()` 不夠：排空只清得掉「已經躺在緩衝區」的位元組，
+	// **抓不到在 recv 窗口內才抵達的遲到回覆** —— 那一筆會被下一次交易讀走，
+	// 從此永久落後一筆，只有重連救得回來（2026-09-01 `.20` 實測卡死，Recv-Q 持續非 0）。
+	//
+	// 附帶效益：本驅動自動納入 TCP_client 的「連續 10 次接收逾時 → 主動斷線」守衛
+	// ——那個守衛只掛在原子交易 API 上，走裸對的驅動卡死時沒有任何機制救得回來。
+	// ⚠️ 該守衛的計數是**每條連線**共用的，但成功一次就歸零；同一條匯流排上只要
+	// 還有別的裝置在正常交易，單一裝置故障不會把整條 bus 扯斷。
+	//
+	// 逾時沿用各站點原本的數字（send 200 / recv 200），不趁機改時序。
+	// 回傳 frame 長度，-1 = 失敗（送出失敗／無回覆／驗證不過）。
+	int txn_frame_(const uint8_t* tx, int tx_len, uint8_t* rx, int rx_size, int min_len,
+	               int recv_timeout_ms = 200);
 	bool sendRecv(const std::vector<uint8_t>& tx, std::vector<uint8_t>& rx);
 
 	bool writeSingle(uint16_t reg, uint16_t value);

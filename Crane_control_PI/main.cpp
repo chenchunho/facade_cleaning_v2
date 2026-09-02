@@ -14,11 +14,16 @@
 //     slave 1 : SD76 #1     左鋼索計米
 //     slave 2 : SD76 #2     右鋼索計米
 //
-//   X518 (DSZL-107 #1) directly on switch @ 192.168.1.32 : 502
-//     Modbus TCP, internal slave/unit ID = 1, 左鋼索張力 (CH1)
-//
-//   X518 (DSZL-107 #2) directly on switch @ 192.168.1.33 : 502
-//     Modbus TCP, internal slave/unit ID = 1, 右鋼索張力 (CH1)
+//   X518 (DSZL-107) directly on switch @ 192.168.1.33 : 502
+//     Modbus TCP, internal slave/unit ID = 1
+//       CH1 (0x0A00) = 右鋼索張力
+//       CH2 (0x0A02) = 左鋼索張力
+//     🔴 [2026-09-01 per user] 原本左右各一台（.32 左 / .33 右，兩台都只用 CH1），
+//        移除一台之後改成**剩下的 .33 一台接兩個通道**。.32 已不存在。
+//     ⚠️ **單點故障**：兩側張力來自同一台，它一掛 tension_valid=0，
+//        **左右過載保護同時失效**（先前一台壞只影響一側）。
+//     ⚠️ **X518 只允許一條 TCP 連線** —— 外部探測工具（Linux_test/x518_*.py）
+//        必須先停本程式，否則一律被拒絕（2026-09-01 踩過：ping 通但 502 拒連）。
 //
 // Topology rationale (2026-05-15 re-layout): control bus and sensing bus
 // physically split — USR_A carries ONLY inverter writes (SE3 left + right),
@@ -62,6 +67,9 @@
 //   set_tension_diff_max_kg <kg>      # motion_rope 左右張力差硬警報
 //   set_length_diff_max_cm <cm>       # motion_rope 左右繩長差硬警報（2026-08-31 新增）
 //   set_retract_tension_stop_kg <kg>  # retract 收繩軟停張力（到了當完成、非錯誤）
+//   set_fine_adjust_level_diff <cm>   # fine_adjust 的「水平參考偏移」＝roll≈0 時的 L-R
+//                                     # （2026-09-01 新增；預設 0 ＝ 舊行為。重心偏左 →
+//                                     #  水平時兩繩不等長，見該常數說明。計米器歸零後要重量）
 //   middle_set <rpm> <pay|retract|stop>
 //   zero_meters <ground|top>
 //   home_status
@@ -171,8 +179,9 @@ static std::string ts_now();
 static constexpr const char* USR_A_IP      = "192.168.1.30";   // USR gateway: SE3 left only
 static constexpr const char* USR_B_IP      = "192.168.1.31";   // USR gateway: SE3 right only
 static constexpr const char* USR_M_IP      = "192.168.1.34";   // USR gateway: SD76 meters (sensing bus)
-static constexpr const char* DSZL_LEFT_IP  = "192.168.1.32";   // X518 direct: left tension
-static constexpr const char* DSZL_RIGHT_IP = "192.168.1.33";   // X518 direct: right tension
+// [2026-09-01] 單一台 X518 服務兩個通道（CH1=右 / CH2=左）。舊的 DSZL_LEFT_IP(.32)
+// 已隨硬體移除；不要再新增第二個 IP 常數，兩側共用 cli_C 這一條連線。
+static constexpr const char* DSZL_IP        = "192.168.1.33";  // X518 direct: 兩側張力（CH1=右, CH2=左）
 static constexpr int         USR_PORT      = 4001;             // USR-TCP232 transparent port
 static constexpr int         DSZL_PORT     = 502;              // X518 native Modbus TCP port
 static constexpr int         CMD_PORT      = 5002;
@@ -193,8 +202,9 @@ static constexpr int INVERTER_SLAVE     = 3;   // on USR_A — CLV900 middle win
 static constexpr int METER_LEFT_SLAVE   = 1;   // on USR_M (.34)
 static constexpr int METER_RIGHT_SLAVE  = 2;   // on USR_M (.34)
 
-static constexpr int DSZL_LEFT_SLAVE    = 1;   // X518 internal default unit ID
-static constexpr int DSZL_RIGHT_SLAVE   = 1;   // X518 internal default unit ID
+static constexpr int DSZL_SLAVE          = 1;   // X518 internal default unit ID（單一台，兩通道共用）
+static constexpr int DSZL_CH_RIGHT       = 1;   // [2026-09-01 per user] CH1 = 右
+static constexpr int DSZL_CH_LEFT        = 2;   // [2026-09-01 per user] CH2 = 左
 
 // [2026-06-05] Water inlet ball valve relay — moved from washrobot side.
 // Shares cli_M (.34) bus with SD76 meters. PQW slave 12, CH4 = ball valve.
@@ -383,6 +393,32 @@ static constexpr int    FINE_ADJUST_TOLERANCE_CM = 2;
 // 實例：2026-09-01 retract 40cm 收在 L=171 R=169，fine_adjust 判定
 // "diff=2 — within ±2, stopping both" 就不對齊了 → 終點 roll −1.63°（出規格）。
 static std::atomic<int> g_fine_adjust_diff_tol_cm {1};   // 左右差容許（cm）≈ 傾斜度數
+
+// 🔴 [2026-09-01] **水平參考偏移：機器 roll≈0 時的 `length_left - length_right`。**
+//
+// fine_adjust 原本把「左右讀值相等」當成收斂目標，但那個目標與「機器水平」沒有
+// 定義好的關係，原因有兩層、彼此獨立：
+//
+//   ① **這台機器重心偏左** —— 2026-09-01 實測：歪 −3.35° 時張力 46.9/45.9（1.02×），
+//      調到水平 +0.92° 時 59.7/34.6（1.73×）。**機器要水平，兩條繩就不等長**
+//      （當時量到水平約對應 3cm 的繩長差，換算 0.85°/cm）。
+//   ② **兩支 SD76 的零點各自獨立** —— 它們之間的固定偏移與繩長無關。
+//      2026-08-31 靜止不動時 left=-249 / right=-236 就已經差 13cm；
+//      `length_diff_max_cm` 那條守衛當天就因此改成比「本次動作的相對位移差」，
+//      **但 fine_adjust 沒有跟著改，它比的仍是絕對讀值差**。
+//
+// ⇒ 目前收斂點接近水平，是現行零點偏移剛好抵銷的結果；**任何一次計米器歸零
+//    都會靜默地移動這個目標**，而且不會有任何徵兆。
+//
+// 本值讓收斂目標變成 `L - R = 本值`（而不是寫死的 0）。
+// 🔴 **預設 0 ＝ 與先前行為逐位元相同**，所以這個機制上線本身不改變任何事；
+//    真正的值必須實機量一次（把機器調到 roll≈0，讀當下的 L−R），
+//    可用 `set_fine_adjust_level_diff <cm>` 執行期設定，不需要重編。
+// ⚠️ **每次歸零計米器之後都要重量**——它描述的是「這組零點下水平長什麼樣」，
+//    不是機器的固有性質。
+// ⚠️ 這是**症狀層**的處置。重心偏左的根因處置（配重／改吊點／接受並補償）
+//    是另一件事，見 work_log 待辦表。
+static std::atomic<int> g_fine_adjust_level_diff_cm {0};
 static constexpr double FINE_ADJUST_HZ_DEFAULT   = 10.0;  // 10→15→10 (2026-07-14: 15Hz 尾段雖快，但過衝大→IMU 微調 pass 變多、net 沒賺，改回 10。set_fine_adjust_hz 仍可 live 調)
 static constexpr int    FINE_ADJUST_TIMEOUT_MS   = 30000;
 static std::atomic<double> g_fine_adjust_hz {FINE_ADJUST_HZ_DEFAULT};
@@ -460,8 +496,21 @@ static constexpr int HEARTBEAT_CHECK_MS         = 250;
 static constexpr double TENSION_MIN_KG          = 0.5;   // (currently UNUSED)
 // motion_rope tension thresholds. These are only DEFAULTS — the live values are
 // the g_tension_max_kg / g_tension_diff_max_kg atomics below, runtime-adjustable
-// from the web GUI (set_tension_max_kg / set_tension_diff_max_kg). DSZL-107
-// uncalibrated → re-tighten on site after scale factor validated.
+// from the web GUI (set_tension_max_kg / set_tension_diff_max_kg).
+//
+// 🔴 [2026-09-01] DSZL-107 已用 4.16 kg 已知重量完成刻度校正（見 DSZL_SCALE_LEFT /
+// DSZL_SCALE_RIGHT），kg 讀值從此有**絕對意義**。校正後同一實體負載的讀數變成
+// 舊值的 2.1~2.4 倍，所以本區塊的門檻全部要用新單位重新檢視。實測基準：
+//   整機總重 ≈ 94 kg（水平懸吊，L 59.7 / R 34.6）
+//   ⚠ 重心偏左 → 機器水平時左繩承擔約 1.7 倍，兩側**本來就不相等**。
+//
+// 🔴 **下面這兩個值 per user 2026-09-01「維持」，但校正之後它們的含意變了，接手要知道：**
+//   ① TENSION_MAX_KG_DEFAULT(100) 是「單側」門檻，而整機才 94 kg
+//      → **一條繩承擔全部重量也不會觸發**。這個 HARD alarm 現在只擋得到
+//      「單繩受力超過整機重量」的情況（卡住、被拉住），擋不到「另一條繩鬆脫」。
+//      要讓它擋得到，值必須落在 (RETRACT_TENSION_STOP_KG_DEFAULT, 94) 之間。
+//   ② TENSION_DIFF_MAX_KG_DEFAULT(50) 對上「水平時本來就有的 25 kg 差」
+//      → **正常狀態就用掉一半預算**。重心偏左的處置決定之後要一起回頭調。
 static constexpr double TENSION_MAX_KG_DEFAULT      = 100.0; // single-side overload threshold (HARD alarm)
 // Left/right imbalance check uses ABSOLUTE kg difference (was percent of avg
 // before 2026-05-08; percent at low avg is noisy and false-alarms during hold).
@@ -473,22 +522,33 @@ static constexpr double TENSION_DIFF_MAX_KG_DEFAULT = 50.0;  // L/R imbalance th
 // set_retract_tension_stop_kg / web.
 // [2026-08-28 per user] 25 → 50 kg。仍遠低於 TENSION_MAX_KG_DEFAULT(100)，
 // 符合上面「Keep this BELOW TENSION_MAX_KG」的要求。
-// ⚠ 但要留意 UP_STOP_TOTAL_KG_DEFAULT（見下方，70 kg，那是 left+right 的「總和」）：
-//   本值是「每一條繩」的門檻，兩條都收到 50 kg 時總和是 100 kg = 該門檻的兩倍。
+// ⚠ 但要留意 UP_STOP_TOTAL_KG_DEFAULT（見下方，那是 left+right 的「總和」）：
+//   本值是「每一條繩」的門檻，兩條都收到本值時總和是本值的兩倍。
 //   兩者走不同路徑（本值在 motion_rope 的 retract，UP_STOP 只在 UP hold 模式生效），
 //   目前不會互相觸發；但若之後要用手動 UP hold 承受同等張力，UP_STOP_TOTAL 必須
 //   一起往上調，否則一按就立刻 hold_all_off。
-static constexpr double RETRACT_TENSION_STOP_KG_DEFAULT = 50.0;
+//
+// 🔴 [2026-09-01] 50 → 75 kg —— **刻度校正的連鎖後果，不是調鬆安全帶**。
+//   舊值 50 是拿「未校正、偏小 2.1~2.4 倍」的讀數調出來的；校正後同一個實體張力
+//   讀成 2 倍以上，舊門檻等於憑空縮緊一半以上，**會直接擋住正常收繩**。
+//   新值取自實測：水平懸吊時單側最大 59.7 kg → 75 留約 26% 餘裕。
+//   當日是用 set_retract_tension_stop_kg 改在記憶體裡驗證的，重開程式會回到舊值
+//   ——本次常數化就是為了消除那個「重開就擋住收繩」的陷阱。
+static constexpr double RETRACT_TENSION_STOP_KG_DEFAULT = 75.0;
 
 // Hold-mode total tension threshold (sum of left+right). When any UP hold is
 // active and total exceeds this, hold_loop calls hold_all_off + EVT.
-// Placeholder — tune on site after DSZL-107 scale factor validated.
-// [2026-08-28 per user] 50 → 70 kg。仍低於「兩條繩各自收到
-// RETRACT_TENSION_STOP_KG_DEFAULT(50) 時的總和 100 kg」，所以手動 UP hold 承受
-// 同等張力時仍會先觸發 hold_all_off — 若要讓 hold 撐到跟 retract 同等張力，
-// 這個值得再往 100 靠。兩者路徑不同（本值只在 UP hold 的 hold_loop 生效，
-// RETRACT_TENSION_STOP 在 motion_rope 的 retract），不會互相觸發。
-static constexpr double UP_STOP_TOTAL_KG_DEFAULT = 70.0;
+// [2026-08-28 per user] 50 → 70 kg。
+//
+// 🔴 [2026-09-01] 70 → 130 kg —— 與 RETRACT_TENSION_STOP 同一個原因（刻度校正，
+//   見上）。**舊值 70 現在低於整機自重 94 kg，一按 UP hold 就會立刻 hold_all_off。**
+//   新值取自實測：水平懸吊總和 94.3 kg → 130 留約 38% 餘裕。
+//   仍低於「兩條繩各自收到 RETRACT_TENSION_STOP_KG_DEFAULT(75) 時的總和 150 kg」，
+//   所以手動 UP hold 承受同等張力時仍會先觸發 hold_all_off ——
+//   兩者的相對關係與 08-28 當時一致，只是整組換算到校正後的單位。
+//   兩者路徑不同（本值只在 UP hold 的 hold_loop 生效，RETRACT_TENSION_STOP 在
+//   motion_rope 的 retract），不會互相觸發。
+static constexpr double UP_STOP_TOTAL_KG_DEFAULT = 130.0;
 static constexpr int    HOLD_LOOP_ACTIVE_MS      = 50;     // poll period when any hold flag set
 static constexpr int    HOLD_LOOP_IDLE_MS        = 200;    // poll period when no hold flags (just refresh tension cache)
 
@@ -511,7 +571,11 @@ static TCP_client         cli_A;       // .30 — SE3 left only  (+ future CLV90
 static TCP_client         cli_B;       // .31 — SE3 right only
 static TCP_client         cli_M;       // .34 — SD76 meters (sensing bus, both meters share)
 static TCP_client         cli_C;       // .32 — X518 left tension  (direct TCP :502)
-static TCP_client         cli_D;       // .33 — X518 right tension (direct TCP :502)
+// 🔴 [2026-09-01] cli_D 已無使用者：X518 從兩台（.32/.33）改為一台（.33 兩通道），
+// 兩側都走 cli_C。刻意**保留這個物件**不刪除 —— 它是 TCP_client，建構即啟動一條
+// reconnect 監看緒，但沒有 connectToServer 就不會嘗試連線，成本為零；而移除它會
+// 連帶動到 g_gw_d_ok 與 status 欄位（GUI 正在解析），那屬於另一個改動。
+static TCP_client         cli_D;       // [2026-09-01] 已退役，見上方說明
 
 static SD76_length_meters meter_left;     // on cli_M slave 1
 static SD76_length_meters meter_right;    // on cli_M slave 2
@@ -519,8 +583,8 @@ static SD76_length_meters meter_middle;   // on cli_M slave 4 (future install)
 static CLV900_inverter    inverter;       // middle winch (cli_A slave 3, future install)
 static CraneVFD       vfd_left;       // left rope  (cli_A slave 1)
 static CraneVFD       vfd_right;      // right rope (cli_B slave 2)
-static DSZL_107           dsz_left;       // left tension (cli_C slave 1)
-static DSZL_107           dsz_right;      // right tension (cli_D slave 1)
+static DSZL_107           dsz_left;       // left tension (cli_C slave 1, CH2)
+static DSZL_107           dsz_right;      // right tension (cli_C slave 1, CH1)
 // [2026-06-05] Water inlet ball valve relay, moved from washrobot to crane side.
 // On cli_M (.34) slave 12 CH4 — shares sensing bus with SD76 meters. Bus traffic
 // is mostly meter polling (~50-100ms) + occasional relay write (sweep flow).
@@ -825,15 +889,37 @@ static std::atomic<double> g_balance_hz_max_offset    {BALANCE_HZ_MAX_OFFSET_DEF
 // A flipped right cell would have made that check dead silently (and a
 // right-only overload trips neither it nor the fabs() diff check).
 //
-// MAGNITUDE: still UNCALIBRATED. 0.01 is merely the DSZL_107 driver default
-// (DSZL_107.cpp:46) — no known weight has ever been hung. kg readings are
-// therefore NOT absolute; the thresholds built on them (TENSION_MAX_KG,
-// RETRACT_TENSION_STOP_KG, UP_STOP_TOTAL_KG) are relative-comparison values
-// only. To calibrate: hang a known weight on each cell and recompute as
-// `kg / (loaded_raw - zero_raw)` (signed), then update via GUI.
-// ⚠ Left and right will almost certainly need DIFFERENT magnitudes (separate
-// cells); this single shared constant only survives because the two SIGNS
-// match. Split into per-side constants when the magnitudes are measured.
+// 🎯 MAGNITUDE: **2026-09-01 已用已知重量校正完成**（先前一整段「still
+// UNCALIBRATED / 0.01 是驅動預設值」的敘述已不成立，故改寫）。
+//
+// 校正條件：單台 X518 @ .33（CH1=右 / CH2=左）、已知重量 **4.16 kg**、機構靜止。
+// 程序（**順序是必要的，不是形式**）：
+//   ① 空載 zero_tension <side>  → 零點寫進 X518 EEPROM
+//   ② 掛 4.16kg 讀 raw
+//   ③ scale = 4.16 / raw
+//   ④ 移除 → **必須回到 0**（負向對照）
+//
+// | | 右 (CH1) | 左 (CH2) |
+// |---|---|---|
+// | 4.16kg 時 raw | -176   | -202.1 |
+// | scale         | -0.0236364 | -0.0205816 |
+// | 解析度        | 42.3 counts/kg | 48.6 counts/kg |
+// | 雜訊          | ±1 count (±0.024kg) | ±3.5 counts (±0.07kg) |
+// | 負向對照      | ✅ 回 0 | ✅ 回 0 |
+//
+// 🔴 **兩側斜率差 15%** —— 先前共用一個 -0.01 是錯的，已拆成兩個常數。
+// 📌 早上（2026-09-01 上午）記的「左右張力差 1.9~2.4 倍」是**用共用的 -0.01 算的**，
+//    真實斜率左右差 15% ⇒ **不對稱程度沒有先前以為的那麼大**，該結論要重算。
+//
+// ⚠️ **跳過歸零直接校跨距會得到完全錯誤的結果**：2026-09-01 第一次嘗試時沒有先
+//    zero_tension，拿「碰巧讀到 0」當基準，量出來的方向（+）與大小（12 counts/kg）
+//    **全錯**，而且負向對照沒回零（移除後停在 raw 117 且穩定）才抓到。
+//
+// ⚠️ **單點校正（過原點），線性度未驗**：4.16kg 校出的斜率外推到工作範圍 12~30kg，
+//    中間沒有任何量測點。有更重的砝碼時值得補一點驗線性。
+//
+// ⚠️ **scale 不持久化** —— 只活在下面的 atomic 裡，重開程式回到常數值。
+//    這正是它必須寫進原始碼而不是只用 GUI 的 set_dsz_scale 設定的原因。
 //
 // ⚠ X518 unit register 0x0614 (1=t 2=kg 3=g 4=kN 5=N 6=lb, factory default
 // 5=N) scales the raw counts. init() calls set_unit_kg(), but set_unit writes
@@ -841,9 +927,12 @@ static std::atomic<double> g_balance_hz_max_offset    {BALANCE_HZ_MAX_OFFSET_DEF
 // below) — so a power-cycled X518 that is read WITHOUT running this program
 // first can come back in N, ~9.8x off, with no visible symptom. Both cells
 // read unit=2 (kg) during the 2026-09-01 sign test.
-static constexpr double DSZL_SCALE_DEFAULT  = -0.01;
-static std::atomic<double> g_dsz_left_scale  {DSZL_SCALE_DEFAULT};
-static std::atomic<double> g_dsz_right_scale {DSZL_SCALE_DEFAULT};
+// [2026-09-01] 實測校正值。負號＝施力時 raw 下降（與當日上午 dszl_sign_test.py
+// 在兩側各自量到的方向一致，三方佐證收斂）。
+static constexpr double DSZL_SCALE_RIGHT = -0.0236364;   // CH1，4.16kg → raw -176
+static constexpr double DSZL_SCALE_LEFT  = -0.0205816;   // CH2，4.16kg → raw -202.1
+static std::atomic<double> g_dsz_left_scale  {DSZL_SCALE_LEFT};
+static std::atomic<double> g_dsz_right_scale {DSZL_SCALE_RIGHT};
 
 // SD76 length meter calibration — device-side (SD76 EEPROM via SCAL/DP regs).
 // Driver: SD76_length_meters::scaleByRatio() / readScale() / writeScale().
@@ -2160,13 +2249,14 @@ static void hold_loop() {
             //    「緊急模式下不信任自動邏輯，完全由操作員眼睛判定何時放開」，
             //    機器卡住時自動停止會擋住救援。這裡只補上「眼睛需要的數字」。
             else if (any_manual_motion()) {
-                // ⚠️ [2026-08-28] 這個警示的可信度受限於 DSZL 的刻度，而該刻度
-                //    **從未用已知重量校正過**（DSZL_SCALE_DEFAULT 只是 driver 預設值）。
-                //    🔴 而且正負號只在**左側**量過，右側是「assumed same wiring」——
-                //    若右側實際相反，右側超載會讀成大負值，而
-                //    tension_safety_check_values 只檢查「過高」（過低已於 2026-05-08 移除），
-                //    → **右側超載偵測不到**。掛已知重量到兩側各量一次即可同時解決。
-                //    在那之前：這個警示「有出現」值得信，「沒出現」不代表安全。
+                // ✅ [2026-09-01 更新] 這段警示的兩個前提限制**都已解除**：
+                //    ① 刻度已用已知重量（4.16kg）在兩側各校正一次，左右分開
+                //       （DSZL_SCALE_LEFT / DSZL_SCALE_RIGHT，見該常數的說明）；
+                //    ② 正負號兩側都實測為負（當日上午 dszl_sign_test.py + 下午的
+                //       校正各自獨立驗證），先前「右側 assumed same wiring」的假設
+                //       已成為量測值 → **右側超載偵測不再是盲區**。
+                //    ⚠️ 仍然成立的限制：單點校正（過原點），4.16kg 外推到工作範圍
+                //       12~30kg 的線性度沒有驗過。
                 const std::string alarm = tension_safety_check_values(l, r);
                 if (!alarm.empty()) {
                     // 節流：警示狀態改變時立刻發，之後每秒一次。
@@ -2304,13 +2394,22 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
 
     const int curL_init = (int)g_length_left .load();
     const int curR_init = (int)g_length_right.load();
-    const int diff_init = curL_init - curR_init;
+
+    // 🔴 [2026-09-01] 水平參考偏移（見 g_fine_adjust_level_diff_cm 的說明）。
+    // 收斂目標是 `L - R = level_diff`，不是寫死的 0。做法是把左側讀值先減掉
+    // level_diff 再與右側比較 —— 之後所有比較都在「已對齊」的座標裡進行，
+    // 只有最後回推左側的實際停止讀值時要把它加回去（見 L_stop_at）。
+    // **level_diff = 0 時下面每一行都與先前逐位元相同。**
+    const int level_diff = g_fine_adjust_level_diff_cm.load();
+    const int curL_adj   = curL_init - level_diff;
+    const int diff_init  = curL_adj - curR_init;
 
     // Already within tolerance — no convergence needed, stop both.
     // [2026-09-01] 這裡比的是**左右差（姿態）**，用專屬的 diff 容許值，
     // 不是每側位置誤差用的 FINE_ADJUST_TOLERANCE_CM（見該常數的說明）。
     if (std::abs(diff_init) <= g_fine_adjust_diff_tol_cm.load()) {
         std::cout << "[fine_adjust] L=" << curL_init << " R=" << curR_init
+                  << " level_diff=" << level_diff
                   << " diff=" << diff_init << " — within ±" << g_fine_adjust_diff_tol_cm.load()
                   << " (diff_tol), stopping both\n";
         std::thread sL([]{ reliable_stop_one(vfd_left);  });
@@ -2320,19 +2419,23 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
         return "";
     }
 
-    // Align to leader (no direction reversal)
+    // Align to leader (no direction reversal).
+    // [2026-09-01] target 是在「已對齊」座標裡算的（左側用 curL_adj）。
     const int target_cm = main_motion_pay_out
-                          ? std::max(curL_init, curR_init)
-                          : std::min(curL_init, curR_init);
+                          ? std::max(curL_adj, curR_init)
+                          : std::min(curL_adj, curR_init);
     const int half_tol  = FINE_ADJUST_TOLERANCE_CM / 2;
 
     // Whether each side has further to go
-    const bool left_needs  = (std::abs(curL_init - target_cm) > FINE_ADJUST_TOLERANCE_CM);
+    const bool left_needs  = (std::abs(curL_adj  - target_cm) > FINE_ADJUST_TOLERANCE_CM);
     const bool right_needs = (std::abs(curR_init - target_cm) > FINE_ADJUST_TOLERANCE_CM);
 
     // Stop threshold per side: at target ± half_tol on the approach side
     // (pay_out approaches from below since display ↑; retract from above)
-    const int L_stop_at = main_motion_pay_out ? (target_cm - half_tol) : (target_cm + half_tol);
+    // 🔴 左側要 **+ level_diff 回推成實際讀值** —— 收斂迴圈比的是原始的 curL，
+    //    不是 curL_adj。漏掉這一項，偏移就會被抵銷掉、等於沒設。
+    const int L_stop_at = (main_motion_pay_out ? (target_cm - half_tol) : (target_cm + half_tol))
+                          + level_diff;
     const int R_stop_at = main_motion_pay_out ? (target_cm - half_tol) : (target_cm + half_tol);
     const bool L_approach_from_below = main_motion_pay_out;
     const bool R_approach_from_below = main_motion_pay_out;
@@ -2343,6 +2446,7 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
     const double hz = g_fine_adjust_hz.load();
 
     std::cout << "[fine_adjust] align-to-leader L=" << curL_init << " R=" << curR_init
+              << " level_diff=" << level_diff << " (L_adj=" << curL_adj << ")"
               << " target=" << target_cm
               << " main=" << (main_motion_pay_out ? "pay_out" : "retract")
               << " L=" << (left_needs ? "→go" : "stop(at-target)") << " (stop at " << L_stop_at << ")"
@@ -2363,7 +2467,7 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
     // ≈ 10cm of rope movement, which overshoots short corrections before the
     // convergence loop even gets to poll the cache.
     const double kick_hz = g_kick_hz.load();
-    const int L_distance = left_needs  ? std::abs(curL_init - target_cm) : 0;
+    const int L_distance = left_needs  ? std::abs(curL_adj  - target_cm) : 0;
     const int R_distance = right_needs ? std::abs(curR_init - target_cm) : 0;
     const bool L_use_kick = left_needs  && (L_distance >= KICK_DISTANCE_THRESHOLD_CM);
     const bool R_use_kick = right_needs && (R_distance >= KICK_DISTANCE_THRESHOLD_CM);
@@ -2489,7 +2593,7 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
                 reliable_stop_one(vfd_left);
                 left_done = true;
                 std::cout << "[fine_adjust] left converged at " << curL
-                          << " (target=" << target_cm << ")\n";
+                          << " (target=" << target_cm << "+level_diff=" << L_stop_at << ")\n";
             }
         }
         if (!right_done && R_valid) {
@@ -3719,6 +3823,7 @@ static std::string cmd_status() {
     oss << " roll_correct_hz="  << g_roll_correct_hz.load();
     oss << " roll_finish_hz="   << g_roll_finish_hz.load();
     oss << " fine_adjust_diff_tol_cm=" << g_fine_adjust_diff_tol_cm.load();
+    oss << " fine_adjust_level_diff_cm=" << g_fine_adjust_level_diff_cm.load();
     // [2026-09-01] IMU 平衡的可觀測性：來源、最後收到的 roll、資料年齡。
     // 🔴 age 一定要出現在 status —— 只看 balance_source=imu 會誤以為它在運作，
     //    實際上資料過期時走的是計米器路徑（見 apply_balance_trim）。
@@ -4438,6 +4543,16 @@ static std::string cmd_set_fine_adjust_diff_tol(int cm) {
     std::cout << "[crane] fine_adjust_diff_tol_cm = " << cm << " cm\n";
     return "OK\n";
 }
+// 🔴 [2026-09-01] 水平參考偏移（見 g_fine_adjust_level_diff_cm 的說明）。
+// 範圍 ±20cm：0.85°/cm 之下 20cm 已經是 17°，比任何合理的水平偏移都大得多
+// ——超出這個範圍的值幾乎必然是打錯或量錯，不該讓它靜靜生效。
+static std::string cmd_set_fine_adjust_level_diff(int cm) {
+    if (cm < -20 || cm > 20) return "ERR out_of_range\n";
+    g_fine_adjust_level_diff_cm.store(cm);
+    std::cout << "[crane] fine_adjust_level_diff_cm = " << cm
+              << " cm（fine_adjust 的收斂目標改為 L-R=" << cm << "）\n";
+    return "OK\n";
+}
 static std::string cmd_set_roll_finish_hz(double hz) {
     // [2026-09-01 per user] 可設定範圍 5–50Hz。低於 5 會被拒絕；
     // 5~10 之間允許但不建議（實際操作範圍是 10–50），故只警告不拒絕。
@@ -4467,15 +4582,18 @@ static std::string cmd_zero_tension(const std::string& which) {
     // so the zero offset persists across X518 power-cycle. Without this,
     // every fresh boot the operator would have to re-zero (and forget would
     // mean tension reads way off baseline).
+    // 🔴 [2026-09-01] 一律用 do_zero()（依 set_channel 分流），**不要再直接呼叫
+    // do_zero_ch1()** —— 兩個物件現在共用同一台裝置，寫死 CH1 會讓左側物件去歸零
+    // 右側的通道，而且**不會有任何錯誤訊息**（Modbus 寫入本身是成功的）。
     if (which == "left") {
         if (!g_dev_dsz_left.load())  return "ERR dsz_left_unavailable\n";
-        if (dsz_left.do_zero_ch1())  return "ERR dsz_left_zero_fail\n";
+        if (dsz_left.do_zero())      return "ERR dsz_left_zero_fail\n";
         if (dsz_left.save_params()) {
             std::cout << "[WARN] dsz_left save_params after zero failed (zero in RAM only)\n";
         }
     } else if (which == "right") {
         if (!g_dev_dsz_right.load()) return "ERR dsz_right_unavailable\n";
-        if (dsz_right.do_zero_ch1()) return "ERR dsz_right_zero_fail\n";
+        if (dsz_right.do_zero())     return "ERR dsz_right_zero_fail\n";
         if (dsz_right.save_params()) {
             std::cout << "[WARN] dsz_right save_params after zero failed (zero in RAM only)\n";
         }
@@ -4483,11 +4601,12 @@ static std::string cmd_zero_tension(const std::string& which) {
         if (!g_dev_dsz_left.load())  return "ERR dsz_left_unavailable\n";
         if (!g_dev_dsz_right.load()) return "ERR dsz_right_unavailable\n";
         bool err = false;
-        if (dsz_left .do_zero_ch1()) err = true;
-        if (dsz_right.do_zero_ch1()) err = true;
+        if (dsz_left .do_zero()) err = true;
+        if (dsz_right.do_zero()) err = true;
         if (err) return "ERR dsz_zero_fail\n";
-        // Save both (best-effort — if one save fails, the other's zero may
-        // still persist; warn but report OK to keep operator flow simple).
+        // 📌 [2026-09-01] save_params 是**裝置層級**（把整份 RAM 參數寫進 flash），
+        // 兩側同源之後呼叫兩次是冗餘的，但保留：第二次是冪等的，而少一次呼叫
+        // 換不到什麼，多一次卻能在第一次失敗時補救。
         if (dsz_left .save_params())
             std::cout << "[WARN] dsz_left save_params after zero failed\n";
         if (dsz_right.save_params())
@@ -4759,6 +4878,11 @@ static std::string dispatch(const std::string& line) {
         if (iss.fail()) return "ERR usage:set_fine_adjust_diff_tol_<cm>\n";
         return cmd_set_fine_adjust_diff_tol(v);
     }
+    if (cmd == "set_fine_adjust_level_diff") {
+        int v = 0; iss >> v;
+        if (iss.fail()) return "ERR usage:set_fine_adjust_level_diff_<cm>\n";
+        return cmd_set_fine_adjust_level_diff(v);
+    }
     if (cmd == "set_roll_finish_hz") {
         double v = 0; iss >> v;
         if (iss.fail()) return "ERR usage:set_roll_finish_hz_<hz>\n";
@@ -4880,20 +5004,17 @@ int main() {
                   << " connect failed — all SD76 length feedback disabled" << std::endl;
     }
 
-    if (cli_C.connectToServer(ep::host("DSZL_L", DSZL_LEFT_IP), ep::port("DSZL_L", DSZL_PORT))) {
+    // [2026-09-01] 單一台 X518、單一條連線服務兩側。ep 覆蓋鍵沿用 "DSZL_L"
+    // （harness 的等價測試以鍵名綁定，改鍵名會破壞既有基線）。
+    // 🔴 cli_D 不再用於 DSZL —— 連上與否直接決定**兩側**張力，g_gw_d_ok 一併退役。
+    if (cli_C.connectToServer(ep::host("DSZL_L", DSZL_IP), ep::port("DSZL_L", DSZL_PORT))) {
         g_gw_c_ok = true;
-        std::cout << "[OK]   DSZL left (X518)  @ " << DSZL_LEFT_IP << ":" << DSZL_PORT << std::endl;
+        g_gw_d_ok = true;   // 相容既有 status 欄位：兩側同源，狀態必然一致
+        std::cout << "[OK]   DSZL (X518) @ " << DSZL_IP << ":" << DSZL_PORT
+                  << "  CH1=右 / CH2=左" << std::endl;
     } else {
-        std::cerr << "[WARN] X518 left tension " << DSZL_LEFT_IP << ":" << DSZL_PORT
-                  << " connect failed — left tension monitoring disabled" << std::endl;
-    }
-
-    if (cli_D.connectToServer(ep::host("DSZL_R", DSZL_RIGHT_IP), ep::port("DSZL_R", DSZL_PORT))) {
-        g_gw_d_ok = true;
-        std::cout << "[OK]   DSZL right (X518) @ " << DSZL_RIGHT_IP << ":" << DSZL_PORT << std::endl;
-    } else {
-        std::cerr << "[WARN] X518 right tension " << DSZL_RIGHT_IP << ":" << DSZL_PORT
-                  << " connect failed — right tension monitoring disabled" << std::endl;
+        std::cerr << "[WARN] X518 " << DSZL_IP << ":" << DSZL_PORT
+                  << " connect failed — **左右兩側**張力監控同時失效" << std::endl;
     }
 
     // [2026-08-30] driver hex log 的開關。本體（app/WASH_ROBOT.cpp:136）早就有
@@ -4988,29 +5109,35 @@ int main() {
         std::cerr << "[WARN] USR_M down — skipping both SD76 meters init + PQW water init" << std::endl;
     }
 
-    // ---- USR_C (.32): DSZL left ----
+    // ---- X518 (.33): 一台兩通道，CH1=右 / CH2=左 ----
+    // [2026-09-01 per user] 兩個物件共用 cli_C 這一條連線，靠 set_channel() 分流。
+    // 保留兩個物件（而非單物件 + get_both_long）是因為各自要有獨立的 scale、
+    // 錯誤計數、last-valid 快取與 @L/@R log 標記 —— 而且左右幾乎必然需要不同 scale
+    // （2026-09-01 實測兩側張力差 2.4 倍）。詳見 DSZL_107::set_channel 的說明。
     if (g_gw_c_ok.load()) {
         // [2026-08-31] 標記側別（**必須在 init 之前**：init 內部就會印 log，
         //   例如 clearAlarm 失敗，而那正是最需要知道是哪一顆的訊息）。
-        dsz_left.set_log_side("L");
-        if (!dsz_left.init(cli_C, DSZL_LEFT_SLAVE, drv_dbg)) {
-            g_dev_dsz_left = true;
-            std::cout << "[OK]   DSZL-107 left  USR_C slave " << DSZL_LEFT_SLAVE << std::endl;
-        } else {
-            std::cerr << "[WARN] DSZL left init failed — left tension monitoring disabled" << std::endl;
-        }
-    }
-
-    // ---- USR_D (.33): DSZL right ----
-    if (g_gw_d_ok.load()) {
-        // [2026-08-31] 標記側別（**必須在 init 之前**：init 內部就會印 log，
-        //   例如 clearAlarm 失敗，而那正是最需要知道是哪一顆的訊息）。
+        // 🔴 [2026-09-01] 這個順序先前是**無效的**：init(TCP_client&) 那個多載直接
+        //   覆蓋 _log_tag、沒有併回 _log_side（只有 init(ip,...) 多載有做）。
+        //   已於 DSZL_107.cpp 修正，兩個多載現在行為一致。
         dsz_right.set_log_side("R");
-        if (!dsz_right.init(cli_D, DSZL_RIGHT_SLAVE, drv_dbg)) {
+        dsz_right.set_channel(DSZL_CH_RIGHT);
+        if (!dsz_right.init(cli_C, DSZL_SLAVE, drv_dbg)) {
             g_dev_dsz_right = true;
-            std::cout << "[OK]   DSZL-107 right USR_D slave " << DSZL_RIGHT_SLAVE << std::endl;
+            std::cout << "[OK]   DSZL-107 right  X518 slave " << DSZL_SLAVE
+                      << " CH" << DSZL_CH_RIGHT << std::endl;
         } else {
             std::cerr << "[WARN] DSZL right init failed — right tension monitoring disabled" << std::endl;
+        }
+
+        dsz_left.set_log_side("L");
+        dsz_left.set_channel(DSZL_CH_LEFT);
+        if (!dsz_left.init(cli_C, DSZL_SLAVE, drv_dbg)) {
+            g_dev_dsz_left = true;
+            std::cout << "[OK]   DSZL-107 left   X518 slave " << DSZL_SLAVE
+                      << " CH" << DSZL_CH_LEFT << std::endl;
+        } else {
+            std::cerr << "[WARN] DSZL left init failed — left tension monitoring disabled" << std::endl;
         }
     }
 
@@ -5025,12 +5152,12 @@ int main() {
     // zero with a broken RAM zero. So save only happens on explicit user
     // action (cmd_zero_tension) where we know the operator intends a fresh
     // zero baseline.
-    if (g_dev_dsz_left.load()  && dsz_left.set_unit_kg())
-        std::cout << "[WARN] DSZL-107 left  set_unit_kg failed (continuing)\n";
+    // 🔴 [2026-09-01] set_unit_kg 寫的是**裝置層級**的單位暫存器（0x0614），不是
+    // 通道層級。兩側同源之後呼叫兩次是冗餘的，只留一次（用 right 物件，它是 CH1）。
     if (g_dev_dsz_right.load() && dsz_right.set_unit_kg())
-        std::cout << "[WARN] DSZL-107 right set_unit_kg failed (continuing)\n";
+        std::cout << "[WARN] DSZL-107 set_unit_kg failed (continuing)\n";
 
-    // Apply scale defaults (negative — see DSZL_SCALE_DEFAULT comment) so kg
+    // Apply calibrated per-side scales (negative — see DSZL_SCALE_LEFT/RIGHT) so kg
     // values come out positive when force is applied. GUI overrides via
     // set_dsz_scale at runtime. (scale is driver-local, doesn't need save_params.)
     if (g_dev_dsz_left.load())  dsz_left .setScale(g_dsz_left_scale .load());
