@@ -161,7 +161,7 @@ public:
     std::string cmd_shutdown();
     std::string cmd_status();
     std::string cmd_vacuum(const std::string& group, bool on);
-    std::string cmd_pump(bool on);                       // dp0105 vacuum pump (PQW CH1)
+    std::string cmd_pump(bool on);                       // dp0105 vacuum pump (PQW CH_PUMP_A = CH2; verified + readback since 2026-09-03)
     std::string cmd_brush(bool on);                      // arm roller brush motor (PQW CH5)
 
     // [2026-09-01 per user] 繼電器現況回讀 + 通用單通道控制（bring-up / 接線盤點用）。

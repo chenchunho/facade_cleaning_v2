@@ -9,6 +9,7 @@
 #   ③ pusher all extend_raw—— 推出 10cm，**不驗真空度**
 #      🔴 為什麼不驗：有些玻璃面有縫隙，吸盤落在縫上本來就吸不住，那是現場條件不是故障。
 #         smart_extend_subset_ 會為了找封一路補伸到 ~16cm 並重試 —— 在有縫的面上是徒勞。
+#   ③b 上滑台 0→50→0   —— [2026-09-03 per user] 推桿仍伸出、風扇仍關；手臂維持 PARK
 #   ④ pusher all retract   —— 已內建「關閥→洩壓→CH6 正壓 500ms→兩段收回」
 #   ⑤ 風扇 7%（開）
 #   ⑥ delay 1000ms
@@ -44,6 +45,9 @@ WROBOT = ("192.168.5.26", 5001)
 CYCLES    = int(sys.argv[1]) if len(sys.argv) > 1 else 1
 STEPS     = int(sys.argv[2]) if len(sys.argv) > 2 else 5
 STEP_CM   = int(sys.argv[3]) if len(sys.argv) > 3 else 40
+VAC_OK_KPA = -50        # [2026-09-03 per user] 密封判準：至少一顆到此值
+VAC_WAIT_S = 10.0       # 等真空建立的上限秒數（超過即視為完全沒附著）
+RAIL_CM   = 50          # [2026-09-03 per user] 步驟 ③b 上滑台行程 0->RAIL_CM->0
 ROLL_TRIP = float(sys.argv[4]) if len(sys.argv) > 4 else 6.0
 DIFF_TRIP = float(sys.argv[5]) if len(sys.argv) > 5 else 8.0
 
@@ -63,7 +67,10 @@ DIFF_TRIP = float(sys.argv[5]) if len(sys.argv) > 5 else 8.0
 #    一筆真實的 6° 就該停，沒有「等它持續」的餘裕。
 DIFF_PERSIST = 3          # 連續幾筆超標才中止（取樣間隔約 0.3s → 約 1 秒持續）
 
-TOP, BOTTOM = 0, 229
+# [2026-09-03 per user] BOTTOM 229 → 223：SD76 當日以「玻璃面最高點」重新歸零，
+# 實測最低點 length_left=223（右 218）。舊值 229 屬於前一組零點，留著等於允許
+# 放繩到玻璃底下約 6cm —— 這是區間守衛（end > BOTTOM+TOL 即中止），不是顯示值。
+TOP, BOTTOM = 0, 223
 TOL = 5
 # 🔴 [2026-09-01 per user] 回程由 50Hz 改 30Hz。
 # 原因：50Hz 回程實測左右差瞬間衝到 9cm，而韌體自己的 length_diff_max_cm 是 10
@@ -81,6 +88,11 @@ abort_reason = []
 # 而這兩者的處置完全相反（前者調門檻、後者要修吊機的啟停時序）。
 # 所以每一段都記，跑完出分布。
 all_diff = []
+# [2026-09-03 per user] 行進速率統計 —— 目的是推估「上下走一公尺要多久」。
+# 分三個口徑，因為它們回答的是不同問題（見 _rate_summary 的說明）。
+timing = {"down_cm": 0.0, "down_move_s": 0.0, "down_step_s": 0.0, "down_steps": 0,
+          "up_cm": 0.0, "up_s": 0.0, "up_runs": 0,
+          "ext_s": 0.0, "vac_s": 0.0, "rail_s": 0.0, "ret_s": 0.0}
 all_nearmiss = []
 
 
@@ -114,7 +126,29 @@ def field(line, key):
 
 
 def fan(pct):
-    return ask(WROBOT, "pwm set 1 50 65535 %d" % pct, 15)
+    """風扇占空比。寫入失敗時自動走 `pwm restart` 復原並重試一次。
+
+    🔴 [2026-09-03] QX-DO24（.22 slave 9）**寫入方向間歇失效**：09-02 的 cycle10_0902c
+    與 09-03 的 10 週期測試都死在這裡，訊息逐字相同
+    （`ERR pwm_freq_write_failed_no_reply_timeout`）。當場實測：
+      - FC 0x10 長幀 3 次全逾時 → FC 0x06 短幀退路自動接手 → **也全逾時**
+      - 但 `pwm status`（讀）正常，`pwm restart`（reg 0xFF00 短幀）回 `acked=1`
+    ⇒ 不是模組全滅，是**寫入路徑失效而重啟這條短幀仍活著**。
+    既然復原手段已被證實有效，就不該讓一次 40 分鐘的耐久測試死在一個能自動救回的已知故障上。
+    ⚠️ 但**每次觸發都會印出來**——這是間歇故障的唯一計數來源，靜默重試等於把證據吃掉。
+    """
+    cmd = "pwm set 1 50 65535 %d" % pct
+    r = ask(WROBOT, cmd, 15)
+    if r.startswith("OK"): return r
+    print("   ⚠ 風扇寫入失敗（%s）→ 試 pwm restart 後重試" % r.strip())
+    rr = ask(WROBOT, "pwm restart", 20)
+    print("   ⚠ pwm restart: %s" % rr.strip())
+    if not rr.startswith("OK"):
+        return r          # 連重啟都進不去 → 交回呼叫端中止，不再盲試
+    time.sleep(1.0)
+    r2 = ask(WROBOT, cmd, 15)
+    print("   ⚠ 重試結果: %s" % r2.strip())
+    return r2
 
 
 def emergency():
@@ -206,6 +240,42 @@ def _diff_summary():
     if all_nearmiss:
         print("  超標後自行回復（未達連續 %d 筆）: %d 次 —— 平衡迴路在工作，不是故障"
               % (DIFF_PERSIST, sum(all_nearmiss)))
+    _rate_summary()
+
+
+def _rate_summary():
+    """行進速率 —— 三個口徑分開，因為它們回答的是不同問題。
+
+    ① 下行純移動：只算 `pay_out` 本身。可跟上行比「機構+VFD 的移動能力」，
+       但**仍含每步的加減速**（5 步 × 40cm，不是一次連續 200cm）。
+    ② 下行含開銷：整步的牆鐘時間（伸出+真空+滑台+收回+移動+讀值）。
+       **這才是實際作業速率** —— 規劃一面牆要多久要用這個數字。
+    ③ 上行回程：一次連續移動，沒有分段加減速 ⇒ **不可與 ① 直接相比**。
+    """
+    t = timing
+    if not t["down_steps"] and not t["up_runs"]:
+        return
+    print("\n=== 行進速率（推估上下一公尺）===")
+    def line(label, cm, sec, note=""):
+        if cm <= 0 or sec <= 0: return
+        print("  %-12s %7.0f cm / %6.1f s  →  %5.2f cm/s   每公尺 %5.1f s%s"
+              % (label, cm, sec, cm / sec, 100.0 * sec / cm, note))
+    line("下行純移動", t["down_cm"], t["down_move_s"], "   （含每步加減速）")
+    line("下行含開銷", t["down_cm"], t["down_step_s"], "   ← 實際作業速率")
+    line("上行回程",   t["up_cm"],   t["up_s"],        "   （一次連續，不可與純移動直接比）")
+    n = t["down_steps"]
+    if n:
+        print("  單步平均開銷: 伸出 %.1f / 真空 %.1f / 滑台 %.1f / 收回 %.1f / 移動 %.1f"
+              " / 其他 %.1f s  （整步 %.1f s）"
+              % (t["ext_s"]/n, t["vac_s"]/n, t["rail_s"]/n, t["ret_s"]/n, t["down_move_s"]/n,
+                 (t["down_step_s"] - t["ext_s"] - t["vac_s"] - t["rail_s"]
+                  - t["ret_s"] - t["down_move_s"]) / n,
+                 t["down_step_s"]/n))
+    if t["down_step_s"] > 0 and t["up_s"] > 0:
+        per_m = 100.0 * (t["down_step_s"] / t["down_cm"] + t["up_s"] / t["up_cm"])
+        print("  ⇒ **一趟來回每公尺約 %.1f s**（下行含開銷 + 上行回程）" % per_m)
+    print("  ⚠️ 下行是 %d 步 × %dcm 的分段移動、上行是一次連續移動 —— 兩者的 cm/s 不同源。"
+          % (STEPS, STEP_CM))
 
 
 def bail(msg):
@@ -280,9 +350,10 @@ ask(CRANE, "set_motion_hz %d" % DOWN_HZ, 15)
 try:
     for cyc in range(1, CYCLES + 1):
         print("═══ 週期 %d/%d ═══" % (cyc, CYCLES))
-        print("%3s %6s %6s %28s %7s %7s %6s %5s %7s"
-              % ("步", "伸出s", "收回s", "四顆壓力 kPa", "移動s", "roll均", "出帶%", "Δmax", "停後roll"))
+        print("%3s %6s %6s %6s %6s %28s %7s %7s %6s %5s %7s"
+              % ("步", "伸出s", "真空s", "滑台s", "收回s", "四顆壓力 kPa", "移動s", "roll均", "出帶%", "Δmax", "停後roll"))
         for i in range(1, STEPS + 1):
+            t_step0 = time.time()
             cur = field(ask(CRANE, "status", 10), "length_left")
             if cur is None:
                 bail("讀不到吊機位置")
@@ -299,8 +370,35 @@ try:
             r = ask(WROBOT, "pusher all extend_raw", 90)
             t_ext = time.time() - t
             if not r.startswith("OK"): bail("extend_raw 失敗：%s" % r)
-            ps = ask(WROBOT, "status", 15)
-            pr = [field(ps, "p%d" % n) for n in (5, 6, 7, 8)]
+            # ③a [2026-09-03 per user] 等真空建立，**至少一顆** <= VAC_OK_KPA 就通過。
+            # 背景：09-03 首輪四顆全程都在 0 附近，我一度判成「推桿沒碰到玻璃」——
+            # per user 更正：**有碰到，是時間不夠**。原本 extend 一回來就立刻讀壓力，
+            # 讀到的是還沒抽起來的瞬間值。
+            # 為什麼是「一顆」而不是「四顆」：檔頭 ③ 的理由仍然成立 —— 玻璃有縫時某些
+            # 吸盤本來就吸不住，那是現場條件不是故障。但「一顆都沒有」代表這一步完全
+            # 沒有附著，那個必須看得見，否則整輪會在無附著的狀態下悄悄跑完（首輪就是）。
+            t = time.time()
+            pr = None
+            while time.time() - t < VAC_WAIT_S:
+                ps = ask(WROBOT, "status", 15)
+                pr = [field(ps, "p%d" % n) for n in (5, 6, 7, 8)]
+                if any(p is not None and p <= VAC_OK_KPA for p in pr): break
+                time.sleep(0.3)
+            t_vac = time.time() - t
+            n_seal = sum(1 for p in (pr or []) if p is not None and p <= VAC_OK_KPA)
+            if n_seal == 0:
+                bail("真空未建立：%.1fs 內四顆都沒有到 %d kPa（%s）"
+                     % (t_vac, VAC_OK_KPA, "/".join("%s" % p for p in (pr or []))))
+
+            # ③b [2026-09-03 per user] 上滑台 0→50→0。
+            # 位置刻意放在 ③ 與 ④ 之間：推桿仍在 10cm（機體有支撐）、風扇仍關（①的順序
+            # 是安全需求，不可為了掃動提前開）。手臂維持 PARK —— 本步只動滑台，不壓玻璃。
+            t = time.time()                                     # ③b
+            r = ask(WROBOT, "rail %d" % RAIL_CM, 60)
+            if not r.startswith("OK"): bail("rail %d 失敗：%s" % (RAIL_CM, r))
+            r = ask(WROBOT, "rail 0", 60)
+            if not r.startswith("OK"): bail("rail 0 復位失敗：%s" % r)
+            t_rail = time.time() - t
 
             t = time.time()                                     # ④
             r = ask(WROBOT, "pusher all retract", 90)
@@ -328,12 +426,20 @@ try:
             ra = field(ask(WROBOT, "status", 15), "raw_x")
             rb = ra
 
+            t_step = time.time() - t_step0
+            timing["down_cm"]    += STEP_CM
+            timing["down_move_s"] += dur
+            timing["down_step_s"] += t_step
+            timing["down_steps"]  += 1
+            timing["ext_s"] += t_ext; timing["vac_s"] += t_vac
+            timing["rail_s"] += t_rail; timing["ret_s"] += t_ret
+
             pstr = "/".join("%.0f" % (p if p is not None else 0) for p in pr)
             if stt:
                 all_diff.append(("週期%d步%d" % (cyc, i), stt["mdiff"]))
                 all_nearmiss.append(stt["nearmiss"])
-            print("%3d %6.1f %6.1f %28s %7.1f %7.2f %6.0f%% %5.0f %7s"
-                  % (i, t_ext, t_ret, pstr, dur,
+            print("%3d %6.1f %6.1f %6.1f %6.1f %28s %7.1f %7.2f %6.0f%% %5.0f %7s"
+                  % (i, t_ext, t_vac, t_rail, t_ret, pstr, dur,
                      stt["avg"] if stt else -1, stt["outpct"] if stt else -1,
                      stt["mdiff"] if stt else -1,
                      ("%+.2f" % ra) if ra is not None else "-"))
@@ -351,6 +457,9 @@ try:
         ask(CRANE, "set_motion_hz %d" % DOWN_HZ, 15)   # 立刻寫回，不等收尾
         if abort_reason: bail(abort_reason[0])
         if not res.startswith("OK"): bail("回程 retract 失敗：%s" % res)
+        timing["up_cm"] += int(cur - TOP)
+        timing["up_s"]  += dur
+        timing["up_runs"] += 1
         fin = field(ask(CRANE, "status", 10), "length_left")
         if stt:
             all_diff.append(("週期%d回程" % cyc, stt["mdiff"]))

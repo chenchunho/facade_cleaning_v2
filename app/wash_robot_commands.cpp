@@ -3808,14 +3808,30 @@ std::string WashRobot::cmd_vacuum(const std::string& group, bool on) {
     return "OK\n";
 }
 
-// Manual control of dp0105 vacuum pump motor (PQW CH1). Init/shutdown manage
-// it automatically; this command lets the user toggle it from GUI for bench
+// Manual control of dp0105 vacuum pump motor (PQW CH_PUMP_A = CH2). Init/shutdown
+// manage it automatically; this command lets the user toggle it from GUI for bench
 // debug. Note: turning OFF mid-flow will starve all 9 cups → vacuum fail.
+//
+// [2026-09-03] Was a bare controlRelay() with an unconditional "OK": on 2026-09-02
+// `pump on` answered OK while four consecutive relay_status reads still showed
+// ch2=0 (a second send did take effect). Same class as the CH_BRUSH mis-numbering
+// — "the send succeeded" is not "the relay moved". Now goes through
+// pqw_set_relay_verified_() (readback + up to 3 retries) and, like cmd_relay,
+// reports the channel state actually read back so the claim is checkable.
 std::string WashRobot::cmd_pump(bool on) {
     State cur = state_.load();
     if (cur == State::Error) return state_violation_(cur);
-    if (pqw_.controlRelay(CH_PUMP, on)) return "ERR pump_fail\n";
-    return "OK\n";
+    if (pqw_set_relay_verified_(CH_PUMP_A, on)) return "ERR pump_fail\n";
+
+    // pqw_set_relay_verified_ reports success when it cannot read back at all
+    // (best-effort by design, so downstream vacuum checks stay the authority).
+    // Echo the real state anyway — a caller that gets no ch2= field knows the
+    // readback path itself is down, instead of reading a bare OK as confirmation.
+    const std::vector<bool> st = pqw_.readAllStatus();
+    if ((int)st.size() < CH_PUMP_A) return "OK pump_set_but_readback_fail\n";
+    std::ostringstream oss;
+    oss << "OK ch" << CH_PUMP_A << "=" << (st[CH_PUMP_A - 1] ? 1 : 0) << "\n";
+    return oss.str();
 }
 
 // Manual relay controls for cleaning subsystem (used to manually shut down
@@ -4000,8 +4016,38 @@ std::string WashRobot::cmd_pwm_set(int ch, int hz, int control, double duty_pct)
         return "ERR pwm_duty_write_failed_" + fail_reason() + "\n";
     }
     if (!pwm_.setPWM_Control(dch, (uint16_t)control)) {
-        std::cout << "[pwm_set] setPWM_Control FAILED — " << fail_reason() << "\n";
-        return "ERR pwm_control_write_failed_" + fail_reason() + "\n";
+        const std::string why = fail_reason();
+        std::cout << "[pwm_set] setPWM_Control FAILED — " << why << "\n";
+        // [2026-09-03] control 是三個寫入的**最後一個**，而且每次寫的都是同一個值
+        // （面板與步伐路徑一律 65535）。當日 60 次開/關實測把四類失敗分乾淨了：
+        //     pwm_freq_write_failed    3/3 → duty 真的沒生效
+        //     pwm_duty_write_failed    1/1 → 真的沒生效
+        //     pwm_control_write_failed 3/3 → **事後四個暫存器全部正確**
+        //     pwm_readback_failed      8/8 → 狀態正確
+        // 機制上說得通：走到這一步 duty 已經寫好了，而 control 寫的是模組本來就持有
+        // 的值 ⇒ 這一幀到不到達，模組狀態都一樣。而 09-03 第二次 10 趟耐久測試
+        // **就是死在這一類**，當下機器完全處於正確狀態。
+        // 🔴 但不能因此直接宣稱成功 —— 下面那段註解記著本裝置「寫入失敗時輸出不會歸零，
+        // 會保持前一個值繼續輸出」，所以**必須實際回讀**；讀不到或不符就照舊回 ERR。
+        double   v_duty = 0;
+        uint32_t v_freq = 0;
+        uint16_t v_ctrl = 0;
+        const bool v_ok = pwm_.getPWM_Duty(dch, v_duty)
+                       && pwm_.getPWM_Freq(dch, v_freq)
+                       && pwm_.getPWM_Control(dch, v_ctrl);
+        if (v_ok && (int)v_freq == hz
+                 && std::fabs(v_duty - duty_pct) <= 0.6
+                 && (int)v_ctrl == control) {
+            std::cout << "[pwm_set] control 寫入逾時，但回讀確認四個值都正確 — 視為 unverified\n";
+            evt_("pwm_control_unconfirmed_state_ok ch=" + std::to_string(ch));
+            std::ostringstream unv;
+            unv << "OK pwm_set_unverified ch=" << ch << " hz=" << hz
+                << " ctrl=" << control << " duty=" << std::fixed << std::setprecision(1)
+                << duty_pct << " control_write_failed_" << why << "\n";
+            return unv.str();
+        }
+        std::cout << "[pwm_set] control 逾時且回讀無法確認狀態 — 維持 ERR\n";
+        return "ERR pwm_control_write_failed_" + why + "\n";
     }
 
     // 🔴 回讀驗證。寫入回 true 只代表「模組收下了這一幀」，不代表暫存器真的是那個值。
@@ -4030,10 +4076,25 @@ std::string WashRobot::cmd_pwm_set(int ch, int hz, int control, double duty_pct)
             std::cout << "[pwm_set] 回讀確認 ch" << ch << " duty=" << rb_duty
                       << " hz=" << rb_freq << " ctrl=" << rb_ctrl << "\n";
         } else {
-            // 讀不到就不能宣稱成功 —— 這正是「寫入回 OK 但實際沒生效」會走的路徑。
-            std::cout << "[pwm_set] ⚠ 回讀失敗（" << fail_reason() << "）— 無法確認是否生效\n";
+            // [2026-09-03] 原本這裡回 ERR，理由是「讀不到就不能宣稱成功」—— 那個原則本身
+            // 沒錯（與 cmd_pump 同一條），但當日 20 次開關的實測推翻了它在**這條**路徑上的
+            // 適用性：`pwm_readback_failed` 出現 3 次，**3 次的 duty 都已經是目標值**
+            // （以獨立的 `pwm status` 讀出）⇒ 操作其實成功了，只有這一層確認逾時。
+            // 而回 ERR 會讓整輪耐久測試中止在一個已經生效的動作上。
+            //
+            // 🔴 但也不回裸 "OK" —— 那正是原註解要防的「寫入回 OK 但實際沒生效」。
+            // 折衷是**可辨識的第三種狀態**：三個寫入自己都已 ack 成功（真的寫入失敗會走
+            // 上面的 pwm_*_write_failed 提前 return），所以這裡的語意是
+            // 「已送出且被接受，但未能複驗」。呼叫端的 startswith("OK") 會通過，
+            // 而 `unverified` 字樣讓它可以被計數，不會被當成乾淨的成功。
+            // ⚠️ 若日後發現 unverified 也會對應到「沒生效」，這個折衷就不成立，要回頭改。
+            std::cout << "[pwm_set] ⚠ 回讀失敗（" << fail_reason() << "）— 已送出但未能複驗\n";
             evt_("pwm_readback_unavailable ch=" + std::to_string(ch));
-            return "ERR pwm_readback_failed_" + fail_reason() + "\n";
+            std::ostringstream unv;
+            unv << "OK pwm_set_unverified ch=" << ch << " hz=" << hz
+                << " ctrl=" << control << " duty=" << std::fixed << std::setprecision(1)
+                << duty_pct << " readback_failed_" << fail_reason() << "\n";
+            return unv.str();
         }
     }
     std::cout << "[pwm_set] OK — 三個寫入都成功\n";
