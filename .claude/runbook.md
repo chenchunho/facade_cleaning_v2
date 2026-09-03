@@ -15,7 +15,12 @@
 
 ### 連線資訊（2026-08-27 實測）
 
-兩台 Pi 各有**兩條路**：有線是 bench 正式配置，WiFi 是備援／驗證用。**帳號兩台不一樣。**
+🔴 **2026-09-03 更正（per user + 實測）：兩台目前都走 WiFi，`192.168.1.x` 那組不是可用路徑。**
+兩台 eth0 雖然 `carrier=1` 且各自持有 `192.168.1.10` / `192.168.1.100`，但**彼此 ping 不通**
+（從 washrobot ping 吊機 `192.168.1.10` 無回應）⇒ 有線沒有真的串起來，**下表「有線」欄位是設定值不是通路**。
+⇒ `CRANE_IP` 自動選路（有線優先 → 300ms 有界探測後退 WiFi）現況每次都會落到 WiFi 這條，符合預期。
+
+**帳號兩台不一樣。**
 
 | 機器 | hostname | 有線（正式） | WiFi（備援） | 帳號 |
 |---|---|---|---|---|
@@ -24,6 +29,9 @@
 
 - 兩台皆 **aarch64 / Debian 13 (trixie) / g++ 14.2**
 - 🔴 **帳號不是 `pi`**（2026-08-28 已全檔更正為 `nexuni@` / `user@`）
+- 🔴 **從 WSL 連 `.25` 可能是 `No route to host`，而 `.26` 同時是通的**（2026-09-03 實測；Windows 端兩台都直連正常）。
+  ⇒ **用 washrobot 當跳板**：`ssh -J nexuni@192.168.5.26 user@192.168.5.25`，實測可用。
+  📌 症狀是「單一位址不通、同網段鄰居卻通」＝ router/ARP 層的問題，**不要先懷疑吊機掛了或金鑰壞了**。
 - 🔴 **吊機有線是 `192.168.1.10` 不是 `.101`**（2026-08-28 全檔更正）。✅ `web_backend/server.js` 的 `CRANE_IP` 預設值**已於 `f4e0d02` 改為 `.1.10`**（2026-08-29 複查確認；本行原本寫「仍是 `.101`」＝過期）。⚠️ 現行的兩支 C++ 走的是 `app/WASH_ROBOT.h` 的 `CRANE_IP = "192.168.5.17"`（WiFi）—— **eth 串接後要回頭改它**，見待辦總表
 - 🔴🔴 **吊機 WiFi IP 會漂，而 `CRANE_IP` 是編譯期常數（2026-08-31 踩到）**：`user_lib/WASH_ROBOT.h`
   的 `CRANE_IP` 沒有任何 env 覆蓋（全檔只有 `WR_DRIVER_DEBUG` 一個 `getenv`）→ **IP 一漂就只能改碼重編**。
@@ -50,6 +58,14 @@
 > `ssh nexuni@192.168.5.26 "cd ~/projects/<專案>/user_lib && g++ -fsyntax-only -std=c++17 -I. <檔案>.cpp"`
 
 ### 0. 一鍵啟動（tmux launcher，bench / 測試用）
+
+🔴🔴 **2026-09-03 實測：這一節目前兩台都跑不起來，動手前先看這兩條。**
+1. **`tmux` 兩台都沒安裝**（`dpkg -l tmux` 皆為 `un`）→ 底下所有 `*.sh start/attach` 直接失敗。
+2. **`~/facade_cleaning_v2` 兩台都不存在**。實際工作目錄是 **`~/bringup/`**（吊機 `crane_control_PI.out`、
+   本體 `facade_cleaning_v2.out`，各自帶一串 `.prevN` 舊版），而且 **`~/bringup/` 不是 git repo**。
+   吊機的週期測試紀錄在 `~/bringup/cycle_logs/`。
+⇒ 現行實際做法是直接跑 `~/bringup/` 底下的 binary（搭配 FIFO `crane_<date>_in` 餵指令、輸出導向 `crane_<date>.log`），
+   不是走 tmux launcher。**要恢復 launcher 就得先裝 tmux 並把路徑改成 `~/bringup`。**
 
 每台 Pi 上都有對應的 launcher script，會用 tmux 把該機所有程式各開一個 window：
 
