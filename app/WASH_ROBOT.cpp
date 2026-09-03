@@ -133,7 +133,23 @@ bool WashRobot::init() {
     if (!cli_22_.connectToServer(ep_usr22, pt_usr22)) {
         std::cerr << "[WashRobot] connect " << ep_usr22 << ":" << pt_usr22 << " fail\n"; return true;
     }
-    std::cout << "[OK] USR .20 (ZDT) / .22 (sensors+PQW) connected\n";
+    // 🆕 [2026-09-03 per user] `.21` = QX-DO24 專用匯流排。
+    // 🔴 **連不上只警告、不中止**，與 `.20`/`.22` 不同：
+    //   那兩條上面是推桿、繼電器、壓力計 —— 沒有它們機器不能動、也不能安全停下。
+    //   而風扇是附屬裝置（本來就有 PWM_ENABLED 開關可以整組關掉）。
+    //   新裝一個網關沒接好就讓整台起不來，是把可用性賠給一個附屬功能。
+    //   ⚠️ 代價是「`.21` 沒接」與「`.21` 接了但不通」在啟動時看起來一樣（都只有一行警告），
+    //     所以這行訊息要明確說出它的後果：風扇指令會失敗。
+    const std::string ep_usr21 = ep::host("USR21", IP_485_2);
+    const int         pt_usr21 = ep::port("USR21", PORT_485);
+    const bool usr21_ok = cli_21_.connectToServer(ep_usr21, pt_usr21);
+    if (!usr21_ok) {
+        std::cout << "[WRN] USR .21 (" << ep_usr21 << ":" << pt_usr21
+                  << ") 連線失敗 —— 風扇（QX-DO24）指令將全部失敗，其餘功能不受影響\n";
+    }
+
+    std::cout << "[OK] USR .20 (ZDT/PQW/rail) / .22 (JC100/XKC) connected"
+              << (usr21_ok ? " / .21 (PWM) connected\n" : " / .21 (PWM) NOT connected\n");
 
     // [TEST MODE 2026-04-21] driver debug=true by default for on-site troubleshooting.
     // Revert to `false` default when main crane is online.
@@ -239,7 +255,11 @@ bool WashRobot::init() {
     // （2026-08-27 曾因 slave 撞 JC100 而停用；2026-08-28 模組改 slave 9 後解除，
     //   沿革見 WASH_ROBOT.h 的 PWM_ENABLED 註解。）
     if (PWM_ENABLED) {
-        pwm_.init(cli_22_, PWM_SLAVE, dbg);
+        // [2026-09-03] cli_22_ → cli_21_：改掛獨立匯流排，見 WASH_ROBOT.h IP_485_2 的說明。
+        // Slave ID **維持 9**：改位址要寫 reg 0x20，而手冊明載那是「實時保存、斷電記憶」
+        // 的暫存器且「請勿頻繁寫入」。獨立匯流排上沒有撞號問題 ⇒ 沒有理由花一次 flash
+        // 寫入去改一個不影響任何事的數字。
+        pwm_.init(cli_21_, PWM_SLAVE, dbg);
         std::cout << "[OK] QX-DO24 PWM slave " << PWM_SLAVE << " (presence not probed)\n";
     } else {
         std::cout << "[--] QX-DO24 PWM DISABLED (PWM_ENABLED=false) — slave "
@@ -253,11 +273,15 @@ bool WashRobot::init() {
     // (read_rope_weight_max_kg_ tier 1); the DY-500 tier is an unused fallback.
     // If they get physically installed later, restore a one-shot probe here to
     // set weight_present_ per sensor.
-    weight_[0].init(cli_22_, DY_SLAVE_LEFT,  dbg);
-    weight_[1].init(cli_22_, DY_SLAVE_RIGHT, dbg);
+    //
+    // 🔴 [2026-09-03 per user] **移除 init 繫結，driver 與 tier-2 程式碼路徑保留。**
+    //   原本這裡呼叫 weight_[i].init(cli_22_, …) 把兩個從未安裝的裝置綁在感測匯流排上。
+    //   Mode B init 本身不發包，所以移除不改變任何流量 —— 但它讓「`.22` 上有什麼」
+    //   這件事在原始碼上與實體一致（先前讀 init() 會以為那條上面掛了 7 個裝置，實際 5 個）。
+    //   要復用時把兩行 init 加回來、並在此處做一次性探測設定 weight_present_ 即可。
     weight_present_[0].store(false);
     weight_present_[1].store(false);
-    std::cout << "[--] DY-500 slaves 10/11 not installed — polling disabled\n";
+    std::cout << "[--] DY-500 slaves 10/11 not installed — driver 保留但未繫結任何匯流排\n";
 
     // Init last_seal_pulse_ to per-slave preset; will be updated by fine_tune on success.
     for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s)

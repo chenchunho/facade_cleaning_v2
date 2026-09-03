@@ -196,9 +196,28 @@ bool QX_DO24::setPWM_Freq(int channel, int freq) {
 	LOG_WRN(_log_tag, "setPWM_Freq FC0x10 failed — 改走 FC0x06 單寫退路（freq %d ≤ 65535）。"
 	                  "⚠ 這代表長幀送不進模組，請查 A/B 接線與模組接收端", freq);
 
+	// 🔴 [2026-09-03] 高位**先讀再決定要不要寫**。
+	//
+	// 手冊那句話的前半是「**保持** 0x04 的值為 0」——保持，不是「寫 0」。
+	// 本專案頻率鎖死 50Hz，0x04 從來就是 0，所以這筆寫入**從未改變過任何東西**。
+	// 而 2026-09-03 的 10 週期測試就是死在它身上：
+	//     [QX:9] FC0x06 fallback: high word (reg 0x0004) write failed
+	// 一個不必要的寫入，讓整個操作失敗、讓整輪耐久測試中止。
+	//
+	// 這條退路存在的前提是「寫入方向有問題」，那麼**能少寫一筆就少一筆**：
+	// 讀（FC 0x03）在同一段期間一直是通的，用一次讀換掉一次寫是划算的交換。
+	// ⚠️ 讀失敗時**仍然照寫** —— 讀不到不等於它是 0，不能因為省事就假設。
+	bool need_hi_write = true;
+	{
+		std::vector<uint16_t> hi;
+		if (readRegs(addr, 1, hi) && hi.size() == 1 && hi[0] == 0x0000) {
+			need_hi_write = false;
+			LOG_INF(_log_tag, "FC0x06 fallback: high word (reg 0x%04X) already 0 — skip", addr);
+		}
+	}
 	// 順序：先把高位寫 0，再寫低位 —— 反過來的話中間態會是「新低位 + 舊高位」，
 	// 那是一個可能很大的錯誤頻率；這個順序的中間態只會是舊低位，有界。
-	if (!writeSingleReg_(addr, 0x0000)) {
+	if (need_hi_write && !writeSingleReg_(addr, 0x0000)) {
 		LOG_ERR(_log_tag, "FC0x06 fallback: high word (reg 0x%04X) write failed", addr);
 		return false;
 	}

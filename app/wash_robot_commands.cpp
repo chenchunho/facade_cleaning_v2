@@ -980,7 +980,7 @@ std::string WashRobot::do_step_down_(bool skip_cleaning_sweep,
             }, "step_down_" + move_group + "_anchor_check")) return "aborted";
             if (try_or_pause_([this, valve_ch]() { return pqw_set_relay_verified_(valve_ch, false); },
                               "step_down_" + move_group + "_valve_off")) return "aborted";
-            if (try_or_pause_([this, move_slaves]() { return vacuum_wait_release_(move_slaves, VACUUM_RELEASE_WAIT_MS); },
+            if (try_or_pause_([this, move_slaves]() { return vacuum_wait_release_(move_slaves, VACUUM_CONFIRM_TIMEOUT_MS); },
                               "step_down_" + move_group + "_vacuum_release")) return "aborted";
             clear_other_group_stalls_(move_group);
             if (try_or_pause_([this, move_slaves]() { return pusher_two_stage_retract_(move_slaves); },
@@ -1379,7 +1379,7 @@ std::string WashRobot::do_step_up_(bool skip_cleaning_sweep,
             }, "step_up_" + move_group + "_anchor_check")) return "aborted";
             if (try_or_pause_([this, valve_ch]() { return pqw_set_relay_verified_(valve_ch, false); },
                               "step_up_" + move_group + "_valve_off")) return "aborted";
-            if (try_or_pause_([this, move_slaves]() { return vacuum_wait_release_(move_slaves, VACUUM_RELEASE_WAIT_MS); },
+            if (try_or_pause_([this, move_slaves]() { return vacuum_wait_release_(move_slaves, VACUUM_CONFIRM_TIMEOUT_MS); },
                               "step_up_" + move_group + "_vacuum_release")) return "aborted";
             clear_other_group_stalls_(move_group);
             if (try_or_pause_([this, move_slaves]() { return pusher_two_stage_retract_(move_slaves); },
@@ -1640,7 +1640,7 @@ std::string WashRobot::do_cross_obstacle_(bool up) {
             }, std::string(tag) + "_" + move_group + "_anchor_check")) return "aborted";
             if (try_or_pause_([this, valve_ch]() { return pqw_set_relay_verified_(valve_ch, false); },
                               std::string(tag) + "_" + move_group + "_valve_off")) return "aborted";
-            if (try_or_pause_([this, move_slaves]() { return vacuum_wait_release_(move_slaves, VACUUM_RELEASE_WAIT_MS); },
+            if (try_or_pause_([this, move_slaves]() { return vacuum_wait_release_(move_slaves, VACUUM_CONFIRM_TIMEOUT_MS); },
                               std::string(tag) + "_" + move_group + "_vacuum_release")) return "aborted";
             clear_other_group_stalls_(move_group);
             // [Phase 1 only] Extend the still-sealed ANCHOR side to 2×preset to stand
@@ -4136,8 +4136,25 @@ std::string WashRobot::cmd_pwm_save() {
 //    把「沒有回覆」判成失敗會誤導（它其實可能成功了）。所以送出之後一律等 2 秒
 //    再讀版本號，用「模組回不回得了話」來判定，而不是用那一幀的回覆。
 std::string WashRobot::cmd_pwm_restart() {
+    // 🔴 [2026-09-03] 拿掉 Idle/Ready 的狀態閘門。
+    //
+    // 起因：09-03 的 10 週期測試中止後，cycle_test.py 的 fan() 自動復原送 `pwm restart`，
+    // 收到 `ERR state_violation current=paused_on_error` —— **復原路徑在最需要它的時候被鎖住**。
+    // 而中止流程本身就會把本體推進 PausedOnError，所以這個閘門保證了「越需要越用不到」。
+    //
+    // 📌 這是 2026-09-01「關閉方向任何狀態都放行」那次修正的**漏網之魚**：當時只放行了
+    //    cmd_pwm_set 的關閉方向，而 restart 是那條退路的**入口**，沒有跟進。
+    //    判準相同 —— 讓模組重新開始，跟把螺旋槳關掉是同一類方向。
+    //
+    // ⚠️ 但不宣稱它「無條件安全」：QX_DO24 的 saveOutputAsDefault() 若曾在 control=65535
+    //    時被呼叫，模組**一上電就會開始驅動馬達**（見該函式的警告區塊）。也就是說重啟後的
+    //    輸出取決於 flash 內容，而那不是這裡看得到的。目前生產路徑沒有任何自動流程呼叫
+    //    `pwm save`（只有面板的明確按鈕），所以風險可控 —— 但**若日後有人存了非停止值，
+    //    這個放行就會變成一條把風扇叫醒的路徑**。要動 save 之前先回來看這一段。
     State cur = state_.load();
-    if (cur != State::Idle && cur != State::Ready) return state_violation_(cur);
+    if (cur != State::Idle && cur != State::Ready)
+        std::cout << "[pwm_restart] 於 " << state_name(cur)
+                  << " 狀態放行 —— 這是復原路徑，擋住它等於讓故障無法自救\n";
     if (!PWM_ENABLED) return "ERR pwm_disabled\n";
 
     const bool acked = pwm_.restartModule();   // false ＝ 無法確認，不等於失敗
@@ -4314,11 +4331,11 @@ std::string WashRobot::cmd_pusher(const std::string& group, const std::string& p
                 if (try_or_pause_([this, valve_ch]() { return pqw_.controlRelay(valve_ch, false); }, valve_ctx)) return on_abort();
             }
         }
-        // Poll until cups release (up to VACUUM_RELEASE_WAIT_MS), then retract.
+        // Poll until cups release (up to VACUUM_CONFIRM_TIMEOUT_MS), then retract.
         {
             const auto rel_slaves = group_slaves_(group);  // handles "all" too
             if (!rel_slaves.empty()) {
-                if (try_or_pause_([this, &rel_slaves]() { return vacuum_wait_release_(rel_slaves, VACUUM_RELEASE_WAIT_MS); },
+                if (try_or_pause_([this, &rel_slaves]() { return vacuum_wait_release_(rel_slaves, VACUUM_CONFIRM_TIMEOUT_MS); },
                                   "manual_pusher_" + group + "_vacuum_release")) return on_abort();
             }
         }

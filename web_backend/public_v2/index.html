@@ -1,0 +1,1313 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>洗窗機作業主控台 v2</title>
+<!--
+  console v2 — 與現行 index.html **並行**，不取代它。
+  刻意不改 server.js：express.static(public) 讓本檔直接在 /v2.html 服務。
+
+  範圍（2026-09-03）：
+    Mission 頁**不在瀏覽器裡重跑週期測試**。中止判準、步驟順序的安全需求、
+    風扇復原邏輯全都在 Linux_test/cycle_test.py 裡；在前端重寫一份等於製造
+    第二個真相，兩邊遲早會漂。這一頁負責的是「起跑前的閘門」與「跑的時候看得見」。
+-->
+<style>
+  :root{
+    --ground:#EDF1F2; --surface:#FFFFFF; --surface2:#E2E8EA; --sunk:#D7DFE1; --rail:#1B2B30;
+    --ink:#132024; --ink2:#4C5C61; --ink3:#7C8D92; --line:#C6D0D3; --line2:#AEBBBF;
+    --accent:#B26816; --accent-soft:#F0E0CC;
+    --ok:#1B7355; --ok-soft:#D3E8DF;
+    --warn:#9E7317; --warn-soft:#F2E6C9;
+    --bad:#A8382B; --bad-soft:#F3D8D4;
+    --idle:#7C8D92; --idle-soft:#DFE5E7;
+    --sans:"IBM Plex Sans TC","Noto Sans TC","Microsoft JhengHei","Helvetica Neue",Arial,sans-serif;
+    --mono:"IBM Plex Mono","SF Mono",Menlo,Consolas,"Courier New",monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --ground:#0C1416; --surface:#131E21; --surface2:#1A272B; --sunk:#0A1214; --rail:#0A1214;
+      --ink:#DEE7E8; --ink2:#93A6AB; --ink3:#6E8085; --line:#25353A; --line2:#33474D;
+      --accent:#E8A33D; --accent-soft:#3A2C16;
+      --ok:#43BC8C; --ok-soft:#122C24;
+      --warn:#E2B854; --warn-soft:#332913;
+      --bad:#E36F60; --bad-soft:#331B18;
+      --idle:#6E8085; --idle-soft:#1A272B;
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--ground);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.55}
+  code{font-family:var(--mono);font-size:.92em;background:var(--surface2);padding:1px 5px;border-radius:2px}
+  .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .stale{opacity:.42}
+
+  .top{display:flex;align-items:center;gap:14px;padding:9px 16px;background:var(--rail);color:#DEE7E8}
+  .top h1{font-size:15px;font-weight:600;margin:0;letter-spacing:.01em}
+  .top .kick{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#5E7278}
+  .top .sp{flex:1}
+  .conn{display:flex;gap:12px;font-family:var(--mono);font-size:11.5px;align-items:center}
+  .conn span{display:flex;align-items:center;gap:5px;color:#93A6AB}
+  .conn i{width:8px;height:8px;border-radius:50%;background:var(--bad);display:inline-block}
+  .conn i.up{background:var(--ok)}
+  .top a{color:#93A6AB;font-family:var(--mono);font-size:11.5px;text-decoration:none;
+         border:1px solid #33474D;padding:4px 9px;border-radius:2px}
+  .top a:hover{color:#DEE7E8;border-color:#5E7278}
+
+  .strip{display:grid;grid-template-columns:repeat(4,1fr);background:var(--surface2);
+         border-bottom:1px solid var(--line)}
+  .cell{padding:11px 15px;border-right:1px solid var(--line);min-width:0}
+  .cell:last-child{border-right:0}
+  .lbl{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink3)}
+  .cell .big{font-family:var(--mono);font-size:22px;font-weight:600;line-height:1.25;margin-top:2px;
+             letter-spacing:-.02em}
+  .cell .sub{font-family:var(--mono);font-size:11px;color:var(--ink2);margin-top:1px}
+  .gauge{margin-top:7px;height:7px;background:var(--sunk);border-radius:1px;position:relative;overflow:hidden}
+  .gauge i{position:absolute;inset:0 auto 0 0;display:block;border-radius:1px;background:var(--ok)}
+  .gauge b{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--bad)}
+  .gtxt{font-family:var(--mono);font-size:10.5px;color:var(--ink3);margin-top:4px}
+
+  .shell{display:grid;grid-template-columns:150px 1fr;min-height:calc(100vh - 160px)}
+  .rail{background:var(--rail);padding:10px 0;display:flex;flex-direction:column;gap:1px}
+  .rail button{width:100%;text-align:left;background:transparent;border:0;color:#93A6AB;
+    font-family:var(--sans);font-size:14px;padding:11px 16px;cursor:pointer;border-left:3px solid transparent}
+  .rail button .rn{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;
+    display:block;color:#5E7278;margin-bottom:1px}
+  .rail button:hover{background:rgba(255,255,255,.06);color:#DEE7E8}
+  .rail button[aria-selected="true"]{background:var(--surface);color:var(--ink);
+    border-left-color:var(--accent);font-weight:600}
+  .rail button[aria-selected="true"] .rn{color:var(--accent)}
+  .rail button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+  .rail .sep{height:1px;background:rgba(255,255,255,.08);margin:9px 16px}
+  .rail .note{font-family:var(--mono);font-size:10px;color:#5E7278;padding:10px 16px 0;line-height:1.55;margin-top:auto}
+  .panes{background:var(--surface);min-width:0}
+  .pane{display:none} .pane.on{display:block}
+
+  .ch{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink3);
+      display:flex;justify-content:space-between;align-items:baseline;padding-bottom:7px;
+      border-bottom:1px solid var(--line);margin-bottom:12px;gap:10px}
+  .band{font-family:var(--mono);font-size:10.5px;color:var(--ink3);line-height:1.55}
+  .band strong{color:var(--ink2)}
+
+  .cols{display:grid;grid-template-columns:262px 1fr 268px}
+  .col{padding:15px;border-right:1px solid var(--line);min-width:0}
+  .col:last-child{border-right:0}
+
+  .pf{list-style:none;padding:0;margin:0}
+  .pf li{display:grid;grid-template-columns:16px 1fr auto;gap:9px;align-items:baseline;padding:6px 0;
+         font-size:13px;border-bottom:1px dotted var(--line)}
+  .pf li:last-child{border-bottom:0}
+  .pf .mk{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--idle)}
+  .pf .v{font-family:var(--mono);font-size:11.5px;color:var(--ink2);white-space:nowrap}
+  .pf li.ok .mk{color:var(--ok)}
+  .pf li.bad .mk{color:var(--bad)} .pf li.bad .v{color:var(--bad);font-weight:600}
+  .gate{margin-top:12px;padding:10px 12px;border-radius:2px;font-size:12.5px;line-height:1.5;
+        background:var(--idle-soft);border-left:3px solid var(--idle)}
+  .gate.clear{background:var(--ok-soft);border-left-color:var(--ok)}
+  .gate.blocked{background:var(--bad-soft);border-left-color:var(--bad)}
+  .cmdhint{margin-top:10px;padding:9px 11px;background:var(--surface2);border-radius:2px;
+           font-family:var(--mono);font-size:11.5px;color:var(--ink2);line-height:1.6;
+           word-break:break-all;-webkit-user-select:all;user-select:all}
+
+  .mon{display:flex;flex-direction:column;gap:14px}
+  .mrow{display:flex;justify-content:space-between;align-items:baseline;font-size:12.5px;gap:8px}
+  .mrow .k{color:var(--ink2)} .mrow .v{font-family:var(--mono);font-weight:600}
+  .spark{margin-top:6px;display:block;width:100%;height:52px}
+  .cups{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:8px 0 6px}
+  .cup{border:1px solid var(--line2);border-radius:2px;padding:6px 9px}
+  .cup .cn{font-family:var(--mono);font-size:10px;color:var(--ink3);letter-spacing:.08em}
+  .cup .cv{font-family:var(--mono);font-size:17px;font-weight:600;line-height:1.3;color:var(--ink3)}
+  .cup.sealed{border-color:var(--ok);background:var(--ok-soft)} .cup.sealed .cv{color:var(--ok)}
+
+  .verif{display:flex;flex-direction:column;gap:5px}
+  .vf{display:grid;grid-template-columns:auto 1fr auto;gap:9px;align-items:center;font-size:12.5px;
+      padding:6px 9px;border-radius:2px;background:var(--surface2)}
+  .vf .dot{width:9px;height:9px;border-radius:50%;flex:none;background:var(--idle)}
+  .vf .cmd{font-family:var(--mono);font-size:11.5px;color:var(--ink2);overflow:hidden;
+           text-overflow:ellipsis;white-space:nowrap}
+  .vf .rb{font-family:var(--mono);font-size:12px;font-weight:600;white-space:nowrap;color:var(--ink3)}
+  .vf.ok .dot{background:var(--ok)} .vf.ok .rb{color:var(--ok)}
+  .vf.unv .dot{background:transparent;border:2px solid var(--warn)} .vf.unv .rb{color:var(--warn)}
+  .vf.bad .dot{background:var(--bad)} .vf.bad .rb{color:var(--bad)}
+  .vf.pend .dot{background:var(--accent)} .vf.pend .rb{color:var(--accent)}
+
+  .dash{display:grid;grid-template-columns:1.1fr 1fr}
+  .dash > div{padding:15px;border-right:1px solid var(--line)}
+  .dash > div:last-child{border-right:0}
+  .wall{display:flex;gap:14px}
+  .wf{display:flex;justify-content:space-between;gap:12px;font-size:13px;
+      border-bottom:1px dotted var(--line);padding:5px 0}
+  .wf .k{color:var(--ink2)} .wf .v{font-family:var(--mono);font-weight:600}
+  .wallfacts{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center}
+  .devgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:6px;margin-top:10px}
+  .dev{border:1px solid var(--line);border-radius:2px;padding:6px 8px;font-family:var(--mono);font-size:11px}
+  .dev b{display:block;font-size:10px;color:var(--ink3);font-weight:400;letter-spacing:.06em}
+  .dev.up{border-color:var(--ok);color:var(--ok)}
+  .dev.down{border-color:var(--bad);color:var(--bad);background:var(--bad-soft)}
+
+  .man{padding:15px;display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:15px}
+  .grp{border:1px solid var(--line);border-radius:2px;overflow:hidden}
+  .grp > header{background:var(--surface2);padding:8px 12px;font-size:13px;font-weight:600;
+    display:flex;justify-content:space-between;align-items:center;gap:8px;border-bottom:1px solid var(--line)}
+  .grp > header .lock{font-family:var(--mono);font-size:10px;color:var(--bad);background:var(--bad-soft);
+    padding:2px 6px;border-radius:2px;white-space:nowrap}
+  .grp > div{padding:10px 12px;display:flex;flex-direction:column;gap:7px}
+  .ctl{display:grid;grid-template-columns:1fr auto auto;gap:9px;align-items:center;font-size:13px}
+  .ctl .cl{min-width:0}
+  .ctl .cl small{display:block;font-family:var(--mono);font-size:10.5px;color:var(--ink3);line-height:1.4}
+  .ctl .rd{font-family:var(--mono);font-size:12px;font-weight:600;white-space:nowrap;color:var(--ink3)}
+  .ctl .rd.on{color:var(--ok)} .ctl .rd.unv{color:var(--warn)} .ctl .rd.pend{color:var(--accent)}
+  .sw{width:42px;height:22px;border-radius:11px;background:var(--sunk);border:1px solid var(--line2);
+      position:relative;cursor:pointer;flex:none;padding:0}
+  .sw::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;
+    background:var(--surface);border:1px solid var(--line2);transition:left .14s}
+  .sw[aria-checked="true"]{background:var(--ok);border-color:var(--ok)}
+  .sw[aria-checked="true"]::after{left:21px;border-color:var(--ok)}
+  .sw:disabled{opacity:.35;cursor:not-allowed}
+  .sw:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .btn{font-family:var(--sans);font-size:12.5px;font-weight:600;padding:6px 12px;border:1px solid var(--line2);
+       border-radius:2px;background:var(--surface);color:var(--ink);cursor:pointer;white-space:nowrap}
+  .btn:hover{background:var(--surface2)}
+  .btn:disabled{opacity:.4;cursor:not-allowed}
+  .btn.dark{background:var(--ink);color:var(--ground);border-color:var(--ink)}
+  .btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .numin{width:70px;font-family:var(--mono);font-size:12.5px;padding:5px 7px;text-align:right;
+         border:1px solid var(--line2);border-radius:2px;background:var(--surface);color:var(--ink)}
+  .numin:focus-visible{outline:2px solid var(--accent);outline-offset:-1px}
+  /* 腳本執行中：整頁變灰且不可點。STOP 由 JS 個別把 pointer-events 開回來。 */
+  .btn.hold{min-width:62px}
+  .btn.hold.active{background:var(--accent);border-color:var(--accent);color:#fff}
+  .locked{opacity:.4;pointer-events:none;filter:saturate(.3)}
+  .locked #crane-stop{opacity:1;filter:none}
+  .warnbox{margin:0 12px 11px;padding:8px 10px;background:var(--bad-soft);border-left:3px solid var(--bad);
+    font-size:12px;line-height:1.5;border-radius:2px}
+  .warnbox.amber{background:var(--warn-soft);border-left-color:var(--warn)}
+  .rawbox{display:flex;gap:8px}
+  .rawbox select,.rawbox input{font-family:var(--mono);font-size:12.5px;padding:7px 9px;
+    border:1px solid var(--line2);border-radius:2px;background:var(--surface);color:var(--ink)}
+  .rawbox input{flex:1;min-width:0}
+  .rawbox input:focus-visible,.rawbox select:focus-visible{outline:2px solid var(--accent);outline-offset:-1px}
+
+  .setwrap{padding:15px}
+  .tbl{width:100%;border-collapse:collapse;font-size:13px}
+  .tbl th{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink3);
+    text-align:left;padding:0 10px 7px;border-bottom:1px solid var(--line2);font-weight:500}
+  .tbl td{padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  .tbl td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap;font-weight:600}
+  .tbl td .sub2{display:block;font-size:11.5px;color:var(--ink3);font-weight:400;font-family:var(--sans);
+    line-height:1.45;margin-top:2px}
+  .pill{font-family:var(--mono);font-size:10px;font-weight:600;padding:2px 7px;border-radius:2px;white-space:nowrap}
+  .pl-lost{background:var(--bad-soft);color:var(--bad)}
+  .pl-keep{background:var(--ok-soft);color:var(--ok)}
+  .pl-const{background:var(--idle-soft);color:var(--ink2)}
+  .scroll{overflow-x:auto}
+
+  .logwrap{border-top:1px solid var(--line);background:var(--sunk)}
+  .logwrap header{padding:6px 15px;font-family:var(--mono);font-size:10px;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--ink3);display:flex;justify-content:space-between;align-items:center}
+  #log{margin:0;padding:0 15px 12px;max-height:168px;overflow:auto;font-family:var(--mono);
+       font-size:11.5px;line-height:1.65;color:var(--ink2);white-space:pre-wrap;word-break:break-all}
+  #log b{font-weight:600;color:var(--ink3)}
+  #log .e{color:var(--bad)} #log .g{color:var(--ok)} #log .w{color:var(--warn)}
+
+  @media (max-width:980px){
+    .cols,.dash{grid-template-columns:1fr}
+    .col,.dash > div{border-right:0;border-bottom:1px solid var(--line)}
+    .strip{grid-template-columns:1fr 1fr}
+    .cell:nth-child(2){border-right:0}
+    .cell:nth-child(1),.cell:nth-child(2){border-bottom:1px solid var(--line)}
+    .shell{grid-template-columns:1fr}
+    .rail{flex-direction:row;overflow-x:auto;padding:0}
+    .rail button{border-left:0;border-bottom:3px solid transparent;white-space:nowrap;width:auto}
+    .rail button[aria-selected="true"]{border-left-color:transparent;border-bottom-color:var(--accent)}
+    .rail .sep,.rail .note{display:none}
+  }
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+
+<div class="top">
+  <div>
+    <div class="kick">facade_cleaning_v2</div>
+    <h1>洗窗機作業主控台 v2</h1>
+  </div>
+  <div class="sp"></div>
+  <div class="conn">
+    <span><i id="c-ws"></i>backend</span>
+    <span><i id="c-wr"></i>washrobot</span>
+    <span><i id="c-cr"></i>crane</span>
+    <span><i id="c-ar"></i>arm</span>
+  </div>
+  <a href="/" title="回到現行介面">舊版 GUI</a>
+</div>
+
+<div class="strip">
+  <div class="cell">
+    <div class="lbl">姿態 raw_x</div>
+    <div class="big" id="v-roll">—</div>
+    <div class="sub" id="s-roll">等待 washrobot</div>
+    <div class="gauge"><i id="g-roll" style="width:0"></i><b style="left:100%"></b></div>
+    <div class="gtxt" id="t-roll">中止門檻 ±6.0°（瞬時）</div>
+  </div>
+  <div class="cell">
+    <div class="lbl">位置 L / R</div>
+    <div class="big mono" id="v-pos">—</div>
+    <div class="sub" id="s-pos">玻璃面 0（頂）– <span id="v-bottom">223</span></div>
+    <div class="gauge"><i id="g-pos" style="width:0;background:var(--accent)"></i></div>
+    <div class="gtxt" id="t-pos">等待 crane</div>
+  </div>
+  <div class="cell">
+    <div class="lbl">張力 L / R</div>
+    <div class="big mono" id="v-ten">—</div>
+    <div class="sub" id="s-ten">比值 — · 總和 —</div>
+    <div class="gauge"><i id="g-ten" style="width:0"></i><b style="left:100%"></b></div>
+    <div class="gtxt" id="t-ten">上限 total 130 kg</div>
+  </div>
+  <div class="cell">
+    <div class="lbl">裝置</div>
+    <div class="big mono" id="v-dev">—</div>
+    <div class="sub" id="s-dev">crane dev_* 旗標</div>
+    <div class="gauge"><i id="g-dev" style="width:0"></i></div>
+    <div class="gtxt" id="t-dev">—</div>
+  </div>
+</div>
+
+<div class="shell">
+  <nav class="rail" role="tablist" aria-label="主控台分頁">
+    <button role="tab" data-p="dashboard" aria-selected="false"><span class="rn">01</span>Dashboard</button>
+    <button role="tab" data-p="mission" aria-selected="true"><span class="rn">02</span>Mission</button>
+    <button role="tab" data-p="manual" aria-selected="false"><span class="rn">03</span>Manual</button>
+    <span class="sep"></span>
+    <button role="tab" data-p="setting" aria-selected="false"><span class="rn">04</span>Setting</button>
+    <div class="note" id="polln">輪詢<br>status 1s<br>relay 4s<br>pwm 6s</div>
+  </nav>
+
+  <div class="panes">
+
+    <!-- ===== DASHBOARD ===== -->
+    <div class="pane" data-pane="dashboard" role="tabpanel">
+      <div class="dash">
+        <div>
+          <div class="ch"><span>機器在哪裡</span><span id="d-range">玻璃面 0 – 223 cm</span></div>
+          <div class="wall">
+            <svg width="86" height="196" viewBox="0 0 86 196" role="img" aria-label="機器在玻璃面上的位置">
+              <rect x="18" y="8" width="50" height="170" fill="var(--surface2)" stroke="var(--line2)"></rect>
+              <line x1="18" y1="8" x2="68" y2="8" stroke="var(--ink2)" stroke-width="2"></line>
+              <line x1="18" y1="178" x2="68" y2="178" stroke="var(--ink2)" stroke-width="2"></line>
+              <text x="72" y="12" font-family="monospace" font-size="9" fill="var(--ink3)">0</text>
+              <text x="72" y="182" font-family="monospace" font-size="9" fill="var(--ink3)" id="sv-bot">223</text>
+              <line x1="30" y1="8" x2="30" y2="20" stroke="var(--ink3)" id="sv-rl"></line>
+              <line x1="56" y1="8" x2="56" y2="20" stroke="var(--ink3)" id="sv-rr"></line>
+              <rect x="22" y="12" width="42" height="16" rx="2" fill="var(--accent)" id="sv-bot-box"></rect>
+              <text x="2" y="24" font-family="monospace" font-size="9" fill="var(--accent)" id="sv-lab">—</text>
+            </svg>
+            <div class="wallfacts">
+              <div class="wf"><span class="k">姿態 raw_x</span><span class="v" id="d-roll">—</span></div>
+              <div class="wf"><span class="k">左右繩長差 L−R</span><span class="v" id="d-diff">—</span></div>
+              <div class="wf"><span class="k">張力比</span><span class="v" id="d-ratio">—</span></div>
+              <div class="wf"><span class="k">本體狀態</span><span class="v" id="d-state">—</span></div>
+              <div class="wf" style="border-bottom:0"><span class="k">平衡來源</span><span class="v" id="d-bal">—</span></div>
+            </div>
+          </div>
+          <div class="band" style="margin-top:8px">水平點隨高度變（頂 +1.8 / 底 +0.87 cm），同一高度另有約 ±0.4° 遲滯 —— 這兩件事都還沒進編譯預設。</div>
+        </div>
+        <div>
+          <div class="ch"><span>裝置（crane dev_* 旗標）</span><span id="d-devn">—</span></div>
+          <div class="devgrid" id="devgrid"></div>
+          <div class="ch" style="margin-top:18px"><span>吸盤（washrobot p5–p8）</span><span id="d-seal">—</span></div>
+          <div class="cups" id="d-cups"></div>
+          <div class="band">密封判準：<strong>至少一顆 ≤ −50 kPa</strong>。玻璃有縫時個別吸盤吸不住是現場條件；一顆都沒有才是問題。真空建立需 1.2–2.9 秒，讀太早會全部看起來像 0。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== MISSION ===== -->
+    <div class="pane on" data-pane="mission" role="tabpanel">
+      <div class="cols">
+        <div class="col">
+          <div class="ch"><span>前置檢查</span><span id="pf-count">— / 6</span></div>
+          <ul class="pf" id="pf">
+            <li data-k="top"><span class="mk">·</span><span>起點在頂端 <small class="band">L ≤ 5</small></span><span class="v">—</span></li>
+            <li data-k="bal"><span class="mk">·</span><span>平衡來源 = imu</span><span class="v">—</span></li>
+            <li data-k="pump"><span class="mk">·</span><span>真空源 ch2 = 1</span><span class="v">—</span></li>
+            <li data-k="hz"><span class="mk">·</span><span>移動速度 30 Hz</span><span class="v">—</span></li>
+            <li data-k="state"><span class="mk">·</span><span>本體 idle / ready</span><span class="v">—</span></li>
+            <li data-k="roll"><span class="mk">·</span><span>起跑姿態 |roll| ≤ 1°</span><span class="v">—</span></li>
+          </ul>
+          <div class="gate" id="gate">等待兩台回報…</div>
+          <div class="band" style="margin-top:10px">全通過後，在吊機 Pi 執行：</div>
+          <div class="cmdhint">cd ~/bringup &amp;&amp; python3 -u cycle_test.py 10 | tee cycle_logs/cyc_$(date +%m%d_%H%M).log</div>
+          <div class="band" style="margin-top:8px">這一頁<strong>不代跑週期測試</strong>——中止判準與復原邏輯都在腳本裡，前端再寫一份就會有兩個真相。</div>
+          <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn" id="fix-bal">設 balance_source imu</button>
+            <button class="btn" id="fix-hz">設 motion_hz 30</button>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="ch"><span>即時監看</span><span id="mon-age">—</span></div>
+          <div class="mon">
+            <div>
+              <div class="mrow"><span class="k">roll（讀 <code>raw_x</code>，與基準無關）</span><span class="v" id="m-roll">—</span></div>
+              <svg class="spark" viewBox="0 0 300 52" preserveAspectRatio="none" role="img" aria-label="roll 時序與正負一度規格帶">
+                <rect x="0" y="18" width="300" height="16" fill="var(--ok-soft)"></rect>
+                <line x1="0" y1="26" x2="300" y2="26" stroke="var(--line2)" stroke-width="1"></line>
+                <polyline id="sp" fill="none" stroke="var(--accent)" stroke-width="1.6" points=""></polyline>
+              </svg>
+              <div class="band">綠帶 = ±1.0° 規格 · 縱軸 ±3°</div>
+            </div>
+            <div>
+              <div class="mrow"><span class="k">左右差 |L−R|</span><span class="v" id="m-diff">—</span></div>
+              <div class="gauge" style="margin-top:6px"><i id="g-diff" style="width:0"></i>
+                <b style="left:80%"></b><b style="left:100%;background:var(--ink3)"></b></div>
+              <div class="band" style="margin-top:5px">腳本中止 8 cm <strong>連續 3 筆</strong> · 韌體守衛 10 cm</div>
+            </div>
+            <div>
+              <div class="mrow"><span class="k">張力差</span><span class="v" id="m-tdiff">—</span></div>
+              <div class="gauge" style="margin-top:6px"><i id="g-tdiff" style="width:0"></i><b style="left:100%"></b></div>
+              <div class="band" style="margin-top:5px">上限 50 kg · 水平時本來就有約 25 kg 差（重心偏左）</div>
+            </div>
+          </div>
+
+          <div class="ch" style="margin-top:18px"><span>致動器 · 指令 ↔ 回讀</span></div>
+          <div class="verif" id="verif">
+            <div class="vf" data-v="pump"><span class="dot"></span><span class="cmd">幫浦 ch2</span><span class="rb">—</span></div>
+            <div class="vf" data-v="valve"><span class="dot"></span><span class="cmd">真空閥 ch1</span><span class="rb">—</span></div>
+            <div class="vf" data-v="fan"><span class="dot"></span><span class="cmd">風扇 pwm ch1</span><span class="rb">—</span></div>
+          </div>
+          <div class="band" style="margin-top:8px">實心＝已回讀確認 · 空心＝已送出未複驗 · 紅＝確認失敗 · 橘＝等待回讀</div>
+        </div>
+
+        <div class="col">
+          <div class="ch"><span>吸盤</span><span id="m-seal">—</span></div>
+          <div class="cups" id="m-cups"></div>
+          <div class="ch" style="margin-top:16px"><span>單步時間基準</span><span>22.4 s</span></div>
+          <div style="display:flex;height:24px;border-radius:2px;overflow:hidden;margin:8px 0">
+            <span style="width:15.2%;background:var(--idle)"></span>
+            <span style="width:8.9%;background:#8FA3A7"></span>
+            <span style="width:19.6%;background:var(--accent)"></span>
+            <span style="width:16.5%;background:var(--idle)"></span>
+            <span style="width:24.1%;background:var(--ok)"></span>
+            <span style="width:15.7%;background:var(--line2)"></span>
+          </div>
+          <div class="band">伸出 3.4 · 真空 2.0 · <strong>滑台 4.4</strong> · 收回 3.7 · <strong>移動 5.4</strong> · 其他 3.6<br><br>
+            下行含開銷每公尺 <strong>56.0 s</strong>、上行 <strong>8.1 s</strong>、來回約 <strong>64 s</strong>。<br>
+            只有 24% 的時間在移動 → 調 <code>motion_hz</code> 幾乎沒用。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== MANUAL ===== -->
+    <div class="pane" data-pane="manual" role="tabpanel">
+      <div id="lockbar" hidden style="margin:15px 15px 0;padding:10px 12px;border-radius:2px;
+           background:var(--bad-soft);border-left:3px solid var(--bad);font-size:13px;line-height:1.5">
+        🔴 <strong>吊機正在運動中（<code>motion_active=1</code>），手動控制已鎖定。</strong>
+        腳本正在驅動吊機時按下手動指令會跟它搶控制權 —— 要接手請先在下方按「緊急停止」。
+      </div>
+      <div class="man">
+
+        <!-- 吊機 -->
+        <div class="grp">
+          <header>吊機 —— 收放繩 <span class="lock" id="crane-lock">按住才動</span></header>
+          <div>
+            <div class="ctl">
+              <span class="cl">即時<small>高度＝離底；繩長為 SD76 原始讀值</small></span>
+              <span class="rd" id="cr-h">—</span>
+              <span class="rd" id="cr-lr" style="color:var(--ink3)">—</span>
+            </div>
+
+            <div class="ctl">
+              <span class="cl"><strong>雙側</strong><small>兩條一起，平衡迴路作用中</small></span>
+              <span class="rd"></span>
+              <span style="display:flex;gap:6px">
+                <button class="btn hold" data-hold="up">▲ 拉繩</button>
+                <button class="btn hold" data-hold="down">▼ 釋放</button>
+              </span>
+            </div>
+            <div class="ctl">
+              <span class="cl"><strong>左側</strong></span><span class="rd"></span>
+              <span style="display:flex;gap:6px">
+                <button class="btn hold" data-hold="up_left">▲ 左</button>
+                <button class="btn hold" data-hold="down_left">▼ 左</button>
+              </span>
+            </div>
+            <div class="ctl">
+              <span class="cl"><strong>右側</strong></span><span class="rd"></span>
+              <span style="display:flex;gap:6px">
+                <button class="btn hold" data-hold="up_right">▲ 右</button>
+                <button class="btn hold" data-hold="down_right">▼ 右</button>
+              </span>
+            </div>
+
+            <div class="ctl" style="margin-top:2px">
+              <span class="cl">精準微調<small>量測式移動，走完指定公分自己停</small></span>
+              <span class="rd"><input id="cm-fine" class="numin" type="number" value="2" min="1" max="50" aria-label="微調公分"></span>
+              <span style="display:flex;gap:6px">
+                <button class="btn cranebtn" data-cc="retract_left" data-side="左">▲左</button>
+                <button class="btn cranebtn" data-cc="retract_right" data-side="右">▲右</button>
+                <button class="btn cranebtn" data-cc="pay_out_left" data-side="左">▼左</button>
+                <button class="btn cranebtn" data-cc="pay_out_right" data-side="右">▼右</button>
+              </span>
+            </div>
+
+            <div class="ctl" style="margin-top:6px">
+              <span class="cl" style="color:var(--bad);font-weight:600">緊急停止<small>立即停下吊機，不復位</small></span>
+              <span class="rd"></span>
+              <button class="btn" id="crane-stop" style="border-color:var(--bad);color:var(--bad);font-weight:700">STOP</button>
+            </div>
+          </div>
+          <div class="warnbox amber">按住的六個鈕走 <code>cmd_hold</code>（`up`/`down` 系列）——
+          <strong>張力保護有效</strong>，超標時伺服器會自己停並送 <code>EVT tension_*</code>。<br>
+          🔴 <strong>不要用 raw command 打 <code>retract_left on</code>：</strong>那是「緊急收繩」路徑，
+          張力檢查與看門狗**兩道都不作用**，設計上完全靠操作員的眼睛。<br>
+          單側動作直接改變姿態：實測約 −0.9 °/cm，動 2cm 就將近 2°。</div>
+        </div>
+
+        <!-- 張力保護（獨立一張，與繼電器／PWM 同尺寸） -->
+        <div class="grp">
+          <header>張力保護 <span class="lock" style="background:var(--bad-soft);color:var(--bad)">重啟就沒了</span></header>
+          <div>
+            <div class="ctl">
+              <span class="cl">目前張力<small>左 / 右 · 比值 · 總和</small></span>
+              <span class="rd" id="cr-ten2">—</span><span class="rd" id="cr-tenr2" style="color:var(--ink3)">—</span>
+            </div>
+            <div id="tenset" style="display:grid;grid-template-columns:1fr auto auto;gap:6px 9px;align-items:center">
+              <span class="band">單側上限 <code>tension_max_kg</code></span>
+              <input class="numin" data-set="set_tension_max_kg" type="number" step="1" aria-label="單側張力上限">
+              <button class="btn" data-setgo="set_tension_max_kg">套用</button>
+              <span class="band">左右差上限 <code>tension_diff_max_kg</code></span>
+              <input class="numin" data-set="set_tension_diff_max_kg" type="number" step="1" aria-label="左右張力差上限">
+              <button class="btn" data-setgo="set_tension_diff_max_kg">套用</button>
+              <span class="band">總和上限 <code>up_stop_total_kg</code></span>
+              <input class="numin" data-set="set_up_stop_total_kg" type="number" step="1" aria-label="總張力上限">
+              <button class="btn" data-setgo="set_up_stop_total_kg">套用</button>
+              <span class="band">收繩停止 <code>retract_tension_stop_kg</code></span>
+              <input class="numin" data-set="set_retract_tension_stop_kg" type="number" step="1" aria-label="收繩張力停止">
+              <button class="btn" data-setgo="set_retract_tension_stop_kg">套用</button>
+            </div>
+          </div>
+          <div class="warnbox"><code>tension_max_kg</code> 目前是<strong>單側</strong>門檻而整機才 94kg
+          —— 一條繩承擔全部重量也不會觸發，它擋得到的是「卡住／被拉住」，不是「另一條鬆脫」。</div>
+        </div>
+
+        <!-- PQW -->
+        <div class="grp">
+          <header>PQW 繼電器 · CH1–8 <span class="lock">CH1 / CH6 需二次確認</span></header>
+          <div id="relaygrp"></div>
+          <div class="warnbox">CH1 是四顆吸盤<strong>唯一</strong>一顆真空閥、CH6 是正壓閥。
+          吸盤承重時開放 raw 控制＝提供一條讓機器脫落的捷徑。<br>
+          📌 <code>relay_status</code> 其實回報 16 格，CH14 是水泵、在這 8 格之外；要的話我再加。</div>
+        </div>
+
+        <!-- 風扇 -->
+        <div class="grp">
+          <header>風扇 QX-DO24 · ch1 <span class="lock" style="background:var(--warn-soft);color:var(--warn)">寫入 ≈7% 真失敗</span></header>
+          <div>
+            <div class="ctl"><span class="cl">狀態<small>duty, hz, ctrl, enable（回讀）</small></span>
+              <span class="rd" id="rd-fan">—</span><span class="rd" id="rd-fanraw" style="color:var(--ink3)">—</span></div>
+            <div class="ctl"><span class="cl">占空比<small>驅動鎖 5~10%，5=停止 10=全速</small></span>
+              <span class="rd"><input id="fan-duty" class="numin" type="number" value="7" min="5" max="10" step="1" aria-label="風扇占空比"></span>
+              <button class="btn" id="fan-set">套用</button></div>
+            <div class="ctl"><span class="cl">快捷</span><span class="rd"></span>
+              <span style="display:flex;gap:6px">
+                <button class="btn" data-cmd="washrobot|pwm set 1 50 65535 5">停止 5%</button>
+                <button class="btn" data-cmd="washrobot|pwm set 1 50 65535 7">作業 7%</button>
+              </span></div>
+            <div class="ctl"><span class="cl">模組重啟<small>reg 0xFF00 短幀；長幀送不進時的退路</small></span>
+              <span class="rd"></span><button class="btn" data-cmd="washrobot|pwm restart">restart</button></div>
+            <div class="ctl"><span class="cl" style="color:var(--bad)">保存到 flash<small>壽命僅 1~2 千次，每次上電只接受一次</small></span>
+              <span class="rd"></span><button class="btn" data-cmd="washrobot|pwm save" data-confirm="1"
+                style="border-color:var(--bad);color:var(--bad)">save</button></div>
+          </div>
+          <div class="warnbox amber"><code>readback_failed</code> 與 <code>control_write_failed</code>
+          在 60 次實測中<strong>事後狀態全部正確（11/11）</strong>＝回報問題；<code>freq</code>／<code>duty</code>
+          才是真失敗。所以這裡一律看回讀，不看回傳字串。</div>
+        </div>
+
+        <!-- ZDT -->
+        <div class="grp">
+          <header>ZDT 推桿 · slave 5–8</header>
+          <div>
+            <div class="ctl"><span class="cl">整組<small>extend_raw 指定公分 0.5~20</small></span>
+              <span class="rd"><input id="push-cm" class="numin" type="number" value="10" min="0.5" max="20" step="0.5" aria-label="推桿公分"></span>
+              <span style="display:flex;gap:6px">
+                <button class="btn" id="push-ext">伸出</button>
+                <button class="btn" data-cmd="washrobot|pusher all retract">收回</button>
+              </span></div>
+            <div class="ctl"><span class="cl">右側 {5,7}</span><span class="rd"></span>
+              <span style="display:flex;gap:6px">
+                <button class="btn" data-cmd="washrobot|pusher right extend">伸</button>
+                <button class="btn" data-cmd="washrobot|pusher right retract">收</button>
+              </span></div>
+            <div class="ctl"><span class="cl">左側 {6,8}</span><span class="rd"></span>
+              <span style="display:flex;gap:6px">
+                <button class="btn" data-cmd="washrobot|pusher left extend">伸</button>
+                <button class="btn" data-cmd="washrobot|pusher left retract">收</button>
+              </span></div>
+            <div id="zdtsingle" style="display:grid;grid-template-columns:1fr auto auto;gap:6px 9px;align-items:center"></div>
+            <div class="ctl" style="margin-top:4px"><span class="cl">使能 / 堵轉<small>zdt_enable · zdt_disable · zdt_release_stall</small></span>
+              <span class="rd"></span>
+              <span style="display:flex;gap:6px">
+                <button class="btn" data-cmd="washrobot|zdt_enable">en</button>
+                <button class="btn" data-cmd="washrobot|zdt_disable">dis</button>
+                <button class="btn" data-cmd="washrobot|zdt_release_stall">解堵轉</button>
+              </span></div>
+            <div class="ctl"><span class="cl" style="color:var(--bad)">歸零<small>把目前位置定為 0</small></span>
+              <span class="rd"></span>
+              <button class="btn" data-cmd="washrobot|zdt_zero" data-confirm="1"
+                style="border-color:var(--bad);color:var(--bad)">zdt_zero</button></div>
+          </div>
+          <div class="warnbox amber">位置與峰值電流看本體 log 的 <code>wait_many</code>（<code>pusher</code> 那行沒有）。
+          09-03 實測上面兩顆耗時是下面兩顆的 <strong>2.2 倍</strong>，尚未查明 —— 四顆要各自量，不要只比左右。</div>
+        </div>
+
+        <!-- 上滑台 -->
+        <div class="grp">
+          <header>上滑台 DM2J · slave 14 <span class="lock" style="background:var(--warn-soft);color:var(--warn)">開迴路 · 無原點感測器</span></header>
+          <div>
+            <div class="ctl"><span class="cl">位置<small>rail_pos 回讀</small></span>
+              <span class="rd" id="rd-rail">—</span>
+              <button class="btn" id="rail-read">讀取</button></div>
+            <div class="ctl"><span class="cl">目標 / RPM<small>rail &lt;cm&gt; [rpm] [acc] [dec]，0＝沿用預設</small></span>
+              <span class="rd" style="display:flex;gap:6px">
+                <input id="rail-cm" class="numin" type="number" value="50" min="0" max="130" aria-label="滑台目標公分">
+                <input id="rail-rpm" class="numin" type="number" value="0" min="0" max="1000" step="50" aria-label="滑台 RPM">
+              </span>
+              <button class="btn" id="rail-go">移動</button></div>
+            <div class="ctl"><span class="cl">快捷</span><span class="rd"></span>
+              <span style="display:flex;gap:6px">
+                <button class="btn" data-cmd="washrobot|rail 0">→ 0</button>
+                <button class="btn" data-cmd="washrobot|rail 50">→ 50</button>
+                <button class="btn" data-cmd="washrobot|rail 130">→ 130</button>
+              </span></div>
+            <div class="ctl"><span class="cl">使能<small>失能後可手推，編碼器仍供電</small></span>
+              <span class="rd" id="rd-railen">—</span>
+              <span style="display:flex;gap:6px">
+                <button class="btn" data-cmd="washrobot|rail_enable on">on</button>
+                <button class="btn" data-cmd="washrobot|rail_enable off">off</button>
+              </span></div>
+            <div class="ctl"><span class="cl" style="color:var(--bad)">校正歸零<small>失能 → 手推到左端硬限位 → 使能 → 歸零</small></span>
+              <span class="rd"></span>
+              <button class="btn" data-cmd="washrobot|rail_zero" data-confirm="1"
+                style="border-color:var(--bad);color:var(--bad)">rail_zero</button></div>
+            <div class="ctl"><span class="cl">驅動器組態<small>一次性：讓 Pr0.07 真的能關閉使能</small></span>
+              <span class="rd"></span>
+              <button class="btn" data-cmd="washrobot|rail_cfg_soft_enable" data-confirm="1">cfg_soft_enable</button></div>
+          </div>
+          <div class="warnbox amber">🔴 <strong>本機沒有原點感測器</strong>（<code>home_start()</code> 沒東西可觸發），
+          座標是否對應真實位置無法保證 —— <strong>手推之後務必歸零</strong>。行程守衛 0–130 cm。</div>
+        </div>
+
+        <!-- raw -->
+        <div class="grp" style="grid-column:1/-1">
+          <header>raw command <span class="lock" style="background:var(--idle-soft);color:var(--ink2)">保留</span></header>
+          <div>
+            <div class="rawbox">
+              <select id="raw-t" aria-label="目標">
+                <option value="washrobot">washrobot</option>
+                <option value="crane">crane</option>
+                <option value="arm">arm</option>
+              </select>
+              <input id="raw-c" type="text" value="relay_status" spellcheck="false" aria-label="指令">
+              <button class="btn dark" id="raw-go">送出</button>
+            </div>
+            <div class="band" style="margin-top:7px">逐顆通電才查得出「CH3 被記成空通道、實際是幫浦 B 組」這種事。這一格永遠不會被拿掉。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== SETTING ===== -->
+    <div class="pane" data-pane="setting" role="tabpanel">
+      <div class="setwrap">
+        <div class="ch"><span>參數 · 重點是「重啟後還在嗎」</span><span>即時值來自 crane / washrobot status</span></div>
+        <div class="scroll">
+          <table class="tbl">
+            <thead><tr><th>參數</th><th>目前值</th><th>編譯預設</th><th>重啟後</th><th>依據</th></tr></thead>
+            <tbody>
+              <tr><td>balance_source<span class="sub2">平衡迴路回授來源</span></td>
+                  <td class="num" id="st-bal">—</td><td class="num" style="color:var(--bad)">meter</td>
+                  <td><span class="pill pl-lost">會遺失</span></td>
+                  <td class="band">關掉 IMU 平衡 → |roll| 0.68° → 2.52°、出帶 22.7% → 67%</td></tr>
+              <tr><td>fine_adjust_level_diff_cm<span class="sub2">fine_adjust 收斂目標</span></td>
+                  <td class="num" id="st-lvl">—</td><td class="num">0</td>
+                  <td><span class="pill pl-lost">預設已知錯</span></td>
+                  <td class="band">水平點 頂 +1.8 / 底 +0.87 —— 是函數不是常數</td></tr>
+              <tr><td>motion_hz<span class="sub2">自動運動頻率</span></td>
+                  <td class="num" id="st-hz">—</td><td class="num">30</td>
+                  <td><span class="pill pl-lost">會遺失</span></td>
+                  <td class="band">中止時若留在 50，下一個人下 pay_out 就是 50 Hz</td></tr>
+              <tr><td>length_diff_max_cm<span class="sub2">左右繩長差韌體守衛</span></td>
+                  <td class="num" id="st-ldm">—</td><td class="num">10</td>
+                  <td><span class="pill pl-const">編譯常數</span></td>
+                  <td class="band">10 只在 imu 模式下正確；切回 meter 應調緊</td></tr>
+              <tr><td>retract_tension_stop_kg<span class="sub2">收繩張力上限</span></td>
+                  <td class="num" id="st-rts">—</td><td class="num">75</td>
+                  <td><span class="pill pl-keep">已常數化</span></td>
+                  <td class="band">實測單側最大 59.7，留 26% 餘裕</td></tr>
+              <tr><td>up_stop_total_kg<span class="sub2">總張力上限</span></td>
+                  <td class="num" id="st-ust">—</td><td class="num">130</td>
+                  <td><span class="pill pl-keep">已常數化</span></td>
+                  <td class="band">整機 94 kg；舊值 70 低於自重，一按就停</td></tr>
+              <tr><td>DSZL 刻度 左 / 右<span class="sub2">張力換算係數</span></td>
+                  <td class="num" id="st-dsz">—</td><td class="num" style="color:var(--ink3)">—</td>
+                  <td><span class="pill pl-keep">已常數化</span></td>
+                  <td class="band">2026-09-01 以 4.16 kg 校正；單點過原點，30–60 kg 線性度未驗</td></tr>
+              <tr><td>BOTTOM（cycle_test.py）<span class="sub2">下行區間守衛</span></td>
+                  <td class="num">223</td><td class="num" style="color:var(--ink3)">229（舊零點）</td>
+                  <td><span class="pill pl-lost">隨歸零而變</span></td>
+                  <td class="band">SD76 一歸零這個值就過期，而且不會有人被告知</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="band" style="margin-top:14px;max-width:80ch">
+          <strong>這一頁為什麼長這樣：</strong>這台機器反覆出現同一類故障 —— 某個值只活在記憶體裡，重啟後悄悄回到編譯預設，而 <code>status</code> 是唯一徵兆。所以第一欄不是「可不可以改」，而是<strong>「改了之後撐不撐得過一次重啟」</strong>。
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="logwrap">
+  <header><span>通訊紀錄</span><button class="btn" id="log-clear" style="padding:3px 9px;font-size:11px">清除</button></header>
+  <pre id="log"></pre>
+</div>
+
+<script>
+'use strict';
+(function(){
+
+//=========== state ===========
+
+var WR = 'washrobot', CR = 'crane', AR = 'arm';
+var ws = null, wsUp = false;
+var conn = {washrobot:false, crane:false, arm:false};
+var last = {wr:null, cr:null, relay:null, pwm:null, arm:null};
+var seenAt = {wr:0, cr:0, relay:0, pwm:0};
+var rollHist = [];
+var pending = {};              // verif key -> true while awaiting readback
+var queues = {};               // target -> {busy, q:[{cmd,resolve}]}
+
+//=========== transport ===========
+
+function log(line, cls){
+  var el = document.getElementById('log');
+  var t = new Date().toTimeString().slice(0,8);
+  var s = document.createElement('span');
+  s.className = cls || '';
+  s.textContent = t + '  ' + line + '\n';
+  el.appendChild(s);
+  while (el.childNodes.length > 300) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+}
+
+function connect(){
+  var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  ws = new WebSocket(proto + location.host);
+  ws.onopen = function(){ wsUp = true; paintConn(); log('backend 已連線', 'g'); };
+  ws.onclose = function(){
+    wsUp = false; conn = {washrobot:false, crane:false, arm:false}; paintConn();
+    log('backend 斷線，3 秒後重連', 'e');
+    setTimeout(connect, 3000);
+  };
+  ws.onerror = function(){ /* onclose 會接手 */ };
+  ws.onmessage = function(ev){
+    var m; try { m = JSON.parse(ev.data); } catch(e){ return; }
+    if (m.src === 'status'){
+      conn.washrobot = !!m.washrobot; conn.crane = !!m.crane; conn.arm = !!m.arm;
+      paintConn(); return;
+    }
+    if (!m.line) return;
+    var line = String(m.line);
+    // 回覆與非同步事件混在同一條流上：只有 OK/ERR 開頭的才當成某道指令的回覆。
+    var isReply = /^(OK|ERR)/.test(line);
+    var qq = queues[m.src];
+    if (isReply && qq && qq.busy){
+      var job = qq.busy; qq.busy = null;
+      clearTimeout(job.to);
+      job.resolve(line);
+      pump(m.src);
+    }
+    // 伺服器因張力超標自動停止 —— 前端要跟著把「按住中」的狀態清掉
+    if (/^EVT tension_(total_limit|alarm)/.test(line) && window.__craneReleaseAll){
+      window.__craneReleaseAll();
+      log('🔴 ' + line + ' —— 伺服器已自動停止，按住狀態已清除', 'e');
+    }
+    if (!isReply || !job_quiet(line)) {
+      log('[' + m.src + '] ' + line, /^ERR/.test(line) ? 'e' : (/^OK/.test(line) ? 'g' : 'w'));
+    }
+  };
+}
+
+// 週期性輪詢的回覆不進紀錄，否則一秒刷三行，真正的事件會被淹掉。
+var quietRe = /^OK (state=|length_left=|ch1=\d+,|ch1=0 ch2=|\[M1\])/;
+function job_quiet(line){ return quietRe.test(line); }
+
+function send(target, cmd, timeoutMs){
+  return new Promise(function(resolve){
+    if (!wsUp) return resolve('ERR ws_down');
+    if (!queues[target]) queues[target] = {busy:null, q:[]};
+    queues[target].q.push({cmd:cmd, resolve:resolve, ms:timeoutMs || 12000});
+    pump(target);
+  });
+}
+
+function pump(target){
+  var qq = queues[target];
+  if (!qq || qq.busy || !qq.q.length) return;
+  var job = qq.q.shift();
+  qq.busy = job;
+  job.to = setTimeout(function(){
+    if (qq.busy === job){ qq.busy = null; job.resolve('ERR local_timeout'); pump(target); }
+  }, job.ms);
+  try { ws.send(JSON.stringify({target:target, cmd:job.cmd})); }
+  catch(e){ qq.busy = null; job.resolve('ERR send_failed'); }
+}
+
+function paintConn(){
+  document.getElementById('c-ws').className = wsUp ? 'up' : '';
+  document.getElementById('c-wr').className = conn.washrobot ? 'up' : '';
+  document.getElementById('c-cr').className = conn.crane ? 'up' : '';
+  document.getElementById('c-ar').className = conn.arm ? 'up' : '';
+}
+
+//=========== parse ===========
+
+function fields(line){
+  var o = {}, re = /([A-Za-z_][A-Za-z0-9_]*)=(-?[\d.]+|ERR|[a-z_]+)/g, m;
+  while ((m = re.exec(line))) o[m[1]] = m[2];
+  return o;
+}
+function num(o, k){ var v = o && o[k]; var f = parseFloat(v); return isFinite(f) ? f : null; }
+
+//=========== paint ===========
+
+function txt(id, v){ var e = document.getElementById(id); if (e) e.textContent = v; }
+function bar(id, pct, col){
+  var e = document.getElementById(id); if (!e) return;
+  e.style.width = Math.max(0, Math.min(100, pct)) + '%';
+  if (col) e.style.background = col;
+}
+function fresh(ts){ return Date.now() - ts < 6000; }
+
+function paint(){
+  var wr = last.wr, cr = last.cr;
+
+  // ---- roll ----
+  var roll = wr ? num(wr, 'raw_x') : null;
+  if (roll === null && wr) roll = num(wr, 'roll');
+  if (roll !== null){
+    txt('v-roll', (roll > 0 ? '+' : '') + roll.toFixed(2) + '°');
+    txt('m-roll', (roll > 0 ? '+' : '') + roll.toFixed(2) + '°');
+    txt('d-roll', (roll > 0 ? '+' : '') + roll.toFixed(2) + '°');
+    var used = Math.abs(roll) / 6.0 * 100;
+    bar('g-roll', used, used > 66 ? 'var(--bad)' : used > 33 ? 'var(--warn)' : 'var(--ok)');
+    txt('t-roll', '餘裕 ' + (6 - Math.abs(roll)).toFixed(2) + '° · 已用 ' + Math.round(used) + '%');
+    txt('s-roll', Math.abs(roll) <= 1 ? '在 ±1° 規格內' : '超出 ±1° 規格');
+    rollHist.push(roll); if (rollHist.length > 60) rollHist.shift();
+    var pts = rollHist.map(function(v, i){
+      var x = rollHist.length < 2 ? 300 : i * (300 / (rollHist.length - 1));
+      var y = 26 - Math.max(-3, Math.min(3, v)) * (26 / 3) * 0.62;
+      return x.toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+    var sp = document.getElementById('sp'); if (sp) sp.setAttribute('points', pts);
+  }
+
+  // ---- position ----
+  // 🔴 [2026-09-03] SD76 於當日傍晚改在**玻璃最底端**歸零 → length_left 0=底、往上為負。
+  //    介面一律顯示「離底高度」= -length_left，與 cycle_test.py / mission_run.py 一致。
+  //    改之前這裡是 L/223（舊的繩長語意），新座標下會把頂端畫成 0、量規整個壞掉。
+  var L = cr ? num(cr, 'length_left') : null, R = cr ? num(cr, 'length_right') : null;
+  var TOPH = 231;                                  // 玻璃面高度（實測頂端 length_left=-231）
+  var H  = (L !== null) ? -L : null;                // 離底高度
+  var HR = (R !== null) ? -R : null;
+  if (H !== null && HR !== null){
+    txt('v-pos', H.toFixed(0) + ' cm');
+    bar('g-pos', H / TOPH * 100);
+    txt('t-pos', '離底 ' + H.toFixed(0) + ' cm · 距頂 ' + Math.max(0, TOPH - H).toFixed(0) + ' cm');
+    txt('s-pos', '玻璃面 0（底）– ' + TOPH + '（頂）');
+    txt('cr-h', '高度 ' + H.toFixed(0) + ' cm');
+    txt('cr-lr', '繩長 L=' + L.toFixed(0) + ' R=' + R.toFixed(0));
+    var d = L - R;                 // 左右差是差值，不受歸零平移影響，沿用繩長即可
+    txt('d-diff', (d > 0 ? '+' : '') + d.toFixed(0) + ' cm');
+    txt('m-diff', Math.abs(d).toFixed(0) + ' cm');
+    bar('g-diff', Math.abs(d) / 10 * 100, Math.abs(d) >= 8 ? 'var(--bad)' : Math.abs(d) >= 6 ? 'var(--warn)' : 'var(--ok)');
+    // dashboard wall marker：高度越大越靠上，所以用 (1 - H/TOPH)
+    var y = 8 + Math.max(0, Math.min(1, 1 - H / TOPH)) * 162;
+    var box = document.getElementById('sv-bot-box'); if (box) box.setAttribute('y', (y).toFixed(0));
+    var lab = document.getElementById('sv-lab');
+    if (lab){ lab.setAttribute('y', (y + 12).toFixed(0)); lab.textContent = H.toFixed(0); }
+    var rl = document.getElementById('sv-rl'), rr = document.getElementById('sv-rr');
+    if (rl) rl.setAttribute('y2', (y).toFixed(0));
+    if (rr) rr.setAttribute('y2', (y).toFixed(0));
+  }
+
+  // ---- tension ----
+  var tl = cr ? num(cr, 'tension_left') : null, tr = cr ? num(cr, 'tension_right') : null;
+  if (tl !== null && tr !== null){
+    txt('v-ten', tl.toFixed(1) + ' / ' + tr.toFixed(1));
+    var tot = tl + tr, ratio = tr !== 0 ? (tl / tr) : 0;
+    txt('s-ten', '比值 ' + ratio.toFixed(2) + '× · 總和 ' + tot.toFixed(1));
+    txt('d-ratio', ratio.toFixed(2) + '×');
+    bar('g-ten', tot / 130 * 100, tot > 117 ? 'var(--bad)' : 'var(--ok)');
+    var td = Math.abs(tl - tr);
+    txt('m-tdiff', td.toFixed(1) + ' kg');
+    bar('g-tdiff', td / 50 * 100, td > 40 ? 'var(--bad)' : td > 30 ? 'var(--warn)' : 'var(--ok)');
+  }
+
+  // ---- devices ----
+  if (cr){
+    var devs = [], up = 0;
+    Object.keys(cr).forEach(function(k){
+      if (k.indexOf('dev_') === 0){
+        var on = cr[k] === '1';
+        if (on) up++;
+        devs.push({n:k.slice(4), on:on});
+      }
+    });
+    if (devs.length){
+      txt('v-dev', up + ' / ' + devs.length);
+      bar('g-dev', up / devs.length * 100, up === devs.length ? 'var(--ok)' : 'var(--warn)');
+      txt('t-dev', devs.filter(function(d){ return !d.on; }).map(function(d){ return d.n; }).join(' ') || '全部正常');
+      txt('d-devn', up + ' / ' + devs.length);
+      var g = document.getElementById('devgrid');
+      g.innerHTML = devs.map(function(d){
+        return '<div class="dev ' + (d.on ? 'up' : 'down') + '"><b>' + d.n + '</b>' + (d.on ? 'OK' : 'DOWN') + '</div>';
+      }).join('');
+    }
+    txt('d-bal', cr.balance_source || '—');
+    txt('st-bal', cr.balance_source || '—');
+    txt('st-hz', cr.motion_hz || '—');
+    txt('st-lvl', cr.fine_adjust_level_diff_cm || '—');
+    txt('st-ldm', cr.length_diff_max_cm || '—');
+    txt('st-rts', cr.retract_tension_stop_kg || '—');
+    txt('st-ust', cr.up_stop_total_kg || '—');
+    if (cr.dsz_left_scale) txt('st-dsz', (+cr.dsz_left_scale).toFixed(5) + ' / ' + (+cr.dsz_right_scale).toFixed(5));
+    txt('rd-balen', cr.balance_enabled === '1' ? '啟用' : '停用');
+
+    // Manual 吊機面板的即時值
+    if (tl !== null && tr !== null){
+      var tot2 = tl + tr, up = parseFloat(cr.up_stop_total_kg) || 130;
+      txt('cr-ten', tl.toFixed(1) + ' / ' + tr.toFixed(1) + ' kg');
+      txt('cr-ten2', tl.toFixed(1) + ' / ' + tr.toFixed(1) + ' kg');
+      txt('cr-tenr2', '比值 ' + (tr ? (tl / tr).toFixed(2) : '—') + '×');
+      txt('cr-tenr', '比值 ' + (tr ? (tl / tr).toFixed(2) : '—') + '× · 總和 ' + tot2.toFixed(1));
+      bar('cr-teng', tot2 / up * 100, tot2 > up * .9 ? 'var(--bad)' : tot2 > up * .75 ? 'var(--warn)' : 'var(--ok)');
+      txt('cr-tenb', '總和 ' + tot2.toFixed(1) + ' / 上限 ' + up.toFixed(0) +
+                     ' kg · tension_valid=' + (cr.tension_valid || '?'));
+    }
+    // 門檻輸入框：只在使用者沒在編輯時才用現值預填，否則會把人打到一半的字蓋掉
+    [['set_tension_max_kg','tension_max_kg'],
+     ['set_tension_diff_max_kg','tension_diff_max_kg'],
+     ['set_up_stop_total_kg','up_stop_total_kg'],
+     ['set_retract_tension_stop_kg','retract_tension_stop_kg']].forEach(function(pr){
+      var el = document.querySelector('[data-set="' + pr[0] + '"]');
+      if (el && document.activeElement !== el && cr[pr[1]] !== undefined) el.value = cr[pr[1]];
+    });
+    // 🔴 看到運動就延長鎖定；解鎖由 paint() 每秒重算倒數
+    if (cr.motion_active === '1') setCraneLock(true);
+  }
+
+  // ---- cups ----
+  if (wr){
+    var names = {5:'上右 s5', 6:'上左 s6', 7:'下右 s7', 8:'下左 s8'};
+    var html = '', sealed = 0, got = 0;
+    [5,6,7,8].forEach(function(n){
+      var p = num(wr, 'p' + n);
+      if (p === null) return;
+      got++;
+      var ok = p <= -50; if (ok) sealed++;
+      html += '<div class="cup' + (ok ? ' sealed' : '') + '"><div class="cn">' + names[n] +
+              '</div><div class="cv">' + p.toFixed(0) + '</div></div>';
+    });
+    if (got){
+      document.getElementById('m-cups').innerHTML = html;
+      document.getElementById('d-cups').innerHTML = html;
+      txt('m-seal', sealed + ' / ' + got + ' 密封');
+      txt('d-seal', sealed + ' / ' + got + ' 密封');
+    }
+    txt('d-state', wr.state || '—');
+  }
+
+  // ---- staleness ----
+  // 第 0 格（姿態）來自 washrobot，其餘三格來自 crane —— 各自判斷新鮮度，
+  // 免得一台斷線就整條狀態列一起變灰、看不出是哪一台掉了。
+  document.querySelectorAll('.strip .cell').forEach(function(c, i){
+    c.classList.toggle('stale', !fresh(i === 0 ? seenAt.wr : seenAt.cr));
+  });
+  var age = Math.round((Date.now() - Math.max(seenAt.wr, seenAt.cr)) / 1000);
+  txt('mon-age', isFinite(age) && age < 999 ? age + ' 秒前' : '—');
+
+  // 鎖的倒數要自己走：沒有新的運動事件時也得每秒重算，否則會卡在鎖定畫面
+  setCraneLock(false);
+  paintPreflight();
+}
+
+//=========== preflight ===========
+
+function paintPreflight(){
+  var wr = last.wr, cr = last.cr, relay = last.relay;
+  var L = cr ? num(cr, 'length_left') : null;
+  var roll = wr ? (num(wr, 'raw_x') !== null ? num(wr, 'raw_x') : num(wr, 'roll')) : null;
+  var pumpOn = relay ? /\bch2=1\b/.test(relay) : null;
+
+  var checks = {
+    top:   L === null ? null : {ok: Math.abs(L) <= 5, v: 'L=' + L.toFixed(0)},
+    bal:   !cr ? null : {ok: cr.balance_source === 'imu', v: cr.balance_source || '?'},
+    pump:  pumpOn === null ? null : {ok: pumpOn, v: pumpOn ? 'ch2=1' : 'ch2=0'},
+    hz:    !cr ? null : {ok: +cr.motion_hz === 30, v: (cr.motion_hz || '?') + ' Hz'},
+    state: !wr ? null : {ok: /^(idle|ready)$/.test(wr.state || ''), v: wr.state || '?'},
+    roll:  roll === null ? null : {ok: Math.abs(roll) <= 1.0, v: roll.toFixed(2) + '°'}
+  };
+
+  var pass = 0, total = 0, blocked = [];
+  Object.keys(checks).forEach(function(k){
+    var li = document.querySelector('.pf li[data-k="' + k + '"]');
+    if (!li) return;
+    var c = checks[k];
+    li.className = c === null ? '' : (c.ok ? 'ok' : 'bad');
+    li.querySelector('.mk').textContent = c === null ? '·' : (c.ok ? '✓' : '✕');
+    li.querySelector('.v').textContent = c === null ? '—' : c.v;
+    if (c !== null){ total++; if (c.ok) pass++; else blocked.push(k); }
+  });
+  txt('pf-count', pass + ' / 6');
+
+  var gate = document.getElementById('gate');
+  if (total < 6){
+    gate.className = 'gate';
+    gate.textContent = '等待兩台回報… （' + total + ' / 6 已讀到）';
+  } else if (!blocked.length){
+    gate.className = 'gate clear';
+    gate.innerHTML = '<strong>六項全通過。</strong>可以起跑。腳本自己還會再驗一次起點與幫浦——重複是刻意的。';
+  } else {
+    gate.className = 'gate blocked';
+    var why = {
+      top:'起點不在頂端 —— 腳本會拒跑（不猜方向）',
+      bal:'<strong>平衡來源不是 imu</strong> —— 每次重啟都會靜默回到編譯預設，status 是唯一徵兆',
+      pump:'沒有真空源 —— 吸盤全程不會吸住',
+      hz:'移動速度不是 30 Hz —— 上一輪可能留在 50',
+      state:'本體不在 idle / ready',
+      roll:'起跑姿態超出 ±1° —— 中止門檻 6° 的預算會先被吃掉'
+    };
+    gate.innerHTML = '<strong>' + blocked.length + ' 項未通過，不建議起跑。</strong><br>' +
+      blocked.map(function(k){ return '· ' + why[k]; }).join('<br>');
+  }
+}
+
+//=========== verification tri-state ===========
+
+function setVerif(key, cls, text){
+  var el = document.querySelector('.vf[data-v="' + key + '"]');
+  if (!el) return;
+  el.className = 'vf ' + cls;
+  el.querySelector('.rb').textContent = text;
+}
+
+function paintRelay(line){
+  last.relay = line; seenAt.relay = Date.now();
+  // 只解析 '|' 之前的通道段；後面是 names 對照，含 ch1=valve 這種非數值。
+  var head = line.split('|')[0];
+  var st = {}, re = /ch(\d+)=([01])\b/g, m;
+  while ((m = re.exec(head))) st[m[1]] = m[2] === '1';
+  document.querySelectorAll('#relaygrp .ctl').forEach(function(row){
+    var ch = row.dataset.ch, on = st[ch];
+    var rd = row.querySelector('.rd'), sw = row.querySelector('.sw');
+    if (on === undefined){ rd.textContent = '—'; rd.className = 'rd'; return; }
+    if (pending['ch' + ch]) return;             // 等回讀期間不覆蓋
+    rd.textContent = on ? '1 已確認' : '0 已確認';
+    rd.className = 'rd ' + (on ? 'on' : '');
+    sw.setAttribute('aria-checked', String(on));
+  });
+  if (st['2'] !== undefined && !pending.ch2) setVerif('pump', st['2'] ? 'ok' : '', st['2'] ? 'ch2 = 1 已確認' : 'ch2 = 0 已確認');
+  if (st['1'] !== undefined && !pending.ch1) setVerif('valve', st['1'] ? 'ok' : '', st['1'] ? 'ch1 = 1 已確認' : 'ch1 = 0 已確認');
+}
+
+function paintPwm(line){
+  last.pwm = line; seenAt.pwm = Date.now();
+  var m = /ch1=(\d+),(\d+),(\d+),(\d+)/.exec(line);
+  if (!m){ setVerif('fan', 'bad', '讀不到'); txt('rd-fan', '讀不到'); return; }
+  var duty = +m[1];
+  var s = duty <= 5 ? '停止' : (duty >= 10 ? '全速' : '作業');
+  setVerif('fan', 'ok', 'duty ' + duty + '% · ' + s + ' 已確認');
+  txt('rd-fanraw', m[1] + ',' + m[2] + ',' + m[3] + ',' + m[4]);
+  var rd = document.getElementById('rd-fan');
+  rd.textContent = duty + '% ' + s + ' 已確認'; rd.className = 'rd on';
+}
+
+//=========== polling ===========
+
+function pollFast(){
+  if (conn.washrobot) send(WR, 'status', 8000).then(function(l){
+    if (/^OK/.test(l)){ last.wr = fields(l); seenAt.wr = Date.now(); paint(); }
+  });
+  if (conn.crane) send(CR, 'status', 8000).then(function(l){
+    if (/^OK/.test(l)){ last.cr = fields(l); seenAt.cr = Date.now(); paint(); }
+  });
+}
+function pollRelay(){
+  if (!conn.washrobot) return;
+  send(WR, 'relay_status', 20000).then(function(l){ if (/^OK/.test(l)) paintRelay(l); });
+}
+function pollPwm(){
+  if (!conn.washrobot) return;
+  send(WR, 'pwm status', 20000).then(function(l){ if (/^OK/.test(l)) paintPwm(l); });
+}
+
+//=========== controls ===========
+
+function fire(target, cmd, verifKey, chKey){
+  if (chKey){ pending[chKey] = true; }
+  if (verifKey) setVerif(verifKey, 'pend', '等待回讀…');
+  log('→ [' + target + '] ' + cmd, 'w');
+  return send(target, cmd, 30000).then(function(l){
+    var unv = /unverified/.test(l), bad = /^ERR/.test(l);
+    if (verifKey) setVerif(verifKey, bad ? 'bad' : (unv ? 'unv' : 'pend'),
+                            bad ? l.slice(0, 42) : (unv ? '已送出 · 未複驗' : '已送出 · 待回讀'));
+    if (chKey) delete pending[chKey];
+    // 一律以回讀為準，不相信回傳字串
+    setTimeout(function(){ pollRelay(); pollPwm(); }, 700);
+    return l;
+  });
+}
+
+document.addEventListener('click', function(ev){
+  var b = ev.target.closest('[data-cmd]');
+  if (!b) return;
+  var parts = b.dataset.cmd.split('|');
+  if (b.dataset.confirm && !confirm('這會移動機器或中止動作：\n\n' + parts[1] + '\n\n確定送出？')) return;
+  var vk = /pwm set/.test(parts[1]) ? 'fan' : null;
+  fire(parts[0], parts[1], vk, null);
+});
+
+//=========== Manual：動態列 ===========
+
+var RELAY = [
+  {ch:1, n:'CH1 真空閥',  d:'四顆吸盤唯一一顆閥', danger:1},
+  {ch:2, n:'CH2 幫浦 A',  d:'運轉期間常開'},
+  {ch:3, n:'CH3 幫浦 B',  d:'實體存在，尚未啟用'},
+  {ch:4, n:'CH4',         d:'未指派'},
+  {ch:5, n:'CH5 滾筒刷',  d:'手臂刷頭馬達'},
+  {ch:6, n:'CH6 正壓閥',  d:'破真空 + 主動灌正壓', danger:1},
+  {ch:7, n:'CH7',         d:'未指派'},
+  {ch:8, n:'CH8',         d:'未指派'}
+];
+document.getElementById('relaygrp').innerHTML = RELAY.map(function(r){
+  return '<div class="ctl" data-ch="' + r.ch + '"' + (r.danger ? ' data-danger="1"' : '') + '>' +
+    '<span class="cl">' + r.n + '<small>' + r.d + '</small></span>' +
+    '<span class="rd">—</span>' +
+    '<button class="sw" role="switch" aria-checked="false" aria-label="' + r.n + '"></button></div>';
+}).join('');
+
+document.getElementById('zdtsingle').innerHTML = [
+  {s:5,n:'s5 右上'},{s:6,n:'s6 左上'},{s:7,n:'s7 右下'},{s:8,n:'s8 左下'}
+].map(function(z){
+  return '<span class="band">' + z.n + '</span>' +
+    '<button class="btn" data-cmd="washrobot|zdt_pusher ' + z.s + ' extend">伸</button>' +
+    '<button class="btn" data-cmd="washrobot|zdt_pusher ' + z.s + ' retract">收</button>';
+}).join('');
+
+//=========== Manual：吊機 ===========
+
+// 🔴 腳本執行中鎖住整個 Manual 頁 —— 否則手動指令會跟腳本搶控制權。
+//
+// ⚠️ **這是推論，不是硬體互鎖。** 前端看不到「有沒有別的 client 在下指令」，
+// 唯一可靠的線索是 crane 的 motion_active，而它**只在吊機實際轉動時為 1**。
+// cycle_test 每一步有約 17 秒在做推桿／真空／滑台，那段 motion_active=0 ——
+// 只看瞬時值的話鎖會一步一鬆，比沒有鎖更糟（讓人以為沒在跑）。
+// 因此改為「看到運動就把鎖延長 LOCK_HOLD_MS」：實測步與步之間的空檔 < 25 秒，
+// 45 秒的保持時間可以撐過整輪，並在最後一次運動後約 45 秒自動解開。
+// 🔴 **緊急停止刻意不鎖** —— 那是把控制權拿回來的唯一手段，鎖掉它就本末倒置。
+var LOCK_HOLD_MS = 45000;
+var busyUntil = 0;
+
+function setCraneLock(moving){
+  if (moving) busyUntil = Date.now() + LOCK_HOLD_MS;
+  var locked = Date.now() < busyUntil;
+  var left = Math.max(0, Math.ceil((busyUntil - Date.now()) / 1000));
+
+  var man = document.querySelector('.man');
+  if (man) man.classList.toggle('locked', locked);
+  // STOP 永遠可按：把它移出被鎖的區域之外（pointer-events 由 .locked 關掉，這裡個別打開）
+  var stop = document.getElementById('crane-stop');
+  if (stop) stop.style.pointerEvents = 'auto';
+  var stopWrap = stop && stop.closest('.ctl');
+  if (stopWrap) stopWrap.style.opacity = locked ? '1' : '';
+
+  var bar = document.getElementById('lockbar');
+  if (bar){
+    bar.hidden = !locked;
+    bar.innerHTML = '🔴 <strong>偵測到吊機運動，Manual 已鎖定</strong>（' +
+      (moving ? '運動中' : '最後一次運動後 ' + left + ' 秒解鎖') + '）。<br>' +
+      '腳本正在跑時按手動指令會跟它搶控制權。要接手請按下方的 <strong>STOP</strong>' +
+      '（它<strong>不會</strong>被鎖）。<br>' +
+      '<span style="font-family:var(--mono);font-size:11px;opacity:.8">' +
+      '⚠️ 這是由 motion_active 推論的，不是硬體互鎖 —— 別當成安全裝置。</span>';
+  }
+  var lk = document.getElementById('crane-lock');
+  if (lk) lk.textContent = locked ? '腳本執行中 · 已鎖定' : '會移動機器';
+}
+
+document.addEventListener('click', function(ev){
+  var b = ev.target.closest('.cranebtn');
+  if (!b) return;
+  var verb = b.dataset.cc;
+  var cm = parseInt(document.getElementById('cm-fine').value, 10);
+  if (!(cm > 0)) { alert('公分必須是正整數'); return; }
+  var dir = verb.indexOf('retract') === 0 ? '收繩（往上）' : '放繩（往下）';
+  if (!confirm('這會移動機器：\n\n' + verb + ' ' + cm + '\n' + b.dataset.side + dir +
+               '\n\n單側動作會改變姿態，實測約 −0.9°/cm。\n確定送出？')) return;
+  fire(CR, verb + ' ' + cm, null, null);
+});
+
+// 張力保護門檻
+document.addEventListener('click', function(ev){
+  var b = ev.target.closest('[data-setgo]');
+  if (!b) return;
+  var key = b.dataset.setgo;
+  var inp = document.querySelector('[data-set="' + key + '"]');
+  var v = parseFloat(inp.value);
+  if (!isFinite(v) || v <= 0) { alert('請輸入正數'); return; }
+  if (!confirm('調整安全門檻：\n\n' + key + ' → ' + v +
+               '\n\n🔴 這是執行期值，重啟就會回到編譯預設。\n確定？')) return;
+  fire(CR, key + ' ' + v, null, null);
+});
+
+// ---- 按住才動（照 v1 的 wireCraneHold，並補兩個它沒處理的釋放時機）----
+// 🔴 走的是 cmd_hold（`up`/`down` 系列），**不是** cmd_manual（`retract_left on`）。
+//    差別是安全等級：cmd_hold 會設 hold flag ⇒ hold_loop 的張力保護有效，超標時
+//    伺服器自己停並廣播 EVT tension_*；cmd_manual 是「緊急收繩」路徑，張力檢查與
+//    看門狗兩道都不作用（motion_flow.md §8：完全由操作員眼睛判定）。
+// ⚠️ v1 只綁 mouseup/mouseleave/touchend/touchcancel。這裡多綁 blur 與
+//    visibilitychange —— 按住時切分頁或視窗失焦，那四個事件都不會發生。
+(function(){
+  var held = [];
+  function release(btn, ev){
+    if (ev) ev.preventDefault();
+    if (!btn.classList.contains('active')) return;
+    btn.classList.remove('active');
+    held = held.filter(function(b){ return b !== btn; });
+    fire(CR, btn.dataset.hold + ' off', null, null);
+  }
+  function releaseAll(){ held.slice().forEach(function(b){ release(b, null); }); }
+
+  [].forEach.call(document.querySelectorAll('.btn.hold'), function(btn){
+    function press(ev){
+      if (ev) ev.preventDefault();
+      if (btn.classList.contains('active')) return;
+      btn.classList.add('active');
+      held.push(btn);
+      fire(CR, btn.dataset.hold + ' on', null, null);
+    }
+    btn.addEventListener('mousedown',   press);
+    btn.addEventListener('touchstart',  press, {passive:false});
+    ['mouseup','mouseleave','touchend','touchcancel','pointercancel'].forEach(function(e){
+      btn.addEventListener(e, function(ev){ release(btn, ev); });
+    });
+  });
+  window.addEventListener('blur', releaseAll);
+  document.addEventListener('visibilitychange', function(){
+    if (document.hidden) releaseAll();
+  });
+  // 伺服器自己停下來時（張力超標）把按鈕狀態清掉，否則畫面會說還在動
+  window.__craneReleaseAll = releaseAll;
+})();
+
+document.getElementById('crane-stop').addEventListener('click', function(){
+  if (!confirm('立即停止吊機（不復位現場）。確定？')) return;
+  fire(CR, 'stop', null, null);
+});
+
+//=========== Manual：風扇 / 推桿 / 滑台 ===========
+
+document.getElementById('fan-set').addEventListener('click', function(){
+  var d = parseInt(document.getElementById('fan-duty').value, 10);
+  if (!(d >= 5 && d <= 10)) { alert('占空比鎖 5~10%'); return; }
+  fire(WR, 'pwm set 1 50 65535 ' + d, 'fan', null);
+});
+document.getElementById('push-ext').addEventListener('click', function(){
+  var cm = parseFloat(document.getElementById('push-cm').value);
+  if (!(cm >= 0.5 && cm <= 20)) { alert('extend_raw 允許 0.5~20 cm'); return; }
+  fire(WR, 'pusher all extend_raw ' + cm, null, null);
+});
+document.getElementById('rail-go').addEventListener('click', function(){
+  var cm = parseFloat(document.getElementById('rail-cm').value);
+  var rpm = parseInt(document.getElementById('rail-rpm').value, 10) || 0;
+  if (!(cm >= 0 && cm <= 130)) { alert('行程守衛 0~130 cm'); return; }
+  fire(WR, 'rail ' + cm + (rpm ? ' ' + rpm : ''), null, null);
+});
+document.getElementById('rail-read').addEventListener('click', pollRail);
+
+function pollRail(){
+  if (!conn.washrobot) return;
+  send(WR, 'rail_pos', 15000).then(function(l){
+    var m = /rail_cm=([-0-9.]+)/.exec(l);
+    var e = document.getElementById('rd-rail');
+    if (e){ e.textContent = m ? (+m[1]).toFixed(1) + ' cm' : l.slice(0, 30); e.className = 'rd on'; }
+  });
+}
+
+//=========== Manual：繼電器（事件委派，因為列是動態產生的）===========
+
+document.getElementById('relaygrp').addEventListener('click', function(ev){
+  var sw = ev.target.closest('.sw'); if (!sw) return;
+  var row = sw.closest('.ctl'), ch = row.dataset.ch;
+  var want = sw.getAttribute('aria-checked') !== 'true';
+  if (row.dataset.danger &&
+      !confirm('CH' + ch + ' 直接控制真空系統。\n吸盤承重時操作它可能讓機器脫落。\n\n確定要' +
+               (want ? '開啟' : '關閉') + '？')) return;
+  var rd = row.querySelector('.rd');
+  rd.textContent = '等待回讀…'; rd.className = 'rd pend';
+  var vk = ch === '2' ? 'pump' : (ch === '1' ? 'valve' : null);
+  var cmd = ch === '2' ? ('pump ' + (want ? 'on' : 'off'))
+          : ch === '5' ? ('brush ' + (want ? 'on' : 'off'))
+          : ('relay ' + ch + ' ' + (want ? 'on' : 'off'));
+  fire(WR, cmd, vk, 'ch' + ch);
+});
+
+document.getElementById('raw-go').addEventListener('click', function(){
+  var t = document.getElementById('raw-t').value;
+  var c = document.getElementById('raw-c').value.trim();
+  if (!c) return;
+  log('→ [' + t + '] ' + c, 'w');
+  send(t, c, 30000).then(function(l){ log('[' + t + '] ' + l, /^ERR/.test(l) ? 'e' : 'g'); });
+});
+document.getElementById('raw-c').addEventListener('keydown', function(e){
+  if (e.key === 'Enter') document.getElementById('raw-go').click();
+});
+document.getElementById('log-clear').addEventListener('click', function(){
+  document.getElementById('log').textContent = '';
+});
+document.getElementById('fix-bal').addEventListener('click', function(){
+  fire(CR, 'set_balance_source imu', null, null);
+});
+document.getElementById('fix-hz').addEventListener('click', function(){
+  fire(CR, 'set_motion_hz 30', null, null);
+});
+
+//=========== tabs ===========
+
+var tabs = [].slice.call(document.querySelectorAll('.rail button'));
+var panes = [].slice.call(document.querySelectorAll('.pane'));
+tabs.forEach(function(t){
+  t.addEventListener('click', function(){
+    tabs.forEach(function(x){ x.setAttribute('aria-selected', String(x === t)); });
+    panes.forEach(function(p){ p.classList.toggle('on', p.dataset.pane === t.dataset.p); });
+  });
+});
+
+//=========== boot ===========
+
+connect();
+setInterval(pollFast, 1000);
+setInterval(pollRelay, 4000);
+setInterval(pollPwm, 6000);
+setInterval(pollRail, 7000);
+setInterval(paint, 1000);
+log('console v2 啟動 —— 與 / 的現行 GUI 並行，server.js 未改動');
+
+})();
+</script>
+</body>
+</html>

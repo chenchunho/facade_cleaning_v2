@@ -9,7 +9,11 @@
 #   ③ pusher all extend_raw—— 推出 10cm，**不驗真空度**
 #      🔴 為什麼不驗：有些玻璃面有縫隙，吸盤落在縫上本來就吸不住，那是現場條件不是故障。
 #         smart_extend_subset_ 會為了找封一路補伸到 ~16cm 並重試 —— 在有縫的面上是徒勞。
-#   ③b 上滑台 0→50→0   —— [2026-09-03 per user] 推桿仍伸出、風扇仍關；手臂維持 PARK
+#   ③b 清潔動作      —— [2026-09-03 per user] 壓上(滾筒) → 滑台 0→100→0 → 收手臂。
+#      推桿仍伸出、風扇仍關。手臂走本體的 arm_deploy/arm_park 代轉。
+#      實測每步約 +14 秒（10 週期 × 5 步 ≈ 多 12 分鐘）。
+#      🔴 若 ③a 判定「一顆都沒吸到」，本步**跳過**（無附著時掃動只會讓機體擺盪），
+#         且整輪不中止 —— 改為計數並在總結報出。理由見 ③a 處的註解。
 #   ④ pusher all retract   —— 已內建「關閥→洩壓→CH6 正壓 500ms→兩段收回」
 #   ⑤ 風扇 7%（開）
 #   ⑥ delay 1000ms
@@ -47,7 +51,13 @@ STEPS     = int(sys.argv[2]) if len(sys.argv) > 2 else 5
 STEP_CM   = int(sys.argv[3]) if len(sys.argv) > 3 else 40
 VAC_OK_KPA = -50        # [2026-09-03 per user] 密封判準：至少一顆到此值
 VAC_WAIT_S = 10.0       # 等真空建立的上限秒數（超過即視為完全沒附著）
-RAIL_CM   = 50          # [2026-09-03 per user] 步驟 ③b 上滑台行程 0->RAIL_CM->0
+RAIL_CM   = 100         # [2026-09-03 per user] 步驟 ③b 上滑台行程 0->RAIL_CM->0（50→100）
+ARM_SLOT  = 'RIGHT'     # 固定滾筒（per user）。LEFT=刮刀 / CENTER
+ARM_WALL_MM = 520       # DEPLOY 的假設牆距
+# 🔴 [2026-09-03] 09-03 實測 tau 一律 14.0~14.4，而 09-02 同動作是 11.1~11.8（高 25%），
+#    且**重複性完美**（θ 散布 0.0012 rad、tau 0.10 Nm）⇒ 是固定的幾何偏移，不是機構鬆動。
+#    已排除：牆面（per user 相同）、ZDT 位置、滑台零點、M1 零點（09-03 重新校正過）。
+#    最可能是機體到玻璃的實際距離與 ARM_WALL_MM 不符 —— 一次 `DEPLOY 505` 就能驗，尚未做。
 ROLL_TRIP = float(sys.argv[4]) if len(sys.argv) > 4 else 6.0
 DIFF_TRIP = float(sys.argv[5]) if len(sys.argv) > 5 else 8.0
 
@@ -67,10 +77,29 @@ DIFF_TRIP = float(sys.argv[5]) if len(sys.argv) > 5 else 8.0
 #    一筆真實的 6° 就該停，沒有「等它持續」的餘裕。
 DIFF_PERSIST = 3          # 連續幾筆超標才中止（取樣間隔約 0.3s → 約 1 秒持續）
 
-# [2026-09-03 per user] BOTTOM 229 → 223：SD76 當日以「玻璃面最高點」重新歸零，
-# 實測最低點 length_left=223（右 218）。舊值 229 屬於前一組零點，留著等於允許
-# 放繩到玻璃底下約 6cm —— 這是區間守衛（end > BOTTOM+TOL 即中止），不是顯示值。
-TOP, BOTTOM = 0, 223
+# 🔴 [2026-09-03 per user 第二次重新定義] 座標語意由「繩長」改成「**離底高度**」。
+#
+# 沿革（兩次歸零都在同一天，不要弄混）：
+#   ① 早上：SD76 在**玻璃最高點**歸零 → length_left 0=頂、223=底（繩長語意）
+#   ② 傍晚：SD76 改在**玻璃最底端（離地最近）**歸零 → 0=底，往上為**負**
+#      實測頂端 length_left = **-231** ⇒ 玻璃面高度 231 cm
+#
+# 🔴🔴 ② 之後若沿用舊程式碼會出事：`L=0` 在新零點是**底端**，而舊的起點檢查
+#      `abs(L0 - TOP) > TOL`（TOP=0）會把它讀成「在頂端」→ 通過 → 接著往下放繩 200cm，
+#      而區間守衛比的是 BOTTOM=223 也擋不住。**從最底端再往下 200cm。**
+#      這與 mission_run.py 那次「方向寫反、被使用者在執行前攔下」是同一類錯誤。
+#
+# 因此本檔一律以 height() 換算後的「離底高度」運算，**不直接用 length_left**：
+#   height = -length_left     （繩越長 → 位置越低 → 高度越小）
+#   底端 height = 0 ／ 頂端 height = TOP
+# 下行仍是 pay_out（繩變長、height 減少）；回程仍是 retract（繩變短、height 增加）。
+# 📌 SD76 量的本來就是繩長，這個換算刻意只做在腳本裡 —— 不去動韌體回報的物理量。
+TOP, BOTTOM = 231, 0
+
+
+def height(length_left):
+    """繩長讀值 → 離底高度（cm）。讀不到就回 None，交給呼叫端 bail。"""
+    return None if length_left is None else -length_left
 TOL = 5
 # 🔴 [2026-09-01 per user] 回程由 50Hz 改 30Hz。
 # 原因：50Hz 回程實測左右差瞬間衝到 9cm，而韌體自己的 length_diff_max_cm 是 10
@@ -90,6 +119,8 @@ abort_reason = []
 all_diff = []
 # [2026-09-03 per user] 行進速率統計 —— 目的是推估「上下走一公尺要多久」。
 # 分三個口徑，因為它們回答的是不同問題（見 _rate_summary 的說明）。
+# [2026-09-03 per user] 真空吸不到的步數 —— 不中止，但一定要看得見（見下方 ③a）。
+no_seal_steps = [0]
 timing = {"down_cm": 0.0, "down_move_s": 0.0, "down_step_s": 0.0, "down_steps": 0,
           "up_cm": 0.0, "up_s": 0.0, "up_runs": 0,
           "ext_s": 0.0, "vac_s": 0.0, "rail_s": 0.0, "ret_s": 0.0}
@@ -240,6 +271,11 @@ def _diff_summary():
     if all_nearmiss:
         print("  超標後自行回復（未達連續 %d 筆）: %d 次 —— 平衡迴路在工作，不是故障"
               % (DIFF_PERSIST, sum(all_nearmiss)))
+    if no_seal_steps[0]:
+        tot = timing["down_steps"] or 1
+        print("\n🔴 真空未建立的步數：%d / %d（%.0f%%）—— 這些步**沒有模擬到附著**，"
+              "滑台掃動也被跳過，不可拿來當吸附系統的證據。"
+              % (no_seal_steps[0], tot, 100.0 * no_seal_steps[0] / tot))
     _rate_summary()
 
 
@@ -284,8 +320,9 @@ def bail(msg):
     _diff_summary()
     cleanup()
     fin = ask(CRANE, "status", 10)
-    print("   L=%s R=%s tension_valid=%s"
-          % (field(fin, "length_left"), field(fin, "length_right"), field(fin, "tension_valid")))
+    print("   高度=%s cm（繩長 L=%s R=%s） tension_valid=%s"
+          % (height(field(fin, "length_left")), field(fin, "length_left"),
+             field(fin, "length_right"), field(fin, "tension_valid")))
     sys.exit(1)
 
 
@@ -302,9 +339,9 @@ print("中止門檻：|roll|>%.1f°（瞬時） / 左右差>%.0fcm 連續 %d 筆
       % (ROLL_TRIP, DIFF_TRIP, DIFF_PERSIST))
 
 st0 = ask(CRANE, "status", 10)
-L0 = field(st0, "length_left")
+L0 = height(field(st0, "length_left"))
 if L0 is None or abs(L0 - TOP) > TOL:
-    print("🔴 起點不在頂端（L=%s，需 %d±%d）——不猜，請先手動移到頂端。" % (L0, TOP, TOL))
+    print("🔴 起點不在頂端（高度=%s cm，需 %d±%d）——不猜，請先手動移到頂端。" % (L0, TOP, TOL))
     sys.exit(1)
 ws0 = ask(WROBOT, "status", 10)
 if "state=ready" not in ws0 and "state=idle" not in ws0:
@@ -351,15 +388,15 @@ try:
     for cyc in range(1, CYCLES + 1):
         print("═══ 週期 %d/%d ═══" % (cyc, CYCLES))
         print("%3s %6s %6s %6s %6s %28s %7s %7s %6s %5s %7s"
-              % ("步", "伸出s", "真空s", "滑台s", "收回s", "四顆壓力 kPa", "移動s", "roll均", "出帶%", "Δmax", "停後roll"))
+              % ("步", "伸出s", "真空s", "清潔s", "收回s", "四顆壓力 kPa", "移動s", "roll均", "出帶%", "Δmax", "停後roll"))
         for i in range(1, STEPS + 1):
             t_step0 = time.time()
-            cur = field(ask(CRANE, "status", 10), "length_left")
+            cur = height(field(ask(CRANE, "status", 10), "length_left"))
             if cur is None:
                 bail("讀不到吊機位置")
-            end = cur + STEP_CM
-            if end > BOTTOM + TOL:
-                bail("預期終點 %d 超出區間 [%d, %d]" % (end, TOP, BOTTOM))
+            end = cur - STEP_CM          # 下行 = 高度減少
+            if end < BOTTOM - TOL:
+                bail("預期終點 %d cm 低於底端，超出區間 [%d, %d]" % (end, BOTTOM, TOP))
 
             r = fan(FAN_OFF)                                   # ①
             if not r.startswith("OK"): bail("風扇關閉失敗：%s" % r)
@@ -386,19 +423,58 @@ try:
                 time.sleep(0.3)
             t_vac = time.time() - t
             n_seal = sum(1 for p in (pr or []) if p is not None and p <= VAC_OK_KPA)
-            if n_seal == 0:
-                bail("真空未建立：%.1fs 內四顆都沒有到 %d kPa（%s）"
-                     % (t_vac, VAC_OK_KPA, "/".join("%s" % p for p in (pr or []))))
+            # 🔴 [2026-09-03 per user] 吸不到**不中止**，記錄後跳過本步的滑台掃動、續行。
+            #
+            # 為什麼可以放行：這個測試**本來就不靠吸盤承重**（見檔頭 ③ 與「無防墜錨點」那段）
+            # —— 全程由鋼索承重，第 ③ 步不提供任何附著作用。所以吸不到不改變安全性，
+            # 只代表「這一步沒有模擬到附著」。09-03 現場實測也確認過：7% 與 8% 風扇推力
+            # 各試一輪都吸不上，而繼續走完全沒有風險。
+            #
+            # 🔴 但**必須看得見**，否則整輪可能全程零附著卻長得像成功 —— 09-03 早上就出過
+            #    一次那種假象（讀太早，四顆全 0 卻照跑）。所以：逐步印、計數、總結再報一次。
+            # 🔴 跳過 ③b 滑台掃動的理由：沒有附著時機體只掛在繩上，橫向移動滑台會讓它擺盪，
+            #    而那個擺盪不屬於被測項目，只會污染 roll 統計。
+            skip_rail = (n_seal == 0)
+            if skip_rail:
+                no_seal_steps[0] += 1
+                print("   ⚠ 真空未建立（%.1fs 內無一顆到 %d kPa：%s）—— 本步跳過滑台掃動、直接收腳續行"
+                      % (t_vac, VAC_OK_KPA, "/".join("%s" % p for p in (pr or []))))
 
             # ③b [2026-09-03 per user] 上滑台 0→50→0。
             # 位置刻意放在 ③ 與 ④ 之間：推桿仍在 10cm（機體有支撐）、風扇仍關（①的順序
             # 是安全需求，不可為了掃動提前開）。手臂維持 PARK —— 本步只動滑台，不壓玻璃。
+            # ③b [2026-09-03 per user] 由「滑台空跑」改成**完整清潔動作**：
+            #     壓上(arm_deploy) → 滑台 0→RAIL_CM→0 → 收手臂(arm_park)
+            #
+            # 🔴 走本體的 arm_deploy/arm_park 代轉，**不直接連 9527** ——
+            #    本腳本跑在吊機那台，而 motor_api 在本體的 127.0.0.1:9527，連不到；
+            #    而且代轉是既有的編排路徑（cmd_arm_deploy → arm_cmd_），不該另闢第二條。
+            #
+            # 🔴 `arm_deploy` 壓玻璃時**本來就會回 ERR**（touch_wall did not converge），
+            #    所以判準看姿態不看回傳值 —— 09-02 建立、09-03 十輪 × 2 工具再次確認：
+            #    0.55 < θ < 0.75 且 tau > 8.0。這與 cyc.py 用的是同一組判準。
+            #
+            # 🔴 無附著時整段跳過（連同壓上）：機體只掛在繩上時把手臂壓上玻璃並橫走滑台，
+            #    等於用一台懸空的機器去推牆，姿態會被推歪而那不屬於被測項目。
             t = time.time()                                     # ③b
-            r = ask(WROBOT, "rail %d" % RAIL_CM, 60)
-            if not r.startswith("OK"): bail("rail %d 失敗：%s" % (RAIL_CM, r))
-            r = ask(WROBOT, "rail 0", 60)
-            if not r.startswith("OK"): bail("rail 0 復位失敗：%s" % r)
-            t_rail = time.time() - t
+            t_rail = 0.0
+            if not skip_rail:
+                r = ask(WROBOT, "arm_deploy %d %s" % (ARM_WALL_MM, ARM_SLOT), 90)
+                time.sleep(1.5)
+                ast_ = ask(WROBOT, "arm_status", 20)
+                th  = field(ast_, "pos")
+                tau = field(ast_, "tau")
+                if th is None or tau is None:
+                    bail("arm_status 讀不到姿態：%s" % ast_[:80])
+                if not (0.55 < th < 0.75 and tau > 8.0):
+                    bail("手臂沒有壓上：θ=%.4f tau=%+.2f（arm_deploy 回 %s）" % (th, tau, r[:40]))
+                r = ask(WROBOT, "rail %d" % RAIL_CM, 60)
+                if not r.startswith("OK"): bail("rail %d 失敗：%s" % (RAIL_CM, r))
+                r = ask(WROBOT, "rail 0", 60)
+                if not r.startswith("OK"): bail("rail 0 復位失敗：%s" % r)
+                r = ask(WROBOT, "arm_park", 90)
+                if not r.startswith("OK"): bail("arm_park 失敗：%s" % r)
+                t_rail = time.time() - t
 
             t = time.time()                                     # ④
             r = ask(WROBOT, "pusher all retract", 90)
@@ -445,27 +521,27 @@ try:
                      ("%+.2f" % ra) if ra is not None else "-"))
 
         # ⑨ 拉回頂端
-        cur = field(ask(CRANE, "status", 10), "length_left")
+        cur = height(field(ask(CRANE, "status", 10), "length_left"))
         if cur is None: bail("讀不到吊機位置（回程前）")
-        if cur - TOP < 1: bail("回程距離異常：L=%.0f" % cur)
+        if TOP - cur < 1: bail("回程距離異常：高度=%.0f cm（已在頂端附近）" % cur)
         r = fan(FAN_OFF)
         if not r.startswith("OK"): bail("回程前關風扇失敗：%s" % r)
         r = ask(CRANE, "set_motion_hz %d" % UP_HZ, 15)
         if not r.startswith("OK"): bail("設定 %dHz 失敗：%s" % (UP_HZ, r))
-        res, stt, dur = monitored_crane_move("retract", int(cur - TOP),
+        res, stt, dur = monitored_crane_move("retract", int(TOP - cur),
                                              "週期%d回程" % cyc, 300)
         ask(CRANE, "set_motion_hz %d" % DOWN_HZ, 15)   # 立刻寫回，不等收尾
         if abort_reason: bail(abort_reason[0])
         if not res.startswith("OK"): bail("回程 retract 失敗：%s" % res)
-        timing["up_cm"] += int(cur - TOP)
+        timing["up_cm"] += int(TOP - cur)
         timing["up_s"]  += dur
         timing["up_runs"] += 1
-        fin = field(ask(CRANE, "status", 10), "length_left")
+        fin = height(field(ask(CRANE, "status", 10), "length_left"))
         if stt:
             all_diff.append(("週期%d回程" % cyc, stt["mdiff"]))
             all_nearmiss.append(stt["nearmiss"])
-        print("  回程 %.0fcm @%dHz  %.1fs  roll均 %.2f  出帶 %.0f%%  Δmax %.0f  → L=%.0f\n"
-              % (cur - TOP, UP_HZ, dur, stt["avg"] if stt else -1,
+        print("  回程 %.0fcm @%dHz  %.1fs  roll均 %.2f  出帶 %.0f%%  Δmax %.0f  → 高度 %.0f\n"
+              % (TOP - cur, UP_HZ, dur, stt["avg"] if stt else -1,
                  stt["outpct"] if stt else -1, stt["mdiff"] if stt else -1,
                  fin if fin is not None else -1))
 finally:

@@ -21,11 +21,26 @@ CRANE = ("127.0.0.1", 5002)
 WROBOT = ("192.168.5.26", 5001)
 
 TRIPS = int(sys.argv[1]) if len(sys.argv) > 1 else 10
-TOP = int(sys.argv[2]) if len(sys.argv) > 2 else 0
-BOTTOM = int(sys.argv[3]) if len(sys.argv) > 3 else 229
+# 🔴 [2026-09-03 per user] 座標語意由「繩長」改成「**離底高度**」，與 cycle_test.py 一致。
+#   SD76 於當日傍晚在**玻璃最底端（離地最近）**重新歸零 → length_left 0=底、往上為負。
+#   實測頂端 length_left = -231 ⇒ 玻璃面高度 231 cm。
+# 🔴🔴 改這支特別重要：它是**唯一會自己決定方向**的腳本，而 09-01 就因為方向寫反
+#   被使用者在執行前攔下（當時機器在頂端卻要再往上收 229cm）。座標一換而邏輯沒跟上，
+#   同一個錯會以「看起來完全合理」的樣子重演。
+TOP = int(sys.argv[2]) if len(sys.argv) > 2 else 231     # 頂端高度
+BOTTOM = int(sys.argv[3]) if len(sys.argv) > 3 else 0    # 底端高度
+
+
+def height(length_left):
+    """繩長讀值 → 離底高度（cm）。繩越長 → 位置越低 → 高度越小。"""
+    return None if length_left is None else -length_left
 DIFF_TRIP = float(sys.argv[4]) if len(sys.argv) > 4 else 8.0
 ROLL_TRIP = float(sys.argv[5]) if len(sys.argv) > 5 else 5.0
-SPAN = BOTTOM - TOP
+# 🔴 [2026-09-03] 座標改成「離底高度」之後，單程距離是 TOP - BOTTOM（頂在上、值較大）。
+# 改漏這一行的症狀是抬頭印出「單程 -231cm / -4.6 m」—— 負距離。
+# 它不影響任何動作（方向由 plan_leg 決定），但**會讓人懷疑方向是不是也反了**，
+# 而在一支剛改過座標的腳本上，那個懷疑代價很高。
+SPAN = TOP - BOTTOM
 
 abort_reason = []
 
@@ -122,10 +137,11 @@ def stats(samples):
                 mdiff=max(diffs) if diffs else 0)
 
 
-print(f"任務：{TRIPS} 趟來回  頂 L={TOP} ↔ 底 L={BOTTOM}  單程 {SPAN}cm  "
+print(f"任務：{TRIPS} 趟來回  頂 {TOP}cm ↔ 底 {BOTTOM}cm（離底高度）  單程 {SPAN}cm  "
       f"共 {TRIPS*2} 次橫越 / {TRIPS*2*SPAN/100:.1f} m")
 st = ask(CRANE, "status", 5)
-print(f"起始 L={field(st,'length_left'):.0f} R={field(st,'length_right'):.0f}  "
+print(f"起始 高度={height(field(st,'length_left')):.0f}cm "
+      f"(繩長 L={field(st,'length_left'):.0f} R={field(st,'length_right'):.0f})  "
       f"motion_hz={field(st,'motion_hz'):.0f}  "
       f"balance_source={re.search(r'balance_source=(\w+)', st).group(1)}  "
       f"length_diff_max={field(st,'length_diff_max_cm'):.0f}")
@@ -140,30 +156,40 @@ print(f"{'趟':>3} {'方向':>4} {'秒':>6} {'n':>4} {'avg':>6} {'max':>6} {'出
 TOL = 5   # cm，端點容許
 
 def plan_leg(cur):
-    """由當前位置推導下一段。回傳 (verb, cm, 目標, 標籤) 或 None（無法判定）。"""
-    if cur <= TOP + TOL:
-        return ("pay_out", BOTTOM - cur, BOTTOM, "下")
-    if cur >= BOTTOM - TOL:
-        return ("retract", cur - TOP, TOP, "上")
+    """由當前高度推導下一段。回傳 (verb, cm, 目標, 標籤) 或 None（無法判定）。
+
+    🔴 新語意下的方向：
+        在頂端（cur ≈ TOP，高度大） → 往下 → pay_out（放繩），高度減少
+        在底端（cur ≈ BOTTOM，高度小） → 往上 → retract（收繩），高度增加
+    移動量一律用「與目標端點的距離」算，不用固定常數 —— 端點值改了它自動跟上。
+    """
+    if cur >= TOP - TOL:
+        return ("pay_out", cur - BOTTOM, BOTTOM, "下")
+    if cur <= BOTTOM + TOL:
+        return ("retract", TOP - cur, TOP, "上")
     return None          # 不在任一端點 —— 不猜，交給人
 
 def check_envelope(verb, cm, cur):
-    """指令執行後的預期位置必須落在 [TOP, BOTTOM] 內。"""
-    end = cur + cm if verb == "pay_out" else cur - cm
+    """指令執行後的預期高度必須落在 [BOTTOM, TOP] 內。
+
+    pay_out 讓高度**減少**、retract 讓高度**增加** —— 這兩個符號跟舊版相反，
+    是本次座標變更中最容易改漏的一處。
+    """
+    end = cur - cm if verb == "pay_out" else cur + cm
     if cm <= 0:
         return f"cm={cm} 非正值"
-    if end < TOP - TOL or end > BOTTOM + TOL:
-        return f"預期終點 {end} 超出區間 [{TOP}, {BOTTOM}]"
+    if end < BOTTOM - TOL or end > TOP + TOL:
+        return f"預期終點 {end} cm 超出區間 [{BOTTOM}, {TOP}]"
     return None
 
 allr, allout, alln = [], 0, 0
 for t in range(1, TRIPS + 1):
     for _half in (0, 1):
         st_ = ask(CRANE, "status", 5)
-        cur = field(st_, "length_left")
+        cur = height(field(st_, "length_left"))
         pl = plan_leg(cur)
         if pl is None:
-            print(f"\n🔴 中止：目前 L={cur:.0f} 不在任一端點附近"
+            print(f"\n🔴 中止：目前高度 {cur:.0f} cm 不在任一端點附近"
                   f"（頂 {TOP}±{TOL} / 底 {BOTTOM}±{TOL}），無法判定方向。")
             print("   不猜方向 —— 請先手動移到端點。")
             sys.exit(1)
@@ -184,7 +210,8 @@ for t in range(1, TRIPS + 1):
             print(f"\n🔴 中止：{abort_reason[0] if abort_reason else res}")
             print("   現場保留，未自動復位。")
             fin = ask(CRANE, "status", 5)
-            print(f"   L={field(fin,'length_left'):.0f} R={field(fin,'length_right'):.0f} "
+            print(f"   高度={height(field(fin,'length_left')):.0f}cm "
+                  f"(繩長 L={field(fin,'length_left'):.0f} R={field(fin,'length_right'):.0f}) "
                   f"tension_valid={field(fin,'tension_valid'):.0f}")
             sys.exit(1)
 

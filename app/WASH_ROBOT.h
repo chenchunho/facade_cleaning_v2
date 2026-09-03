@@ -380,10 +380,23 @@ public:
 private:
     //=========== constants ===========
 
-    // [v2 2026-07-08] Two RS485 gateways only: .20 (ZDT pushers 1-4) + .22
-    // (JC100/PQW/arm-rail/XKC/DY500). v1's .21 (IP_485_2) bus retired — ZDT
-    // moved to .20 (freed by removing DM2J feet/wheel rails).
+    // [2026-09-03] **三條** RS485 匯流排（原文寫「Two gateways only」，已過期）：
+    //   .20 ZDT 推桿 5~8 + PQW 12 + DM2J 14
+    //   .21 QX-DO24 9（PWM 風扇）—— 2026-09-03 per user 新增，見下方常數的說明
+    //   .22 JC100 5~8 + XKC 13
+    // ⚠️ `.21` 這個位址 v1 時代曾是 ZDT bus、2026-07 退役；現在是**不同的新網關、不同的用途**。
+    // 看到舊註解寫「.21 retired」時不要據此判斷它不存在。
     static constexpr const char* IP_485_1   = "192.168.1.20";
+    // 🆕 [2026-09-03 per user] QX-DO24（PWM 風扇）獨立一條匯流排。
+    //   動機：09-03 六次多週期測試裡**四次死在 `.22`**，而掛掉時是整條一起掛
+    //   （QX:9 與 JC100 5/6/7 同時逾時）—— 不是單一模組故障。把風扇模組拉出來之後：
+    //     ① 風扇的通訊問題不再能拖垮真空壓力計，而 JC100 是「機器還吸不吸得住」的唯一判準
+    //     ② 若 `.21` 乾淨而 `.22` 仍會掛 ⇒ 問題在 `.22` 的線路/網關，不在模組
+    //     ③ 反之若 `.21` 也掛 ⇒ 問題跟著模組走
+    //   —— 這個拆分**本身就是一個分辨實驗**，不只是隔離措施。
+    //   ⚠️ 位址沿用 v1 時代已退役的 `.21`（v1 的 ZDT bus）。網關為新品，
+    //     2026-09-03 實查設定與 `.22` 逐項相同：115200 8N1 / 4001 / cmode=0 / _pt=0。
+    static constexpr const char* IP_485_2   = "192.168.1.21";
     static constexpr const char* IP_485_3   = "192.168.1.22";
     static constexpr int         PORT_485   = 4001;
 
@@ -1121,6 +1134,32 @@ private:
     static constexpr int DETACH_THRESHOLD_KPA   = -10;   // kPa
     static constexpr int VACUUM_SETTLE_MS     = 1500;   // 2026-05-22: 2000 → 1500
     static constexpr int VACUUM_RELEASE_WAIT_MS = 700;   // wait after valve OFF before pusher retract (cup adhesion + line vent) (2026-06-01: 3000→1500; 2026-07-14: 1500→700 激進提速。⚠ 這是氣動洩壓時間、物理下限，若 bench 看到 cup 帶負壓「啵」彈開或瞬間 stall 就是砍過頭，往回加)
+    // 🔴 [2026-09-03] 上面那個 700 的註解，描述的是它**沒有在做**的那件事。
+    //   逐一查過所有使用點後確認：它唯一的實際用途是 vacuum_wait_release_ 的**輪詢逾時**，
+    //   而註解通篇在講「氣動洩壓時間、物理下限」——那個角色**在程式碼裡沒有任何對應**
+    //   （沒有 sleep_ms_(VACUUM_RELEASE_WAIT_MS)，1327 行那句「in bal_cal_release_body_」也已不成立）。
+    //     ① 氣動洩壓時間（物理下限）  ← 註解宣稱的，**實際無人使用**
+    //     ② 確認已鬆開的通訊預算      ← **它真正在做的唯一一件事**
+    //   ⇒ 於是一個為「排氣要多久」訂的數字，實際上在決定「允許讀幾次 JC100」。
+    //   輪詢間隔 300ms ⇒ **總共只試 2~3 次讀取**。
+    //   09-03 現場：`.22` 匯流排打嗝（QX:9 與 JC100 5/6/7 同時逾時），2~3 次全落空 →
+    //   「讀不到」被保守地當成「還吸著」（那個判斷是對的）→ 整條流程停下等人。
+    //   而 `.22` 恢復後送 continue，`[vacuum_release] all released after **0ms**` ——
+    //   氣早就排完了，**不夠的從來不是洩壓時間，是通訊重試的機會**。
+    //
+    // 📌 這比「同一個數字兩種語意」（08-31 減速遮罩、FINE_ADJUST_TOLERANCE_CM）更隱蔽：
+    //   那些是一個數字**做兩件事**，這個是**註解描述了它沒在做的那件事**
+    //   ——同 per_program_cautions.md §0.5「看安全性斷言不要把註解當證據」。
+    //   ⚠️ 我一開始也把它讀成「兼任兩種語意」，是逐一 grep 使用點才發現角色 ① 根本沒有實作。
+    //
+    // 🔴 **刻意不改成「確認不了就直接收腳」** —— vacuum_wait_release_ 裡
+    //   「comms fail → treat as still attached」是防止「吸盤還吸著就收腳、把機器從牆上扯下來」
+    //   的唯一防線，09-03 稍早才親眼看過那個情境。拆開常數能解決同樣的問題，
+    //   而且**不需要拿掉任何保護**。
+    static constexpr int VACUUM_CONFIRM_TIMEOUT_MS = 3000;  // 確認「已鬆開」的通訊預算（≈10 次輪詢）
+    // ⚠️ 拆開之後 VACUUM_RELEASE_WAIT_MS **已無程式碼使用者**（只剩本註解引用）。
+    //   刻意保留而不刪：700ms 這個數字是 3000→1500→700 一路量出來的**氣動洩壓物理下限**，
+    //   刪掉就沒有第二份記載了。日後若要在閥關閉後加一段明確的洩壓等待，用它，不要另訂新值。
     static constexpr int POLL_INTERVAL_MS     = 50;
     static constexpr double VACUUM_BACKUP_CM  = 10.0;  // rail backup on each vacuum retry (2026-05-29: 5→10，weak_seal 後找新位置 5cm 不夠遠，常吸到同一個漏氣點)
 
@@ -1307,7 +1346,7 @@ private:
     static constexpr int    BAL_CAL_PRELOAD_RETRACT_CM   = 30;      // max retract per attempt during preload
     static constexpr int    BAL_CAL_FREE_HANG_SETTLE_MS  = 3000;    // wait after all cups off for swing to die
     // [2026-06-02 v8] Cal-specific vacuum release wait — replaces the previous blind
-    // sleep_ms_(VACUUM_RELEASE_WAIT_MS) in bal_cal_release_body_ / _feet_center_.
+    // （2026-09-03 更正：此處原寫 sleep_ms_(VACUUM_RELEASE_WAIT_MS)，實際上不存在該呼叫）
     // Calls vacuum_wait_release_ which polls JC100 pressure until p >= DETACH_THRESHOLD_KPA
     // OR this timeout. Bench observed cup retract stalled when blind sleep ended too soon
     // and cups were still sucking. Cal isn't time-pressured — give a generous budget.
@@ -1382,7 +1421,12 @@ private:
 
     //=========== hardware ===========
 
-    TCP_client cli_20_, cli_22_;   // [v2] .20 = ZDT pushers 1-4, .22 = JC100/PQW/arm-rail/XKC/DY500 (.21/cli_21_ retired)
+    // [2026-09-03] 成員註解重寫 —— 原文描述的是 v1 配置（「.22 = PQW/arm-rail」），
+    // 而 PQW 與 arm-rail 早在 2026-08-27/28 就搬到 .20 了。以 init() 的實際繫結為準：
+    //   cli_20_ = ZDT 5~8（推桿）/ PQW 12（繼電器）/ DM2J 14（上滑台）
+    //   cli_21_ = QX-DO24 9（PWM 風扇）— 2026-09-03 新增，獨佔一條
+    //   cli_22_ = JC100 5~8（真空壓力）/ XKC 13（水位，不探測）
+    TCP_client cli_20_, cli_21_, cli_22_;
     TCP_client crane_cli_;
     // Cleaning arm — separate TCP connection to local motor_api service (127.0.0.1:9527)
     TCP_client arm_cli_;
@@ -2622,8 +2666,8 @@ std::string WashRobot::cycle_group_(const std::string& group,
             if (try_or_pause_([this, valve_ch]() { return pqw_.controlRelay(valve_ch, false); },
                               "cycle_" + group + "_valve_off_retry")) return "aborted";
             // Poll-based wait — proceeds the moment all cups release, up to
-            // VACUUM_RELEASE_WAIT_MS. On timeout drops into PausedOnError.
-            if (try_or_pause_([this, &slaves]() { return vacuum_wait_release_(slaves, VACUUM_RELEASE_WAIT_MS); },
+            // VACUUM_CONFIRM_TIMEOUT_MS. On timeout drops into PausedOnError.
+            if (try_or_pause_([this, &slaves]() { return vacuum_wait_release_(slaves, VACUUM_CONFIRM_TIMEOUT_MS); },
                               "cycle_" + group + "_vacuum_release_retry")) return "aborted";
 
             // Other-group stall sweep: 真空釋放後 cup 解離過程可能讓對側組 latch
@@ -2766,7 +2810,7 @@ std::string WashRobot::cycle_group_(const std::string& group,
             // (same sequence as vacuum retry — rail can't move with cups stuck).
             if (try_or_pause_([this, valve_ch]() { return pqw_.controlRelay(valve_ch, false); },
                               "cycle_" + group + "_rescue_valve_off")) return "aborted";
-            if (try_or_pause_([this, &slaves]() { return vacuum_wait_release_(slaves, VACUUM_RELEASE_WAIT_MS); },
+            if (try_or_pause_([this, &slaves]() { return vacuum_wait_release_(slaves, VACUUM_CONFIRM_TIMEOUT_MS); },
                               "cycle_" + group + "_rescue_vacuum_release")) return "aborted";
             // Extra settle after vacuum_wait_release_ reports "released": the
             // pressure sensor crossing DETACH_THRESHOLD_KPA doesn't guarantee
