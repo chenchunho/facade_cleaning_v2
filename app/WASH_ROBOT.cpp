@@ -918,6 +918,19 @@ std::string WashRobot::cmd_arm_deploy(int wall_mm, const std::string& slot) {
         return "ERR invalid_slot (LEFT|CENTER|RIGHT)\n";
     std::ostringstream oss;
     oss << "DEPLOY " << wall_mm << " " << s;
+
+    // 🔴 [2026-09-03] 先送 ENABLE —— **PARK 會停用兩顆馬達**，而停用狀態下 DEPLOY
+    //   會被 motor_api 以 `ERR motor not enabled; send ENABLE first` 擋掉。
+    //   於是「arm_park 之後 arm_deploy」這個很自然的順序會**靜默失敗**：
+    //   指令送得出去、log 印得出 [arm] DEPLOY、回傳是 ERR，但手臂一動也不動。
+    //   09-03 把清潔動作整合進 cycle_test 時就是踩到這個 —— 而 cyc.py 一直能跑，
+    //   只因為它在每個週期開頭自己補了 `M1 ENABLE; M2 ENABLE`（見該檔註解「PARK 會停用馬達」）。
+    //   ⇒ 那個 workaround 說明缺陷在編排層，不在呼叫端。修在這裡，所有呼叫端一次受益。
+    // ⚠️ 不檢查 ENABLE 的回傳：已經 enabled 時再 enable 是無害的冪等操作，
+    //   而真正的失敗會在下一行的 DEPLOY 顯現（那裡才有姿態驗證）。
+    arm_cmd_("M1 ENABLE", 5);
+    arm_cmd_("M2 ENABLE", 5);
+
     std::cout << "[arm] " << oss.str() << "\n";
     std::string r = arm_cmd_(oss.str(), 30);
     if (r.rfind("OK", 0) == 0) {

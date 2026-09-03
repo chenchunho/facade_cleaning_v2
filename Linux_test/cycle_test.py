@@ -127,8 +127,14 @@ timing = {"down_cm": 0.0, "down_move_s": 0.0, "down_step_s": 0.0, "down_steps": 
 all_nearmiss = []
 
 
-def ask(addr, cmd, timeout):
-    """送一行指令，讀到 OK/ERR 為止。回傳該行（或 TIMEOUT/EXC:...）。"""
+def ask(addr, cmd, timeout, prefixes=("OK", "ERR")):
+    """送一行指令，讀到指定前綴的行為止。回傳該行（或 TIMEOUT/EXC:...）。
+
+    🔴 [2026-09-03] `prefixes` 是後加的：**不是每個指令都回 OK/ERR 開頭的行**。
+    `arm_status` 回的是手臂原始狀態字串 `[M1] pos=... | [M2] pos=...`，
+    用預設前綴會**永遠等不到、直到逾時**，而症狀長得像「手臂沒回應」——
+    整合清潔動作那天就是這樣誤判了兩輪，實際上手臂一直是好的。
+    """
     try:
         s = socket.create_connection(addr, timeout=10)
         s.settimeout(timeout)
@@ -140,7 +146,7 @@ def ask(addr, cmd, timeout):
                 break
             buf += d
             for line in buf.decode(errors="replace").splitlines():
-                if line.startswith("OK") or line.startswith("ERR"):
+                if any(line.startswith(p) for p in prefixes):
                     s.close()
                     return line
         s.close()
@@ -327,8 +333,19 @@ def bail(msg):
 
 
 def cleanup():
-    """🔴 一定要跑：風扇關 + motion_hz 寫回下行速度。
-    中途中止若把 motion_hz 留在 50，下一個人下 pay_out 就是 50Hz 下行 —— 超出使用者定的上限。"""
+    """🔴 一定要跑：收手臂 + 風扇關 + motion_hz 寫回下行速度。
+
+    中途中止若把 motion_hz 留在 50，下一個人下 pay_out 就是 50Hz 下行 —— 超出使用者定的上限。
+
+    🔴 [2026-09-03 per user] **補上 arm_park。** ③b 整合清潔動作之後，任何在
+    「壓上之後、收手臂之前」的中止都會**讓手臂留在壓著玻璃的狀態**（實測 6~14 Nm 持續頂著），
+    而 bail() 只印「現場保留，未自動復位」—— 那句話對吊機與推桿是刻意的（保留現場好查），
+    但對手臂不成立：**頂著玻璃不是「保留現場」，是持續施力**，而達妙馬達長時間受力會觸發
+    過熱/過流鎖存（09-03 的 `switchControlMode failed` 就是那樣來的，只能斷電解除）。
+    ⚠️ 手臂收回**不會**破壞現場證據：θ 與 tau 在中止當下已經被記錄，收回只是卸力。
+    ⚠️ 放在最前面：先卸力再處理其他，因為其他兩件都不緊急。
+    """
+    print("   [收尾] 手臂 arm_park : %s" % ask(WROBOT, "arm_park", 90)[:40])
     print("   [收尾] 風扇 %d%% / motion_hz→%d : %s / %s"
           % (FAN_OFF, DOWN_HZ, fan(FAN_OFF), ask(CRANE, "set_motion_hz %d" % DOWN_HZ, 15)))
 
@@ -461,7 +478,8 @@ try:
             if not skip_rail:
                 r = ask(WROBOT, "arm_deploy %d %s" % (ARM_WALL_MM, ARM_SLOT), 90)
                 time.sleep(1.5)
-                ast_ = ask(WROBOT, "arm_status", 20)
+                # arm_status 回的是 `[M1] ... | [M2] ...`，不是 OK 開頭 —— 見 ask() 的說明
+                ast_ = ask(WROBOT, "arm_status", 20, prefixes=("[M1]",))
                 th  = field(ast_, "pos")
                 tau = field(ast_, "tau")
                 if th is None or tau is None:
