@@ -3072,10 +3072,15 @@ std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 	// ---- Step 6: 壓力收斂（割線法，kp_eff 由實測取代猜測）---------------------
 	// 初值 70 來自 09-04 三點：Dtau/Dtheta_cmd = 2.54/0.0343 = 74、2.15/0.0338 = 64。
 	// **不是 hold_kp(90)** —— 接觸後手臂仍會被壓進去一點，吸收掉一部分角度差。
-	float kp_eff    = DEPLOY_F_KP_EFF0;
-	float last_cmd  = theta_cmd;
-	float last_tau  = tau;
-	bool  converged = false;
+	float kp_eff     = DEPLOY_F_KP_EFF0;
+	float last_cmd   = theta_cmd;
+	float last_tau   = tau;
+	bool  converged  = false;
+	// [2026-09-04 per facade web gui session] 迭代次數要出現在**回覆**裡，不能只在 stdout ——
+	// server.js 只橋接 TCP，stdout 永遠到不了 GUI，少了這個欄位 GUI 在結構上就不可能顯示收斂過程。
+	// 📌 目前實測恆為 1（一步就進容差）。**這正是它便宜的地方：哪天不是 1，
+	//    就是幾何或等效剛度變了的最早訊號** —— 而那正是力控要盯的東西。
+	int   iters_done = 0;
 	for (int it = 0; it < DEPLOY_F_ITER_MAX; ++it) {
 		float need = target_nm - tau;
 		if (std::abs(need) <= DEPLOY_F_TOL_NM) { converged = true; break; }
@@ -3092,6 +3097,7 @@ std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 		}
 		if (!press_probe_(next, DEPLOY_F_SEEK_SPEED, DEPLOY_F_RELAX_MS, pos, tau))
 			return "ERR DEPLOY_F: press timeout";
+		++iters_done;
 		// 用這一步實際量到的斜率取代猜測（分母太小就不更新，避免雜訊放大）。
 		float d_cmd = next - last_cmd;
 		float d_tau = tau  - last_tau;
@@ -3127,7 +3133,8 @@ std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 	    << " theta=" << pos
 	    << " cmd=" << theta_cmd
 	    << " contact=" << theta_contact
-	    << " kp_eff=" << std::setprecision(1) << kp_eff;
+	    << " kp_eff=" << std::setprecision(1) << kp_eff
+	    << " iters=" << iters_done;
 	if (!converged)
 		oss << " (未收斂：" << DEPLOY_F_ITER_MAX << " 次迭代後仍差 "
 		    << std::setprecision(2) << (target_nm - tau) << " Nm)";

@@ -1038,6 +1038,17 @@ per user 調整限位後恢復，tau 降到 −0.03。
 
 **⚠️ 工具面的邊界**：`motor_api` 的 listen backlog 只有 5，而兩個 web_backend 實例各佔 2 條
 （`ARM_IP = WASHROBOT_IP`），加上本體的 1 條**剛好滿**。日後要再開第三個 GUI 實例會被拒。
+🔴🔴 **2026-09-04 推翻整條，兩個地方都錯**（由 facade web gui session 指出，我複驗屬實）：
+① **不是 5 條，是 3 條**——每個 web_backend 只持有**一條** arm 橋接，不是兩條
+   （建兩次的是 `makeBridge('crane')`：main + intr）。實測 established 就是
+   `.25:58874` / `.25:58872` / `127.0.0.1:41012` 共 3 條。
+② **`listen(fd, 5)` 是「尚未被 accept 的等待佇列」上限，不是同時連線數上限。**
+   `server_loop()` 是 `accept()` → `std::thread(client_thread).detach()` 的**無上限迴圈**，
+   accept 得很緊、佇列基本不會積 ⇒ **第三個 GUI 實例不會被拒。**
+📌 **病根：`ss -ltn` 對 LISTEN socket 的兩欄語意與 established 不同** ——
+   `Recv-Q` = 目前排隊等 accept 的數量、`Send-Q` = backlog 上限。
+   `LISTEN 0 5` 要讀成「上限 5、目前排隊 0」，當初把 `Send-Q` 讀成了連線數。
+
 
 ### 待完成（09-03 收盤，已按當日最終狀態更正）
 
@@ -1059,7 +1070,8 @@ per user 調整限位後恢復，tau 降到 −0.03。
 - 🟡 **滑台掃動期間工具頭被摩擦力扭轉 0.45~0.49 rad（26~28°）**，十輪高度一致＝固有特性。
   刮刀那輪每次都收在 −1.32~−1.34（**已越過下界 −1.05**）—— 這解釋了 M2 為何會出現在行程外。
   會直接影響清潔接觸角，先前無紀錄。
-- 🟡 **`motor_api` 的 listen backlog 只有 5**：兩個 web_backend 各佔 2 條 + 本體 1 條＝剛好滿。
+- ~~🟡 **`motor_api` 的 listen backlog 只有 5**：兩個 web_backend 各佔 2 條 + 本體 1 條＝剛好滿。~~
+  → 🔴 **09-04 推翻：實際 3 條，且 backlog 不是同時連線數上限，第三個 GUI 不會被拒**（見上方該條）。
   再開第三個 GUI 實例會被拒。
 - 🟡 **Web GUI 8080/8081 開機不會自動啟動**，吊機重開機後要手動起（指令見上方 GUI 段）。
 

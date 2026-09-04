@@ -309,7 +309,7 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
   ┌───────────────────┐    （橋接兩邊，見下）
   │ 本體 Pi  washrobot │
   │   facade_cleaning_v2   :5001                 │
-  │   motor_api（手臂）     :9527  ← 127.0.0.1 本機 │
+  │   motor_api（手臂）     :9527  ← 0.0.0.0 全介面 │
   └───────────────────┘
 ```
 
@@ -328,8 +328,18 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 - **web_backend 刻意放在吊機側**：本體在半空中掛掉時，GUI 仍能透過吊機手動收繩救援
 - **本體會主動當 TCP client 連吊機 `:5002`**（`app/WASH_ROBOT.h` `CRANE_IP`），
   自動步態下移時由本體下 `pay_out_left/right <cm>` 同步放繩 —— 兩台之間是**本體指揮吊機**
-- **手臂 `motor_api` 跑在本體 Pi 的 `127.0.0.1:9527`**，本體用
-  `arm_cmd_("INIT"/"DEPLOY"/"PARK"/"STATUS")` 下指令
+- **手臂 `motor_api` 跑在本體 Pi 的 `:9527`**，本體用
+  `arm_cmd_("INIT"/"DEPLOY"/"DEPLOY_F"/"PARK"/"STATUS")` 下指令（本體自己走 `127.0.0.1`）
+  🔴 **2026-09-04 更正：它綁的是 `0.0.0.0:9527`，不是只有 loopback。**
+  本檔先前三處寫成 `127.0.0.1:9527`，讀起來像只綁本機 —— 實際上**同網段任何一台都打得到手臂**
+  （吊機上的 web GUI 正是靠這條直連：`server.js` 的 `ARM_IP = WROBOT_IP`）。
+  ⇒ ① GUI 測手臂**不需要本體主程式在跑**，那條路徑是 direct 不是代轉；
+     ② 這也是一個未設防的控制面，`192.168.5.0/24` 上沒有任何驗證。目前接受（測試網段），
+     但別再以為它是 loopback-only。
+  📌 **同時連線數沒有上限**（2026-09-04 更正，見下）：`server_loop()` 是
+     `accept()` → `std::thread(client_thread).detach()` 的無上限迴圈。
+  🆕 **`DEPLOY_F <target_nm> <slot>`（2026-09-04）是力控貼合**：壓力是被控量，
+     不使用 `wall_mm`。`DEPLOY` 未動，兩條路徑並行。細節見 `main_api.h` 的 `DEPLOY_F_*` 常數區。
 
 | 位址 | 機器 | 帳號 | 備註 |
 |---|---|---|---|
@@ -414,7 +424,7 @@ D435i 深度相機 2026-09-01 整套移除。**盤點硬體時不要再把它們
 ```
 Raspberry Pi 5（本體主控）
   ├─ USB→TTL  /dev/ttyUSB0 @ WT901BC ──── 姿態儀 IMU（Serial_port，非 Modbus）
-  ├─ 127.0.0.1:9527 ──────────────────── motor_api → damiao USB-CAN
+  ├─ 0.0.0.0:9527 ─────────────────────── motor_api → damiao USB-CAN（**全介面**，非 loopback）
   │                                        M1 DM10010L 大臂 / M2 DM4340_48V 工具頭
   │
   ├─ USR #1  192.168.1.20  (cli_20_)  ─── 「動力 + 滑台 bus」

@@ -6,7 +6,11 @@ import socket, sys, time, re
 
 HOST, PORT = "127.0.0.1", 5001
 
-def ask(sock, f, cmd, timeout, prefixes=("OK", "ERR", "[M1]")):
+def ask(sock, f, cmd, timeout, prefixes=("OK", "ERR", "WARN", "[M1]")):
+    # 🔴 [2026-09-04] WARN 一定要在裡面：DEPLOY_F 未收斂時前綴是 WARN 而不是 OK/ERR。
+    #   漏了它，回覆會被當成非同步事件，指令永遠等不到 resolve → 卡到逾時，
+    #   症狀長得像「手臂沒回應」，而真正的 WARN 那行已經滾過去了。
+    #   （由 facade web gui session 在自己的 transport 上發現同型 bug 後提醒。）
     sock.sendall((cmd + "\n").encode())
     deadline = time.time() + timeout
     while time.time() < deadline:
