@@ -91,6 +91,15 @@ DIFF_TRIP = float(sys.argv[5]) if len(sys.argv) > 5 else 8.0
 # ⚠️ roll 門檻**維持瞬時判定**，刻意不比照辦理：那是機體姿態的安全線，
 #    一筆真實的 6° 就該停，沒有「等它持續」的餘裕。
 DIFF_PERSIST = 3          # 連續幾筆超標才中止（取樣間隔約 0.3s → 約 1 秒持續）
+# [2026-09-04] roll 的持續筆數。取 3 與 DIFF_PERSIST 一致（約 1 秒）：
+#   實測尖峰是**單筆**的（−6.65 之後下一筆就回到 −3.35），1 秒足以區分
+#   「擺過去又回來」與「真的歪著不動」。要更保守就調大，但別調回 1 ——
+#   那等於退回瞬時判定。
+ROLL_PERSIST = 3
+# [2026-09-04 per user]「這個修正之後也要做在腳本裡面，救得回來就繼續腳本，不行才停住」
+ROLL_RECOVER_OK   = 3.0   # 修正後 |roll| 低於此值視為救回來（ROLL_TRIP 的一半）
+ROLL_RECOVER_TRY  = 3     # roll_correct 最多迭代幾次
+ROLL_RECOVER_MAXD = 4     # 單次 roll_correct 的 delta 上限（cm），避免一次動太多
 
 # 🔴 [2026-09-03 per user 第二次重新定義] 座標語意由「繩長」改成「**離底高度**」。
 #
@@ -148,6 +157,8 @@ timing = {"down_cm": 0.0, "down_move_s": 0.0, "down_step_s": 0.0, "down_steps": 
           "up_cm": 0.0, "up_s": 0.0, "up_runs": 0,
           "ext_s": 0.0, "vac_s": 0.0, "rail_s": 0.0, "ret_s": 0.0}
 all_nearmiss = []
+all_roll_nearmiss = []
+roll_fixed = [0]      # roll 自動修正成功的次數
 
 
 def ask(addr, cmd, timeout, prefixes=("OK", "ERR")):
@@ -230,6 +241,14 @@ def monitored_crane_move(verb, cm, label, timeout):
     stop_evt = threading.Event()
     rolls, maxdiff = [], [0.0]
     streak, nearmiss = [0], [0]      # 連續超標筆數 / 超標但自行回復的次數
+    # 🔴 [2026-09-04] roll 也改成「連續 N 筆」，與左右差同一套邏輯。
+    #   09-03 就記過這條待辦：「roll 中止門檻是瞬時的，左右差卻要連續 3 筆
+    #   —— 同一個教訓只套用了一半」，當日 223cm 收回全程平均 1.33°，
+    #   卻被最後一筆停止擺盪 −7.04° 中止。
+    #   09-04 兩段上升（110cm / 118cm）實測再次量到瞬間尖峰 **−6.65° 與 −5.41°**，
+    #   兩次都隨即回穩（−3.35 / −2.13）⇒ **機體在繩索移動中本來就會瞬間擺過 6°，
+    #   那是固有行為不是姿態失控。** 一筆就中止會把正常的擺盪判成故障。
+    roll_streak, roll_nearmiss = [0], [0]
 
     def mon():
         while not stop_evt.is_set():
@@ -257,8 +276,17 @@ def monitored_crane_move(verb, cm, label, timeout):
                     if streak[0] > 0:
                         nearmiss[0] += 1     # 超標過但自行回復 ＝ 平衡迴路在工作
                     streak[0] = 0
-                if roll is not None and abs(roll) > ROLL_TRIP:
-                    abort_reason.append("%s: roll %.2f° > %.1f" % (label, roll, ROLL_TRIP)); break
+                if roll is not None:
+                    if abs(roll) > ROLL_TRIP:
+                        roll_streak[0] += 1
+                        if roll_streak[0] >= ROLL_PERSIST:
+                            abort_reason.append(
+                                "%s: roll 連續 %d 筆超過 %.1f°（最後 %.2f°）—— 持續傾斜，非擺盪"
+                                % (label, roll_streak[0], ROLL_TRIP, roll)); break
+                    else:
+                        if roll_streak[0] > 0:
+                            roll_nearmiss[0] += 1   # 超標過但自行回復 ＝ 擺盪，不是失控
+                        roll_streak[0] = 0
             except Exception:
                 pass
             time.sleep(0.3)
@@ -276,8 +304,90 @@ def monitored_crane_move(verb, cm, label, timeout):
         out = [r for r in rolls if abs(r) > 1.0]
         st = dict(n=len(rolls), avg=sum(abs(r) for r in rolls) / len(rolls),
                   mx=max(abs(r) for r in rolls), outpct=100.0 * len(out) / len(rolls),
-                  mdiff=maxdiff[0], nearmiss=nearmiss[0])
+                  mdiff=maxdiff[0], nearmiss=nearmiss[0],
+                  roll_nearmiss=roll_nearmiss[0])
     return res, st, dur
+
+
+def roll_recover(tag):
+    """roll 持續超標 → 自動水平修正。回 True 表示救回來、可以續行。
+
+    🔴 [2026-09-04 per user]「救得回來就繼續腳本，不行才停住」。
+    當日實測：步2 因 roll 連續超標中止，事後量到 L=-147 / R=-153（差 6cm）、roll -7.07°；
+    **一道 `roll_correct -2` 就把 L/R 拉平到 -150/-150、roll 回到 -1.4°**。
+    ⇒ 這類傾斜是**繩長差造成的、可修的**，不該讓整場停下來。
+
+    🔴 **「繩長已經齊平卻仍然歪」是另一回事** —— 那不是繩長造成的，再動繩只會更糟，
+       直接回 False 交回呼叫端中止。這是這支函式最重要的一條分支。
+
+    ⚠️ 中止時 `emergency()` 送過 `emergency_stop`，本體會停在 `state=error`，
+       修完必須 `reset` 才能繼續，否則後續指令全部會被狀態閘門擋掉。
+    📌 `roll_correct` 的符號：`+delta = 左放右收`、`-delta = 左收右放`（吊機原始碼註解）。
+       所以 L-R > 0（左邊比右邊低）要用**負**的 delta。
+    📌 delta 與實際位移不是 1:1 —— 當日送 -2 實際兩側各動 3cm。所以用**迭代量到為止**，
+       不去猜那個增益。
+    """
+    for k in range(ROLL_RECOVER_TRY):
+        # 🔴 [2026-09-04] 狀態讀取要**重試**，不能一次失敗就放棄。
+        #   首次實跑就踩到：`roll_correct -3` **實際上成功了**（事後量到 L=-191/R=-190、
+        #   roll 由 -6.94° 變 +1.37°），但緊接著的狀態讀取失敗，程式就放棄並中止整場 ——
+        #   **修好了卻回報修不好**。一次瞬時讀取失敗不該否定一個已經生效的修正。
+        # 📌 失敗時把**原始回應**印出來：上一版只印「讀不到」，等於把診斷資訊丟掉，
+        #   下次還是只能猜。
+        L = R = roll = None
+        for attempt in range(3):
+            cs = ask(CRANE, "status", 15)
+            ws = ask(WROBOT, "status", 15)
+            L, R = field(cs, "length_left"), field(cs, "length_right")
+            roll = field(ws, "raw_x")
+            if L is not None and R is not None and roll is not None:
+                break
+            print("   ⚠ [%s] 狀態讀取第 %d 次失敗 —— crane:%s / wrobot:%s"
+                  % (tag, attempt + 1, cs[:40], ws[:40]))
+            time.sleep(1.5)
+        if L is None or R is None or roll is None:
+            print("   🔴 [%s] 連續 3 次讀不到繩長/roll —— 放棄修正" % tag)
+            return False
+        if abs(roll) <= ROLL_RECOVER_OK:
+            print("   ✅ [%s] roll 已回到 %+.2f°（門檻 %.1f），第 %d 次後達成"
+                  % (tag, roll, ROLL_RECOVER_OK, k))
+            return True
+        d = L - R
+        if abs(d) < 1.0:
+            print("   🔴 [%s] 繩長已齊平（L-R=%.0f）卻仍歪 %+.2f° —— **不是繩長造成的**，"
+                  "不再動繩，交回中止" % (tag, d, roll))
+            return False
+        delta = int(round(abs(d) / 2.0))
+        delta = max(1, min(ROLL_RECOVER_MAXD, delta))
+        if d > 0:
+            delta = -delta
+        print("   ⚙ [%s] 第 %d 次：L=%.0f R=%.0f（差 %+.0f）roll %+.2f° → roll_correct %d"
+              % (tag, k + 1, L, R, d, roll, delta))
+        r = ask(CRANE, "roll_correct %d" % delta, 120, prefixes=("OK", "ERR"))
+        if not r.startswith("OK"):
+            print("   ⚠ [%s] roll_correct 失敗：%s" % (tag, r[:80]))
+            return False
+        time.sleep(2.5)
+    cs = ask(CRANE, "status", 10); ws = ask(WROBOT, "status", 10)
+    roll = field(ws, "raw_x")
+    ok = roll is not None and abs(roll) <= ROLL_RECOVER_OK
+    print("   %s [%s] %d 次修正後 roll=%s" % ("✅" if ok else "🔴", tag, ROLL_RECOVER_TRY,
+                                              ("%+.2f°" % roll) if roll is not None else "讀不到"))
+    return ok
+
+
+def clear_error(tag):
+    """emergency_stop 之後把本體由 error 拉回 idle。回 True 表示可以續行。"""
+    st = ask(WROBOT, "status", 10)
+    if "state=error" not in st:
+        return True
+    r = ask(WROBOT, "reset", 20)
+    st = ask(WROBOT, "status", 10)
+    ok = "state=error" not in st
+    print("   %s [%s] 清除 error：reset -> %s（現在 %s）"
+          % ("✅" if ok else "🔴", tag, r[:30],
+             (re.search(r"state=\w+", st).group(0) if re.search(r"state=\w+", st) else "?")))
+    return ok
 
 
 def _diff_summary():
@@ -298,8 +408,13 @@ def _diff_summary():
     worst = sorted(all_diff, key=lambda x: -x[1])[:5]
     print("  最大的 5 段: " + "  ".join("%s=%.0f" % (k, v) for k, v in worst))
     if all_nearmiss:
-        print("  超標後自行回復（未達連續 %d 筆）: %d 次 —— 平衡迴路在工作，不是故障"
+        print("  左右差超標後自行回復（未達連續 %d 筆）: %d 次 —— 平衡迴路在工作，不是故障"
               % (DIFF_PERSIST, sum(all_nearmiss)))
+    if roll_fixed[0]:
+        print("  🔧 roll 自動修正並續行: %d 次 —— 繩長差造成的傾斜，已就地拉平" % roll_fixed[0])
+    if all_roll_nearmiss:
+        print("  roll 超標後自行回復（未達連續 %d 筆）: %d 次 —— 擺盪，不是姿態失控"
+              % (ROLL_PERSIST, sum(all_roll_nearmiss)))
     if obstacle_steps[0]:
         tot = timing["down_steps"] or 1
         print("\n⚠ 疑似橫桿的步數：%d / %d（%.0f%%）—— 手臂在比任何玻璃都近的位置就接觸，"
@@ -388,8 +503,8 @@ def cleanup():
 
 print("週期測試：%d 週期 × (下行 %d 步 × %dcm = %dcm @%dHz) + 拉回 @%dHz"
       % (CYCLES, STEPS, STEP_CM, STEPS * STEP_CM, DOWN_HZ, UP_HZ))
-print("中止門檻：|roll|>%.1f°（瞬時） / 左右差>%.0fcm 連續 %d 筆 / tension_valid=0 / 任一指令非 OK\n"
-      % (ROLL_TRIP, DIFF_TRIP, DIFF_PERSIST))
+print("中止門檻：|roll|>%.1f°（連續 %d 筆，可自動修正） / 左右差>%.0fcm 連續 %d 筆 / tension_valid=0 / 任一指令非 OK\n"
+      % (ROLL_TRIP, ROLL_PERSIST, DIFF_TRIP, DIFF_PERSIST))
 
 st0 = ask(CRANE, "status", 10)
 L0 = height(field(st0, "length_left"))
@@ -604,7 +719,42 @@ try:
 
             res, stt, dur = monitored_crane_move("pay_out", STEP_CM,        # ⑦
                                                  "週期%d步%d" % (cyc, i), 180)
-            if abort_reason: bail(abort_reason[0])
+            if abort_reason:
+                # 🔴 [2026-09-04 per user] roll 造成的中止先試著自動修正，救得回來就續行。
+                #   其他中止原因（tension_valid=0 / 左右差持續擴大）**不自動修正** ——
+                #   那兩者不是「歪了」而是「保護失效」或「持續發散」，性質不同。
+                if "roll 連續" in abort_reason[0]:
+                    print("   ⚠ %s" % abort_reason[0])
+                    tag = "週期%d步%d" % (cyc, i)
+                    if roll_recover(tag) and clear_error(tag):
+                        roll_fixed[0] += 1
+                        abort_reason[:] = []
+                        # 這一步的移動被 stop 打斷、沒走完，補完剩下的距離。
+                        cur2 = height(field(ask(CRANE, "status", 10), "length_left"))
+                        if cur2 is None: bail("修正後讀不到吊機位置")
+                        rest = int(round(cur2 - end))
+                        if rest > TOL:
+                            print("   ↩ 補完本步剩餘 %d cm" % rest)
+                            res, stt2, dur2 = monitored_crane_move(
+                                "pay_out", rest, tag + "補", 180)
+                            dur += dur2
+                            if abort_reason:
+                                bail(abort_reason[0] + "（修正後補完再次中止 —— 不再重試）")
+                            if not res.startswith("OK"):
+                                bail("補完 pay_out 失敗：%s" % res)
+                        else:
+                            print("   ↩ 剩餘 %d cm 在容差內，不補" % rest)
+                            # 🔴 [2026-09-04] 這行是實作 bug 的修正：修正成功但**不需要補完**時，
+                            #   `res` 仍留著被中止的那個 `ERR aborted`，掉到下面
+                            #   `if not res.startswith("OK")` 就會中止 —— 修好了卻還是停。
+                            #   首次實跑就踩到（剩餘 -1cm）。補完那條路徑有重新賦值 res，
+                            #   只有這條沒有。
+                            res = "OK roll_recovered_no_topup"
+
+                    else:
+                        bail(abort_reason[0] + "（自動修正失敗）")
+                else:
+                    bail(abort_reason[0])
             if not res.startswith("OK"): bail("pay_out 失敗：%s" % res)
 
             # ⑧ 靜置後量一次「停下來之後的 roll」。
@@ -631,6 +781,7 @@ try:
             if stt:
                 all_diff.append(("週期%d步%d" % (cyc, i), stt["mdiff"]))
                 all_nearmiss.append(stt["nearmiss"])
+                all_roll_nearmiss.append(stt.get("roll_nearmiss", 0))
             print("%3d %6.1f %6.1f %6.1f %6.1f %28s %7.1f %7.2f %6.0f%% %5.0f %7s"
                   % (i, t_ext, t_vac, t_rail, t_ret, pstr, dur,
                      stt["avg"] if stt else -1, stt["outpct"] if stt else -1,
@@ -657,6 +808,7 @@ try:
         if stt:
             all_diff.append(("週期%d回程" % cyc, stt["mdiff"]))
             all_nearmiss.append(stt["nearmiss"])
+            all_roll_nearmiss.append(stt.get("roll_nearmiss", 0))
         print("  回程 %.0fcm @%dHz  %.1fs  roll均 %.2f  出帶 %.0f%%  Δmax %.0f  → 高度 %.0f\n"
               % (TOP - cur, UP_HZ, dur, stt["avg"] if stt else -1,
                  stt["outpct"] if stt else -1, stt["mdiff"] if stt else -1,
