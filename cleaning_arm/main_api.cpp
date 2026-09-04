@@ -2940,6 +2940,47 @@ bool DamiaoAPI::press_probe_(float theta_cmd, float speed, int settle_ms,
 }
 
 // ============================================================
+//  press_hold_step_()  -- 直接把 hold_pos 推一階（接觸後專用）
+//  設計理由見 main_api.h 的宣告處。夾限與 move_to_slot 逐條相同 ——
+//  **不可以因為走了另一條路就繞過那些上下限。**
+// ============================================================
+bool DamiaoAPI::press_hold_step_(float theta_cmd, int settle_ms,
+                                 float& pos_out, float& tau_out)
+{
+	if (!m1_.enabled) return false;
+	{
+		std::lock_guard<std::mutex> lk(motor_mutex_);
+		float clamped = theta_cmd;
+		// upper clamp 1: hard slot limit（與 move_to_slot 同）
+		clamped = std::min(clamped, m1_.upper_bound);
+		// upper clamp 2: SETWALL geometry safety（與 move_to_slot 同）
+		if (m1_.wall_dist > 0.0f) {
+			float usable = m1_.wall_dist - PASSIVE_EXT_MM;
+			float theta_max_sw = (usable <= 0.0f)
+				? VERTICAL_OFFSET_RAD
+				: VERTICAL_OFFSET_RAD + std::asin(std::min(usable / ARM_LENGTH_MM, 1.0f));
+			clamped = std::min(clamped, theta_max_sw);
+		}
+		clamped = std::max(clamped, m1_.lower_bound);
+
+		// 確保在 hold 態：move_act 若還開著，feedback_loop 會走 move 分支、
+		// 我們寫的 hold_pos 就不會生效（而且它結束時會把 hold_pos 蓋掉）。
+		m1_.move_act = false;
+		m1_.move_cur = clamped;      // 讓 move 分支若日後被喚醒不會從舊值跳
+		m1_.move_target = clamped;
+		m1_.hold_pos = clamped;
+		m1_.hold_en = true;
+		// hold_ki 對 M1 是 0（見 init()），積分項不參與；仍歸零以免日後開啟時帶著舊帳。
+		m1_.hold_err_integral = 0.0f;
+	}
+	std::this_thread::sleep_for(std::chrono::milliseconds(settle_ms));
+	std::lock_guard<std::mutex> lk(motor_mutex_);
+	pos_out = m1_.motor->Get_Position();
+	tau_out = m1_.motor->Get_tau();
+	return true;
+}
+
+// ============================================================
 //  cmd_deploy_force_sequence()  -- DEPLOY_F <target_nm> <LEFT|CENTER|RIGHT>
 //                                          [theta_min] [theta_max]
 //  [2026-09-04 per user] 力控貼合。設計理由見 main_api.h 的 DEPLOY_F_* 常數區。
@@ -3032,9 +3073,9 @@ std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 	for (int i = 0; i < DEPLOY_F_SEEK_MAX; ++i) {
 		theta_cmd += DEPLOY_F_SEEK_STEP;
 		if (theta_cmd > th_max) break;                 // 守衛 A（下方統一回報）
-		if (!press_probe_(theta_cmd, DEPLOY_F_SEEK_SPEED,
-		                  DEPLOY_F_SEEK_SETTLE_MS, pos, tau))
-			return "ERR DEPLOY_F: seek timeout";
+		// 🔴 用 hold step 不用 move_to_slot —— 後者每步會把力卸掉再重加載（見宣告處）。
+		if (!press_hold_step_(theta_cmd, DEPLOY_F_SEEK_SETTLE_MS, pos, tau))
+			return "ERR DEPLOY_F: seek failed (M1 not enabled?)";
 		if (tau >= DEPLOY_F_TOUCH_NM) {
 			theta_contact = pos;                       // 守衛用**實際位置**
 			touch_cmd     = theta_cmd;                 // 暖啟動錨點用**命令值**（兩者差 ~0.10 rad）
@@ -3095,8 +3136,8 @@ std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 			std::cerr << "[DEPLOY_F] " << e.str() << "\n";
 			return e.str();
 		}
-		if (!press_probe_(next, DEPLOY_F_SEEK_SPEED, DEPLOY_F_RELAX_MS, pos, tau))
-			return "ERR DEPLOY_F: press timeout";
+		if (!press_hold_step_(next, DEPLOY_F_RELAX_MS, pos, tau))
+			return "ERR DEPLOY_F: press failed (M1 not enabled?)";
 		++iters_done;
 		// 用這一步實際量到的斜率取代猜測（分母太小就不更新，避免雜訊放大）。
 		float d_cmd = next - last_cmd;

@@ -596,6 +596,22 @@ private:
     // 命令一個設定點、等 ramp 跑完、靜置後回讀 (pos, tau)。力控迴圈的量測原語。
     bool        press_probe_(float theta_cmd, float speed, int settle_ms,
                              float& pos_out, float& tau_out);
+    // [2026-09-04 per user] **接觸之後改用這支，不要再用 press_probe_。**
+    // 直接把 hold_pos 往外寫一階，讓 hold 迴圈用 kp*(hold_pos - pos) 推。
+    // 🔴 為什麼必須換：`move_to_slot()` 每次都把 ramp 的起點設成**實際位置**
+    //    (`s.move_cur = Get_Position()`)。手臂被玻璃擋住之後 pos 不再前進，
+    //    於是每一步的命令值都先「塌回」實際位置再爬到新目標 ——
+    //    在 kp=90 之下那是 **-5 N·m 的階躍**，力量被完全卸掉再重新加載。
+    //    50Hz DIAG 實測（09-04，m1_diag.csv）：命令值在 0.60~0.68 之間來回、
+    //    tau 在 -1.9~+3.5 之間振盪、約 0.8 Hz，per user 現場描述為
+    //    「像在重試壓在牆上的力道」。走 6~10 步就振盪 6~10 次。
+    //    ⚠️ 這也是為什麼把 SEEK_SPEED 調快只讓振盪變快，沒有消除它。
+    // ⚠️ 只用於「已經在接觸區」的小階（<= SEEK_STEP）：hold 分支**沒有**
+    //    move 分支那個速度安全閥（M1_VEL_SAFETY_LIMIT），所以自由行程那一大段
+    //    仍然要走 press_probe_/move_to_slot。0.010 rad x kp90 = 0.9 N·m，
+    //    真的沒接觸也只是慢慢挪一小步，不會失控。
+    bool        press_hold_step_(float theta_cmd, int settle_ms,
+                                float& pos_out, float& tau_out);
     std::string cmd_park_sequence();
     std::string cmd_status_sequence();
 

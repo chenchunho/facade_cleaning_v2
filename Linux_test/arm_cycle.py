@@ -22,9 +22,13 @@ import socket, sys, time, re
 
 HOST, PORT = "127.0.0.1", 5001
 ROUNDS  = int(sys.argv[1]) if len(sys.argv) > 1 else 1
-WALL_MM = int(sys.argv[2]) if len(sys.argv) > 2 else 520
+# 🔴 [2026-09-04] 第二個參數改成**目標壓力 N·m**（力控），不再是 wall_mm。
+#   要跑舊的開迴路路徑就傳 `wall` 當第五個參數（值域自己看：15 vs 520 差很多，
+#   送錯不會有語法錯誤——DEPLOY_F 的 theta_max 守衛會擋下「把 520 當 N·m」）。
+TARGET  = float(sys.argv[2]) if len(sys.argv) > 2 else 15.0
 SLOT    = sys.argv[3] if len(sys.argv) > 3 else "RIGHT"   # RIGHT=滾筒 / LEFT=刮刀
 RAIL_CM = int(sys.argv[4]) if len(sys.argv) > 4 else 100
+MODE    = sys.argv[5] if len(sys.argv) > 5 else "force"   # force=DEPLOY_F / wall=DEPLOY
 
 TH_LO, TH_HI, TAU_MIN = 0.55, 0.75, 8.0
 
@@ -90,23 +94,59 @@ def bail(msg):
     sock.close()
     sys.exit(1)
 
-print("=== arm_cycle: %d 輪 | DEPLOY %d %s | rail 0->%d->0 ===" % (ROUNDS, WALL_MM, SLOT, RAIL_CM))
-print("    判準 %.2f < th < %.2f 且 tau > %.1f；姿態輪詢到穩定才採用\n" % (TH_LO, TH_HI, TAU_MIN))
+if MODE == "force":
+    print("=== arm_cycle: %d 輪 | DEPLOY_F %.1f N·m %s | rail 0->%d->0 ==="
+          % (ROUNDS, TARGET, SLOT, RAIL_CM))
+    print("    力控：壓力是被控量，判準讀 DEPLOY_F 的回覆（OK/WARN/no_wall/obstacle）\n")
+else:
+    print("=== arm_cycle: %d 輪 | DEPLOY %d %s（開迴路）| rail 0->%d->0 ==="
+          % (ROUNDS, int(TARGET), SLOT, RAIL_CM))
+    print("    判準 %.2f < th < %.2f 且 tau > %.1f；姿態輪詢到穩定才採用\n" % (TH_LO, TH_HI, TAU_MIN))
 rows = []
 for r in range(1, ROUNDS + 1):
     t_round = time.time()
     print("--- 第 %d/%d 輪 ---" % (r, ROUNDS))
     c0 = cups()
     t = time.time()
-    rep = ask("arm_deploy %d %s" % (WALL_MM, SLOT), 90)
-    t_dep = time.time() - t
-    d = settle()
-    if d is None:
-        bail("arm_status 讀不到姿態")
-    print("  壓上  %5.1fs  th=%+.4f tau=%+.2f  M2=%+.4f   (deploy 回 %s)"
-          % (t_dep, d["th"], d["tau"], d.get("m2", float("nan")), rep[:46]))
-    if not (TH_LO < d["th"] < TH_HI and d["tau"] > TAU_MIN):
-        bail("手臂沒有壓上：th=%.4f tau=%+.2f" % (d["th"], d["tau"]))
+    if MODE == "force":
+        # prefixes 含 WARN：未收斂時前綴是 WARN 不是 OK/ERR。
+        rep = ask("arm_deploy_f %.1f %s" % (TARGET, SLOT), 150)
+        t_dep = time.time() - t
+        if rep.startswith("ERR unknown_cmd"):
+            bail("本體無 arm_deploy_f（舊 binary）—— 要跑開迴路請傳第五個參數 wall")
+        if "obstacle" in rep:
+            bail("疑似障礙物：%s" % rep[:110])
+        if "no_wall" in rep:
+            bail("找不到牆：%s" % rep[:110])
+        if not rep.startswith(("OK", "WARN")):
+            bail("arm_deploy_f 失敗：%s" % rep[:110])
+        # 🔴 判準讀回覆不讀姿態，但仍**另外**量一次姿態當交叉檢查 ——
+        #    回覆裡的 tau 是 motor_api 等過鬆弛後量的，這裡再讀一次是為了驗證
+        #    「回覆說的」與「事後獨立量到的」一致。不一致就是有東西在回覆之後動了。
+        d = settle()
+        if d is None:
+            bail("arm_status 讀不到姿態")
+        rep_tau = None
+        m = re.search(r"\btau=(-?[\d.]+)", rep)
+        if m: rep_tau = float(m.group(1))
+        flag = ""
+        if rep_tau is not None and abs(rep_tau - d["tau"]) > 1.0:
+            flag = "  ⚠回覆tau=%+.2f 與複量差 %.2f" % (rep_tau, abs(rep_tau - d["tau"]))
+        print("  壓上  %5.1fs  th=%+.4f tau=%+.2f  M2=%+.4f   %s%s"
+              % (t_dep, d["th"], d["tau"], d.get("m2", float("nan")),
+                 rep[:60], flag))
+        if rep.startswith("WARN"):
+            print("      🟡 未收斂到 %.1f N·m（掃動照做）" % TARGET)
+    else:
+        rep = ask("arm_deploy %d %s" % (int(TARGET), SLOT), 90)
+        t_dep = time.time() - t
+        d = settle()
+        if d is None:
+            bail("arm_status 讀不到姿態")
+        print("  壓上  %5.1fs  th=%+.4f tau=%+.2f  M2=%+.4f   (deploy 回 %s)"
+              % (t_dep, d["th"], d["tau"], d.get("m2", float("nan")), rep[:46]))
+        if not (TH_LO < d["th"] < TH_HI and d["tau"] > TAU_MIN):
+            bail("手臂沒有壓上：th=%.4f tau=%+.2f" % (d["th"], d["tau"]))
 
     t = time.time()
     x = ask("rail %d" % RAIL_CM, 60)
