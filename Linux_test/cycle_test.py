@@ -10,8 +10,13 @@
 #      🔴 為什麼不驗：有些玻璃面有縫隙，吸盤落在縫上本來就吸不住，那是現場條件不是故障。
 #         smart_extend_subset_ 會為了找封一路補伸到 ~16cm 並重試 —— 在有縫的面上是徒勞。
 #   ③b 清潔動作      —— [2026-09-03 per user] 壓上(滾筒) → 滑台 0→100→0 → 收手臂。
-#      推桿仍伸出、風扇仍關。手臂走本體的 arm_deploy/arm_park 代轉。
-#      實測每步約 +14 秒（10 週期 × 5 步 ≈ 多 12 分鐘）。
+#      推桿仍伸出、風扇仍關。手臂走本體的 arm_deploy_f/arm_park 代轉。
+#      🔴 [2026-09-04 per user] 壓上改用 **DEPLOY_F（力控）**：目標壓力 15 N·m 是被控量，
+#         不再由 ARM_WALL_MM 開迴路推。判準由「事後讀姿態」改成「讀 DEPLOY_F 的回覆」。
+#         四種回覆三種行為：OK 正常掃動 / WARN 掃動照做並計數 /
+#         no_wall 跳過掃動並計數續行 / obstacle 中止。詳見下方 ③b 處。
+#      實測每步約 +14 秒（10 週期 × 5 步 ≈ 多 12 分鐘）；DEPLOY_F 比 DEPLOY 慢約 7 秒
+#         （暖啟動 15s vs 8s），10 週期 50 步再多約 6 分鐘。
 #      🔴 若 ③a 判定「一顆都沒吸到」，本步**跳過**（無附著時掃動只會讓機體擺盪），
 #         且整輪不中止 —— 改為計數並在總結報出。理由見 ③a 處的註解。
 #   ④ pusher all retract   —— 已內建「關閥→洩壓→CH6 正壓 500ms→兩段收回」
@@ -53,11 +58,21 @@ VAC_OK_KPA = -50        # [2026-09-03 per user] 密封判準：至少一顆到�
 VAC_WAIT_S = 10.0       # 等真空建立的上限秒數（超過即視為完全沒附著）
 RAIL_CM   = 100         # [2026-09-03 per user] 步驟 ③b 上滑台行程 0->RAIL_CM->0（50→100）
 ARM_SLOT  = 'RIGHT'     # 固定滾筒（per user）。LEFT=刮刀 / CENTER
-ARM_WALL_MM = 520       # DEPLOY 的假設牆距
+ARM_WALL_MM = 520       # DEPLOY 的假設牆距（僅在退回舊路徑時使用，見 ARM_TARGET_NM）
+# [2026-09-04 per user] 目標壓力 15 N·m，現場目視定案。DEPLOY_F 用它，不用 ARM_WALL_MM。
+ARM_TARGET_NM = 15.0
+# 自動偵測：本體若還是舊 binary（沒有 arm_deploy_f 代轉）會回 `ERR unknown_cmd`，
+# 第一次遇到就整輪退回 arm_deploy 舊路徑並大聲說一次。不必手動切旗標。
+ARM_FORCE_MODE = [True]
 # 🔴 [2026-09-03] 09-03 實測 tau 一律 14.0~14.4，而 09-02 同動作是 11.1~11.8（高 25%），
 #    且**重複性完美**（θ 散布 0.0012 rad、tau 0.10 Nm）⇒ 是固定的幾何偏移，不是機構鬆動。
 #    已排除：牆面（per user 相同）、ZDT 位置、滑台零點、M1 零點（09-03 重新校正過）。
-#    最可能是機體到玻璃的實際距離與 ARM_WALL_MM 不符 —— 一次 `DEPLOY 505` 就能驗，尚未做。
+#    最可能是機體到玻璃的實際距離與 ARM_WALL_MM 不符 —— 一次 `DEPLOY 505` 就能驗。
+# ✅ [2026-09-04] **驗過了，假說成立**：同高度 520/505/490 → tau 15.29/12.75/10.60
+#    （0.156 N·m/mm）。⇒ 那 25% 是幾何不是磨損，且牆距隨高度變。
+#    📌 但結論不是「把 ARM_WALL_MM 調小」—— per user 現場目視後把 **15 N·m 定為目標壓力**，
+#    所以本高度的 520 剛好是對的。真正的修法是 DEPLOY_F（壓力被控），見上方 ARM_TARGET_NM。
+#    ⚠️ ARM_WALL_MM 現在只在退回舊路徑時才用得到。
 ROLL_TRIP = float(sys.argv[4]) if len(sys.argv) > 4 else 6.0
 DIFF_TRIP = float(sys.argv[5]) if len(sys.argv) > 5 else 8.0
 
@@ -121,6 +136,11 @@ all_diff = []
 # 分三個口徑，因為它們回答的是不同問題（見 _rate_summary 的說明）。
 # [2026-09-03 per user] 真空吸不到的步數 —— 不中止，但一定要看得見（見下方 ③a）。
 no_seal_steps = [0]
+# [2026-09-04] ③b 改用 DEPLOY_F 之後的兩個新計數：
+#   no_wall  = 牆比預期遠／沒玻璃／出邊界 —— **跳過掃動、續行**（與「吸不到就繼續走」同性質）
+#   warn     = 有壓上但沒收斂到目標壓力 —— 掃動照做，只是資料品質要標記
+no_wall_steps = [0]
+press_warn_steps = [0]
 timing = {"down_cm": 0.0, "down_move_s": 0.0, "down_step_s": 0.0, "down_steps": 0,
           "up_cm": 0.0, "up_s": 0.0, "up_runs": 0,
           "ext_s": 0.0, "vac_s": 0.0, "rail_s": 0.0, "ret_s": 0.0}
@@ -277,6 +297,14 @@ def _diff_summary():
     if all_nearmiss:
         print("  超標後自行回復（未達連續 %d 筆）: %d 次 —— 平衡迴路在工作，不是故障"
               % (DIFF_PERSIST, sum(all_nearmiss)))
+    if no_wall_steps[0]:
+        tot = timing["down_steps"] or 1
+        print("\n🔴 找不到牆的步數：%d / %d（%.0f%%）—— 手臂伸到上限仍未接觸，"
+              "該步的清潔動作被跳過。這是**現場幾何**（牆比預期遠／沒玻璃／出邊界），不是故障。"
+              % (no_wall_steps[0], tot, 100.0 * no_wall_steps[0] / tot))
+    if press_warn_steps[0]:
+        print("🟡 壓力未收斂到目標的步數：%d —— 有壓上、掃動照做，但沒到 %.1f N·m，"
+              "這些步的清潔力道與其他步不可比。" % (press_warn_steps[0], ARM_TARGET_NM))
     if no_seal_steps[0]:
         tot = timing["down_steps"] or 1
         print("\n🔴 真空未建立的步數：%d / %d（%.0f%%）—— 這些步**沒有模擬到附著**，"
@@ -463,33 +491,85 @@ try:
             # ③b [2026-09-03 per user] 由「滑台空跑」改成**完整清潔動作**：
             #     壓上(arm_deploy) → 滑台 0→RAIL_CM→0 → 收手臂(arm_park)
             #
-            # 🔴 走本體的 arm_deploy/arm_park 代轉，**不直接連 9527** ——
-            #    本腳本跑在吊機那台，而 motor_api 在本體的 127.0.0.1:9527，連不到；
-            #    而且代轉是既有的編排路徑（cmd_arm_deploy → arm_cmd_），不該另闢第二條。
+            # 🔴 走本體的 arm_deploy_f/arm_park 代轉，**不直接連 9527** ——
+            #    ⚠️ [2026-09-04 更正] 舊註解寫的理由「motor_api 在本體的 127.0.0.1:9527，
+            #    吊機連不到」**是錯的**：它綁的是 `0.0.0.0:9527`，吊機上的 web GUI 正是
+            #    靠這條直連。真正的理由只剩後半句 —— 代轉是既有的編排路徑
+            #    （cmd_arm_deploy_f → arm_cmd_），不該另闢第二條。那個理由仍然成立。
             #
-            # 🔴 `arm_deploy` 壓玻璃時**本來就會回 ERR**（touch_wall did not converge），
-            #    所以判準看姿態不看回傳值 —— 09-02 建立、09-03 十輪 × 2 工具再次確認：
-            #    0.55 < θ < 0.75 且 tau > 8.0。這與 cyc.py 用的是同一組判準。
+            # 🔴🔴 [2026-09-04 per user] 判準由「讀姿態」改成「讀 DEPLOY_F 的回覆」。
+            #    舊判準（0.55 < θ < 0.75 且 tau > 8.0）存在的唯一原因，是 `arm_deploy`
+            #    壓玻璃時本來就回 ERR、回覆沒有資訊，只好回頭去推姿態。
+            #    DEPLOY_F 的回覆**本身就是結論**，而且比事後讀姿態更可信：
+            #      - 事後 `arm_status` 會凍結（馬達失能就不再送 CAN 幀，快取吐舊值）
+            #      - `sleep(1.5)` 讀在鬆弛中途（09-04 實測壓上後 1 秒內掉 1.46~2.15 N·m）
+            #    ⇒ 這兩個坑一起消失，不是換個數字而已。
+            #
+            # 🔴 四種回覆、三種行為（per user 2026-09-04）：
+            #      OK        壓到目標壓力            → 正常掃動
+            #      WARN      有壓上但沒到目標        → 掃動照做，計數（資料品質標記）
+            #      no_wall   牆太遠/沒玻璃/出邊界    → **跳過掃動、計數、續行**
+            #      obstacle  有東西擋著              → **中止**
+            #    no_wall 與 obstacle 的分野，跟真空那邊「吸不到就繼續走」是同一個道理：
+            #    前者是現場條件（09-03 高度 229 的 DEPLOY 520 只壓出 6.01 N·m 就是這個），
+            #    後者不是 —— 頂著障礙物再橫走滑台會弄壞東西。
+            #    📌 舊判準在高度 229 會 bail()，而症狀會長得像手臂故障。這正是要修掉的。
             #
             # 🔴 無附著時整段跳過（連同壓上）：機體只掛在繩上時把手臂壓上玻璃並橫走滑台，
             #    等於用一台懸空的機器去推牆，姿態會被推歪而那不屬於被測項目。
             t = time.time()                                     # ③b
             t_rail = 0.0
+            skip_press = False
             if not skip_rail:
-                r = ask(WROBOT, "arm_deploy %d %s" % (ARM_WALL_MM, ARM_SLOT), 90)
-                time.sleep(1.5)
-                # arm_status 回的是 `[M1] ... | [M2] ...`，不是 OK 開頭 —— 見 ask() 的說明
-                ast_ = ask(WROBOT, "arm_status", 20, prefixes=("[M1]",))
-                th  = field(ast_, "pos")
-                tau = field(ast_, "tau")
-                if th is None or tau is None:
-                    bail("arm_status 讀不到姿態：%s" % ast_[:80])
-                if not (0.55 < th < 0.75 and tau > 8.0):
-                    bail("手臂沒有壓上：θ=%.4f tau=%+.2f（arm_deploy 回 %s）" % (th, tau, r[:40]))
+                if ARM_FORCE_MODE[0]:
+                    # ⚠️ prefixes 一定要含 WARN：未收斂時前綴是 WARN 不是 OK/ERR，
+                    #    漏了它會被當成非同步事件、等到逾時，症狀長得像「手臂沒回應」。
+                    r = ask(WROBOT, "arm_deploy_f %.1f %s" % (ARM_TARGET_NM, ARM_SLOT),
+                            150, prefixes=("OK", "ERR", "WARN"))
+                    if r.startswith("ERR unknown_cmd"):
+                        # 本體還是舊 binary。整輪退回舊路徑，並大聲說一次。
+                        ARM_FORCE_MODE[0] = False
+                        print("   ⚠️ 本體無 arm_deploy_f（舊 binary）→ 本輪起改用 "
+                              "arm_deploy %d + 姿態判準。壓力不再是被控量，"
+                              "各高度的清潔力道會隨牆距浮動。" % ARM_WALL_MM)
+                    elif r.startswith("OK"):
+                        pass                                   # 壓到目標，照常掃動
+                    elif r.startswith("WARN"):
+                        press_warn_steps[0] += 1
+                        print("   🟡 壓力未收斂到 %.1f N·m，掃動照做：%s"
+                              % (ARM_TARGET_NM, r[:90]))
+                    elif "no_wall" in r:
+                        no_wall_steps[0] += 1
+                        skip_press = True
+                        print("   ⚠️ 找不到牆（手臂伸到上限仍未接觸）—— 本步跳過清潔動作、"
+                              "續行：%s" % r[:90])
+                    elif "obstacle" in r:
+                        bail("疑似障礙物，頂著它橫走滑台會弄壞東西：%s" % r[:120])
+                    else:
+                        bail("arm_deploy_f 失敗：%s" % r[:120])
+
+                if not ARM_FORCE_MODE[0]:
+                    # 舊路徑（本體尚未安裝 arm_deploy_f 代轉時）。判準與 09-03 相同。
+                    r = ask(WROBOT, "arm_deploy %d %s" % (ARM_WALL_MM, ARM_SLOT), 90)
+                    time.sleep(1.5)
+                    # arm_status 回的是 `[M1] ... | [M2] ...`，不是 OK 開頭 —— 見 ask() 的說明
+                    ast_ = ask(WROBOT, "arm_status", 20, prefixes=("[M1]",))
+                    th  = field(ast_, "pos")
+                    tau = field(ast_, "tau")
+                    if th is None or tau is None:
+                        bail("arm_status 讀不到姿態：%s" % ast_[:80])
+                    if not (0.55 < th < 0.75 and tau > 8.0):
+                        bail("手臂沒有壓上：θ=%.4f tau=%+.2f（arm_deploy 回 %s）"
+                             % (th, tau, r[:40]))
+
+            if not skip_rail and not skip_press:
                 r = ask(WROBOT, "rail %d" % RAIL_CM, 60)
                 if not r.startswith("OK"): bail("rail %d 失敗：%s" % (RAIL_CM, r))
                 r = ask(WROBOT, "rail 0", 60)
                 if not r.startswith("OK"): bail("rail 0 復位失敗：%s" % r)
+            if not skip_rail:
+                # 🔴 no_wall 也要收：手臂已經伸出去了（尋觸走到上限），
+                #    跳過的只是掃動，不是收回。留在外面會一路撞到下一步。
                 r = ask(WROBOT, "arm_park", 90)
                 if not r.startswith("OK"): bail("arm_park 失敗：%s" % r)
                 t_rail = time.time() - t
