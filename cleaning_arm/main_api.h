@@ -298,13 +298,38 @@ public:
     // **不是 hold_kp(90)**，因為手臂在接觸後仍會被壓進去一點（Dtheta_actual
     // 0.0053 / 0.0080），那部分吸收掉一部分角度差。取中間值當起始猜測，
     // 之後由迭代自己用兩點量出來的斜率取代。
-    static constexpr float DEPLOY_F_KP_EFF0     = 70.0f;
+    // 🔴 [2026-09-04] 單一常數 70 對兩個工具**都不對**，造成兩個同源症狀：
+    //   ① **29 次壓上全部 iters=2、一次都沒有 1**（每多一輪修正就多一次 RELAX 等待）
+    //   ② tau 系統性高於目標（中位 15.48 / 目標 15.0）
+    //   收斂後的實測（只取最終值，不取迭代中途的估計 —— 中途值 59~60 是剛接觸時的
+    //   軟斜率，拿它當起手會過頭得更嚴重）：
+    //       RIGHT 滾筒  n=20  平均 81.5（76.8~84.3）
+    //       LEFT  刮刀  n=11  平均 72.1（68.9~73.8）
+    //   兩者差 9.4 ⇒ **工具不同，等效剛度就不同**，一個常數服務不了兩個。
+    static constexpr float DEPLOY_F_KP_EFF0_RIGHT  = 82.0f;
+    static constexpr float DEPLOY_F_KP_EFF0_LEFT   = 72.0f;
+    // ⚠️ CENTER **沒有實測資料**（今天兩個測試都只跑 RIGHT/LEFT）。取兩者中間值當佔位，
+    //    第一次用 CENTER 壓上時 iters 可能是 2；跑過一次之後執行期快取就會校正它。
+    static constexpr float DEPLOY_F_KP_EFF0_CENTER = 77.0f;
+    // 執行期自校：每次收斂後把量到的 kp_eff 存回對應工具，下次直接當起手值。
+    // 索引 0=LEFT 1=CENTER 2=RIGHT。⚠️ 重啟歸零、退回上面的編譯預設 ——
+    // 那些預設就是實測值，所以冷啟動本來就準，快取只是讓它跟著現場漂移。
+    float deploy_f_kp_eff_cache_[3] = { DEPLOY_F_KP_EFF0_LEFT,
+                                        DEPLOY_F_KP_EFF0_CENTER,
+                                        DEPLOY_F_KP_EFF0_RIGHT };
     static constexpr float DEPLOY_F_SEEK_STEP   = 0.010f;  // rad，~4.3mm at tip
     static constexpr int   DEPLOY_F_SEEK_MAX    = 80;      // 步數上限（0.40 -> 1.20 用不到這麼多）
     static constexpr int   DEPLOY_F_ITER_MAX    = 4;       // 壓力收斂迭代上限
     // 09-04 實測鬆弛：DEPLOY 520 t=0 讀 17.14、1 秒後 14.99（-2.15）；
     // 490 為 12.06 -> 10.60（-1.46）。**單次讀取會把值記錯**，必須等。
     static constexpr int   DEPLOY_F_RELAX_MS    = 1500;
+    // [2026-09-04 per user「靠上牆要過很久滑台才會動」] 收尾複驗的等待。
+    // 原本是再等一次完整的 RELAX_MS(1500)，但那**與迭代裡剛等過的 1500ms 重複**：
+    // 50Hz 實測鬆弛都在壓上後 **1 秒內**收斂完（490 那次 -1.46 N·m、520 那次 -2.15 N·m），
+    // 迭代的 1500ms 已經涵蓋。這裡只需要一個短暫的確認窗口。
+    // 實測：指令送出 → rail 起動 13.59s，其中 2.00s 是腳本的重複 settle、
+    // 1.5s 是本項、1.5s 是「29 次全部 iters=2」多出來的那輪修正。
+    static constexpr int   DEPLOY_F_FINAL_MS    = 300;
     static constexpr int   DEPLOY_F_SEEK_SETTLE_MS = 150;  // 尋觸每步的靜置（輕觸鬆弛很小）
     // [2026-09-04] 0.05 -> 0.15（與 deploy_speed 同）。實測每個尋觸步驟花 ~1.4s 而非
     // 預估的 0.4s，原因在 move_to_slot() 是**從實際位置**起 ramp（move_cur = Get_Position()）：
@@ -313,12 +338,38 @@ public:
     static constexpr float DEPLOY_F_SEEK_SPEED  = 0.15f;
     // 起點必須低於 THETA_MIN，否則一起步就已經在「障礙物」區間裡。
     static constexpr float DEPLOY_F_THETA_START = 0.40f;
-    // 🔴 這兩個預設值是**保守占位**，還沒有跨高度的實測支撐：
-    //   已知玻璃落在 theta 0.6205（09-04 此高度）~ 0.7078（09-03 高度 229），
-    //   本身就佔掉 0.087 rad（~38mm）。凸出量小於這個範圍的障礙物分不出來。
-    //   ⇒ 掃過頂/中/底三個高度的 theta_contact 之後要回來收緊。
-    static constexpr float DEPLOY_F_THETA_MIN   = 0.45f;
-    static constexpr float DEPLOY_F_THETA_MAX   = 0.95f;
+    // 🎯 [2026-09-04 per user 現場實測三個高度] THETA_MIN 由占位的 0.45 → **0.565**。
+    //   量法：機體逐段上移，每個高度重新吸附後用低目標（DEPLOY_F 3.0）輕觸，只讀 contact。
+    //
+    //     位置              length      contact(RIGHT)   是什麼
+    //     底部              +3/+5       0.5842           玻璃
+    //     中段              -50/-52     0.5449 ~ 0.5510  **橫桿**（滑台 0/50/100 全線都是）
+    //     上段              -129/-130   0.6086           玻璃（per user 確認無障礙物）
+    //   （刮刀 LEFT：底部 0.5991、上段 0.6315，同方向）
+    //
+    //   ⇒ 分界窗口 **0.5510 ~ 0.5842，寬 0.033 rad ≈ 14mm**，取中點 0.565，
+    //     兩側各留 0.014~0.019 rad（6~8mm）。
+    //   🔴 **關鍵是玻璃往上是越來越遠的**（0.5842 → 0.6086，09-03 高度 229 的
+    //     theta_press 0.7078 是第三個同向佐證）⇒ 玻璃不會往橫桿那側靠，窗口不會被吃掉。
+    //   ⚠️ **只有兩個玻璃取樣點、都在下半部。** 上半部若出現比 0.5842 更近的玻璃，
+    //     這個門檻會誤擋。真要放心得補上半部的點。
+    //   📌 若日後窗口被壓縮到不可用，替代判別是**接觸後的剛度**：橫桿是硬的、
+    //     玻璃隔著工具有柔度，kp_eff 的斜率不一樣。目前不需要。
+    static constexpr float DEPLOY_F_THETA_MIN   = 0.565f;
+    // 🔴 [2026-09-04 per user] 0.95 → **1.10**。0.95 是我憑空給的占位值，
+    //   當天實測**它擋住的不是異常，是一個合法的工作點**：
+    //     `ERR cannot reach 15.0 Nm — 需要 theta=0.9581 超過上限 0.9500（tau 停在 12.45）`
+    //   刮刀在 length=-129 那個高度要 0.9581 才壓得到 15 N·m，差 0.008 就被擋掉。
+    //   三件事疊起來造成的：① 該高度玻璃比底部遠（contact 0.6086 vs 0.5842）
+    //   ② 刮刀伸出量比滾筒短 12mm（TOOL_EXT_LEFT 192.37 vs RIGHT 204.32）⇒ M1 要轉更多
+    //   ③ 0.95 本來就沒有依據。
+    //   1.10 距機構硬上限 upper_bound=1.5 仍有 0.4 rad 餘裕。
+    // 📌 放寬**不會**讓「找不到牆」失效：真的沒有牆時 tau 永遠到不了 TOUCH_NM，
+    //    走到 1.10 照樣回 no_wall —— 這道守衛靠的是「有沒有碰到」，不是「走多遠」。
+    // 🟡 **未決（per user 當天提出、尚未討論）**：刮刀在該高度壓不到 15 N·m，
+    //    可能代表 **15 N·m 對刮刀根本不是對的目標值**（刮刀刃口軟、設計上也許就該貼得淺）。
+    //    若是，正解是**分工具設定目標壓力**，那比放寬 theta_max 更根本。放寬只是先解開卡住。
+    static constexpr float DEPLOY_F_THETA_MAX   = 1.10f;
     // [2026-09-04] 尋觸加速：從 THETA_START(0.40) 一路每 0.010 rad 摸到 0.58 要 ~20 步，
     // 首次實測整趟 44 秒（現行 DEPLOY 只要 8 秒）。10 週期 x 5 步會多花約 30 分鐘。
     // 相鄰高度的牆距差很小（09-04 量到 ~6mm/一個測試高度），所以用**上次的接觸點**

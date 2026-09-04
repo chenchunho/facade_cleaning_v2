@@ -29,13 +29,13 @@ def ask(sock, f, cmd, timeout, prefixes=("OK", "ERR", "WARN", "[M1]")):
     return "<timeout>"
 
 def parse(status):
-    m1 = re.search(r"\[M1\] pos=(-?[\d.]+) vel=(-?[\d.]+) tau=(-?[\d.]+)", status)
-    m2 = re.search(r"\[M2\] pos=(-?[\d.]+) vel=(-?[\d.]+) tau=(-?[\d.]+)", status)
-    if not m1:
+    a = _seg_kv(status, "M1")
+    b = _seg_kv(status, "M2")
+    if not a or "pos" not in a:
         return None
-    d = {"m1_pos": float(m1.group(1)), "m1_vel": float(m1.group(2)), "m1_tau": float(m1.group(3))}
-    if m2:
-        d.update({"m2_pos": float(m2.group(1)), "m2_vel": float(m2.group(2)), "m2_tau": float(m2.group(3))})
+    d = {"m1_pos": a["pos"], "m1_vel": a.get("vel", 0.0), "m1_tau": a.get("tau", 0.0)}
+    if b and "pos" in b:
+        d.update({"m2_pos": b["pos"], "m2_vel": b.get("vel", 0.0), "m2_tau": b.get("tau", 0.0)})
     return d
 
 def settle(sock, f, label, max_wait=40.0):
@@ -63,6 +63,31 @@ def settle(sock, f, label, max_wait=40.0):
         prev = d["m1_pos"]
         time.sleep(1.0)
     return d
+
+def _seg_kv(status, tag):
+    """把 `[M1] k=v k=v ... | [M2] ...` 切段後，段內用**通用 k=v** 掃描。
+    🔴 [2026-09-04] 原本是「把整串欄位依序寫死」的正則：
+        r"\[M1\] pos=(...) vel=(...) tau=(...)"
+    那要求 pos/vel/tau **相鄰且同序**。當天上游在 err= 後面加了 en= 剛好沒炸到，
+    但**只要有人把新欄位插在中間，整條比對就會失敗**，而症狀是「解析不到姿態」——
+    看起來像通訊問題，除錯的人會去查網路，不會想到是對方多加了一個欄位。
+    📌 由 facade web gui session 在自己的前端踩到同一形狀後提醒。
+    **新增欄位本來是相容的改動，是「依序寫死的解析」把它變成不相容。**
+    """
+    i = status.find("[%s]" % tag)
+    if i < 0:
+        return None
+    seg = status[i:]
+    j = seg.find("|")            # 只取到下一段之前，避免抓到另一顆馬達的欄位
+    if j > 0:
+        seg = seg[:j]
+    # ⚠️ 只收「純數值」的欄位。err=0x1 這種會**整條不匹配而被略過**，
+    #    不會吃到前面那個 "0" 給出一個看起來合理的錯值。使能狀態一律看 en=。
+    out = {}
+    for k, v in re.findall(r"([A-Za-z_][A-Za-z0-9_]*)=(-?[0-9.]+)(?![0-9A-Za-z.])", seg):
+        out[k] = float(v)
+    return out or None
+
 
 def main():
     wall = sys.argv[1]

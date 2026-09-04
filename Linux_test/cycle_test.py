@@ -141,6 +141,9 @@ no_seal_steps = [0]
 #   warn     = 有壓上但沒收斂到目標壓力 —— 掃動照做，只是資料品質要標記
 no_wall_steps = [0]
 press_warn_steps = [0]
+# [2026-09-04] 橫桿步數。與 no_wall 分開記：兩者都是現場條件，但成因不同
+#   （no_wall=牆太遠/沒玻璃；obstacle=有東西比玻璃更近），混在一起會看不出牆的形狀。
+obstacle_steps = [0]
 timing = {"down_cm": 0.0, "down_move_s": 0.0, "down_step_s": 0.0, "down_steps": 0,
           "up_cm": 0.0, "up_s": 0.0, "up_runs": 0,
           "ext_s": 0.0, "vac_s": 0.0, "rail_s": 0.0, "ret_s": 0.0}
@@ -297,6 +300,11 @@ def _diff_summary():
     if all_nearmiss:
         print("  超標後自行回復（未達連續 %d 筆）: %d 次 —— 平衡迴路在工作，不是故障"
               % (DIFF_PERSIST, sum(all_nearmiss)))
+    if obstacle_steps[0]:
+        tot = timing["down_steps"] or 1
+        print("\n⚠ 疑似橫桿的步數：%d / %d（%.0f%%）—— 手臂在比任何玻璃都近的位置就接觸，"
+              "該步清潔動作被跳過。這是**牆面結構**，不是故障。"
+              % (obstacle_steps[0], tot, 100.0 * obstacle_steps[0] / tot))
     if no_wall_steps[0]:
         tot = timing["down_steps"] or 1
         print("\n🔴 找不到牆的步數：%d / %d（%.0f%%）—— 手臂伸到上限仍未接觸，"
@@ -544,7 +552,18 @@ try:
                         print("   ⚠️ 找不到牆（手臂伸到上限仍未接觸）—— 本步跳過清潔動作、"
                               "續行：%s" % r[:90])
                     elif "obstacle" in r:
-                        bail("疑似障礙物，頂著它橫走滑台會弄壞東西：%s" % r[:120])
+                        # 🔴🔴 [2026-09-04 per user 現場確認] **由「中止」改為「跳過、續行」。**
+                        #   原本當成異常，是因為我把 obstacle 想成「不該出現的東西」。
+                        #   實測那是**橫桿** —— 這面牆的固定結構，一趟下行必然會遇到幾根。
+                        #   那跟「有些玻璃面有縫隙、吸盤本來就吸不住」是**完全同一類的現場條件**，
+                        #   而那一條 per user 明講過是「設計要求，不是妥協」。
+                        #   照舊邏輯，十週期遇到第一根橫桿就整場中止。
+                        #   ⚠️ 「不能頂著橫桿橫走滑台」這個顧慮仍然成立 ——
+                        #      正確處置是**不要掃**，不是**停止整場測試**。
+                        obstacle_steps[0] += 1
+                        skip_press = True
+                        print("   ⚠ 疑似橫桿（接觸點比任何玻璃都近）—— 本步跳過清潔動作、"
+                              "續行：%s" % r[:90])
                     else:
                         bail("arm_deploy_f 失敗：%s" % r[:120])
 

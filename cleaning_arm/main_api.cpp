@@ -3053,6 +3053,7 @@ std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 		if (!prep_err.empty()) return prep_err;
 	}
 
+	const auto t_begin = std::chrono::steady_clock::now();
 	float pos = 0.0f, tau = 0.0f;
 
 	// ---- Step 3: 退到起點（確保尋觸是從「沒接觸」開始）------------------------
@@ -3140,7 +3141,9 @@ std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 	// ---- Step 6: 壓力收斂（割線法，kp_eff 由實測取代猜測）---------------------
 	// 初值 70 來自 09-04 三點：Dtau/Dtheta_cmd = 2.54/0.0343 = 74、2.15/0.0338 = 64。
 	// **不是 hold_kp(90)** —— 接觸後手臂仍會被壓進去一點，吸收掉一部分角度差。
-	float kp_eff     = DEPLOY_F_KP_EFF0;
+	// 依工具取起手值（執行期快取，初值為實測的編譯預設）。
+	const int kp_idx = (m2_slot_idx < 0) ? 0 : (m2_slot_idx > 0 ? 2 : 1);
+	float kp_eff     = deploy_f_kp_eff_cache_[kp_idx];
 	float last_cmd   = theta_cmd;
 	float last_tau   = tau;
 	bool  converged  = false;
@@ -3184,7 +3187,7 @@ std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 
 	// ---- Step 7: 鬆弛複驗 -----------------------------------------------------
 	// 迭代裡已經每步等 RELAX_MS，這裡再等一次是為了抓「收斂之後才發生」的鬆弛。
-	std::this_thread::sleep_for(std::chrono::milliseconds(DEPLOY_F_RELAX_MS));
+	std::this_thread::sleep_for(std::chrono::milliseconds(DEPLOY_F_FINAL_MS));
 	{
 		std::lock_guard<std::mutex> lk(motor_mutex_);
 		pos = m1_.motor->Get_Position();
@@ -3202,14 +3205,25 @@ std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 	    << " cmd=" << theta_cmd
 	    << " contact=" << theta_contact
 	    << " kp_eff=" << std::setprecision(1) << kp_eff
-	    << " iters=" << iters_done;
+	    << " iters=" << iters_done
+	    // [2026-09-04] 把耗時放進回覆。per user 回報「靠上牆要過很久滑台才會動」時，
+	    // 這件事只能另外寫腳本量 —— 帳面上完全看不到。放進來就不必再量第二次。
+	    << " ms=" << (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+	           std::chrono::steady_clock::now() - t_begin).count();
 	if (!converged)
-		oss << " (未收斂：" << DEPLOY_F_ITER_MAX << " 次迭代後仍差 "
+		// 🔴 [2026-09-04] 原本印的是 ITER_MAX 常數不是實際次數 —— 09-04 輕觸探測時
+		//   出現「iters=0」卻說「4 次迭代後」，會讓除錯的人以為它試了 4 次都失敗。
+		//   （那次真正的原因是：迴圈內已達容差就 break，之後的鬆弛讓 tau 掉出容差。）
+		oss << " (未收斂：" << iters_done << " 次迭代後仍差 "
 		    << std::setprecision(2) << (target_nm - tau) << " Nm)";
 	std::cout << "[DEPLOY_F] " << oss.str() << "\n";
 	// 只在真的壓到目標時才記住接觸點：失敗的那次可能根本沒碰到牆，
 	// 記下來會讓下一次的暖啟動從一個錯誤的位置開始。
-	if (converged) deploy_f_last_touch_cmd_ = touch_cmd;
+	if (converged) {
+		deploy_f_last_touch_cmd_ = touch_cmd;
+		// 只在收斂時回存：沒壓到目標的那次，量到的斜率不能代表目標附近的剛度。
+		if (kp_eff > 10.0f && kp_eff < 300.0f) deploy_f_kp_eff_cache_[kp_idx] = kp_eff;
+	}
 	return oss.str();
 }
 
