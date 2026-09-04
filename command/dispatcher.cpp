@@ -164,6 +164,17 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
         if (iss.fail()) return "ERR usage:arm_deploy_<wall_mm>_<LEFT|CENTER|RIGHT>\n";
         return robot.cmd_arm_deploy(wall_mm, slot);
     }
+    // [2026-09-04 per user] 力控貼合：目標壓力取代假設牆距。
+    // 🔴 第一個參數是 **N·m 不是 mm** —— 與 arm_deploy 只差一個字，值域卻完全不同
+    //   (15 vs 520)，送錯不會有語法錯誤。motor_api 側的 theta_max 守衛會擋下
+    //   「把 520 當成 N·m」的情況（要不到那個力就回 cannot reach）。
+    if (cmd == "arm_deploy_f") {
+        double target_nm = 0.0;
+        std::string slot;
+        iss >> target_nm >> slot;
+        if (iss.fail()) return "ERR usage:arm_deploy_f_<target_nm>_<LEFT|CENTER|RIGHT>\n";
+        return robot.cmd_arm_deploy_f(target_nm, slot);
+    }
     if (cmd == "arm_clean_sweep") {
         int wall_mm = 0;
         int rounds = 1;

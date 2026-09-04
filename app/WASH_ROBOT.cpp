@@ -947,6 +947,37 @@ std::string WashRobot::cmd_arm_deploy(int wall_mm, const std::string& slot) {
     return r + "\n";
 }
 
+// [2026-09-04 per user] 力控貼合的代轉。與 cmd_arm_deploy 的差別只有一個：
+// 送 DEPLOY_F <target_nm> 而不是 DEPLOY <wall_mm>，其餘（ENABLE 前置、stow 狀態）相同。
+//
+// 🔴 **刻意不做 verify_arm_deploy_**：那支是拿「wall_mm 推算出的預期 θ」去比對實際 θ，
+//   而 DEPLOY_F 的整個前提就是不預設 θ 在哪。障礙物判斷已經在 motor_api 側用
+//   theta_min/theta_max 兩個守衛做掉了，回傳字串本身就分得出 no_wall / obstacle。
+//   在這裡再套一次舊的幾何檢查等於把剛拆掉的假設又裝回來。
+// ⚠️ 回傳保留 motor_api 的原字串（OK tau=... / ERR ... no_wall / obstacle），
+//   呼叫端要判讀就看它，不要只看 OK/ERR 前綴。
+std::string WashRobot::cmd_arm_deploy_f(double target_nm, const std::string& slot) {
+    if (target_nm <= 0.0) return "ERR invalid_target_nm\n";
+    std::string s = slot;
+    for (auto& c : s) c = (char)std::toupper((unsigned char)c);
+    if (s != "LEFT" && s != "CENTER" && s != "RIGHT")
+        return "ERR invalid_slot (LEFT|CENTER|RIGHT)\n";
+    std::ostringstream oss;
+    oss << "DEPLOY_F " << target_nm << " " << s;
+
+    // 與 cmd_arm_deploy 同一個理由：PARK 會停用馬達，不先 ENABLE 就會靜默失敗。
+    arm_cmd_("M1 ENABLE", 5);
+    arm_cmd_("M2 ENABLE", 5);
+
+    std::cout << "[arm] " << oss.str() << "\n";
+    // 逾時放大到 120s：DEPLOY_F 有尋觸與收斂迭代，09-04 首次冷啟動實測 44 秒
+    // （暖啟動後較短）。用 DEPLOY 的 30s 會在尋觸中途就逾時。
+    std::string r = arm_cmd_(oss.str(), 120);
+    if (r.rfind("OK", 0) == 0)
+        arm_stow_state_.store(s == "CENTER" ? ArmStowState::Center : ArmStowState::Unknown);
+    return r + "\n";
+}
+
 std::string WashRobot::cmd_arm_park() {
     std::cout << "[arm] PARK\n";
     std::string r = arm_cmd_("PARK", 30);

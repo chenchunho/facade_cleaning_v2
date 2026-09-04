@@ -241,6 +241,8 @@ public:
     // ---- cleaning arm (damiao motors via separate motor_api service, TCP 9527) ----
     std::string cmd_arm_init();                                      // INIT — enable + tool-head calibration
     std::string cmd_arm_deploy(int wall_mm, const std::string& slot); // DEPLOY <mm> <LEFT|CENTER|RIGHT>
+    // [2026-09-04 per user] 力控貼合：DEPLOY_F <target_nm> <slot>，壓力是被控量。
+    std::string cmd_arm_deploy_f(double target_nm, const std::string& slot);
     std::string cmd_arm_park();                                       // PARK — return + disable
     std::string cmd_arm_status();                                     // STATUS — relay arm state line
     std::string cmd_arm_attached(bool on);                            // toggle whether washrobot drives the cleaning arm

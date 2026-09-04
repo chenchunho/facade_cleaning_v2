@@ -254,6 +254,75 @@ public:
     // 首次驗證請留意 PARK 末段有沒有出現「自己往回衝」的過補償跡象。
     static constexpr float M1_GRAVITY_MIN_VALID_RAD = 0.20f;   // 變號點 PHASE-π=0.1754，留餘裕
 
+    // ============================================================
+    //  [2026-09-04 per user] 力控貼合 DEPLOY_F —— 壓力是被控量，wall_mm 不再是假設
+    // ------------------------------------------------------------
+    //  現行 DEPLOY 是**開迴路**：由 wall_mm 算出 theta_target 推過去，壓力只是
+    //  「推不動之後殘餘角度誤差 x kp」的副產品。牆一變遠壓力就靜默地掉，而
+    //  09-03 高度 229 實測 DEPLOY 520 只壓出 6.01 Nm（同日其他高度 14.31）——
+    //  log 裡沒有任何一行說「壓力不足」。09-04 三點實測確認牆距隨高度變
+    //  （520/505/490 -> tau 15.29/12.75/10.60，0.156 Nm/mm）。
+    //
+    //  DEPLOY_F 改成量測回授：命令一個設定點、讀實際 tau、用**現場量到的**等效
+    //  剛度修正設定點，逼近目標壓力。這樣不必知道牆在哪，也不受下列任何一項影響：
+    //    - 重力前饋 M1_GRAVITY_K*sin(pos-PHASE)（此姿態約 -6.9 Nm）
+    //    - 靜摩擦前饋 M1_FRICTION_TAU
+    //    - 「命令 theta_target 0.8668、實際停 0.6205、誤差 x kp(90) = 22.2 Nm
+    //       但實測只有 15.09」這段**尚未解釋清楚的落差**
+    //  它們都是姿態的平滑函數，會被就地量到的 kp_eff 吸收掉。
+    //
+    //  ⚠️ **控制的是「馬達回報的 tau」，不是玻璃受力。** 兩者差一個隨姿態變的
+    //     重力項：theta=0.6205 時 -6.90 Nm、theta=0.7078 時 -8.14 Nm，
+    //     ⇒ 不同高度維持同樣的 tau，實際壓在玻璃上的力仍差約 1.2 Nm（~8%）。
+    //     目前接受這個誤差（目標值本身就是 per user 目視定的），但別當成恆力控制。
+    //
+    //  兩個守衛（per user 2026-09-04）——把已經發生過的兩件事變成程式看得見的：
+    //    theta_contact > THETA_MAX  => 牆比預期遠 / 沒有玻璃 / 出了邊界（高度 229 那次）
+    //    theta_contact < THETA_MIN  => 有東西擋著（09-03「吸不到」查明是橫桿）
+    //  這兩個限是**手臂幾何**、不隨高度變，這正是它取代 wall_mm 的原因。
+    // ============================================================
+    static constexpr float DEPLOY_F_TARGET_NM   = 15.0f;   // per user 2026-09-04 現場目視定案
+    static constexpr float DEPLOY_F_TOUCH_NM    = 2.0f;    // 輕觸判定：超過此值視為接觸
+    static constexpr float DEPLOY_F_TOL_NM      = 1.0f;    // 收斂容差
+    // 09-04 三點實測的等效剛度：Dtau/Dtheta_target = 2.54/0.0343 = 74、2.15/0.0338 = 64。
+    // **不是 hold_kp(90)**，因為手臂在接觸後仍會被壓進去一點（Dtheta_actual
+    // 0.0053 / 0.0080），那部分吸收掉一部分角度差。取中間值當起始猜測，
+    // 之後由迭代自己用兩點量出來的斜率取代。
+    static constexpr float DEPLOY_F_KP_EFF0     = 70.0f;
+    static constexpr float DEPLOY_F_SEEK_STEP   = 0.010f;  // rad，~4.3mm at tip
+    static constexpr int   DEPLOY_F_SEEK_MAX    = 80;      // 步數上限（0.40 -> 1.20 用不到這麼多）
+    static constexpr int   DEPLOY_F_ITER_MAX    = 4;       // 壓力收斂迭代上限
+    // 09-04 實測鬆弛：DEPLOY 520 t=0 讀 17.14、1 秒後 14.99（-2.15）；
+    // 490 為 12.06 -> 10.60（-1.46）。**單次讀取會把值記錯**，必須等。
+    static constexpr int   DEPLOY_F_RELAX_MS    = 1500;
+    static constexpr int   DEPLOY_F_SEEK_SETTLE_MS = 150;  // 尋觸每步的靜置（輕觸鬆弛很小）
+    // [2026-09-04] 0.05 -> 0.15（與 deploy_speed 同）。實測每個尋觸步驟花 ~1.4s 而非
+    // 預估的 0.4s，原因在 move_to_slot() 是**從實際位置**起 ramp（move_cur = Get_Position()）：
+    // 一旦接觸，pos 停住而 cmd 持續往外，於是每一步的 ramp 距離是 (cmd - pos) 而不是步長，
+    // 而且越走越長。0.15 rad/s 仍遠低於 M1_VEL_SAFETY_LIMIT(0.4)。
+    static constexpr float DEPLOY_F_SEEK_SPEED  = 0.15f;
+    // 起點必須低於 THETA_MIN，否則一起步就已經在「障礙物」區間裡。
+    static constexpr float DEPLOY_F_THETA_START = 0.40f;
+    // 🔴 這兩個預設值是**保守占位**，還沒有跨高度的實測支撐：
+    //   已知玻璃落在 theta 0.6205（09-04 此高度）~ 0.7078（09-03 高度 229），
+    //   本身就佔掉 0.087 rad（~38mm）。凸出量小於這個範圍的障礙物分不出來。
+    //   ⇒ 掃過頂/中/底三個高度的 theta_contact 之後要回來收緊。
+    static constexpr float DEPLOY_F_THETA_MIN   = 0.45f;
+    static constexpr float DEPLOY_F_THETA_MAX   = 0.95f;
+    // [2026-09-04] 尋觸加速：從 THETA_START(0.40) 一路每 0.010 rad 摸到 0.58 要 ~20 步，
+    // 首次實測整趟 44 秒（現行 DEPLOY 只要 8 秒）。10 週期 x 5 步會多花約 30 分鐘。
+    // 相鄰高度的牆距差很小（09-04 量到 ~6mm/一個測試高度），所以用**上次的接觸點**
+    // 往回退一段當起點，把步數由 ~20 降到 ~6。
+    // 🔴 起點若已經接觸（牆變近了），**退回從 THETA_START 重來**，不可就地當成接觸點 ——
+    //    那會把「牆變近」誤記成 contact，兩個守衛就都失效了。
+    static constexpr float DEPLOY_F_WARMSTART_BACK = 0.060f;   // rad，約 26mm 餘裕
+    // 🔴 錨點是**接觸當下的命令值**，不是接觸的實際角度。兩者差很多（09-04 實測
+    //    contact theta=0.5858 而當時 cmd=0.6854，差 0.10 rad）——因為接觸後 pos 停住、
+    //    cmd 還要繼續往外推才生得出 TOUCH_NM。拿 theta 當錨點等於每次都從還差 10 步的
+    //    地方重新摸起，這就是第一版暖啟動完全沒省到時間的原因（36s 對 44s）。
+    // ⚠️ 執行期值，重啟歸零 —— 只影響速度，不影響結果與兩個守衛。
+    float deploy_f_last_touch_cmd_ { 0.0f };
+
     // ---- M1 Coulomb friction breakaway assist -------------------------------
     // [2026-08-18 per user] PARK/DEPLOY 修好重力前饋之後仍有「停一下再突然滑一段」
     // 的分段感。從 bench trace 逐行差分（每行 240ms，命令速度應為 0.0168 rad/行）
@@ -515,6 +584,18 @@ private:
     // ---- compound sequences (blocking -- run on client_thread) --------------
     std::string cmd_init_sequence();
     std::string cmd_deploy_sequence(const std::string& params);
+    // [2026-09-04 per user] 力控貼合。與 cmd_deploy_sequence 共用 prepare_touch_slot_()
+    // 的 Step1/Step2（收回 + 換 slot + 靜置），只有「怎麼壓上去」不同。
+    std::string cmd_deploy_force_sequence(const std::string& params);
+    // Step1(M1 收回並確認靜止) + Step2(M2 換 slot) + Step2.5(等兩顆同時靜止)。
+    // [2026-09-04] 由 cmd_deploy_sequence 原地抽出，讓 DEPLOY_F 不必複製一份 ——
+    // 這個 repo 已經因為「同一件事寫在三個地方」吃過虧（cyc10/cyc20、
+    // 滾筒繼電器三份複本只改到一份）。**行為與抽出前逐行相同，沒有邏輯改動。**
+    // 回傳空字串 = 成功；非空 = 要直接回給呼叫端的錯誤訊息。
+    std::string prepare_touch_slot_(int m2_slot_idx);
+    // 命令一個設定點、等 ramp 跑完、靜置後回讀 (pos, tau)。力控迴圈的量測原語。
+    bool        press_probe_(float theta_cmd, float speed, int settle_ms,
+                             float& pos_out, float& tau_out);
     std::string cmd_park_sequence();
     std::string cmd_status_sequence();
 

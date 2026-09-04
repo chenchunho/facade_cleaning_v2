@@ -59,13 +59,27 @@
 
 ### 0. 一鍵啟動（tmux launcher，bench / 測試用）
 
-🔴🔴 **2026-09-03 實測：這一節目前兩台都跑不起來，動手前先看這兩條。**
+🔴🔴 **2026-09-03 實測：這一節目前兩台都跑不起來，動手前先看這三條。**
 1. **`tmux` 兩台都沒安裝**（`dpkg -l tmux` 皆為 `un`）→ 底下所有 `*.sh start/attach` 直接失敗。
 2. **`~/facade_cleaning_v2` 兩台都不存在**。實際工作目錄是 **`~/bringup/`**（吊機 `crane_control_PI.out`、
    本體 `facade_cleaning_v2.out`，各自帶一串 `.prevN` 舊版），而且 **`~/bringup/` 不是 git repo**。
    吊機的週期測試紀錄在 `~/bringup/cycle_logs/`。
 ⇒ 現行實際做法是直接跑 `~/bringup/` 底下的 binary（搭配 FIFO `crane_<date>_in` 餵指令、輸出導向 `crane_<date>.log`），
    不是走 tmux launcher。**要恢復 launcher 就得先裝 tmux 並把路徑改成 `~/bringup`。**
+
+3. 🔴🔴 **FIFO（本地 console）只認 `exit` / `quit` / `status`，其餘一律靜默丟棄**（2026-09-04 踩到）。
+   `Crane_control_PI/main.cpp:5249` 的 stdin 迴圈就這三個字，**沒有 dispatcher、沒有錯誤訊息**：
+   ```cpp
+   while (std::getline(std::cin, line)) {
+       if (line == "exit" || line == "quit") break;
+       if (line == "status") std::cout << cmd_status();
+   }
+   ```
+   而 `status` 有輸出 ⇒ **「FIFO 看起來是通的」**，於是 `set_*` 三道全部寫進去、全部沒生效、
+   全部沒有徵兆。🔧 **執行期參數一律走 TCP `:5002`（或 GUI），不要走 FIFO。**
+   📌 **開機流程順序**：程式起來 → **先設參數** → 才讓任何人碰 GUI。
+   2026-09-04 就是因為參數還沒設，per user 在 09:25 下的那趟 `down on` 跑在編譯預設
+   （`motion_hz=50` + `balance_source=meter`）之下，資料整趟不可比。
 
 每台 Pi 上都有對應的 launcher script，會用 tmux 把該機所有程式各開一個 window：
 
@@ -597,12 +611,8 @@ bash ~/main_20260831/launch.sh <binary> <logfile> <fifo>
 看起來像卡死（2026-08-31 就是這樣誤判了一輪）。
 ⚠️ **redirection 順序**：`< fifo` 必須是最後一個 stdin 重導，尾巴再多寫一個 `< /dev/null` 會蓋掉它。
 
-🔴🔴 **2026-09-04：本地 console 只認三個字，其餘靜默丟棄。**
-`Crane_control_PI/main.cpp:5249` 的迴圈是
-`if (line=="exit"||line=="quit") break; if (line=="status") cout << cmd_status();`
-—— **`set_motion_hz` / `set_balance_source` / `set_fine_adjust_level_diff` 等寫進 FIFO 會直接消失，
-沒有回應、也沒有錯誤**。而 `status` 有輸出，所以 FIFO 看起來是通的。
-🔧 **執行期參數一律走 TCP `:5002`**（或 GUI）。本體 `:5001` 同理。
+🔴🔴 **FIFO 只認 `exit` / `quit` / `status`，`set_*` 寫進去會靜默消失** —— 權威版見 §0 第 3 條。
+**執行期參數一律走 TCP `:5002`（或 GUI），不要走 FIFO。**
 
 事後要下本地 console 指令（`status` / `exit`）就寫進 FIFO：
 `ssh nexuni@192.168.5.26 'echo status > ~/main_20260831/wr_in; sleep 5; tail -5 ~/main_20260831/run.log'`

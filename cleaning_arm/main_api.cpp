@@ -2466,6 +2466,14 @@ std::string DamiaoAPI::dispatch(const std::string& line)
 		ltrim(rest);
 		return cmd_deploy_sequence(rest);
 	}
+	// [2026-09-04 per user] 力控貼合。刻意**不改 DEPLOY**，兩條路徑並行以便 A/B ——
+	// 沿用本專案 console v2 起在 8081、與 8080 並行的做法。
+	if (prefix == "DEPLOY_F") {
+		std::string rest;
+		std::getline(iss, rest);
+		ltrim(rest);
+		return cmd_deploy_force_sequence(rest);
+	}
 	if (prefix == "PARK") {
 		return cmd_park_sequence();
 	}
@@ -2645,44 +2653,14 @@ std::string DamiaoAPI::cmd_init_sequence()
 }
 
 // ============================================================
-//  cmd_deploy_sequence()  -- DEPLOY
-//  Step 1: M1 retract to vertical (VERTICAL_OFFSET_RAD)
-//  Step 2: M2 move to target slot @ 1.0 rad/s
-//  Step 3: M1 TOUCHWALL
-//  [speed] param applies to M1 only; M2 always uses 1.0 rad/s.
+//  prepare_touch_slot_()  -- DEPLOY / DEPLOY_F 共用的 Step1 + Step2 + Step2.5
+//  [2026-09-04] 由 cmd_deploy_sequence 原地抽出，**行為與抽出前逐行相同**。
+//  抽出的理由：DEPLOY_F 需要同一段前置（收回 -> 換 slot -> 等兩顆靜止），
+//  而複製一份會重演這個 repo 已經吃過虧的形狀（cyc10/cyc20 內容相同的兩份、
+//  滾筒繼電器三份複本只改到一份）。回傳空字串 = 成功。
 // ============================================================
-std::string DamiaoAPI::cmd_deploy_sequence(const std::string& params)
+std::string DamiaoAPI::prepare_touch_slot_(int m2_slot_idx)
 {
-	// [2026-08-14 per user] DEPLOY touch_wall 這段反覆在通過某個角度時失控暴衝，
-	// 已知在 0.55、0.1、0.08 都發生過（0.08 這次還是來回甩了 4-5 次才穩下來，只是
-	// 沒有再撞上限/凍結）。[2026-08-17 per user] 真正的不穩定平衡角度還沒確認
-	// （幾何估計 ~0.75 vs 擬合結果換算 ~0.18，兩者對不上），在查清楚之前先繼續
-	// 降速，配合同時調緊的 M1_VEL_SAFETY_LIMIT/M1_EMERGENCY_BRAKE_KD 一起降低風險。
-	// [2026-08-18 per user] spd 0.05 → 0.10. 原本 0.55→0.35→0.10→0.08→0.05 一路
-	// 降速，是為了壓制當時查不出根因的暴衝；那些根因後來查明並修掉了（kd 編碼
-	// 溢位讓阻尼實際只有 0.5 而非設定值、ramp 重力前饋用 cur_cmd 而非 pos）。
-	// 提升幅度刻意比 PARK（0.07→0.15）保守一半：DEPLOY 是**順著重力**伸出
-	// （tau_ff 為負代表重力往伸出方向拉），一旦失控會被重力持續加速，正是當年
-	// 暴衝的那條路徑；PARK 逆重力則不會。速度安全閥 M1_VEL_SAFETY_LIMIT=0.4
-	// 維持不動，仍是命令速度的 4 倍餘裕，真失控時照樣攔得住。
-	float wall_mm = 0.0f, clearance = 0.0f, spd = m1_.deploy_speed;   // 0.08→0.05→0.10→0.15 (runtime-tunable)
-	std::string slot_str;
-	std::istringstream ps(params);
-	if (!(ps >> wall_mm >> slot_str))
-		return "ERR usage: DEPLOY <wall_mm> <LEFT|CENTER|RIGHT> [clearance_mm] [speed_rad_s]";
-	for (auto& c : slot_str) c = static_cast<char>(::toupper(c));
-	ps >> clearance >> spd;
-	if (clearance < 0.0f) clearance = 0.0f;
-
-	int m2_slot_idx;
-	if (slot_str == "LEFT")   m2_slot_idx = -1;
-	else if (slot_str == "CENTER") m2_slot_idx = 0;
-	else if (slot_str == "RIGHT")  m2_slot_idx = 1;
-	else return "ERR usage: DEPLOY <wall_mm> <LEFT|CENTER|RIGHT> [clearance_mm] [speed_rad_s]";
-
-	if (!m1_.enabled) return "ERR DEPLOY: M1 not enabled";
-	if (!m2_.enabled) return "ERR DEPLOY: M2 not enabled";
-
 	// Step 1: M1 retract to home (0 rad).
 	// ❌ [2026-09-02 試過並還原] 曾把這行翻成 false（fast profile），**量測不支持**：
 	//   改後工具切換 9.7 / 12.3 / 11.8 s，改前 11.4 / 11.0 s —— 散布蓋過差距。
@@ -2803,6 +2781,55 @@ std::string DamiaoAPI::cmd_deploy_sequence(const std::string& params)
 				<< "（門檻 " << SETTLE_VEL << "）。touch_wall 仍會起步，起步踢擊可能重現。\n";
 	}
 
+	return std::string();
+}
+
+// ============================================================
+//  cmd_deploy_sequence()  -- DEPLOY
+//  Step 1: M1 retract to vertical (VERTICAL_OFFSET_RAD)
+//  Step 2: M2 move to target slot @ 1.0 rad/s
+//  Step 3: M1 TOUCHWALL
+//  [speed] param applies to M1 only; M2 always uses 1.0 rad/s.
+// ============================================================
+std::string DamiaoAPI::cmd_deploy_sequence(const std::string& params)
+{
+	// [2026-08-14 per user] DEPLOY touch_wall 這段反覆在通過某個角度時失控暴衝，
+	// 已知在 0.55、0.1、0.08 都發生過（0.08 這次還是來回甩了 4-5 次才穩下來，只是
+	// 沒有再撞上限/凍結）。[2026-08-17 per user] 真正的不穩定平衡角度還沒確認
+	// （幾何估計 ~0.75 vs 擬合結果換算 ~0.18，兩者對不上），在查清楚之前先繼續
+	// 降速，配合同時調緊的 M1_VEL_SAFETY_LIMIT/M1_EMERGENCY_BRAKE_KD 一起降低風險。
+	// [2026-08-18 per user] spd 0.05 → 0.10. 原本 0.55→0.35→0.10→0.08→0.05 一路
+	// 降速，是為了壓制當時查不出根因的暴衝；那些根因後來查明並修掉了（kd 編碼
+	// 溢位讓阻尼實際只有 0.5 而非設定值、ramp 重力前饋用 cur_cmd 而非 pos）。
+	// 提升幅度刻意比 PARK（0.07→0.15）保守一半：DEPLOY 是**順著重力**伸出
+	// （tau_ff 為負代表重力往伸出方向拉），一旦失控會被重力持續加速，正是當年
+	// 暴衝的那條路徑；PARK 逆重力則不會。速度安全閥 M1_VEL_SAFETY_LIMIT=0.4
+	// 維持不動，仍是命令速度的 4 倍餘裕，真失控時照樣攔得住。
+	float wall_mm = 0.0f, clearance = 0.0f, spd = m1_.deploy_speed;   // 0.08→0.05→0.10→0.15 (runtime-tunable)
+	std::string slot_str;
+	std::istringstream ps(params);
+	if (!(ps >> wall_mm >> slot_str))
+		return "ERR usage: DEPLOY <wall_mm> <LEFT|CENTER|RIGHT> [clearance_mm] [speed_rad_s]";
+	for (auto& c : slot_str) c = static_cast<char>(::toupper(c));
+	ps >> clearance >> spd;
+	if (clearance < 0.0f) clearance = 0.0f;
+
+	int m2_slot_idx;
+	if (slot_str == "LEFT")   m2_slot_idx = -1;
+	else if (slot_str == "CENTER") m2_slot_idx = 0;
+	else if (slot_str == "RIGHT")  m2_slot_idx = 1;
+	else return "ERR usage: DEPLOY <wall_mm> <LEFT|CENTER|RIGHT> [clearance_mm] [speed_rad_s]";
+
+	if (!m1_.enabled) return "ERR DEPLOY: M1 not enabled";
+	if (!m2_.enabled) return "ERR DEPLOY: M2 not enabled";
+
+	// Step 1 + Step 2 + Step2.5：收回、換 slot、等兩顆同時靜止。
+	// [2026-09-04] 抽成 prepare_touch_slot_()，與 DEPLOY_F 共用。
+	{
+		std::string prep_err = prepare_touch_slot_(m2_slot_idx);
+		if (!prep_err.empty()) return prep_err;
+	}
+
 	// Step 3: M1 touch wall
 	if (!touch_wall_slot(m1_, wall_mm, m2_slot_idx, clearance, spd))
 		return "ERR DEPLOY: M1 touch_wall failed";
@@ -2884,6 +2911,230 @@ std::string DamiaoAPI::cmd_deploy_sequence(const std::string& params)
 		<< " clearance=" << clearance << " speed=" << spd;
 	if (may_limit) oss << " warn=SETWALL_MAY_LIMIT";
 	*/
+	return oss.str();
+}
+
+// ============================================================
+//  press_probe_()  -- 命令一個設定點、等 ramp 跑完、靜置後回讀 (pos, tau)
+//  力控迴圈唯一的量測原語。
+//
+//  🔴 **一定要等**。09-04 實測壓上後 tau 會鬆弛：DEPLOY 520 在 t=0 讀 17.14、
+//     1 秒後 14.99（-2.15 Nm）；490 為 12.06 -> 10.60（-1.46 Nm）。
+//     單次讀取會把值記錯，整條斜率跟著歪掉。cycle_test.py ③b 的 sleep(1.5)
+//     後只讀一次也是同一個坑（尚未修，見 work_log 2026-09-04）。
+//
+//  ⚠️ move_to_slot() 完成後 feedback_loop 會把 hold_pos 設成 move_target
+//     （不是「手臂實際停在哪」——見該處註解），所以 ramp 結束後手臂**仍在持續推**，
+//     這正是我們要量的穩態。
+// ============================================================
+bool DamiaoAPI::press_probe_(float theta_cmd, float speed, int settle_ms,
+                             float& pos_out, float& tau_out)
+{
+	move_to_slot(m1_, theta_cmd, speed);
+	if (!wait_for_move(m1_)) return false;
+	std::this_thread::sleep_for(std::chrono::milliseconds(settle_ms));
+	std::lock_guard<std::mutex> lk(motor_mutex_);
+	pos_out = m1_.motor->Get_Position();
+	tau_out = m1_.motor->Get_tau();
+	return true;
+}
+
+// ============================================================
+//  cmd_deploy_force_sequence()  -- DEPLOY_F <target_nm> <LEFT|CENTER|RIGHT>
+//                                          [theta_min] [theta_max]
+//  [2026-09-04 per user] 力控貼合。設計理由見 main_api.h 的 DEPLOY_F_* 常數區。
+//
+//  流程：
+//    Step 1/2  prepare_touch_slot_()  —— 與 DEPLOY 完全共用
+//    Step 3    退到 THETA_START（保證不碰玻璃）
+//    Step 4    尋觸：每步 +SEEK_STEP，量 tau，直到 tau >= TOUCH_NM
+//                守衛 A：theta_cmd 超過 theta_max 仍未接觸 -> ERR no_wall
+//    Step 5    守衛 B：接觸位置低於 theta_min -> ERR obstacle
+//    Step 6    壓力收斂：theta_cmd += (target - tau) / kp_eff，
+//                kp_eff 由**實際量到的兩點**斜率取代初始猜測
+//    Step 7    鬆弛複驗（RELAX_MS）+ 必要時補壓一次
+//
+//  🔴 為什麼這樣就不需要 wall_mm：整條路徑沒有用到任何「牆在哪」的假設，
+//     只用馬達回報的 tau。牆變遠變近，收斂到的 theta 跟著變，壓力不變。
+// ============================================================
+std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
+{
+	float target_nm = DEPLOY_F_TARGET_NM;
+	float th_min    = DEPLOY_F_THETA_MIN;
+	float th_max    = DEPLOY_F_THETA_MAX;
+	std::string slot_str;
+	std::istringstream ps(params);
+	if (!(ps >> target_nm >> slot_str))
+		return "ERR usage: DEPLOY_F <target_nm> <LEFT|CENTER|RIGHT> [theta_min] [theta_max]";
+	for (auto& c : slot_str) c = static_cast<char>(::toupper(c));
+	ps >> th_min >> th_max;
+	if (target_nm <= 0.0f) return "ERR DEPLOY_F: target_nm must be > 0";
+	if (th_min >= th_max)  return "ERR DEPLOY_F: theta_min must be < theta_max";
+
+	int m2_slot_idx;
+	if (slot_str == "LEFT")        m2_slot_idx = -1;
+	else if (slot_str == "CENTER") m2_slot_idx = 0;
+	else if (slot_str == "RIGHT")  m2_slot_idx = 1;
+	else return "ERR usage: DEPLOY_F <target_nm> <LEFT|CENTER|RIGHT> [theta_min] [theta_max]";
+
+	if (!m1_.enabled) return "ERR DEPLOY_F: M1 not enabled";
+	if (!m2_.enabled) return "ERR DEPLOY_F: M2 not enabled";
+
+	{
+		std::string prep_err = prepare_touch_slot_(m2_slot_idx);
+		if (!prep_err.empty()) return prep_err;
+	}
+
+	float pos = 0.0f, tau = 0.0f;
+
+	// ---- Step 3: 退到起點（確保尋觸是從「沒接觸」開始）------------------------
+	// 用 deploy_speed 快速走完這段（這段預期不會碰到東西），尋觸才降速。
+	// 暖啟動：有上次的接觸點就從它退 WARMSTART_BACK 起步，省掉一大段空走。
+	float theta_start = DEPLOY_F_THETA_START;
+	if (deploy_f_last_touch_cmd_ > 0.0f) {
+		float warm = deploy_f_last_touch_cmd_ - DEPLOY_F_WARMSTART_BACK;
+		if (warm > theta_start && warm < th_max) theta_start = warm;
+	}
+	bool warm_started = (theta_start > DEPLOY_F_THETA_START);
+	if (!press_probe_(theta_start, m1_.deploy_speed,
+	                  DEPLOY_F_SEEK_SETTLE_MS, pos, tau))
+		return "ERR DEPLOY_F: approach timeout";
+	if (tau > DEPLOY_F_TOUCH_NM) {
+		if (warm_started) {
+			// 牆比上次近 —— 暖啟動的起點已經頂到東西了。**不可就地當接觸點**
+			// （那等於用一個已經受力的位置當基準，兩個守衛都會失效）。
+			// 退回真正的起點重來一次，這次是冷啟動、一定從沒接觸開始。
+			std::cerr << "[DEPLOY_F] 暖啟動起點 " << theta_start
+			          << " 已受力 (tau=" << tau << ")，退回 "
+			          << DEPLOY_F_THETA_START << " 重新尋觸\n";
+			deploy_f_last_touch_cmd_ = 0.0f;
+			theta_start = DEPLOY_F_THETA_START;
+			if (!press_probe_(theta_start, m1_.deploy_speed,
+			                  DEPLOY_F_SEEK_SETTLE_MS, pos, tau))
+				return "ERR DEPLOY_F: approach timeout";
+		}
+		// 冷啟動的起點就已經受力 = 有東西擋在比任何玻璃都近的地方。
+		if (tau > DEPLOY_F_TOUCH_NM) {
+			std::ostringstream e;
+			e << std::fixed << std::setprecision(4)
+			  << "ERR DEPLOY_F: obstacle at start theta=" << pos
+			  << " tau=" << std::setprecision(2) << tau
+			  << " (起點 " << DEPLOY_F_THETA_START << " 就受力，比任何玻璃都近)";
+			return e.str();
+		}
+	}
+
+	// ---- Step 4: 尋觸 ---------------------------------------------------------
+	float theta_cmd     = theta_start;
+	float theta_contact = 0.0f;
+	float touch_cmd     = 0.0f;
+	bool  touched       = false;
+	for (int i = 0; i < DEPLOY_F_SEEK_MAX; ++i) {
+		theta_cmd += DEPLOY_F_SEEK_STEP;
+		if (theta_cmd > th_max) break;                 // 守衛 A（下方統一回報）
+		if (!press_probe_(theta_cmd, DEPLOY_F_SEEK_SPEED,
+		                  DEPLOY_F_SEEK_SETTLE_MS, pos, tau))
+			return "ERR DEPLOY_F: seek timeout";
+		if (tau >= DEPLOY_F_TOUCH_NM) {
+			theta_contact = pos;                       // 守衛用**實際位置**
+			touch_cmd     = theta_cmd;                 // 暖啟動錨點用**命令值**（兩者差 ~0.10 rad）
+			touched = true;
+			std::cout << std::fixed << std::setprecision(4)
+			          << "[DEPLOY_F] contact theta=" << theta_contact
+			          << " (cmd=" << theta_cmd << ") tau="
+			          << std::setprecision(2) << tau << "\n";
+			break;
+		}
+	}
+
+	// ---- 守衛 A：找不到牆 -----------------------------------------------------
+	if (!touched) {
+		std::ostringstream e;
+		e << std::fixed << std::setprecision(4)
+		  << "ERR DEPLOY_F: no_wall — theta 走到 " << theta_cmd
+		  << " (上限 " << th_max << ") 仍未達 " << DEPLOY_F_TOUCH_NM
+		  << " Nm，最後 tau=" << std::setprecision(2) << tau
+		  << "（牆比預期遠／沒有玻璃／出了邊界）";
+		std::cerr << "[DEPLOY_F] " << e.str() << "\n";
+		return e.str();
+	}
+
+	// ---- 守衛 B：太近就碰到 = 障礙物 ------------------------------------------
+	if (theta_contact < th_min) {
+		std::ostringstream e;
+		e << std::fixed << std::setprecision(4)
+		  << "ERR DEPLOY_F: obstacle — 接觸於 theta=" << theta_contact
+		  << "，低於下限 " << th_min << "（比任何真實玻璃都近，疑似橫桿或異物）";
+		std::cerr << "[DEPLOY_F] " << e.str() << "\n";
+		return e.str();
+	}
+
+	// ---- Step 6: 壓力收斂（割線法，kp_eff 由實測取代猜測）---------------------
+	// 初值 70 來自 09-04 三點：Dtau/Dtheta_cmd = 2.54/0.0343 = 74、2.15/0.0338 = 64。
+	// **不是 hold_kp(90)** —— 接觸後手臂仍會被壓進去一點，吸收掉一部分角度差。
+	float kp_eff    = DEPLOY_F_KP_EFF0;
+	float last_cmd  = theta_cmd;
+	float last_tau  = tau;
+	bool  converged = false;
+	for (int it = 0; it < DEPLOY_F_ITER_MAX; ++it) {
+		float need = target_nm - tau;
+		if (std::abs(need) <= DEPLOY_F_TOL_NM) { converged = true; break; }
+		float next = theta_cmd + need / kp_eff;
+		if (next > th_max) {
+			std::ostringstream e;
+			e << std::fixed << std::setprecision(4)
+			  << "ERR DEPLOY_F: cannot reach " << std::setprecision(1) << target_nm
+			  << " Nm — 需要 theta=" << std::setprecision(4) << next
+			  << " 超過上限 " << th_max << "（tau 停在 "
+			  << std::setprecision(2) << tau << "）";
+			std::cerr << "[DEPLOY_F] " << e.str() << "\n";
+			return e.str();
+		}
+		if (!press_probe_(next, DEPLOY_F_SEEK_SPEED, DEPLOY_F_RELAX_MS, pos, tau))
+			return "ERR DEPLOY_F: press timeout";
+		// 用這一步實際量到的斜率取代猜測（分母太小就不更新，避免雜訊放大）。
+		float d_cmd = next - last_cmd;
+		float d_tau = tau  - last_tau;
+		if (std::abs(d_cmd) > 1e-4f && d_tau > 0.1f) {
+			float k = d_tau / d_cmd;
+			if (k > 10.0f && k < 300.0f) kp_eff = k;   // 合理範圍才採信
+		}
+		std::cout << std::fixed << std::setprecision(4)
+		          << "[DEPLOY_F] iter " << it << " cmd=" << next
+		          << " pos=" << pos << " tau=" << std::setprecision(2) << tau
+		          << " kp_eff=" << std::setprecision(1) << kp_eff << "\n";
+		last_cmd  = next;
+		last_tau  = tau;
+		theta_cmd = next;
+	}
+
+	// ---- Step 7: 鬆弛複驗 -----------------------------------------------------
+	// 迭代裡已經每步等 RELAX_MS，這裡再等一次是為了抓「收斂之後才發生」的鬆弛。
+	std::this_thread::sleep_for(std::chrono::milliseconds(DEPLOY_F_RELAX_MS));
+	{
+		std::lock_guard<std::mutex> lk(motor_mutex_);
+		pos = m1_.motor->Get_Position();
+		tau = m1_.motor->Get_tau();
+	}
+	converged = (std::abs(target_nm - tau) <= DEPLOY_F_TOL_NM);
+
+	std::ostringstream oss;
+	oss << std::fixed
+	    << (converged ? "OK" : "WARN")
+	    << " tau=" << std::setprecision(2) << tau
+	    << " target=" << std::setprecision(1) << target_nm
+	    << std::setprecision(4)
+	    << " theta=" << pos
+	    << " cmd=" << theta_cmd
+	    << " contact=" << theta_contact
+	    << " kp_eff=" << std::setprecision(1) << kp_eff;
+	if (!converged)
+		oss << " (未收斂：" << DEPLOY_F_ITER_MAX << " 次迭代後仍差 "
+		    << std::setprecision(2) << (target_nm - tau) << " Nm)";
+	std::cout << "[DEPLOY_F] " << oss.str() << "\n";
+	// 只在真的壓到目標時才記住接觸點：失敗的那次可能根本沒碰到牆，
+	// 記下來會讓下一次的暖啟動從一個錯誤的位置開始。
+	if (converged) deploy_f_last_touch_cmd_ = touch_cmd;
 	return oss.str();
 }
 
