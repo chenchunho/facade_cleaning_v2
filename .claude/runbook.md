@@ -597,6 +597,13 @@ bash ~/main_20260831/launch.sh <binary> <logfile> <fifo>
 看起來像卡死（2026-08-31 就是這樣誤判了一輪）。
 ⚠️ **redirection 順序**：`< fifo` 必須是最後一個 stdin 重導，尾巴再多寫一個 `< /dev/null` 會蓋掉它。
 
+🔴🔴 **2026-09-04：本地 console 只認三個字，其餘靜默丟棄。**
+`Crane_control_PI/main.cpp:5249` 的迴圈是
+`if (line=="exit"||line=="quit") break; if (line=="status") cout << cmd_status();`
+—— **`set_motion_hz` / `set_balance_source` / `set_fine_adjust_level_diff` 等寫進 FIFO 會直接消失，
+沒有回應、也沒有錯誤**。而 `status` 有輸出，所以 FIFO 看起來是通的。
+🔧 **執行期參數一律走 TCP `:5002`**（或 GUI）。本體 `:5001` 同理。
+
 事後要下本地 console 指令（`status` / `exit`）就寫進 FIFO：
 `ssh nexuni@192.168.5.26 'echo status > ~/main_20260831/wr_in; sleep 5; tail -5 ~/main_20260831/run.log'`
 
