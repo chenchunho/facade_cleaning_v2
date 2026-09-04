@@ -213,9 +213,36 @@ bool DamiaoAPI::init(const char* port,
 	//     ② LR_CALIBRATE 量到的正向機械停點是 **+0.7204**，遠在 0.463 之外
 	//   ⇒ 既不是機械極限、也不是單純摩擦。**下一步應在 lr_move_to_slot_impl 的斜坡段
 	//     錄 M2 的 50Hz 波形**，看它究竟在哪一刻、以多大力矩停住。
-	m2_.hold_kp = 7.0f;
+	// 🔴 [2026-09-04 per user] hold_kp 7 → 31。**這解的不是上面那段的落點誤差問題**，
+	//   是一個當天現場量出來的、更嚴重的東西：**M2 的保持力連自己的靜摩擦都克服不了。**
+	//
+	//   per user 徒手把 M2 由 slot 目標 0.5316 扳到 0.4339（偏差 0.0977 rad = 5.60°）後放手，
+	//   **40 秒 pos 一格都沒動**（逐秒回讀 40 筆全部 0.4339）。逐項對帳：
+	//       kp*err          = 7 x 0.0977 = 0.68 N·m
+	//       積分上限 ki*IMAX = 0.6 x 2.0  = 1.20 N·m   （tau 1.46→1.94 爬升 ~9 秒即為充電過程）
+	//       保持力上限                    = 1.88 N·m   ← 實測平台 1.85，完全吻合
+	//   而 M2 靜摩擦 09-02 實測約 **2.0~2.3 N·m** ⇒ **1.88 < 2.0，推不回來，而且是永遠。**
+	//
+	//   ⇒ 這正是 09-03 記下但未查明的「滑台掃動期間工具頭被摩擦力扭轉 0.45~0.49 rad
+	//     （26~28°），十輪高度一致＝固有特性」的根因：摩擦把它帶走，馬達扛不回來，
+	//     **帶到哪就留在哪**。當時只註明「會直接影響清潔接觸角、先前無紀錄」。
+	//
+	//   ⇒ 一句話講清楚的設計不一致：**移動時 MIT_KP=31 推得動，保持時 hold_kp=7 撐不住。**
+	//     「推得動就該待得住」——所以取同一個值 31，而不是另外挑一個。
+	//     31 x 0.0977 = 3.03 N·m（含積分 4.23），高於摩擦 2.0~2.3。
+	//
+	// ⚠️ **這會改變清潔幾何**：掃動扭轉量會變小，工具頭的實際接觸角跟著變。改完必須
+	//    跑一輪掃動實測新的扭轉量。M2 另有過熱/過流鎖存前科（09-03 夜間只能斷電解除），
+	//    持續力矩變大要留意。
+	// 📌 上面那段「kp 7→20 位置幾乎不動」的結論**仍然成立且不衝突**：那量的是
+	//    `lr_move_to_slot_impl` **移動後的落點誤差**（位置受限），本項改的是
+	//    **保持階段能不能抵抗外力**（力矩受限）。兩個不同的量。
+	m2_.hold_kp = 31.0f;   // 2026-09-04: 7 → 31（＝lr_move_to_slot_impl 的 MIT_KP）
 	m2_.hold_kd = 5.0f;
-	m2_.park_kp = m2_.hold_kp;   // M2 PARK/DEPLOY unchanged — user only asked to split M1
+	// 🔴 park_kp **刻意不跟著改**（原本是 `= m2_.hold_kp`）。cmd_init_sequence 的
+	//   `go_home_slot(m2_)` 預設 use_park_profile=true 會吃它 —— 本次只打算改保持行為，
+	//   不想順手改動 INIT 的 M2 歸位力道。要一起調請另外量過再說。
+	m2_.park_kp = 7.0f;
 	m2_.park_kd = m2_.hold_kd;
 	// ⚠️ 這行原註解的前提是錯的：「> ~0.8 Nm friction」——09-02 實測 M2 摩擦約 2 Nm。
 	// 但真正的限制是**積分累積速率**（繞到上限要數十秒），不是上限值本身，見 main_api.h。
@@ -3187,6 +3214,69 @@ std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 }
 
 // ============================================================
+//  cmd_startup_sequence()  -- 開機自動就緒（per user 2026-09-04）
+//  兩顆上電 → M1 停在機械零點 → M2 預設滾筒(RIGHT)
+//  設計取捨見 main_api.h 的宣告處。
+// ============================================================
+std::string DamiaoAPI::cmd_startup_sequence()
+{
+	std::cout << "[STARTUP] 自動就緒：上電 → M1 回機械零點 → M2 滾筒(RIGHT)\n";
+
+	enable_slot(m1_);
+
+	// 零點合理性守衛，與 cmd_init_sequence 同一套：pos<=0 表示已在/越過機械停點；
+	// pos>upper_bound 表示帶著一個陳舊的大偏移回來。兩者都不能拿來當 go_home 的起點。
+	// 🔴 這裡只 set_zero 不 calibrate —— set_zero 是「宣告現在這裡是 0」，
+	//    calibrate 是「去撞停點找出 0 在哪」。開機自動化只做前者。
+	{
+		std::lock_guard<std::mutex> lk(motor_mutex_);
+		float pos = m1_.motor->Get_Position();
+		if (pos <= 0.0f || pos > m1_.upper_bound) {
+			std::cerr << "[STARTUP] M1 pos=" << pos << " rad 超出 [0, "
+				<< m1_.upper_bound << "] — set_zero 後再歸位\n";
+			dm_->set_zero_position(*m1_.motor);
+			m1_.hold_pos = 0.0f;
+			m1_.hold_err_integral = 0.0f;
+		}
+	}
+
+	bool m1_ok = go_home_slot(m1_, /*use_park_profile=*/true);
+	float m1_pos = 0.0f;
+	{
+		std::lock_guard<std::mutex> lk(motor_mutex_);
+		m1_pos = m1_.motor->Get_Position();
+	}
+	if (!m1_ok) {
+		// 🔴 M1 沒回到零點就**不要**動 M2：工具頭在手臂還伸著的時候旋轉會刮傷玻璃與工具，
+		//    這與 LR_SLOT 自己那道「M1 未離開玻璃」守衛是同一個理由。
+		std::cerr << "[STARTUP] M1 未回到機械零點（pos=" << m1_pos
+			<< "）—— 保持使能並保持位置，**不動 M2**。請人工確認後送 INIT。\n";
+		std::ostringstream e;
+		e << std::fixed << std::setprecision(4)
+		  << "ERR STARTUP: M1 did not reach home (pos=" << m1_pos
+		  << ") — M1 left enabled and holding, M2 untouched";
+		return e.str();
+	}
+
+	// M1 留在使能狀態（不像 PARK 會 disable）—— 使用者要求「開機時手臂應該要上電」。
+	enable_slot(m2_);
+	bool m2_ok = lr_move_to_slot_impl(m2_, 1 /*RIGHT = 滾筒*/, 0.6f);
+	float m2_pos = 0.0f;
+	{
+		std::lock_guard<std::mutex> lk(motor_mutex_);
+		m2_pos = m2_.motor->Get_Position();
+	}
+
+	std::ostringstream oss;
+	oss << std::fixed << std::setprecision(4)
+	    << (m2_ok ? "OK" : "WARN") << " STARTUP m1_pos=" << m1_pos
+	    << " m2_pos=" << m2_pos << " slot=RIGHT en=1,1";
+	if (!m2_ok) oss << " (M2 未收斂到 RIGHT slot — 見 log)";
+	std::cout << "[STARTUP] " << oss.str() << "\n";
+	return oss.str();
+}
+
+// ============================================================
 //  cmd_park_sequence()  -- PARK: home + disable both motors
 // ============================================================
 std::string DamiaoAPI::cmd_park_sequence()
@@ -3314,11 +3404,19 @@ std::string DamiaoAPI::cmd_status_sequence()
 		<< "[M1] pos=" << pos_1 << " vel=" << vel_1 << " tau=" << tau_1
 		<< " hold=" << (m1_.hold_en.load() ? 1 : 0)
 		<< " moving=" << (m1_.move_act.load() ? 1 : 0)
-		<< " err=" << err_name(err_1) << " | "
+		<< " err=" << err_name(err_1)
+		// 🔴 [2026-09-04] 補 en=。失能的馬達**不再送 CAN frame**，Get_Position()/
+		//   Get_tau()/Get_err() 全部吐最後一次收到的值 —— 看起來完全合理的舊數字。
+		//   09-03 因此連續誤判三次（M2 手轉後讀值一字不變、M1 的 0.5560 推出三個全錯的
+		//   結論），09-04 又撞一次（PARK 後連讀三次逐字元完全相同）。
+		//   ⚠️ **en=0 時上面所有欄位都是快取，不是現況。** err 也是——PARK 後 M2 常見的
+		//   `err=0x1`（依協定＝使能）正是凍結值，不代表它現在還使能。
+		<< " en=" << (m1_.enabled.load() ? 1 : 0) << " | "
 		<< "[M2] pos=" << pos_2 << " vel=" << vel_2 << " tau=" << tau_2
 		<< " hold=" << (m2_.hold_en.load() ? 1 : 0)
 		<< " moving=" << (m2_.move_act.load() ? 1 : 0)
-		<< " err=" << err_name(err_2);
+		<< " err=" << err_name(err_2)
+		<< " en=" << (m2_.enabled.load() ? 1 : 0);
 
 	return oss.str();
 }

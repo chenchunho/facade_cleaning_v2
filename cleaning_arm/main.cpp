@@ -14,6 +14,7 @@
 #include "main_api.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <thread>
 
@@ -78,6 +79,18 @@ int main(int argc, char* argv[])
 
 	// ---- 啟動背景 TCP 伺服器（非阻塞）---------------------
 	api.start();
+
+	// [2026-09-04 per user] 開機自動就緒：上電 → M1 回機械零點 → M2 滾筒(RIGHT)。
+	// ⚠️ 這會讓手臂在行程啟動時自己移動；ARM_NO_AUTOSTART=1 可停用。
+	{
+		const char* off = std::getenv("ARM_NO_AUTOSTART");
+		if (off && off[0] == '1') {
+			std::cout << "[STARTUP] ARM_NO_AUTOSTART=1 — 跳過自動就緒，"
+			             "兩顆維持失能（需自行送 ENABLE 或 INIT）\n";
+		} else {
+			std::cout << api.cmd_startup_sequence() << "\n";
+		}
+	}
 
 	std::cout << "Ready. TCP commands on port " << cfg.tcp_port << "\n";
 	std::cout << "Press Ctrl+C to quit.\n\n";

@@ -104,6 +104,16 @@ public:
               int           tcp_port = 9527);
 
     void start();
+    // [2026-09-04 per user] 開機自動就緒：兩顆上電 → M1 停在機械零點 → M2 預設滾筒(RIGHT)。
+    // 在此之前 motor_api 啟動後是**完全被動**的（init() 不 enable，feedback_loop 走
+    // control_mit(0,0,0,0,0) ＝ 不出力），第一道 DEPLOY 一定先吃到 "M1 not enabled"。
+    // 🔴 **刻意不做 CALIBRATE**：那會驅動手臂去撞機械停點來重新定義零點，屬於明確的
+    //    操作者動作，不該在每次行程啟動時自動發生（今天為了換 binary 就重啟了 6 次）。
+    //    這裡只做 go_home ＝「回到既有零點」，零點本身活在馬達驅動器裡、跨重啟保留。
+    //    要重新定義零點請明確送 INIT。
+    // ⚠️ **這會讓手臂在行程啟動時自己移動。** 若重啟當下手臂正壓在玻璃上，它會收回。
+    //    設 ARM_NO_AUTOSTART=1 可停用（bench/除錯、或在手臂位置不明時）。
+    std::string cmd_startup_sequence();
     void stop();
 
     void registerCommand(const std::string& key, CommandHandler handler);
