@@ -794,7 +794,11 @@
         <span class="default" data-default-for="step_cm_default">(default: ?)</span>
       </label>
       <label>step_cm_max
-        <input type="number" data-setting="step_cm_max" min="5" max="100" step="1">
+        <!-- [2026-09-07] 刻意不寫 max：這個欄位的上限就是後端的 STEP_CM_MAX，
+             由 app.js 的 handleSettingsReply 從 get_settings 的 "現值:預設"
+             取 def 欄位填進來（連線時就會要一次）。先前寫死 100，而後端
+             2026-08-31 已降回 45 —— 那是一個只有實際送出才會發現的謊。 -->
+        <input type="number" data-setting="step_cm_max" min="5" step="1">
         <span class="default" data-default-for="step_cm_max">(default: ?)</span>
       </label>
       <label>step_margin_cm

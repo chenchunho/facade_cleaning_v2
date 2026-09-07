@@ -36,9 +36,14 @@ function connectWs() {
         // EVT was missed during the WS outage. status reply contains state=...
         // + p1..p4 + crane_attached + roll/pitch which all auto-update via
         // existing parsers in onWashrobotLine.
+        // [2026-09-07] get_settings 也一起要。先前它只在使用者切到 Settings
+        // 分頁時才發，於是「沒開過設定頁」的情況下 parseScriptCsv 的步距上限
+        // 一直是前端的保底值而不是後端現值 —— 腳本預覽會照一個猜的數字放行。
+        // 這是唯讀指令，不改變機器任何狀態。
         setTimeout(() => {
             send('washrobot', 'status');
             send('crane',     'status');
+            send('washrobot', 'get_settings');
         }, 200);
     };
     ws.onclose = () => {
@@ -1343,6 +1348,26 @@ document.getElementById('btn-descend-to-ground').onclick = () => {
 // Default = sweep (matches 99% use case + preserves backward-compat).
 // ====================================================================
 
+// --------------------------------------------------------------------
+// [2026-09-07] 步距範圍的單一真相在後端 —— 這兩個變數只是快取，不是來源。
+//
+// 後端權威：parse_script_csv_ 判的是 STEP_CM_MIN .. settings_.step_cm_max
+// （app/wash_robot_commands.cpp:3296）。settings_.step_cm_max 是**執行期可調
+// 值**，被 cmd_set_setting 夾在 [5, STEP_CM_MAX] 內，而 STEP_CM_MAX 現為 45。
+// get_settings 回覆的 "step_cm_max=<現值>:<STEP_CM_MAX>" 兩個欄位都拿得到，
+// 由 handleSettingsReply 寫回這裡；ws.onopen 每次(重)連線都會要一次。
+//
+// 🔴 不要在這裡寫死數字。2026-08-28 曾把上限寫成 100 去對齊當時的後端，
+// 後端 08-31 降回 45 之後這裡沒人跟著改 —— 那正是這段註解自己警告過的
+// 「預覽說 OK、送出被拒」，而且沒有任何徵兆，只有實際送出才會發現。
+const STEP_CM_MIN_FALLBACK = 5;    // = 後端 STEP_CM_MIN，編譯期常數
+const STEP_CM_MAX_FALLBACK = 45;   // = 後端 STEP_CM_MAX，get_settings 到達前的保底值
+// ⚠️ min 目前沒有辦法從後端問到（get_settings 不吐 step_cm_min），所以它仍是
+// 一份複本。改後端 STEP_CM_MIN 時記得回來改這裡。
+let backendStepCmMin = STEP_CM_MIN_FALLBACK;
+let backendStepCmMax = STEP_CM_MAX_FALLBACK;
+// --------------------------------------------------------------------
+
 // Returns
 //   { ok: true, steps: [{cm, sweep}, ...], totalCm, nSweep, nTransit }
 //   | { ok: false, err: '...' }
@@ -1383,11 +1408,10 @@ function parseScriptCsv(csv) {
         }
         const cm = parseInt(head, 10);
 
-        // [2026-08-28 per user] 上限 50 → 100，對齊後端的 STEP_CM_MIN..STEP_CM_MAX
-        // (5..100)。這裡只是前端預覽的即時檢查，真正的把關在 parse_script_csv_；
-        // 兩邊不一致的話會出現「預覽說 OK、送出被拒」或反過來，所以要一起改。
-        if (cm < 5 || cm > 100)
-            return { ok: false, err: `token #${i+1} cm=${cm} 超出 5..100` };
+        // 這裡只是前端預覽的即時檢查，真正的把關在 parse_script_csv_。
+        // 邊界取自後端（見上方 backendStepCmMin/Max 的說明），不寫死。
+        if (cm < backendStepCmMin || cm > backendStepCmMax)
+            return { ok: false, err: `token #${i+1} cm=${cm} 超出 ${backendStepCmMin}..${backendStepCmMax}` };
         if (count < 1 || count > 1000)
             return { ok: false, err: `token #${i+1} count=${count} 超出 1..1000` };
         for (let k = 0; k < count; ++k) {
@@ -1909,6 +1933,16 @@ updateCraneButtonStates();
                 lastApplied[key] = cur;
                 input.classList.remove('dirty');
                 ++found;
+            }
+            // [2026-09-07] step_cm_max 同時是「腳本預覽的上限」與「這個欄位自己
+            // 的可填上限」，兩者都改成從這則回覆推導，不再由前端寫死：
+            //   cur = 執行期現值   → parseScriptCsv 的上界
+            //   def = STEP_CM_MAX  → 這個欄位能填到多大（set_setting 的 apply
+            //                        邊界就是 [5, STEP_CM_MAX]，超過會回 ERR）
+            if (key === 'step_cm_max') {
+                const n = parseInt(cur, 10);
+                if (Number.isFinite(n)) backendStepCmMax = n;
+                if (input) input.max = def;
             }
             const defEl = document.querySelector(`.default[data-default-for="${key}"]`);
             if (defEl) defEl.textContent = `(default: ${def})`;

@@ -3737,6 +3737,16 @@ std::string WashRobot::cmd_status() {
     oss << " obstacle_detect=" << (obstacle_detect_enabled_.load() ? "on" : "off");
     oss << " follower_mode="  << (follower_use_imu_.load() ? "imu" : "meter");
     oss << " first_step="     << (first_step_right_.load() ? "right" : "left");
+    // [2026-09-07] 把 step_in_progress_ 露出來。
+    // 🔴 **為什麼需要**：`cmd_attach` 是**成功之後**才 `set_state_(Attached)`，
+    //    整段 10~30 秒的 attach 流程（含 ③→④ 那 2 秒密封窗口）`state` 停在 `ready`
+    //    ⇒ **從 status 完全看不出 attach 正在進行**。GUI 因此無法在密封窗口提高取樣率，
+    //    而那正是最需要看清楚的 2 秒。這個旗標本來就存在（`StepInProgressGuard`，
+    //    attach / step_down / step_up 都會設），只是從來沒有被送出去過。
+    // 📌 它同時也是「後端沒有『某件事正在進行』的訊號」這個結構缺口的一小塊；
+    //    ⚠️ 但**它涵蓋不到 `cycle_test`** —— 那支不走 `step_*`，全程 idle（見待辦表）。
+    //    不要因為多了這個欄位就以為腳本鎖的問題解決了。
+    oss << " step_in_progress=" << (step_in_progress_.load() ? 1 : 0);
     oss << std::fixed << std::setprecision(1);
     for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s)
         oss << " p" << s << "=" << cached_pressure_[s - 1].load();
@@ -3840,8 +3850,17 @@ std::string WashRobot::cmd_pump(bool on) {
 std::string WashRobot::cmd_brush(bool on) {
     State cur = state_.load();
     if (cur == State::Error) return state_violation_(cur);
-    if (pqw_.controlRelay(CH_BRUSH, on)) return "ERR brush_fail\n";
-    return "OK\n";
+    // [2026-09-07] 由裸 controlRelay + 無條件 OK 改為 verified + 回讀，比照 cmd_pump。
+    // 🔴 這支比 cmd_pump 更需要：**滾筒刷沒有任何下游感測可以推翻它**
+    //    （幫浦至少還有 vacuum_check 當權威）。在這裡回一個假的 OK，就是最終答案。
+    // 🔴 而 CH_BRUSH 正是 2026-07/08 被誤改成 15、**打到空通道、滾筒整段不轉而
+    //    帳面全綠**的那個通道 —— 那次事故的唯一徵兆就是「有人發現滾筒沒轉」。
+    if (pqw_set_relay_verified_(CH_BRUSH, on)) return "ERR brush_fail\n";
+    const std::vector<bool> st = pqw_.readAllStatus();
+    if ((int)st.size() < CH_BRUSH) return "OK brush_set_but_readback_fail\n";
+    std::ostringstream oss;
+    oss << "OK ch" << CH_BRUSH << "=" << (st[CH_BRUSH - 1] ? 1 : 0) << "\n";
+    return oss.str();
 }
 
 // [2026-09-01 per user] 繼電器現況回讀。見 WASH_ROBOT.h 的宣告說明。
@@ -3899,8 +3918,17 @@ std::string WashRobot::cmd_relay(int ch, bool on) {
 std::string WashRobot::cmd_water_pump(bool on) {
     State cur = state_.load();
     if (cur == State::Error) return state_violation_(cur);
-    if (pqw_.controlRelay(CH_WATER_PUMP, on)) return "ERR water_pump_fail\n";
-    return "OK\n";
+    // [2026-09-07] 同 cmd_brush，由裸 controlRelay + 無條件 OK 改為 verified + 回讀。
+    // ⚠️ CH_WATER_PUMP 是 2026-08-27 由 6 搬到 14 的（6 讓給破真空閥）。
+    //    🔴🔴 CH6 與 CH14 絕不可同號——若這支寫回 CH6，噴水＝開破真空閥＝四顆吸盤
+    //    同時失去真空、機器在貼牆狀態下脫落。多一層回讀不會擋住寫錯常數，
+    //    但至少讓「送出去了卻沒生效」不再無聲。
+    if (pqw_set_relay_verified_(CH_WATER_PUMP, on)) return "ERR water_pump_fail\n";
+    const std::vector<bool> st = pqw_.readAllStatus();
+    if ((int)st.size() < CH_WATER_PUMP) return "OK water_pump_set_but_readback_fail\n";
+    std::ostringstream oss;
+    oss << "OK ch" << CH_WATER_PUMP << "=" << (st[CH_WATER_PUMP - 1] ? 1 : 0) << "\n";
+    return oss.str();
 }
 
 //=========== QX-DO24 PWM output (cli_22_ slave 6) ===========

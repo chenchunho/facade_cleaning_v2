@@ -831,7 +831,39 @@ static std::atomic<double> g_balance_deadband  {BALANCE_DEADBAND_DEFAULT};
 //    調頻率一樣救不了——馬達沒在轉，改它的頻率沒有意義。那條仍靠
 //    length_diff_max_cm 的中止保護與 fine_adjust 事後對齊。**兩者互補，不取代。**
 enum class BalanceSource { Meter, Imu };
-static std::atomic<BalanceSource> g_balance_source {BalanceSource::Meter};   // 預設 Meter＝與現行逐位元相同
+// 🔴🔴 [2026-09-07] **編譯預設由 Meter 改為 Imu。**
+//
+// 症狀：production 一律跑 `imu`，但那是**執行期**用 `set_balance_source imu` 設的，
+//       沒有任何持久化 → **吊機程式一重啟就靜默退回 meter**，除了 `status` 之外
+//       沒有徵兆。09-03 深夜記過一次、09-04 早上在有人正在操作 GUI 時重演，
+//       那趟 `down on` 整趟資料不可比（對照組：關掉 IMU 平衡，平均 |roll|
+//       0.68° → 2.52°）。
+//
+// ✅ **為什麼改預設是安全的（這是本次判斷的重點，不是照著改）**：
+//    「預設 Meter」**不是** IMU 沒接時的安全退路 —— 退路在別的地方，而且是**每個 tick**
+//    重新判定的：`apply_balance_trim` 算的是
+//        use_imu = want_imu && imu_roll_fresh()
+//    `imu_roll_fresh()` 在**從未收到**（stamp==0）與**過期**（>IMU_ROLL_STALE_MS=750ms）
+//    兩種情況都回 false，而 else 分支用的 kp / deadband / 誤差式與 Meter 路徑
+//    **逐位元相同**。⇒ IMU 沒接時，`imu` 與 `meter` 兩個設定跑的是同一段控制律，
+//    唯一差別是多印一行「退回計米器」的警告（每 2 秒一次，stderr）。
+//    **default=Imu 在 IMU 缺席時不比 default=Meter 差，在 IMU 在線時才是對的。**
+//
+// 📌 原本 `Meter` 的理由是註解自己寫的「與現行逐位元相同」——那是 2026-09-01 導入
+//    這個功能當天的 **opt-in 開關**（新功能不要改變既有行為），不是安全設計。
+//    功能在 09-01 就已驗收（229cm 全程實測），開關卻沒有跟著翻過來。
+//
+// 🔴 另一個支持改預設的事實：`LENGTH_DIFF_MAX_CM_DEFAULT` 已經在 09-01 為了 IMU
+//    世界**永久**由 15 放寬到 10、語意也從「姿態指標」改成「單側卡死偵測」
+//    （見該常數上方說明）。留著 default=Meter 等於出廠組態是
+//    「計米器控制 + 為 IMU 世界調過的守衛」—— 兩邊沒有一邊是被驗證過的組合。
+//
+// ⚠️ 沒有被這次改動解決的事：**設定仍然不持久化**。改的只是「重啟後落在哪個
+//    預設」，`set_balance_source meter` 之後重啟一樣會跳回 imu。真正的根治是把
+//    執行期參數寫檔（與 motion_hz / fine_adjust_level_diff_cm 同一條線，
+//    見 work_log 待辦），不在本次範圍。
+// ⚠️ 未經硬體驗證（機器維修中，全程只送唯讀指令）。
+static std::atomic<BalanceSource> g_balance_source {BalanceSource::Imu};   // 🔴 [2026-09-07] Meter → Imu，理由見上
 // 🔴 [2026-09-01] kp 的語意由「Hz/度」改為「**base_hz 的比例/度**」。
 //
 // 原因（229cm 全程實測，同樣的 IMU 平衡、只差速度）：
@@ -5203,6 +5235,31 @@ int main() {
         return 1;
     }
     std::cout << "[OK]   command server :" << CMD_PORT << " (type 'exit' to stop)" << std::endl;
+
+    // 🔴 [2026-09-07] 開機大聲宣告平衡誤差來源。
+    //
+    // 改預設（Meter → Imu）解決的是「重啟後跑錯組態」，**解決不了**另一半：
+    // `balance_source=imu` 只表示**想要**用 IMU，實際是否用得到還要看 roll 資料
+    // 新不新鮮 —— 而 roll 是**本體**在移動中以 ~4Hz 推過來的（cmd_set_imu_roll），
+    // 吊機自己沒有 IMU。所以開機當下必然是 `從未收到`，這行的用途是讓操作者
+    // 知道「現在還沒有 IMU 平衡，要等本體連上並開始推送」，而不是看到
+    // balance_source=imu 就以為它在運作。
+    // 📌 這正是 cmd_status 裡 imu_roll_age_ms / imu_roll_fresh 兩個欄位存在的理由，
+    //    只是那要有人去問；開機這一行是不問也會看到的那份。
+    {
+        int64_t age = -1;
+        const bool fresh = imu_roll_fresh(&age);
+        const bool want_imu = (g_balance_source.load() == BalanceSource::Imu);
+        std::cout << "[INFO] balance_source=" << (want_imu ? "imu" : "meter")
+                  << " (編譯預設；執行期可用 set_balance_source 改，**不持久化**)"
+                  << std::endl;
+        if (want_imu && !fresh) {
+            std::cerr << "[WARN] balance_source=imu 但 roll 資料"
+                      << (age < 0 ? "從未收到" : "已過期")
+                      << " → 在本體開始推送 set_imu_roll 之前，平衡走的是**計米器**路徑"
+                      << "（每輪自動判定，資料一來就會切過去）" << std::endl;
+        }
+    }
 
     // Broadcast initial device_state so any client that connects later gets a
     // fresh snapshot via cmd_status; in-flight clients should also poll status

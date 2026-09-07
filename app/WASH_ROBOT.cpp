@@ -4715,7 +4715,18 @@ bool WashRobot::pqw_set_relay_verified_(int ch, bool on) {
         // now ~200ms). Each sweep round has ~4-6 PQW ops → +0.6-0.9s per round.
         sleep_ms_(200);
         auto st = pqw_.readAllStatus();
-        if (st.empty() || (int)st.size() <= ch - 1) return false;  // can't verify, proceed
+        if (st.empty() || (int)st.size() <= ch - 1) {
+            // [2026-09-07] 這條分支原本一行都不印 —— 而它正是「回讀整條掛掉」的路徑。
+            // 對照組：下面「重試三次放棄」那條**有**印。於是最該留下證據的情況反而無聲，
+            // 唯一徵兆是 cmd_pump 回覆字串裡少了 `ch2=` 欄位；而實查三個呼叫端
+            // （console v2 / cycle_test.py / 8080 GUI）**沒有一個看那個字串**，
+            // 它們一律各自去讀 relay_status ⇒ **降級狀態等於零證據**。
+            // 🔴 語意刻意不變：best-effort、權威留給下游 vacuum check。這裡只補證據。
+            std::cout << "[pqw_relay] ch=" << ch << " set " << (on ? "ON" : "OFF")
+                      << " readback unavailable (size=" << st.size()
+                      << ") — proceeding unverified, downstream check is the authority\n";
+            return false;  // can't verify, proceed
+        }
         if (st[ch - 1] == on) return false;                         // confirmed
         std::cout << "[pqw_relay] ch=" << ch << " set " << (on ? "ON" : "OFF")
                   << " verify fail vr=" << vr << ", retrying\n";

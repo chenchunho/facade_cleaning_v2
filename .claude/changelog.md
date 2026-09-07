@@ -1,3 +1,531 @@
+## [2026-09-07g6] 🔗 Setting 表四處耦合到期改完；並抓到同表另一個方向相反的謊
+
+> 範圍：`web_backend/public_v2/index.html`。已部署（`2026.09.07-2222`）。
+
+### Fixed（四處耦合，隨 `m4` 部署同日到期）
+- ① `balance_source` 的「編譯預設」`meter` → **`imu`**，並拿掉 `color:var(--bad)` 紅字
+  （紅字原本的語意是「預設是錯的那個」）。
+- 🔴 ② **「重啟後」的 `會遺失` pill 刻意維持不動**（由 ai-2 當場更正我的第一版）。
+  機器線改的只是**編譯預設落在哪**，`balance_source` **仍然完全沒有持久化**——
+  執行期設成 `meter` 之後重啟一樣靜默變回 `imu`。
+  **值照樣遺失，只是後果從「掉到錯的那一個」變成「掉到對的那一個」。**
+  ⇒ 改寫「依據」欄說明後果反轉即可。**寫「不會遺失」會讓這張表在相反方向說謊，比不改更糟。**
+- ③ Dashboard 的來源註記邏輯反過來：現在 **`meter` 才是「被手動設過」**，`imu` 可能只是重啟後的預設。
+  🔴 兩邊都標——看到 `imu` 以為「有人確認過」、看到 `meter` 以為「本來就這樣」，兩種都會誤導。
+- ④ Mission 起跑檢查的 `bal:` 說明：原文「每次重啟都會靜默回到編譯預設」**字面仍為真**
+  （仍不持久化），只是回到的已是對的值 ⇒ **調語氣不是修錯誤**，並補一句「不要靠重啟修，直接設回來」。
+
+### 🔴 順帶抓到：同一張表的 `motion_hz` 列，方向是反的
+- 「編譯預設」寫 **30**，實際是 **50**（`Crane_control_PI/main.cpp:277`
+  `VFD_MOTION_HZ_DEFAULT = 50.0`）。**當晚 `m4` 重啟實測：未經任何設定 → `motion_hz=50`。**
+- 更糟的是「依據」欄寫「中止時若留在 50，下一個人下 `pay_out` 就是 50 Hz」——
+  **把 50 講成殘留的危險值，而 50 正是重啟後你會拿到的東西。**
+- ✅ 已改為 `50`（標紅）＋「重啟後就是 50 Hz（不是殘留，是預設）· 現場慣用 30 · 每次重啟都要重設」。
+- 📌 **這張表的存在意義就是回答「重啟後會變成什麼」——答錯比不答更糟，它會讓人放心。**
+  同表其餘各列已逐一對照吊機常數複核：`LENGTH_DIFF_MAX_CM_DEFAULT=10` ✅／
+  `RETRACT_TENSION_STOP_KG_DEFAULT=75` ✅／`UP_STOP_TOTAL_KG_DEFAULT=130` ✅／
+  `fine_adjust_level_diff_cm` 預設 0 ✅（今晚重啟實測也是 0）。
+
+### Verified
+- 兩個 inline `<script>` `node --check`；`tools/check_console.js` 四項全過
+- 部署後 md5 兩邊逐位元一致；`curl` 確認服務出去的內容已換（舊的紅字 `meter` 計數歸零）
+- **截圖複驗 Setting 分頁**：`balance_source` 列現為 `imu / imu / 會遺失`，依據欄說明後果反轉；
+  同畫面另外確認了本日其他成果：頁首 `🖥 電腦` 切換鈕、輪詢說明 `status 1s · 運動中 250ms`
+
+---
+
+## [2026-09-07m4] 🔴🔴 VS 早就不是建置路徑了；四個「待建置」改動當天建完、部署、實機驗證
+
+> 範圍：新增 `scripts/build/{build_body.sh,build_body_incremental.sh,build_crane.sh,README.md}`；
+> 更正 `CLAUDE.md`（Project Overview + Build System）與 `.claude/runbook.md`（§A、MSVC 節）。
+> **兩支 binary 已重建並部署。**
+
+### 🔴 起因：一個錯誤前提害我把四件事排進「等 VS 窗口」
+per user 提出「你現在都直接用 g++，VS 用不到」之後才去查。查出來的比預期嚴重：
+
+| 實查 | 意義 |
+|---|---|
+| VS 遠端樹停在 **08-25~08-27**（分層重構之前） | 之後沒被用過 |
+| 樹裡只有 `Crane_control_PI/main.cpp` + `user_lib/` | 缺 `app/ command/ common/ transport/ mechanism/ config/` |
+| **`rope_axis.h` 整棵遠端樹找不到**，而 `main.cpp` include 它 | ⇒ **那棵樹現在建不起來** |
+| `.vcxproj` 的 include 路徑**漏 `..\mechanism`／`..\config`**、`ClInclude` 沒列 `rope_axis.h` | **建置定義本身就是壞的** |
+| Pi 上早有 `bld_wr.sh` / `bld_body.sh` / `bld_cr.sh`，純 `g++ -std=c++17 -O2 -lpthread` | **真正的建置路徑** |
+
+📌 **我先前對 per user 與 ai-2 都說「C++ 只能走 VS」，那是錯的**，並因此把 `m1`/`m2`/`m3`
+排成「待部署」。⇒ **這是「文件會落後於機器，而且是靜默的」在同一天的第二個實例**
+（第一個是 `cmd_pump` 那列過期 5 天的待辦）。三份文件（`CLAUDE.md`／`runbook.md`／`.vcxproj`）
+**同時**在說一件不成立的事，而沒有任何訊號。
+
+### Added
+- **`scripts/build/`**：三支腳本**逐位元自 Pi 取回**（md5 兩邊相同），先前**只存在於兩台 Pi 的
+  `~/bringup/`、不在版控** —— 與同日的檢查器同病，但嚴重得多：**它是唯一能用的建置定義。**
+- **`scripts/build/README.md`**：記下三個先前**沒有任何文件記載**的隱藏步驟——
+  ① 同步（腳本建的是 Pi 上那份原始碼，不是 repo）② 改名（產物 `*_drv.out` ≠ 部署名）
+  ③ 停程式才換得動（`Text file busy` 是保護不是障礙）。
+
+### 🐛 新踩坑：`pgrep` 的 15 字元 comm 上限
+`pgrep facade_cleaning_v2` **永遠回零筆**（名字 18 字元 > comm 15 字元上限）。
+它**有印警告**，但只看「有沒有輸出」就會把**還在跑**判成**已停止**——本次就這樣誤判過一次。
+✅ 用 `ps -eo pid,etime,cmd | grep …` 或 `pgrep -f`，**並同時確認埠已關**。
+📌 又一個「找不到 ≠ 沒有」。
+
+### Verified —— 全部實機，不是語法層
+- **建置**：本體 16/16 TU、**18 秒**；吊機**62 秒**。
+- 🔴 **本體新舊 binary 大小完全相同（1086728 bytes，純屬巧合）** ⇒ 只比大小會以為沒建到。
+  ✅ 用 `strings` 對照：`step_in_progress=` / `brush_set_but_readback_fail` /
+  `water_pump_set_but_readback_fail` / `readback unavailable` **新版各 1、現役各 0**。
+  吊機同理：`[INFO] balance_source=` 與 `[WARN] balance_source=imu` 新版有、現役無。
+- **同步可證**：三個 `.cpp` 送上去後 md5 與 repo 逐位元相同才建。
+- 🎯 **`m1` 端到端**：吊機重啟後**未經任何設定** → `balance_source=imu`（舊版此處是 `meter`）。
+  開機宣告如實：`[WARN] balance_source=imu 但 roll 資料從未收到 → …實際走計米器路徑`，
+  本體起來後 `imu_roll_fresh=1 age=162ms` ⇒ **它說「資料一來就會切過去」，確實切過去了**。
+  ✅ 同時 `motion_hz` 回 **50**、`fine_adjust_level_diff_cm` 回 **0**
+  ⇒ **反向證明重啟是真的發生了**，且只有 `balance_source` 現在會落在對的值。
+- 🎯 **`m2` 端到端（真開關）**：`brush on` → **`OK ch5=1`**、`brush off` → **`OK ch5=0`**
+  （舊版一律回光禿禿的 `OK`）。`water_pump off` → `OK ch14=0`。
+  收尾 16 個通道全 0，與動手前基線逐欄相同。
+- 🎯 **`m3`**：本體 `status` 出現 `step_in_progress=0`（舊版無此欄位）。
+- **init 段與當日首次啟動逐字比對**：本體只差 IMU roll 一行（0.8899→0.8844）⇒ 無新故障。
+  三條匯流排 `.20`/`.21`/`.22` 全 connected、crane 連上、GUI 兩個橋接自動重連。
+- ✅ 重啟後已補設 `motion_hz=30`、`fine_adjust_level_diff=5`（**這兩個仍不持久化**）。
+
+### 未做（已知缺口）
+- 🟡 **沒有同步腳本**（repo → Pi 仍是手動 `scp`）⇒ 「建出來的是這個 commit」目前只能靠人工複驗。
+- 🟡 `scripts/build/` 與 Pi 上的 `~/bringup/*.sh` **是兩份副本**（今日取回時相同）。權威是 repo。
+- ⚪ `.sln` / `.vcxproj` **保留給編輯與 IntelliSense，不再是建置權威**；已在 `CLAUDE.md` 標明
+  **不要照它推斷檔案清單或 include 路徑**。連帶：「4 個 `.vcxproj.user` 被 git 追蹤」那條待辦失去意義。
+
+---
+
+## [2026-09-07m3] 🔴 本體 `status` 新增 `step_in_progress` 欄位
+
+> 範圍：`app/wash_robot_commands.cpp`（`cmd_status`）。**需 VS 重建才會生效。**
+
+### Added
+- `status` 輸出新增 `step_in_progress=0|1`。
+  🔴 **為什麼**：`cmd_attach` 是**成功之後**才 `set_state_(Attached)` ⇒ 整段 10~30 秒的
+  attach 流程（含 ③→④ 那 2 秒密封窗口）`state` 停在 `ready`，**外界完全看不出 attach 正在進行**。
+  09-07 實機確認 status 22 個欄位裡沒有任何一個能指出這件事。
+  旗標本身早就存在（`StepInProgressGuard`，attach / step_down / step_up 都會設），
+  **只是從來沒有被送出去過**。
+- ⚠️ **它涵蓋不到 `cycle_test`** —— 那支不走 `step_*`，全程 `idle`。
+  **不要因為多了這個欄位就以為「腳本鎖」那個結構缺口解決了。**
+
+### Verified
+- 送 Pi `g++ -fsyntax-only -std=c++17`（14.2.0）通過，**負控制命中 1**（插入未宣告符號被抓）
+- 🔴 **行為未驗**，需 VS 重建。部署後 `status` 應多一個 `step_in_progress=0`。
+
+---
+
+## [2026-09-07g5] ⚡ console v2 動態輪詢：閒置 1s、運動中 250ms（附防堆積）
+
+> 範圍：`web_backend/public_v2/index.html`。純前端，已部署（`2026.09.07-2148`）。
+
+### Added
+- `pollFast` 由 `setInterval(1000)` 改為**自我排程的 `setTimeout`**，每輪重新決定間隔。
+  用 `setTimeout` 不用切換 `setInterval`，是為了避免「舊 interval 沒清乾淨、兩條同時在跑」。
+- 🔴 **防堆積（本次最重要的一項）**：佇列是「單一在途、其餘排隊」且**排隊長度無上限**。
+  提速到 250ms 後，只要一次往返超過 250ms 就會疊上去，而且**堆起來完全沒有徵兆**——
+  只會看到畫面越來越舊。✅ 每輪先問「這個 target 已經有 status 在路上了嗎」，有就跳過
+  ⇒ **實際取樣率自動收斂到往返時間，不會比後端跟得上的還快。**
+- 頂欄說明同步顯示 `status 1s · 運動中 250ms`（由同一張 `POLLS` 表產生，速率改了說明一定跟著改）。
+
+### Notes
+- ✅ **動手前先查證：不會增加 `.22` 匯流排負載**（這是最大的疑慮，那條匯流排最脆弱）。
+  本體 `cmd_status` 的 JC100 現場讀取**後端自己限速在 ≤1Hz**，其註解寫的理由正是
+  「GUI 2Hz 輪詢 × 每次打 `cli_22_` 九次 → bus saturation」；且**運動中直接回快取**
+  （由運動路徑 piggyback 更新）、attach 期間更完全抑制現場讀。
+  ⇒ 提速只增加 WebSocket 與 TCP 往返，**不碰 Modbus**。
+- 🔴 **只解掉了一半，而且另一半是結構性的**：
+  ✅ **解掉**「16 秒回程只有 16 個取樣點」——`motion_active=1` 時 250ms ⇒ 64 點。
+  ❌ **沒解掉**「③→④ 那 2 秒密封窗口保證會漏」——**因為沒有任何訊號指出 attach 正在進行**
+  （見 `m3`）。程式已先讀 `wr.step_in_progress`，C++ 補上欄位的那天**前端不必再改就會生效**；
+  **在那之前密封窗口仍然是 1Hz，不要以為修好了。**
+- 📌 GUI 既有註解早就記過相關限制：「`motion_active` **只在吊機實際轉動時為 1**，
+  而 `cycle_test` 每步有約 17 秒在做推桿／真空／滑台，那段是 0」⇒ 光看它會正好漏掉密封窗口。
+- 🟡 `paused` / `paused_on_error` / `waiting_confirm` **刻意不提速**：那是在等人，白費往返。
+
+### Verified
+- 兩個 inline `<script>` `node --check`；`tools/check_console.js` 四項全過
+- 🎯 **決策函式逐案測試 8/8**（把 `pollFastMs` 逐字抽出來餵合成狀態）：
+  閒置 1000／吊機在轉 250／running 250／balancing 250／paused 1000／waiting_confirm 1000／
+  **attach 中（後端現況）1000**／**attach 中（補欄位後）250**
+- ⚠️ **端到端速率未實測**：`status` 是 FAST 路徑，**兩個後端的 log 都不記它** ⇒ 沒有可數的東西。
+  不要把上面的 8/8 當成「實機上真的以 250ms 在跑」。
+
+---
+
+## [2026-09-07g4] 🛠 前端靜默失敗檢查器進版控（`web_backend/tools/check_console.js`）
+
+> 範圍：新增 `web_backend/tools/check_console.js`、`CLAUDE.md` 登記一列。不影響執行期。
+
+### Added
+- **檢查四類「不會有任何徵兆」的前端錯**，離開碼 0/1 可直接串在部署前：
+  ① 重複 id（`getElementById` 只拿得到第一個，第二個永遠不更新）
+  ② 寫到不存在的元素（`txt()`/`bar()` 找不到就 return，**沒有例外、沒有 console 訊息**）
+  ③ 大括號平衡　④ `<div>` 開合
+  另有一條 ℹ️：宣告了但全組只出現一次（純 markup，不當成失敗但值得看一眼）。
+- 🔴 **這支自己有前科，所以才進版控**：2026-09-04 寫過功能相同的一支、跑完就丟、沒進 repo，
+  09-07 要用時只能整支重寫。📌 **一個沒進版控的檢查工具，等於下次還要再寫一次。**
+
+### Notes
+- 🔴 **按「組」檢查不是按檔**。console v2 是單檔（markup + JS 同在 `index.html`），
+  但 8080 是 `index.html` + `app.js` 兩個檔 —— 逐檔檢查的話 ② **根本檢不到**
+  （app.js 寫到 index.html 沒有的 id 那一類），而那正是 8080 的真實風險；
+  ③ 也會把 151 個 id 全報成「沒人寫」。
+- 🔴 **工具自己會印出它的盲區**：只比對**字面字串**，樣板字串動態組的 id
+  （`` getElementById(`vac-${n}`) ``）看不到。後果不對稱：
+  **② 會漏報（假陰性，危險）**、③ 的 ℹ️ 會誤報。
+  首次跑就踩到 —— 8080 的 `vac-5..8` 被列成「沒人寫」，實際是 `vac-${id}` 寫的。
+  ✅ 已抓「動態前綴」來消掉 ③ 的誤報，並**如實印出「② 涵蓋率非 100%」**。
+  📌 **一個會靜默漏掉某一類的檢查工具，比沒有工具更危險——它會讓人以為查過了。**
+  這與同日的 `--timeout` 不等、「讀到一行就當回覆」是同一族：
+  **工具給了看起來完整的答案，而完整性是假設出來的。**
+
+### Verified
+- 兩組現行檔案全數通過（console v2：id 107／指名 99；8080：id 151／指名 113）
+- 誤報已消（`vac-5..8` 不再列入），盲區警告正確出現（`` `vac-${…}` ``）
+- 剩下唯一一筆 ℹ️ 是 console v2 的 `tenset` —— 查過是純版面容器，**不是缺陷**
+
+---
+
+## [2026-09-07m2] 🔴 `cmd_brush` / `cmd_water_pump` 補回讀；回讀整條掛掉的那條路徑補上證據
+
+> 範圍：`app/wash_robot_commands.cpp`、`app/WASH_ROBOT.cpp`。**需 VS 重建才會生效。**
+
+### Fixed
+- 🔴 **`pqw_set_relay_verified_` 的「讀不回來」分支一行 log 都不印。**
+  對照組刺眼：同一支函式裡「重試三次放棄」那條**有**印，而**最該留下證據的降級路徑反而無聲**。
+  它 `return false`（＝成功）讓上層繼續走，唯一徵兆是 `cmd_pump` 回覆裡少了 `ch2=` 欄位——
+  🔎 **而實查三個呼叫端沒有一個看那個字串**：console v2 明寫「一律看回讀不看回傳字串」、
+  `cycle_test.py` 自己解析 `relay_status` 的 `ch<N>=1`、8080 GUI 根本不解析 pump 回覆。
+  ⇒ **降級狀態等於零證據。** ✅ 補上一行，語意（best-effort、權威留給下游）**刻意不變**。
+  📌 **補在 helper 不是補在 `cmd_pump`** —— 這樣 valve 等其他呼叫端一起受惠。
+- 🔴 **`cmd_brush`(CH5) / `cmd_water_pump`(CH14) 仍是裸 `controlRelay` + 無條件 `OK`。**
+  `cmd_pump`（09-03）與 `cmd_relay` 都補過回讀，這兩支被落下。改為
+  `pqw_set_relay_verified_` + 回讀並回報實際通道值，與 `cmd_pump` 同形。
+  🔴 **`cmd_brush` 比 `cmd_pump` 更需要**：滾筒刷**沒有任何下游感測可以推翻它**
+  （幫浦至少還有 vacuum_check 當權威）⇒ 這裡回一個假的 OK 就是最終答案。
+  而 `CH_BRUSH` 正是 2026-07/08 被誤改成 15、**打到空通道、滾筒整段不轉而帳面全綠**那個通道。
+
+### Verified
+- **語法層**：repo 現行原始碼打包送本體 Pi（g++ 14.2.0）`-fsyntax-only -std=c++17`，
+  `wash_robot_commands.cpp` 與 `WASH_ROBOT.cpp` 皆通過。
+  ✅ **有做負控制**：插入未宣告符號會被抓到（`error: ... was not declared`），還原後複檢仍 OK。
+  ⚠️ 刻意**不用** Pi 上 `~/projects/` 那棵 VS 樹——它沒有 `common/`／`transport/`／`mechanism/`，
+  拿它檢等於檢別的東西。
+- **實機（安全做法，機器維修中）**：只送 `off` 到**已經是 off** 的通道 ⇒ 實體零動作。
+  ```
+  基線     ch5=0 ch14=0
+  brush off       -> 'OK'          ← 光禿禿，一個通道欄位都沒有
+  water_pump off  -> 'OK'
+  複驗     ch5=0 ch14=0            ← 前後逐欄相同
+  ```
+  ⇒ **現行回覆完全不帶證據**這件事已在實機上確認（對照 `cmd_pump` 回 `OK ch2=<值>`）。
+  🔴 **刻意沒有把 CH5／CH14 打開**：那會轉滾筒刷馬達、噴水。per user 放行的是「繼電器可動」，
+  但這兩個通道的下游是實體動作，維修中沒有必要為了驗證去動它。
+
+### 待部署
+- 需 Windows VS remote build（Debug|ARM64）。部署後才可做真驗證：
+  `brush on` 應回 `OK ch5=1`（現在是裸 `OK`）、`water_pump on` 應回 `OK ch14=1`。
+- ⚠️ **修好後的行為未經硬體驗證**，不要與上面「已驗」混為一談。
+
+---
+
+## [2026-09-07g3] 🖥 console v2 加電腦版／平板版切換（觸控目標 44px）
+
+> 範圍：`web_backend/public_v2/index.html`。純前端，已部署（`2026.09.07-2101`）。
+
+### Added
+- **頁首新增 `🖥 電腦 / 📱 平板` 切換鈕**，與亮／暗同一套模式：`<head>` 在 CSS 之前先套用
+  （避免先畫一次再跳）、選擇記在該瀏覽器的 `localStorage`。**預設 desktop ＝ 先前逐字相同的行為。**
+- 🔴 **為什麼是手動開關而不是 media query**：同樣 1024px 寬，可能是滑鼠、也可能是**戴著手套的
+  手指**。視窗寬度分辨不出輸入方式，`pointer:coarse` 也只分得出「有沒有觸控螢幕」。
+  📌 與主題那條同型：**裝置說得出自己的規格，說不出使用者的處境。**
+- **平板版只放大可觸控的東西**，不動版面欄數（欄數本來就隨寬度重排，09-07 實測 1440 四欄／1024 兩欄）
+  ⇒ 平板版在寬螢幕也能用，反之亦然。判準 **44px**（iOS/Android 指南共同下限；
+  現行 `.btn` 約 29px、`.numin` 約 27px、`.sw` 22px）。
+  🔴 **刻意不整體放大**：這個面板的價值在「一眼看到很多數字」，等比放大會把 STOP 擠到摺線以下。
+- `?density=tablet|desktop` **可覆蓋單次載入、刻意不寫進 localStorage** ——
+  headless 每次都是全新 profile、讀不到 localStorage ⇒ 沒有這個參數，這個模式**無法被自動驗證**。
+  📌 沿用專案既有先例（分頁寫進 `#hash` 的理由之一就是「讓自動截圖能指定分頁」）。
+
+### Notes
+- 🐛 **開關（`.sw`）要連滑塊一起改**：只放大外框、滑塊會停在原地，看起來像壞掉。
+  幾何：外框 56／內寬 54／滑塊 24／打開時 `left:28`。
+- 🔴 **`.sw` 是唯一達不到 44px 的**（藥丸做成 44px 高很突兀）。改用一層看不見的 `::before`
+  把**可點範圍**上下各撐 7px（30+14=44），視覺維持 30px。
+  ⚠️ `.sw` 的 `::after` 已被滑塊佔用，只能用 `::before`。
+- ⚠️ 平板版的規則是**列舉不是通則**：日後新增控制項不會自動進到那個區塊。
+
+### Verified
+- 兩個 inline `<script>` 各自 `node --check`；靜默失敗檢查全過（重複 id 0／寫到不存在的元素 0）
+- **兩種模式各截一張同尺寸（1024×768 Manual）對照**：按鈕明顯放大、切換鈕文字正確、
+  分頁列變高；另拉高視窗到 1024×1500 專門確認 **8 顆繼電器開關的滑塊沒有錯位**
+- 部署後 md5 兩邊逐位元一致
+
+---
+
+## [2026-09-07g2] 🖥 console v2 首次被渲染出來看（headless，帶真實資料）；輪詢說明改由資料產生
+
+> 範圍：`web_backend/public_v2/index.html`。純前端。
+
+### Fixed
+- 🔴 **頂欄輪詢說明只說了四分之三的實話。** `id="polln"` 寫死 `status 1s / relay 4s / pwm 6s`，
+  而實際有**四個** `setInterval`——**漏了 `rail 7s`**。
+  ✅ 改成由 `POLLS` 表同時產生 `setInterval` 與那行說明 ⇒ 間隔與標示不可能再分岔。
+  📌 **一個只說四分之三實話的清單，比沒有清單更糟**——它看起來像完整清單。
+  （`paint` 刻意不入表：它是重繪不是輪詢，不對外送指令。）
+- 🔴 **版號三次部署都沒更新**（`2026.09.04-1412` 掛到今天）。本專案規則是**每次部署前必須更新版號**，
+  那個 badge 正是使用者確認「看到的是不是新版」的唯一機制。本條為自記缺失。
+  ⇒ 今日最終版號 `2026.09.07-2032`。
+  🟡 **順帶發現：8080 那支 `public/index.html` 根本沒有版號欄位**，無法用同樣方式確認。已入待辦。
+
+### Notes
+- 🔴🔴 **Setting 分頁「重啟後還剩什麼」表的「編譯預設」整欄是寫死的複本**，而吊機的編譯常數
+  **沒有任何查詢管道**（「目前值」欄是每秒問 status，可信）。
+  機器線 `[2026-09-07m1]` 已改 `g_balance_source` 預設，**該 binary 一部署，這裡就有四處同時失真**。
+  ✅ 已在該表上方寫入逐處改法。🔴 **刻意不先改**——新 binary 上線前先改，錯的就變成這裡。
+  ⚠️ **其中一處我第一版寫錯，由 ai-2 當場更正**：「會遺失」pill **不可以改成「不會遺失」**。
+  機器線只改了**編譯預設落在哪**，`balance_source` **仍然完全沒有持久化** ⇒
+  **值一樣會遺失，只是後果從「掉到錯的那一個」變成「掉到對的那一個」。**
+  📌 **教訓：寫給未來執行者的指示，寫錯比不寫更糟**——它會被照做，而且看起來很權威。
+
+### Verified —— console v2 上線以來第一次被渲染
+- 🛠 **靜態檢查器**（09-04 那支寫了沒進版控，已重寫，暫放 scratchpad）：
+  重複 id **0**／寫到不存在的元素 **0**／大括號平衡 **0**／`<div>` 149:149。
+- 🎯 **四個分頁 1440×900 全數截到，且帶真實機器資料**。逐項對後端真值全部吻合：
+  左右繩長差 `+3`（56/53）／`roll +0.88°`／距中止 `5.12°`（＝6.0−0.88，`ROLL_TRIP` 正確）／
+  張力門檻 `100·50·130·75` 四個全中／吸盤 `上右 s5 上左 s6 下右 s7 下左 s8`
+  （**08-28 左右歸屬修正在 GUI 上是對的**）／ZDT 右側 `{5,7}`／行程守衛 `0–130`／
+  arm 點紅、手臂「未讀取」（motor_api 未跑）／前置檢查 4/6 兩項不過皆為真實狀態。
+  ✅ 本批 `polln` 修正也在畫面上確認生效（四項齊全）。
+
+### 🔴 方法論：`--timeout` 不等，差點又是一次誤判
+第一張截圖**吸盤與張力兩張卡全空**。09-04 記載過同型假象（`--virtual-time-budget` 快轉計時器），
+我沒用那個參數，所以一度以為是真的壞了。
+**實測：headless Chrome 的 `--timeout=20000` 根本不等，2 秒就截圖** ⇒ 是截太早，不是 GUI 的 bug。
+- ❌ 父頁 busy-wait 延後 `load`：整頁截成白的（繪製也被擋住）
+- ✅ **可行解：讓 `load` 等一張慢速回應的圖片**——本機起一個睡 14 秒才回 1×1 PNG 的小伺服器，
+  wrapper 頁面 iframe 真實頁 + 引用那張圖。`load` 被延後而**主執行緒全程沒被佔住**。
+📌 通則：**`load` 事件觸發 ≠ 畫面畫完了**。與「讀到一行 ≠ 讀到我這筆的回覆」（framing）、
+「`OK` ≠ 真的生效」（回讀）是同一句話的三個版本：
+**工具給了一個看起來完整的答案，而它的完整性是假設出來的，而那個假設從來沒被寫下來過。**
+
+### 仍未驗（不要混進上面）
+- **真人瀏覽器**：按鈕真實行為、觸控目標大小、**實際陽光下可讀性**（亮色是依原理選的，不是量過的）
+- **動作類按鈕**：吊機不能動；真空閥/幫浦/繼電器雖可動，但同時段機器線正在用，
+  刻意不碰以免兩個 session 同時動繼電器
+- **Mission `bal:` 那句 roll 說明字串**（本日 `g1` 改的）需 `|roll| > 1°` 才會顯示，今日未觸發
+
+---
+
+## [2026-09-07m1] 🔴 `balance_source` 編譯預設 Meter → Imu；`cmd_pump` 的謊已在 09-03 修掉且已上機驗證
+
+> 範圍：`Crane_control_PI/main.cpp` 兩處（**未部署** —— C++ 要 VS remote build，見下方 Verified）。
+> `cmd_pump` 本次**沒有改任何一行程式**，只做了查證與實機驗證。
+> 🔴 全程未對吊機發任何動作指令；本體只動了 PQW **CH2（pumpA）**，收尾已還原（見 Verified）。
+
+### Fixed
+- 🔴🔴 **`g_balance_source` 的編譯預設由 `Meter` 改為 `Imu`**（`Crane_control_PI/main.cpp:834`）。
+  症狀：production 一律跑 `imu`，但那是**執行期**用 `set_balance_source imu` 設的、沒有持久化
+  ⇒ 吊機程式一重啟就靜默退回 `meter`，除了 `status` 之外沒有徵兆。09-03 深夜記過一次、
+  09-04 早上在有人正在操作 GUI 時重演，該趟 `down on` 整趟資料不可比
+  （對照組：關掉 IMU 平衡，平均 |roll| 0.68° → 2.52°）。
+
+  ✅ **改預設之前先確認「預設 Meter」是不是 IMU 沒接時的安全退路 —— 它不是。**
+  退路在別的地方，而且是**每個 tick 重新判定**的（`apply_balance_trim`）：
+  ```
+  use_imu = want_imu && imu_roll_fresh()
+  ```
+  `imu_roll_fresh()` 在**從未收到**（`g_imu_roll_stamp_ms == 0`）與**已過期**
+  （`> IMU_ROLL_STALE_MS = 750ms`）兩種情況都回 `false`，而 `else` 分支用的
+  kp / deadband / 誤差式與 `Meter` 路徑**逐位元相同**。
+  ⇒ **IMU 沒接時，`imu` 與 `meter` 兩個設定跑的是同一段控制律**，唯一差別是多印一行
+  「退回計米器」的警告（每 2 秒一次、stderr）。
+  **default=Imu 在 IMU 缺席時不比 default=Meter 差，在 IMU 在線時才是對的** ⇒ 改。
+
+  📌 **原本 `Meter` 的理由，註解自己寫著「與現行逐位元相同」** —— 那是 2026-09-01
+  導入這個功能當天的 **opt-in 開關**（新功能不改變既有行為），不是安全設計。
+  `git log -L834,834` 確認該行**自導入日起一個字都沒動過**：功能在 09-01 就已驗收
+  （229cm 全程實測），開關卻沒有跟著翻過來。
+
+  🔴 **另一個支持改預設的事實**：`LENGTH_DIFF_MAX_CM_DEFAULT` 已經在 09-01 為了 IMU 世界
+  **永久**由 15 放寬到 10、語意也從「姿態指標」改成「單側卡死偵測」。
+  留著 `default=Meter` 等於出廠組態是「計米器控制 ＋ 為 IMU 世界調過的守衛」
+  —— **兩邊沒有一邊是被驗證過的組合**。
+
+### Added
+- 🔴 **開機大聲宣告平衡誤差來源**（`Crane_control_PI/main.cpp`，command server banner 之後）。
+  改預設解決的是「重啟後跑錯組態」，**解決不了**另一半：`balance_source=imu` 只表示
+  **想要**用 IMU，實際用不用得到還要看 roll 新不新鮮 —— 而 roll 是**本體**在移動中
+  以 ~4Hz 推過來的（`cmd_set_imu_roll`），**吊機自己沒有 IMU**。
+  所以開機當下必然是「從未收到」，這行的用途是讓操作者知道
+  「現在還沒有 IMU 平衡，要等本體連上並開始推送」，而不是看到 `balance_source=imu`
+  就以為它在運作。📌 這正是 `cmd_status` 裡 `imu_roll_age_ms` / `imu_roll_fresh`
+  存在的理由，只是那要有人去問；開機這一行是**不問也會看到**的那份。
+
+### Notes — `cmd_pump` 查證結果：**本次無需修改，它 09-03 就修好了**
+- 🔴 **交接單上的「`cmd_pump` 沒有回讀」已經過期。** `app/wash_robot_commands.cpp:3821`
+  現在走 `pqw_set_relay_verified_()`（回讀 + 最多 3 次重試），並且**再自己讀一次
+  回報實際通道狀態**，比同輩的 `cmd_relay` 多一層。
+  沿革在 `changelog [2026-09-03a]`：「`cmd_pump` 改走 `pqw_set_relay_verified_()`
+  ……09-02 曾出現 `pump on` 回 OK 而連續四次 `relay_status` 讀到 `ch2=0`」。
+  ⇒ **09-02 那個症狀就是這條 changelog 的動機，不是還沒修的 bug。**
+- ✅ **而且已經上機**：`~/bringup/facade_cleaning_v2.out`（Sep 4 10:44、`pid 1749` 正在跑的
+  就是它）`strings` 查得到新版才有的 `pump_set_but_readback_fail`。
+  ⇒ 「repo 修好但機上還是舊的」這個常見缺口在本例**不存在**。
+- ⚠️ **同一類缺陷仍留在兩支同輩指令**（本次未動，列出來讓它別再隱形）：
+  | 指令 | 現況 |
+  |---|---|
+  | `cmd_brush`（CH5） | 裸 `pqw_.controlRelay()` + 無條件 `OK`，**無回讀** |
+  | `cmd_water_pump`（CH14） | 同上，**無回讀** |
+  🔴 `CH_BRUSH` 正是 2026-07/08 誤號打到空通道、log 完全看不出來的那個通道
+  （`cmd_relay` 的註解自己寫著這件事）。**修好的是 `cmd_pump`，不是這個形狀。**
+- ℹ️ **實測發現的殘留觀察（未處置，屬設計決策）**：回讀整條掛掉時，
+  `cmd_pump` 回的是 **`OK pump_set_but_readback_fail`** —— 字串開頭仍是 `OK`。
+  呼叫端若用最自然的 `reply.startswith("OK")` 判斷，這一筆會被當成成功。
+  ⚠️ 而且**這條路徑不寫任何 log**（`pqw_set_relay_verified_` 在 `st.empty()` 時
+  直接 `return false` 不印，`cmd_pump` 也不印）⇒ **唯一的徵兆就是回覆字串本身**。
+  📌 現行註解說這是刻意的（best-effort，權威留給下游 vacuum check），所以本次不改，
+  但它值得被知道：本次 7 筆 pump 指令中**出現了 1 筆**。
+
+### Verified
+- ✅ **語法檢查（吊機改動）**：把 repo 現行的 `Crane_control_PI/main.cpp` ＋
+  `common/ transport/ user_lib/ mechanism/` 打包送上本體 Pi，用 Pi 的 g++ 14.2.0 檢：
+  ```
+  g++ -fsyntax-only -std=c++17 -I Crane_control_PI -I common -I transport -I user_lib -I mechanism \
+      Crane_control_PI/main.cpp     → 通過（1.6s）
+  ```
+  🔴 **有做負控制**：同一份檔插一行 `int probe = undefined_symbol_probe;` 會被抓到
+  （`error: 'undefined_symbol_probe' was not declared in this scope`）⇒ 這個檢查是活的。
+  ⚠️ **刻意不用 Pi 上的 `~/projects/crane_control_PI/`** —— 那棵樹沒有 `common/`、
+  `transport/`、`mechanism/` 三個目錄（停在舊版面），拿它檢等於檢了別的東西。
+- 🎯 **`cmd_pump` 實機端對端驗證（本體 `192.168.5.26:5001`，機器在地面、張力總計 ~6.2kg 無吊重）**
+  ```
+  基線        relay_status  ch1..ch16 全 0
+  pump on  →  OK ch2=1      relay_status ×4 全部 ch2=1     ← 09-02 的失敗場景，現在 4/4 通過
+  pump off →  OK ch2=0      relay_status    ch2=0
+  再 on/off 循環 ×3          回讀與回覆逐筆一致
+  ```
+  ⇒ **09-02「回 OK 但連四次讀到 ch2=0」無法重現**，修正確實生效。
+- 🔴 **收尾已還原並複驗**：`pump off` → `OK ch2=0`，再獨立讀 `relay_status` **3 次**
+  全部 `ch1..ch16 全 0`，**與動手前的基線逐欄相同**。動過的通道只有 **CH2**；
+  CH1（真空閥）與 CH6（破真空閥）**一次都沒碰**。
+- ⚠️ **吊機那兩處改動未經任何硬體驗證**（機器維修中、且 C++ 需 VS remote build）。
+  `balance_source` 預設與開機宣告**只到語法層為止**，行為要等下一次建置窗口。
+  **不要把本條 changelog 的「實機驗證」讀成涵蓋吊機** —— 那一段只涵蓋 `cmd_pump`。
+
+### Notes — 一個測試工具自己的坑（免得下次再花時間）
+- 第一版測試 client 每次 `ask()` 都丟掉緩衝區殘餘 ⇒ 回覆被切成兩個 TCP 段時，
+  後半會被**下一個**指令的 `ask()` 吃掉，畫面上長得像「某一筆 `relay_status` 沒有回應」。
+  **那是測試工具的框幀 bug，不是機器的**：改成持久緩衝後不再出現，
+  且用 8 條各自獨立的連線覆測 `relay_status` **8/8 全正常**。
+  📌 與 `changelog [2026-09-04c]`（吊機 keepalive 的回覆冒充成指令回覆）**同一個形狀**
+  ——共用連線上，「讀到一行」不等於「讀到我這一筆的回覆」。
+
+### 待部署
+🔴 `Crane_control_PI/main.cpp` 兩處改動**尚未建置、尚未部署**，需 Windows 端 VS remote build
+（`Debug|ARM64`）。部署後第一件事：看開機那行 `[INFO] balance_source=imu`，
+並在本體開始推送 roll 之後用 `status` 確認 `imu_roll_fresh=1`。
+
+🔴🔴 **這個 binary 一部署，`web_backend/public_v2/index.html` 有四處會同時開始說謊，
+必須「跟著部署一起改」** —— 由 GUI 線（agent-ai-5a）2026-09-07 指出，本次已逐處查證存在。
+根因：吊機的**編譯期常數沒有任何查詢管道**（不像 `step_cm_max` 有 `get_settings` 可問）
+⇒ console v2 Setting 分頁那張「重啟後還剩什麼」表的「編譯預設」欄整欄是寫死的複本。
+
+| # | 位置 | 部署後應改成 |
+|---|---|---|
+| 1 | Setting 表 `balance_source` 列的「編譯預設 **meter**」（約 `line 867`，還帶 `color:var(--bad)` 紅字） | `imu`，並拿掉紅字 —— 預設不再是「已知錯」的那一個 |
+| 2 | 同列「重啟後」欄的 `會遺失` pill（約 `line 868`） | ⚠️ **見下方更正，不是單純改成「不會遺失」** |
+| 3 | Dashboard `src === 'meter' ? '（重啟後的預設值）'`（約 `line 1439`） | `src === 'imu' ? …` —— 註記邏輯整個反過來 |
+| 4 | Mission 起跑檢查 `bal:'…每次重啟都會靜默回到編譯預設…'`（約 `line 1569`） | 字面**仍為真**，但語氣要調：回到的已是對的那個值 |
+
+⚠️ **第 2 點要更正 GUI 線的說法**：交接訊息寫「改完之後就不會遺失了」——**不對**。
+本次改的是**編譯預設落在哪**，`balance_source` **仍然完全沒有持久化**：
+執行期設成 `meter` 之後重啟，一樣會靜默變回 `imu`。**值照樣遺失，只是遺失的後果從
+「掉到錯的那一個」變成「掉到對的那一個」。**
+📌 該 pill 自己的定義（見該檔 `重啟後存活統計` 註解）是「**不能靠重啟後的值**」——
+按這個定義它確實該改，但理由是「預設已等於慣用值」，**不是「它會存活」**。
+🔴 **寫成「不會遺失」會製造一個方向相反的新謊**，而這張表整個存在意義就是回答
+「重啟後會變成什麼」。建議保留「會遺失」語意、改寫「依據」欄說明後果已反轉。
+
+✅ **`set-tally`（「不可信 N 項」）不必手改** —— 它是 `querySelectorAll('.pill.pl-lost').length`
+從 DOM 現數的，pill 一改它自己會跟著（該處註解正是為了避免「同一件事寫在兩個地方」）。
+✅ 已逐處確認**沒有第五處**：`line 1806` 那句「這是執行期值，重啟就會回到編譯預設」
+屬張力門檻對話框的通用文案，與 `balance_source` 無關。
+
+🔴 **在這個 binary 部署之前不要先改那四處** —— 現在改，錯的就會變成 GUI 那邊。
+這是一件必須與部署同一動作完成的事。
+
+---
+
+## [2026-09-07g1] 🔧 步伐上限改成向後端取值；補掉 console v2 第三處寫死的 roll 門檻
+
+> 範圍：`web_backend/public/{index.html,app.js}`、`web_backend/public_v2/index.html`。
+> 純前端，不需重建 C++、不需重啟 node（express 每次請求重讀檔）。
+> 🔴 **全程只送 `status` / `get_settings` 兩個唯讀指令**——機器在維修，一道動作指令都沒發。
+
+### Fixed
+- 🔴🔴 **腳本步伐上限三邊不一致，而 repo 自己就是錯的那一邊。**
+  Pi `5..50` ／ repo `5..100` ／ 後端 `STEP_CM_MAX = 45`。
+  repo 那個 100 是 2026-08-28 為了對齊「當時」的後端而改的，**後端 08-31 降回 45 之後沒人跟著改**
+  —— 那正是該處註解自己警告過的「預覽說 OK、送出被拒」，只是方向相反。
+  📌 **這件事是在部署前一刻才攔下來的**：本來只是要把落後的 `public/` 推上機，
+  逐 hunk 讀 diff 才發現其中一個不是註解而是行為改變。
+  **「部署落後版本」與「repo 是對的」是兩件事，不要混為一談。**
+  ✅ 修法**不是改成 45**，是改成向後端取值：
+  - 後端權威 = `parse_script_csv_`：`STEP_CM_MIN .. settings_.step_cm_max`
+    （`app/wash_robot_commands.cpp:3296`）。`settings_.step_cm_max` 是**執行期可調值**，
+    被 `cmd_set_setting` 夾在 `[5, STEP_CM_MAX]`（`app/WASH_ROBOT.cpp:1103`）。
+  - `get_settings` 吐 `step_cm_max=<現值>:<STEP_CM_MAX>` ⇒ `cur` 給 `parseScriptCsv` 當上界、
+    `def` 給設定頁那個 input 當 `max`。
+  - `index.html` 的 `max="100"` **整個移除**（不是換個數字），由 JS 從回覆填。
+- 🔴 **`get_settings` 先前只在使用者切到 Settings 分頁時才發。**
+  ⇒ 沒開過設定頁的話，前端手上根本沒有後端的值，腳本預覽是照保底值放行的。
+  ✅ 改在 `ws.onopen` 每次(重)連線就要一次，接在既有的「強制同步 status」那組後面。
+- 🔴 **console v2 還有第三處寫死的 roll 門檻。**
+  09-04 已把渲染路徑那兩處（`/6.0` 與 `(6 - …)`）收斂成 `ROLL_TRIP`，
+  但**起跑檢查的說明字串裡還有一個 `6°`** —— 它不在計算式裡，所以逃過了那次收斂。
+  📌 **教訓：收斂常數時，grep 要連字串一起掃，不能只看運算式。**
+- ✅ **`刷洗滾筒 (CH15)` → `(CH5)`**（Pi 上落後的操作者可見錯標籤；repo 08-28 就對了）。
+
+### Notes
+- 🔴 **`ROLL_TRIP` 不能比照 `step_cm_max` 處理，已在該處註解寫明。**
+  `step_cm_max` 有 `get_settings` 可問；roll 門檻是 **`cycle_test.py:76` 的 `sys.argv[4]`**，
+  是腳本自己的執行期參數，**兩個後端都不知道它** ⇒ GUI 沒有任何管道查得到。
+  要真解決得讓 `cycle_test` 起跑時把參數回報出來（EVT），屬 C++/Python 那條線。
+  在那之前它就是一份無法查證的複本，而且**腳本是可以帶參數啟動的**
+  （`cycle_test.py 1 5 40 4.0`），那一刻畫面就開始說謊且無徵兆。
+- ⚠️ **`step_cm_min` 仍是複本**：`get_settings` 不吐它，沒有管道問。已在註解標明。
+- ℹ️ 順帶觀察（未處置，不是前端的錯）：`step_cm_default` 的 apply 邊界是 `[5, 60]`，
+  **上界比 `STEP_CM_MAX`(45) 還大** ⇒ 可以把預設步距設成 60，但任何實際 > 45 的步伐
+  都會被 `parse_script_csv_` 拒絕。HTML 的 `max="60"` 與後端相符。
+
+### Verified
+- `node --check` 過 `public/app.js`；console v2 的兩個 inline `<script>` 抽出後各自 `node --check` 過，
+  並確認 `ROLL_TRIP` 的宣告與新使用點**在同一個 script 區塊**（scope 沒斷）
+- 部署後 **md5 兩邊逐位元一致**（`public/` 兩檔 + `public_v2/index.html`），
+  再用 `curl` 確認**服務出去的內容**真的換了：舊字串計數 **0**、新字串計數 **1**
+  📌 **不是只比對檔案** —— 檔案對而服務端沒換過的情況（快取、PUBLIC_DIR 指到別處）看不出來。
+- 🎯 **拿實機回覆真的跑一次解析**：向 `192.168.5.26:5001` 要 `get_settings`
+  （實得 `step_cm_max=45:45`，共 22 筆設定），餵給部署後的那段邏輯：
+  ```
+  backendStepCmMax : 45   (先前寫死 100)
+  input.max        : 45   (先前寫死 100)
+    step   4 cm -> 擋下 (超出 5..45)     step  45 cm -> 放行
+    step   5 cm -> 放行                  step  46 cm -> 擋下
+    step  30 cm -> 放行                  step 100 cm -> 擋下 (先前會被放行)
+  ```
+- 🔴 **仍未經瀏覽器**：以上全部是「檔案對、服務出去的內容對、解析邏輯對」，
+  **畫面沒有人看過、按鈕沒有人按過**。不要把這條 changelog 當成 UI 已驗證。
+
+### Rollback
+Pi 上已留 `index.html.bak-20260907` / `app.js.bak-20260907`（`public/` 與 `public_v2/` 各一份），
+`cp` 回去即可，**不需重啟 node**。
+
+---
+
 ## [2026-09-04r] 🎯 `cycle_test` 完整週期跑通（5 步 200cm + 回程）；roll 修正再修兩個實作缺陷
 
 > 範圍：`Linux_test/cycle_test.py`。

@@ -151,23 +151,43 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-C++ 機器人控制系統，包含洗窗機器手臂（wash robot arm）與吊車升降系統（crane lift），目標平台為 Raspberry Pi（ARM/ARM64），透過 Visual Studio 的 "Visual C++ for Linux Development" 從 Windows 交叉編譯部署。
+C++ 機器人控制系統，包含洗窗機器手臂（wash robot arm）與吊車升降系統（crane lift），目標平台為 Raspberry Pi（aarch64）。🔴 **2026-09-07 更正：建置是在 Pi 上用 g++ 直接編**（見 `scripts/build/`），本句舊文寫的 Visual Studio 遠端建置**已不成立**。
 
 ## Build System
 
+> 🔴🔴 **2026-09-07 全面更正：Visual Studio 已經不是建置路徑，本節舊文會把人導向一條死路。**
+> 實查證據：Pi 上 VS 的遠端樹停在 **08-25~08-27**（分層重構之前），裡面只有
+> `Crane_control_PI/main.cpp` + `user_lib/`，**`rope_axis.h` 整棵樹找不到** ⇒ 那棵樹建不起來。
+> 而 `.vcxproj` 的 include 路徑**漏了 `..\mechanism` 與 `..\config`**、`ClInclude` 也沒列
+> `rope_axis.h` —— **建置定義本身就是壞的**。
+>
+> ✅ **真正的建置路徑是 Pi 上的 g++**，腳本已於 2026-09-07 收進 **`scripts/build/`**
+> （先前只存在於兩台 Pi 的 `~/bringup/`、不在版控）。**完整說明見 `scripts/build/README.md`**，
+> 含三個先前無任何文件記載的隱藏步驟（同步／改名／停程式才換得動）。
+> 🔴 **產物是 `-O2` 進 `~/bringup/`，不是 `bin/ARM64/Debug`。**
+>
+> ⚪ **`.sln` / `.vcxproj` 保留給編輯與 IntelliSense，不再是建置權威** ——
+> **不要照它推斷檔案清單或 include 路徑，已被證明是錯的。**
+
+<details><summary>（歷史）VS remote build 的舊說明</summary>
+
 **IDE:** Visual Studio (solution: `facade_cleaning_v2.sln`)
-> 🐛 **2026-08-28 更正**：本檔原本寫 `washrobot_new_PI.sln`——那是 fork 前 v1 的檔名，repo 裡根本沒有這個檔。照舊寫法跑會直接失敗。  
-**Build method:** MSBuild with remote SSH deployment to Linux/ARM targets  
-**No CMake or Makefile** — all build configuration is in `.vcxproj` files  
+**Build method:** MSBuild with remote SSH deployment to Linux/ARM targets
+**No CMake or Makefile** — all build configuration is in `.vcxproj` files
+
+</details>
 
 Target platforms: ARM, ARM64, x86, x64 — all with Debug/Release configurations.  
 Compiled binaries land in `bin/[arch]/[config]/` within each project directory.
 
-To build from command line (if using MSBuild):
+🔴 **2026-09-07：上面兩行（`bin/[arch]/[config]/`、MSBuild 指令）都是 VS 時代的，已不適用。**
+現行產物在 Pi 的 `~/bringup/`、`-O2`。建置指令：
+
+```bash
+ssh nexuni@192.168.5.26 'cd ~/bringup && bash bld_wr.sh'          # 本體，約 18 秒
+ssh -J nexuni@192.168.5.26 user@192.168.5.25 'cd ~/bringup && bash bld_cr.sh'   # 吊機，約 62 秒
 ```
-# 🔴 Platform 必須是 ARM64——只有 Debug|ARM64 設了 AdditionalIncludeDirectories
-msbuild facade_cleaning_v2.sln /p:Configuration=Debug /p:Platform=ARM64
-```
+權威版腳本在 **`scripts/build/`**，隱藏步驟（同步／改名／停程式）見該目錄 `README.md`。
 
 ## Repository Structure
 
@@ -176,6 +196,12 @@ msbuild facade_cleaning_v2.sln /p:Configuration=Debug /p:Platform=ARM64
 
 ```
 web_backend/         # ── 介面層：Node.js server + 前端 GUI（獨立行程，在吊機那台）
+                     #    tools/check_console.js 🆕 2026-09-07：前端「靜默失敗」檢查器
+                     #    （重複 id／寫到不存在的元素／大括號／<div> 開合），改前端後跑一次
+                     #    🔴 它自己有前科：09-04 寫過功能相同的一支、跑完就丟沒進 repo，
+                     #       09-07 要用時只能整支重寫 ⇒ **沒進版控的檢查工具等於下次再寫一次**
+                     #    ⚠️ 已知盲區（工具自己會印）：只比對字面字串，樣板字串動態組的 id
+                     #       （`` `vac-${n}` ``）看不到 ⇒ 「寫到不存在的元素」涵蓋率非 100%
                      ↓ 文字協定
 command/             # ── 🆕 指令層：文字協定的解析、分派、FAST/SLOW 路由、參數驗證
                      #    dispatcher.{h,cpp}

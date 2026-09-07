@@ -52,8 +52,12 @@
 - 金鑰登入：Windows 端與 WSL 端用同一把 `~/.ssh/claudeuser`（**2026-08-31 由 `id_ed25519` 更名**，
   內容未變、指紋 `SHA256:VDtxIH…z6E` 相同，兩台的 `authorized_keys` 不需更動），已裝上兩台
 
-> 🔴 **C++ 改動只能在 Pi 上驗證。** Visual Studio 的 "Visual C++ for Linux Development" 是把原始碼
-> 送到 Pi、用 **Pi 上的 g++** 編譯——建置不發生在 Windows。沒有 Pi 就無法驗證任何 C++ 改動。
+> 🔴🔴 **2026-09-07 更正：不需要 Visual Studio。**
+> 本段舊文寫「C++ 改動只能靠 VS remote build」，**那已經不成立**——VS 的遠端樹停在 08-25~08-27
+> （分層重構之前），`rope_axis.h` 整棵樹找不到 ⇒ **那條路現在建不起來**。
+> ✅ **直接在 Pi 上跑 `scripts/build/` 的腳本**（純 g++、約 18 秒／62 秒），
+> 完整流程與三個隱藏步驟見 **`scripts/build/README.md`**。
+> 🔴 仍然成立的是：**建置只能發生在 Pi 上**（Windows 端無 aarch64 工具鏈），沒有 Pi 就驗不了 C++。
 > 快速語法檢查（不產生檔案）：
 > `ssh nexuni@192.168.5.26 "cd ~/projects/<專案>/user_lib && g++ -fsyntax-only -std=c++17 -I. <檔案>.cpp"`
 
@@ -508,6 +512,10 @@ right 同理，另加兩行 `[WARN] ... init failed` 路徑（正常不會出現
 📌 **2026-08-29 由 `origin/main` 帶進來、並在本機實測校正過。**
 專案沒有 CMake/Makefile，改完 C++ 一向只能等部署到 Pi 才知道編不編得過。
 Windows 端的 MSVC `cl /Zs`（只做語法檢查、不產 obj）可以當場驗。
+> 🔴 **2026-09-07 更正：上面那句「一向只能等部署到 Pi」已不成立。**
+> Pi 上直接 `g++ -fsyntax-only`（單檔、秒級）或跑 `scripts/build/` 的完整建置（18~62 秒）都可以，
+> 而且**用的是真正的目標編譯器**（Pi 的 g++ 14.2），比 MSVC 的近似檢查可信。
+> ⚠️ 另外下面那個 `/I` 清單**也已過期**：分層後還需要 `common`、`mechanism`、`config`。
 
 🔴 **對方文件寫的路徑在這台機器是錯的**，已校正兩處：
 1. `Visual Studio\2022\Community\...` → **這台是 `18\Community`**（`2022\` 是空的殘留目錄）
