@@ -19,7 +19,7 @@
 | 位置 | 內容 | 錨點 |
 |---|---|---|
 | `Crane_control_PI/main.cpp` | 2 instance + ~40 用點 + helper 群 + keepalive thread | 見下 |
-| `Crane_control_PI.vcxproj` | build SE3_inverter.cpp/.h | L84/L95 |
+| ~~`Crane_control_PI.vcxproj`~~ → **`scripts/build/build_crane.sh`** | 編譯清單（vcxproj 已於 2026-09-07 刪除） | — |
 | `web_backend/public/{app.js,index.html}` | `se3_left`/`se3_right` 裝置旗標 + 按鈕 data-required + 中文標籤 | app.js:289/295/308, index.html:511/589+ |
 | `Linux_test/main.cpp` | SE3 bench 測試 menu | — |
 | docs | CLAUDE.md 架構+driver 表、motion_flow、summaries | — |
@@ -55,7 +55,7 @@ main.cpp 主要錨點：
 - 00-20/00-21 也可用 driver `configureModbusControl()` 一次性寫入（寫 EEPROM，只跑一次）
 
 ### Phase 1 — build 接線
-- `Crane_control_PI.vcxproj` 加 `MH300_inverter.cpp` / `.h`（SE3 檔先留著、全部驗證過再從 vcxproj 移除）
+- ~~`Crane_control_PI.vcxproj`~~ → 改動 **`scripts/build/build_crane.sh`** 的編譯清單（兩支 driver 目前都已在清單內）
 
 ### Phase 2 — main.cpp 型別 swap（機械）
 - include `SE3_inverter.h` → `MH300_inverter.h`

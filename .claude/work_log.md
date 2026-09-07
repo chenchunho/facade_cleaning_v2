@@ -86,7 +86,7 @@
 | ✅ | ~~**null-client 守衛：12 支 driver 裡有 8 支的傳輸路徑沒守**~~ ⚠️ **原記「10 支」是錯的（2026-08-29 當日更正）**：那次用 grep pattern `!client\b` 判定，而 `!client->sendData(...)` 也會匹配，於是把 `JC_100_METER:57` 與 `XKC_Y25_RS485:70,180,214` （寫法是 `if (!client \|\| !client->isConnected())`）誤判成沒守，同時把 `DM2J_RS570` 誤判成守好了（它只守 `sendRecv`，六支 `read_*` 與 `recv_frame_` 是裸的）。**逐函式讀原始碼後實際是 8 支。**| `user_lib/`：ZDT(18)／DM2J(7)／PQW(5)／DY_500(3)／DSZL(2)／MH300(1)／SD76(1)／SE3(1)＝**38 處**，外加先前的 CLV900(1) | ✅ **已修（2026-08-29）**：守衛插在各函式進場，回傳值依各自慣例（Modbus 系 `true`=錯／`recv_frame_` 回 `-1`／回 vector 的回 `{}`／`close()` 直接 `return`）。本來就守好的是 `JC_100`／`XKC_Y25`／`QX_DO24`。🔴 **未編譯** | 2026-08-29 修 CLV900 時帶出，同日修完 |
 | ✅ | ~~`TCP_client` 缺 `SO_ERROR` 驗證 → 影響 reconnect 的邊界 case~~ ⚠️ **本列與表格第一列是同一件事**（2026-06-09 與 2026-08-28 各記了一次），2026-08-29 合併確認 | `transport/TCP_client.cpp:208,214` | **已修（`56bfa5c`／`ce8ba81`）** — 詳見表格第一列（含雙向斷言實機驗證） | work_log 2026-06-09｜2026-08-29 判為重複列 |
 | 🟡 | MH300 實機必驗清單未跑：方向映射、電流 scale、2101H run bit、fault code | `Crane_control_PI/main.cpp`（`VFD_DIR_*` 巨集）、`.claude/mh300_migration_plan.md` | **未修** ✔（註解仍寫 `RE-VERIFY on MH300`） | work_log 2026-07-07 |
-| ✅ | **4 個 `.vcxproj.user` 被 git 追蹤** → 不同 bench 的 Remote Target 互相覆蓋（Connection Manager 顯示空白）。⚠️ 原記 5 個，`windows_test/` 已於 `a69f82f` 整個移除 → 實際 4 個 | `Crane_control_PI/`、`Linux_test/`、`cleaning_arm/`、`facade_cleaning_v2/` | ✅ **已修（2026-08-29）**：四個檔 `git rm --cached`（**留在本機**）＋ `.gitignore` 加 `*.vcxproj.user`。移除前已確認「哪個專案建置到哪台 Pi」**不是唯一副本**（`.claude/runbook.md:22-23` 與 `CLAUDE.md:263-264` 都有）。📌 真正的理由是內容含只在該台機器有意義的連線 handle（如 `-1125135748`），本來就不可共用 | work_log 2026-07-15｜2026-08-29 複查確認 |
+| ✅ | ~~**4 個 `.vcxproj.user` 被 git 追蹤**~~ → 🎉 **2026-09-07 徹底結案：整個 VS 檔案組已刪除**（`.sln` + 4 個 `.vcxproj` + 4 個 `.vcxproj.user` + `.vs/` 43 MB，per user「不用 VS 了」）。⚠️ **先前以為它結案了，其實沒有**：`.gitignore` 早就有 `*.vcxproj.user`，但 **gitignore 對已追蹤的檔案無效**，四個檔一直還在版控裡。📌 **「規則加了」≠「規則生效了」** —— 加 ignore 規則時要一併 `git rm --cached`。 | — | **已刪除** | 多處 |
 | 🟡 | 沒有 hot re-init：裝置 flag 只在啟動時設一次，硬體中途修好要重開 crane | `Crane_control_PI/main.cpp` | **未修** | work_log 2026-05-08 |
 | 🟡 | 沒有任何機制偵測「M2 被重新安裝過」；重裝後若位置落在 ±1.5 rad 內，INIT 會**靜默**移到錯的 CENTER | `cleaning_arm/main_api.cpp:1992-2028` | **未修** | work_log 2026-08-17 |
 | 🟡 | `LR_CALIBRATE` 自動雙向尋邊不可靠（假觸發撞牆、或衝很遠都撞不到），目前只能走手動流程 | `cleaning_arm/main_api.cpp` | **未修** | work_log 2026-08-17 |
@@ -440,6 +440,28 @@ threshold 再實作」：① `cmd_hold` 與 motion 互斥（避免 hold 跟 moti
 📌 **更通用的一句**（09-07 同日出現三個實例，兩條線各自撞到）：
 **工具給了一個看起來完整的答案，而它的完整性是假設出來的，而那個假設從來沒被寫下來過。**
 　① `load` 觸發 ≠ 畫完　② 讀到一行 ≠ 讀到我這筆的回覆（framing）　③ 回 `OK` ≠ 真的生效（回讀）
+
+### ⚰️ Visual Studio 整組移除（09-07 收盤，per user「不用 VS 了」）
+
+已從版控與磁碟刪除：`facade_cleaning_v2.sln`、4 個 `.vcxproj`、4 個 `.vcxproj.user`、`.vs/`（43 MB）。
+取回見 git `79a2312`（刪除前的 commit）。
+
+🔴 **刪之前先補上被它獨佔的建置定義** —— 差一步就製造出「移除一份定義卻沒有替代品」：
+- `Linux_test` 的 16 個 TU 清單**只存在於它的 vcxproj**（唯一副本）→ 已搬成
+  `scripts/build/build_linux_test.sh`，並**在 Pi 上實建通過**（671,520 bytes）。
+- `cleaning_arm` **刻意不搬** —— `cleaning_arm/compile.sh` 本來就在 repo 且內容是對的，
+  搬過去只會製造第二份副本。已改寫它的抬頭（原寫「VS MSBuild 是主路徑」，現在它才是主路徑）。
+
+🐛 **實建才抓到的一個誤解**：我第一版 `build_arm.sh` 照抄 Pi 上 `~/projects/compile.sh` 的
+裸指令（無任何 `-I`），**建不起來**（`damiao.h` 找不到）。那行在 Pi 上能跑，是因為
+`~/projects/cleaning_arm/` 底下有 **VS 複製過去的 `user_lib/` 扁平副本**。
+📌 **一段「一直都能跑」的指令，未必是靠它自己跑起來的。**（repo 裡的 `cleaning_arm/compile.sh`
+反而一直帶著正確的 `-I../user_lib`。）
+
+🔴 **更正我自己的說法**：我先前說「`.vcxproj` 的檔案清單也不完整」，**那句是錯的** ——
+`ClCompile` 兩個主專案都**完全正確**（本體 16=16、吊機 10=10）。錯的只有
+`AdditionalIncludeDirectories`（漏 `mechanism`／`config`）與 `ClInclude` 沒列 `rope_axis.h`
+（⇒ VS 不會把它複製到遠端，那才是遠端樹建不起來的直接原因）。已同步更正 `CLAUDE.md` 與 commit 說明。
 
 ### 待完成（GUI 線，09-07 新增）
 

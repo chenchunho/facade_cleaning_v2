@@ -178,7 +178,7 @@ v2 對 v1 做了大幅簡化：
 
 v2 定案吊機左右鋼索 winch 變頻器換成 **Delta VFD-MH300**（型號 `VFD11AMH21ANSAA`，3HP/230V單相），取代原本士林 SE3-210；理由是 SE3 的 CU mode latch + OPT silent latch 踩過太多次，Delta 是業界主流、文件完整。**馬達本身保留不換**，只換變頻器 + 制動電阻（`BR300W070-S`，300W/70Ω）。
 
-Driver `user_lib/MH300_inverter.{h,cpp}` 已寫好（public API 對齊 SE3_inverter 可 drop-in），但**尚未加入任何 vcxproj build、未接 `Crane_control_PI/main.cpp`**（等實際換裝再做）。目前 bench 硬體仍是 SE3，透過 `Crane_control_PI/main.cpp` 頂端的編譯期開關 `#define CRANE_VFD_IS_SE3`（1=SE3 / 0=MH300）決定 include 哪個 header + `using CraneVFD = ...`，程式碼一律用 `CraneVFD` 型別。**換裝時只要把這個開關改 0 重編**，兩個 driver 的 `runForward/Reverse`、`stopDecel`、`emergencyStop`、`setFreqHz`、`readStatusWord`、`readFaultCode`、`clearAlarm` 都同簽名；唯一差異是 keepalive fault 偵測（`vfd_poll_fault_()`/`vfd_status_is_fault_()` 兩個 helper，SE3 讀 `0x1001` 檢查 b7，MH300 讀 `0x2100` 檢查 low byte）也隨開關切換。
+Driver `user_lib/MH300_inverter.{h,cpp}` 已寫好（public API 對齊 SE3_inverter 可 drop-in），🔴 **2026-09-07 更正：`vcxproj` 已刪除，且 `MH300_inverter.cpp` 本來就在 `scripts/build/build_crane.sh` 的編譯清單裡 ⇒ 它是有被編的**；真正沒接上的是 `main.cpp`（`CRANE_VFD_IS_SE3 1`）。原文：尚未加入任何 vcxproj build、未接 `Crane_control_PI/main.cpp`**（等實際換裝再做）。目前 bench 硬體仍是 SE3，透過 `Crane_control_PI/main.cpp` 頂端的編譯期開關 `#define CRANE_VFD_IS_SE3`（1=SE3 / 0=MH300）決定 include 哪個 header + `using CraneVFD = ...`，程式碼一律用 `CraneVFD` 型別。**換裝時只要把這個開關改 0 重編**，兩個 driver 的 `runForward/Reverse`、`stopDecel`、`emergencyStop`、`setFreqHz`、`readStatusWord`、`readFaultCode`、`clearAlarm` 都同簽名；唯一差異是 keepalive fault 偵測（`vfd_poll_fault_()`/`vfd_status_is_fault_()` 兩個 helper，SE3 讀 `0x1001` 檢查 b7，MH300 讀 `0x2100` 檢查 low byte）也隨開關切換。
 
 MH300 Register map 摘要（已用完整手冊 `DELTA_IA-MDS_MH300_UM_TC_20260505.pdf` 核對過，driver 用的是修正後的值）：
 

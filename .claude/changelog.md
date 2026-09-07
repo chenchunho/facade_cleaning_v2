@@ -1,3 +1,48 @@
+## [2026-09-07m5] ⚰️ Visual Studio 整組移除；補上被它獨佔的建置定義
+
+> per user「不用 VS 了，整組刪掉」。刪除 `facade_cleaning_v2.sln`、4 個 `.vcxproj`、
+> 4 個 `.vcxproj.user`、`.vs/`（43 MB 快取）。取回見刪除前的 commit `79a2312`。
+
+### 🔴 刪之前先補上被它獨佔的建置定義
+差一步就製造出「移除一份定義卻沒有替代品」—— 跟今天清掉的病同型。
+- **`Linux_test` 的 16 個 TU 清單只存在於它的 `.vcxproj`**（唯一副本）
+  → 逐項搬成 `scripts/build/build_linux_test.sh`，並**在 Pi 上實建通過**（`linux_test.out`, 671,520 bytes）。
+  ⚠️ include 比 vcxproj 原宣告的多帶 `..\config` 與 `..\mechanism`（那兩個本來就漏）。
+- **`cleaning_arm` 刻意不搬** —— `cleaning_arm/compile.sh` 本來就在 repo 且內容正確
+  （一直帶著 `-I../user_lib`）。搬進 `scripts/build/` 只會製造第二份副本。
+  ✅ 改寫它的抬頭：原寫「Fallback／VS MSBuild 走 vcxproj 是主路徑」，現在它才是主路徑。
+
+### 🐛 實建才抓到的誤解：那行「一直都能跑」的指令，不是靠它自己跑起來的
+第一版 `build_arm.sh` 照抄 Pi 上 `~/projects/compile.sh` 的裸指令（**無任何 `-I`**）→
+`fatal error: damiao.h: No such file or directory`。
+那行在 Pi 上能跑，是因為 `~/projects/cleaning_arm/` 底下有 **VS 複製過去的 `user_lib/` 扁平副本**。
+⇒ 「它一直都是純 g++」這句話為真，但**那條指令依賴 VS 佈置出來的目錄**。
+📌 **一段「一直都能跑」的指令，未必是靠它自己跑起來的。**
+（同族：`load` 觸發 ≠ 畫完／讀到一行 ≠ 我的回覆／回 `OK` ≠ 真的生效。）
+✅ 該檔已刪除（改指 `cleaning_arm/compile.sh`），但驗證過程留在這裡。
+
+### 🔴 更正我自己一個誇大的說法
+先前說「`.vcxproj` 的**檔案清單也不完整**」（並寫進 `CLAUDE.md` 與 `m4` 的 commit 說明）——
+**那句是錯的**。逐項比對：`ClCompile` **兩個主專案都完全正確**（本體 16=16、吊機 10=10）。
+真正錯的只有兩處：`AdditionalIncludeDirectories` 漏 `..\mechanism`／`..\config`，
+以及 `ClInclude` 沒列 `rope_axis.h` ⇒ **VS 不會把它複製到遠端**，那才是遠端樹建不起來的直接原因。
+⇒ **`.vcxproj` 離正確只差三行，不是壞得該丟；刪它的理由是「它是第二份建置定義」。**
+已同步更正 `CLAUDE.md`、`scripts/build/README.md`。
+
+### 🔴 另一個「以為結案、其實沒有」
+待辦表「4 個 `.vcxproj.user` 被 git 追蹤」在 2026-07 標成已處理（`.gitignore` 加了 `*.vcxproj.user`），
+**但四個檔一直還在版控裡** —— **gitignore 對已追蹤的檔案無效**。
+📌 **「規則加了」≠「規則生效了」**：加 ignore 規則時要一併 `git rm --cached`。
+
+### 文件更新（`changelog.md` 為 append-only 歷史帳本，不動）
+`CLAUDE.md`（Build System 整段重寫成 g++ 表格／根目錄盤點兩列／include 路徑表改指腳本）、
+`runbook.md`（`~/projects/` 標為已廢棄、TU 權威來源改指腳本、MSVC `cl /Zs` 整節標作廢）、
+`ONBOARDING.md` 與 `MH300_INVERTER_MODBUS_SUMMARY.md`（🔴 兩處說 MH300「未在 vcxproj 生效」——
+實際上 `build_crane.sh` **有編它**，沒生效的是 `main.cpp` 的 `CRANE_VFD_IS_SE3 1`）、
+`mh300_migration_plan.md`（步驟改指 `scripts/build/build_crane.sh`）。
+
+---
+
 ## [2026-09-07g6] 🔗 Setting 表四處耦合到期改完；並抓到同表另一個方向相反的謊
 
 > 範圍：`web_backend/public_v2/index.html`。已部署（`2026.09.07-2222`）。

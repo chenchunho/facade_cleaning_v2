@@ -23,6 +23,11 @@
 | `build_body.sh` | 本體 `facade_cleaning_v2`（16 個 TU，完整） | `~/bringup/facade_drv.out` | `facade_cleaning_v2.out` |
 | `build_body_incremental.sh` | 本體，**只重編 4 個 TU** 後重連結 | `~/bringup/facade_cleaning_v2.new` | 同上 |
 | `build_crane.sh` | 吊機 `Crane_control_PI`（單次 g++） | `~/bringup/crane_drv.out` | `crane_control_PI.out` |
+| `build_linux_test.sh` | bench 工具 `Linux_test`（16 TU） | `Linux_test/linux_test.out` | 手動 scp |
+| **`cleaning_arm/compile.sh`** ← 不在本目錄 | 手臂 `motor_api` | `cleaning_arm/motor_api` | `~/bringup/motor_api` |
+
+🔴 **`cleaning_arm` 刻意不搬進本目錄**：它本來就有 `compile.sh` 且內容是對的，
+搬過來只會製造第二份副本。**一份來源** —— 那正是這次整理的主題。
 
 全部是純 `g++ -std=c++17 -O2 -I… -lpthread`，**沒有任何外部相依**。
 本體完整建置在 Pi 5 上約 **18 秒**（`-P4` 平行），吊機約 **62 秒**（單次編譯，未平行）。

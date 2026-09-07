@@ -395,7 +395,7 @@ ssh nexuni@192.168.5.26 'cd ~/bringup && g++ -std=c++17 -O2 -Icommon -Itransport
 ⚠️ **驗建置結果要看產物，不要看管線離開碼**：`g++ … 2>&1 | tail` 的離開碼是 `tail` 的
 （2026-08-29 差點誤判）。用 `ls -la` + `md5sum` 確認檔案時間戳與雜湊真的變了。
 
-⚠️ **`~/bringup/` 是刻意跟 `~/projects/` 分開的**：`~/projects/` 是 Visual Studio 遠端建置的落點，
+⚠️ **`~/bringup/` 是刻意跟 `~/projects/` 分開的**：`~/projects/` 是**已廢棄的** Visual Studio 遠端建置落點（VS 已於 2026-09-07 整組移除，那棵樹停在 08-25~08-27、且缺半數目錄），
 另一位開發者在 `main` 上迭代時會重建並覆蓋它。
 
 ### 2. 先跑起來，但不要覆蓋現有部署
@@ -576,7 +576,7 @@ rm -rf tmp/base && mkdir -p tmp/base && git archive <baseline-commit> | tar -x -
 > 🔴 **`main` 的目錄結構跟重構後的分支完全不同** —— 沒有 `app/`／`command/`／`mechanism/`／
 > `transport/`，所有 driver 平放在 `user_lib/`，`WASH_ROBOT.cpp` 也在裡面。
 > **A2 §1 那兩條建置指令套不到 `main`**（`-Iapp -Icommand …` 的 include 路徑都不存在）。
-> 權威來源清單看各 `.vcxproj` 的 `ClCompile`：本體 13 個 `user_lib` + `main.cpp` ＝ 14 個 TU；
+> 🔴 **2026-09-07 更正：`.vcxproj` 已刪除。權威來源改看 `scripts/build/` 的腳本**（本體 16 個 TU）。原文：本體 13 個 `user_lib` + `main.cpp` ＝ 14 個 TU；
 > 吊機 9 個 `user_lib` + `main.cpp`。
 
 > ✅ **2026-08-31 起兩台的建置已保留下來，之後要用不必重編**：

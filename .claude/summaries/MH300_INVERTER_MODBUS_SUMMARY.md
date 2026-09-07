@@ -44,6 +44,6 @@ Source: `.claude/mh300_migration_plan.md` Phase 0 / Phase 3（keypad 值經手�
 
 ## 相關檔案
 
-- Driver：`user_lib/MH300_inverter.{h,cpp}`（已存在，未在 vcxproj 生效）
+- Driver：`user_lib/MH300_inverter.{h,cpp}`（已存在；🔴 2026-09-07 更正：`vcxproj` 已刪除，該檔在 `scripts/build/build_crane.sh` 裡**有被編譯**，未生效的是 `main.cpp` 的 `CRANE_VFD_IS_SE3 1`）
 - 型號切換：`Crane_control_PI/main.cpp` 的 `#define CRANE_VFD_IS_SE3`
 - 完整遷移步驟（Phase 0~4）：`.claude/mh300_migration_plan.md`
