@@ -5,7 +5,39 @@
 
 ---
 
+## 🔴🔴 2026-09-09 路徑大搬家 —— `~/bringup/` 已不存在
+
+per user「合併到 main 了，可以用 project 的資料夾，把舊的清掉，我們的搬過去，才不會散落各處」。
+
+**兩台 Pi 的新配置（原始碼與執行期產物分家）：**
+
+| 路徑 | 放什麼 | 大小（吊機／本體） |
+|---|---|---|
+| `~/projects/facade_cleaning_v2/` | **原始碼**，結構與 repo 一致，**頂層只有目錄** | 3.5M ／ 5.3M |
+| `~/run/` | **執行期**：執行檔、`logs/`、FIFO、`cycle_logs/`、回退點、`bench/`（臨時探針 binary） | 28M ／ 21M |
+| `~/archive_20260909/` | 舊樹的 `tar.gz`（吊機 3 個／本體 5 個） | 16M ／ 38M |
+
+🔴 **為什麼分家**：搬家前 `~/bringup/` 把程式碼與產物混在同一層 —— 吊機 44 個 log＋28 個 FIFO＋11 個舊執行檔，
+本體 118 個 log＋59 個 FIFO＋**97 個舊執行檔（77M）**。那個混法就是它三個月後難整理的原因。
+
+🔴 **搬家時抓到 6 份「頂層舊拷貝」，全部落後於正本**，這是真正的風險（改到錯的那份不會有任何徵兆）：
+
+| 舊拷貝 | 正本 | 落後 |
+|---|---|---|
+| 吊機 `main.cpp` | `Crane_control_PI/main.cpp` | **790 行** |
+| 吊機 `DSZL_107.h` / `MH300_inverter.h` / `SE3_inverter.h` | `user_lib/` | 32 / 5 / 5 行 |
+| 本體 `wash_robot_commands.cpp` | `app/` | 526 行 |
+| 本體 `dispatcher.cpp` | `command/` | 68 行 |
+
+⚠️ **本檔以下所有 `~/bringup` 字樣（§A2 建置、§A4 歷史段等）都已過期**，除非該段明確標著「歷史」。
+⚠️ **`~/projects/` 不再是「已廢棄的 VS 落點」** —— 舊 VS 樹已刪除，現在它就是正式的家。
+📌 `motor_api`（手臂）已移到 **`~/run/motor_api`**（09-04 版；`~/projects/` 那份是 06-10 舊版，
+留在 `~/run/motor_api.stale-20260610`）。
+
+---
+
 ## A. 啟動順序
+
 
 > 🔴 **2026-08-28 路徑全面更正。** 本檔原本寫的 deploy 路徑
 > （`~/<project>/bin/ARM/Release/<name>`）**五個地方都錯**：少了 `projects/`、
@@ -15,10 +47,50 @@
 
 ### 連線資訊（2026-08-27 實測）
 
-🔴 **2026-09-03 更正（per user + 實測）：兩台目前都走 WiFi，`192.168.1.x` 那組不是可用路徑。**
-兩台 eth0 雖然 `carrier=1` 且各自持有 `192.168.1.10` / `192.168.1.100`，但**彼此 ping 不通**
-（從 washrobot ping 吊機 `192.168.1.10` 無回應）⇒ 有線沒有真的串起來，**下表「有線」欄位是設定值不是通路**。
-⇒ `CRANE_IP` 自動選路（有線優先 → 300ms 有界探測後退 WiFi）現況每次都會落到 WiFi 這條，符合預期。
+🔴🔴 **2026-09-08 更正：`192.168.1.x` 現在真的通了，09-03 那條記載已被推翻。**
+原文（09-03）：「兩台 eth0 雖然 `carrier=1` 且各自持有 `192.168.1.10` / `192.168.1.100`，但**彼此 ping 不通**
+⇒ 有線沒有真的串起來」。**09-08 雙向 ping 各 20 次、0% 丟包，ARP 互解 MAC ⇒ 串起來了。**
+
+🔴 **但「通了」不等於「該用它」**——中間那一跳是 **Blue Robotics Fathom-X Tether Interface Board**
+（HomePlug AV / IEEE-1901，單對雙絞線跑乙太網，200m，實測 80 Mbps）。它是**機器吊上牆時唯一的實體連線**，
+不是接歪的慢線路。延遲分佈（同時段各 20 次）：
+
+| 路徑 | avg | 判讀 |
+|---|---|---|
+| 各自本地閘道（`.20` / `.33`） | 0.71 / 0.11 ms | ✅ 真有線 |
+| **跨段（過隧道）** | **114 ~ 186 ms**（峰值 583，mdev 與 avg 同量級，**0% 丟包**） | ⚠️ PLC 的 MAC 層重傳＝丟包轉成延遲尾巴 |
+| 兩台之間走 WiFi | 7.2 ms | ✅ 穩定 |
+
+🟢 **bench 現況：走 WiFi `192.168.5.25`，不要走 `192.168.1.10`。**
+🔴 **2026-09-08 晚間更正：理由比本段原本寫的強得多。** 原文寫「不是有線比較爛，而是 bench 上
+兩台在同一個房間、WiFi 是更好的那條」——**當天稍晚的受控實驗推翻了「不是有線比較爛」這句**：
+
+| 條件 | 隧道（Fathom-X / HomePlug AV） | WiFi（同一秒對照） |
+|---|---|---|
+| 閒置 | roll age ~495ms | ~68ms |
+| **VFD 一運轉** | **90 送 9 收＝掉 90% 封包**；roll age 17 秒內 758ms → **7,206ms** | **90/90 全通** |
+
+⇒ **隧道在機器真的動起來的時候會塌掉**，平衡全程退回 `src=meter`＝**IMU 路徑實質死亡**。
+📌 這不是延遲尾巴的程度問題，是**負載相關的失效**：閒置時量不到，一動就出現。
+
+🔴🔴 **per user 已拍板最終走有線**，所以這條路遲早要修。切過去之前至少兩件事：
+① **干擾本身**（VFD 運轉 ↔ 電力線通訊共用同一組電源／線路，per user 要先改電源）；
+② `IMU_ROLL_STALE_MS=750`（見待辦總表）——即使沒有 VFD 干擾，隧道閒置時
+應用層實測 p90 = 365ms、最長空窗 **1,198ms**、120 秒內 **22 次**超過 750ms（WiFi 是 0 次）。
+
+🔴 **實務上要帶 `FCV_EP_CRANE_HOST=192.168.5.25` 啟動本體**（2026-09-08 `m2` 之後不帶會自動選有線）
+—— 完整說明與失敗徵兆見 **§A0** 第 3 步下方。
+
+🧪 **改完電源要複驗時用 `scripts/link_probe.sh`**（2026-09-09 新增）—— 它把上表那組受控實驗
+做成可重跑的腳本，**在本體 `.26` 上跑**（只有它同時看得到兩條路徑）：
+
+```
+./link_probe.sh offset ; ./link_probe.sh run 420 ; ./link_probe.sh analyze <前綴> <HOLD起> <HOLD迄>
+```
+
+窗口取自吊機 log 的 `HOLD-TRACE` 時間戳。⚠️ **一次只驗一個變因**：改電源就只改電源，
+位置與線材不要同時動，否則分不出是哪一個。
+📌 判讀：隧道丟包大幅下降而 WiFi 不變 ⇒ 電源耦合；沒改善 ⇒ 輻射／線間耦合（磁環・遮蔽線・走線分離）。
 
 **帳號兩台不一樣。**
 
@@ -31,8 +103,19 @@
 - 🔴 **帳號不是 `pi`**（2026-08-28 已全檔更正為 `nexuni@` / `user@`）
 - 🔴 **從 WSL 連 `.25` 可能是 `No route to host`，而 `.26` 同時是通的**（2026-09-03 實測；Windows 端兩台都直連正常）。
   ⇒ **用 washrobot 當跳板**：`ssh -J nexuni@192.168.5.26 user@192.168.5.25`，實測可用。
+
+📌 **兩台的 sudo 不對稱，這是原狀不是誰忘了關**（2026-09-08 查證）：
+吊機 `.25`（`user`）**免密碼 sudo**，來自 `/etc/sudoers.d/010_pi-nopasswd`（`user ALL=(ALL) NOPASSWD: ALL`，
+檔案時間 **2025-11-24**）＝ Raspberry Pi OS 的預設配置，**早於任何一次 Claude 作業 10 個月**；
+本體 `.26`（`nexuni`）則**需要密碼**。
+⚠️ 這兩台是 facade 的 bench 測試機、**不在 remote_hosts 納管範圍**，因此不適用
+「NOPASSWD 預設關、用完主動關閉」那條 remote_hosts 規則。
+🔴 **下次收尾看到 `.25` 是 NOPASSWD，不要當成自己忘了關而去「還原」** —— 照規範先 `stat` 檔案時間戳再判斷。
   📌 症狀是「單一位址不通、同網段鄰居卻通」＝ router/ARP 層的問題，**不要先懷疑吊機掛了或金鑰壞了**。
-- 🔴 **吊機有線是 `192.168.1.10` 不是 `.101`**（2026-08-28 全檔更正）。✅ `web_backend/server.js` 的 `CRANE_IP` 預設值**已於 `f4e0d02` 改為 `.1.10`**（2026-08-29 複查確認；本行原本寫「仍是 `.101`」＝過期）。⚠️ 現行的兩支 C++ 走的是 `app/WASH_ROBOT.h` 的 `CRANE_IP = "192.168.5.17"`（WiFi）—— **eth 串接後要回頭改它**，見待辦總表
+- 🔴 **吊機有線是 `192.168.1.10` 不是 `.101`**（2026-08-28 全檔更正）。✅ `web_backend/server.js` 的 `CRANE_IP` 預設值**已於 `f4e0d02` 改為 `.1.10`**（2026-08-29 複查確認；本行原本寫「仍是 `.101`」＝過期）。⚠️ 現行的兩支 C++ 走的是 `app/WASH_ROBOT.h` 的 `CRANE_IP`（WiFi）。
+  🔴 **2026-09-08 更正：現值是 `192.168.5.25` 不是 `192.168.5.17`**（`strings ~/run/facade_cleaning_v2.out` 實測）。
+  ✅ **「eth 串接後要回頭改它」這條已結案**——eth 09-08 確認可通，但 bench 上刻意維持 WiFi（理由見上方連線資訊段）。
+  📌 **開跑前先 `strings` 驗 `CRANE_IP`**：對不存在的主機是 blocking connect ⇒ 卡滿 SYN timeout 約 2 分鐘、看起來像當機
 - 🔴🔴 **吊機 WiFi IP 會漂，而 `CRANE_IP` 是編譯期常數（2026-08-31 踩到）**：`user_lib/WASH_ROBOT.h`
   的 `CRANE_IP` 沒有任何 env 覆蓋（全檔只有 `WR_DRIVER_DEBUG` 一個 `getenv`）→ **IP 一漂就只能改碼重編**。
   症狀極具誤導性：`init()` 會一路印到 `[--] DY-500 … polling disabled` 然後**整個停住約 2 分鐘**、
@@ -61,11 +144,118 @@
 > 快速語法檢查（不產生檔案）：
 > `ssh nexuni@192.168.5.26 "cd ~/projects/<專案>/user_lib && g++ -fsyntax-only -std=c++17 -I. <檔案>.cpp"`
 
+### A0. 🟢 日常啟動／收尾（**2026-09-09 起：原始碼 `~/projects/facade_cleaning_v2/`、執行期 `~/run/`**）
+
+> 📌 **2026-09-08 建立。** 在此之前，`~/bringup/` 的做法只以文字寫在 §0 的警語裡，
+> 全檔唯一可複製的「啟動順序」在 **§A4**，而那是 `main` 分支快照 `~/main_20260831/` 專用。
+> ⇒ 照目錄找「啟動順序」的人會起到 08-31 的舊 binary，**零徵兆**。這一節就是為了堵這個坑。
+> 下列指令即 2026-09-08 實際跑起來的那組（由執行中的 `ps` 逐字取回，不是憑記憶寫的）。
+
+🔴 **開跑前兩件事**（各自都踩過）：
+1. `ping 192.168.5.25` / `.26` 確認在線。**不通先 ping 倉庫 router `192.168.5.1`**——
+   `.1` 通而目標不通 ＝ 機器沒開，不是 VPN 沒接。（也可登 Vigor2915ac 查 DHCP 表。）
+2. `ssh nexuni@192.168.5.26 'strings ~/run/facade_cleaning_v2.out | grep -E "^192\.168\."'`
+   驗編譯期 `CRANE_IP` 是否等於吊機現值。不對就得改碼重編，直接開跑會卡兩分鐘 SYN timeout。
+   ⚠️ **2026-09-08（`m2`）起編譯期常數不再是唯一決定因素** —— `FCV_EP_CRANE_HOST` 環境變數優先，
+   有設就完全不做探測。⇒ 這一步現在只證明「沒帶環境變數時會落到哪」，**不等於本次實際會用的位址**。
+
+**`<D>` 以下代表當日標記**（例：`0908`；同日第二輪用 `0908b`）。**吊機先、本體後。**
+
+```
+# 1) 吊機主程式（:5002）
+ssh user@192.168.5.25 'cd ~/run && rm -f crane_<D>_in logs/cr_<D>.log && mkfifo -m 600 crane_<D>_in && setsid nohup sh -c "exec sleep infinity > /home/user/run/crane_<D>_in" >/dev/null 2>&1 </dev/null & sleep 1; cd ~/run && setsid nohup stdbuf -oL -eL ./crane_control_PI.out > logs/cr_<D>.log 2>&1 < crane_<D>_in & sleep 12; ss -ltn | grep :5002; tail -25 ~/run/logs/cr_<D>.log'
+
+# 2) 兩個 WEB（都跑在吊機上，8080=public / 8081=console v2）
+ssh user@192.168.5.25 'D=/home/user/projects/facade_cleaning_v2/web; cd $D && WROBOT_IP=192.168.5.26 CRANE_IP=127.0.0.1 HTTP_PORT=8080 setsid nohup node server.js > ~/run/logs/web_<D>.log 2>&1 </dev/null & cd $D && WROBOT_IP=192.168.5.26 CRANE_IP=127.0.0.1 HTTP_PORT=8081 PUBLIC_DIR=$D/public_v2 setsid nohup node server.js > ~/run/logs/web_v2_<D>.log 2>&1 </dev/null & sleep 6; ss -ltn | grep -E ":(8080|8081)"'
+
+# 3) 本體主程式（:5001）
+ssh nexuni@192.168.5.26 'cd ~/run && rm -f wr_<D>_in logs/wr_<D>.log && mkfifo -m 600 wr_<D>_in && setsid nohup sh -c "exec sleep infinity > /home/nexuni/run/wr_<D>_in" >/dev/null 2>&1 </dev/null & sleep 1; cd ~/run && WR_DRIVER_DEBUG=0 FCV_EP_CRANE_HOST=192.168.5.25 setsid nohup stdbuf -oL -eL ./facade_cleaning_v2.out > logs/wr_<D>.log 2>&1 < wr_<D>_in & sleep 3; echo started'
+```
+
+#### 🔴🔴 第 3 步的 `FCV_EP_CRANE_HOST=192.168.5.25` 不可省 —— 省掉不會報錯，只會安靜地走上壞的那條
+
+📌 **2026-09-08 補。** 本節 19:19 初版寫成時還沒有這個需求；同日 19:50（`m1`）與 20:10（`m2`）
+兩個 C++ 修正上線之後，**不帶它的行為變了**：
+
+- `m2` 之後 `resolve_crane_ip_()` 的覆蓋判準改看「環境變數在不在」（`ep::has_host_override("CRANE")`），
+  **沒帶就會去跑有線自動探測**；而 `m1` 之後那個探測**會成功** ⇒ 選走有線 `192.168.1.10`
+- 🔴 而同日的受控實驗已證實：**VFD 一運轉，隧道（Fathom-X / HomePlug AV）掉 90% 封包**
+  （hold 期間隧道 9/90，同一秒 WiFi 90/90 全通），roll age 在 17 秒內由 758ms 劣化到 **7,206ms**，
+  平衡全程退回 `src=meter` ⇒ **IMU 路徑實質死亡**
+
+⚠️ **失敗的樣子**：init 全 `[OK]`、埠正常開、`status` 有回應、閒置時一切正常。
+**只有在機器真的開始動的時候才壞** —— 也就是最需要它的時候。
+📌 **這正是本專案反覆踩的那一類**：不是「錯誤」，是「安靜地走了另一條路」。
+
+🔴 **這是一個「必須記得帶」的參數，也就是遲早會被忘記的那種。**
+🟡 **待決（不是已拍板）**：干擾修好之前，可以考慮把它寫進啟動腳本，
+或把編譯期預設暫時改成 WiFi，讓「忘記帶」不再是一種失敗模式。**尚未決定，先照上面帶著跑。**
+
+🔴 **`web` 在吊機的 `~/projects/facade_cleaning_v2/web/`**（2026-09-09 由 `~/bringup/web/` 搬來）。
+兩個埠共用同一份 `server.js`，靠 `HTTP_PORT` + `PUBLIC_DIR` 區分（v2 要指 `public_v2`）。
+
+**驗收判準**（缺一不可）：
+
+| 檢查 | 通過樣子 |
+|---|---|
+| 吊機 | `command server :5002`；VFD keepalive `L/R ok=50 fail=0` |
+| 本體 | `command server :5001`；`.20`/`.21`/`.22` 三條匯流排 connected |
+| 本體 → 吊機 | **`[OK] crane 192.168.5.25:5002`** —— 是 `OK` 不是 `WARN`，**而且位址要是 `.5.25`**<br>🔴 **看到 `192.168.1.10` 就是環境變數漏帶** ⇒ **停下來重啟**，不要繼續（理由見上方說明）<br>📌 帶對時開機會印 `[crane] 位址由環境變數覆蓋 = 192.168.5.25（不做有線探測）`；<br>漏帶時印的是 `[crane] 走**有線** 192.168.1.10:5002（探測通過）` |
+| WEB | log 出現 `[crane] connected` 與 `[washrobot] connected 192.168.5.26:5001` |
+
+📌 本體未開機時 web 顯示 `washrobot disconnected` ＝ 正確反映，不是故障；
+吊機 `imu_roll_fresh=0` 同理（沒人推 roll）。
+
+🔴 **重開機後回到編譯預設的執行期值**：`fine_adjust_level_diff_cm` 會是 `0` 不是 5。
+**跑 `cycle_test` 前必須先設**（`balance_source` 09-07 起已由編譯預設解決；`motion_hz` 本來就是 50）。
+
+**收尾（不要用 `kill` 主程式）**——兩支都靠 console loop 的 `exit` 走正規關機路徑：
+
+```
+ssh nexuni@192.168.5.26 'echo exit > ~/run/wr_<D>_in'        # 本體先（它會對吊機下 water_inlet off）
+ssh user@192.168.5.25   'pkill -f "node server.js"'
+ssh user@192.168.5.25   'echo exit > ~/run/crane_<D>_in'
+ssh user@192.168.5.25   'pkill -f "sleep infinity"'              # 清 FIFO 常駐 writer
+```
+
+⚠️ `[SHUTDOWN] stopping...` 印出來**不等於已結束**（本體約 5 秒、吊機約 10 秒在 join 執行緒）
+→ 用 `ss -ltn` 確認埠關掉才算數。
+
+🔴🔴 **上面那條 `pkill -f "sleep infinity"` 只在「整個收尾流程的最後一步」安全 —— 拿去清殘留會關掉機器。**
+
+它是**收尾序列的一環**（前面已經 `echo exit` 讓主程式走完正規關機）。但同一天多輪測試會累積殘留
+（例：2026-09-08 重啟 5 次，留下 `wr_0908` / `b` / `c` / `d` / `e` 五組），此時**主程式正靠其中一個 FIFO 當 stdin**
+⇒ 直接 `pkill -f` 會讓它收到 **EOF 而當場關機**。
+
+🐛 **而且 `-f` 的命中數會騙人**：2026-09-08 實測 `pgrep -f "sleep infinity"` 命中 **12 個，其中只有 5 個是真 writer**——
+其餘是**命令列裡含有該字串的啟動器 `bash -c`**，連當下那條查詢指令自己都被算進去。
+📌 與本檔既有的 `pgrep` 陷阱同族：**比對「命令列裡有沒有這個字」時，下指令的那條命令列本身就含有它。**
+
+✅ **清殘留的正確做法（不要用 `pkill`）**——先驗明身分，只殺對不上的：
+
+```
+# 1) 主程式現在靠哪個 FIFO 當 stdin（<MAIN_PID> = 主程式 PID）
+ssh nexuni@192.168.5.26 'readlink /proc/<MAIN_PID>/fd/0'
+
+# 2) 逐一列出真 writer 各自寫哪個 FIFO（fd/1 指向 FIFO 檔的才是，指向 pipe: 的是啟動器）
+ssh nexuni@192.168.5.26 'for p in $(pgrep -x sleep); do echo "$p -> $(readlink /proc/$p/fd/1)"; done'
+
+# 3) 只 kill 與第 1 步對不上的那幾個 PID，再刪掉對應的 FIFO 檔（保留在用的那支）
+```
+
+**動手後必須複驗**：主程式 PID 仍在、`fd/0` 仍指向原 FIFO、`:5001` 仍 listening、log 尾端沒有 `[SHUTDOWN]`。
+
+🔴 **FIFO 只認 `exit` / `quit` / `status`，其餘靜默丟棄**（權威版見 §0 第 3 條）。
+**執行期參數一律走 TCP `:5002`／`:5001` 或 GUI。**
+
+---
+
 ### 0. 一鍵啟動（tmux launcher，bench / 測試用）
 
 🔴🔴 **2026-09-03 實測：這一節目前兩台都跑不起來，動手前先看這三條。**
 1. **`tmux` 兩台都沒安裝**（`dpkg -l tmux` 皆為 `un`）→ 底下所有 `*.sh start/attach` 直接失敗。
-2. **`~/facade_cleaning_v2` 兩台都不存在**。實際工作目錄是 **`~/bringup/`**（吊機 `crane_control_PI.out`、
+2. ⚰️ **（2026-09-09 已過期，見檔首搬家公告）** 原文：「`~/facade_cleaning_v2` 兩台都不存在，實際工作目錄是 `~/bringup/`」——
+   **現在原始碼在 `~/projects/facade_cleaning_v2/`、執行期在 `~/run/`。** 以下三行保留作歷史：（吊機 `crane_control_PI.out`、
    本體 `facade_cleaning_v2.out`，各自帶一串 `.prevN` 舊版），而且 **`~/bringup/` 不是 git repo**。
    吊機的週期測試紀錄在 `~/bringup/cycle_logs/`。
 ⇒ 現行實際做法是直接跑 `~/bringup/` 底下的 binary（搭配 FIFO `crane_<date>_in` 餵指令、輸出導向 `crane_<date>.log`），
@@ -348,16 +538,19 @@ ssh user@192.168.5.25 'who; ss -ltn | grep -E ":(5002|8080)"; ps -eo pid,etime,c
 ### 1. 建置（在 Pi 上）
 
 > 🔴🔴 **2026-09-01 更正：本節標題原本寫「另開目錄，不碰現有部署」——那是錯的。**
-> 實測兩台的程式**就是直接跑在 `~/bringup/` 底下**
->（`/proc/<pid>/exe` → `~/bringup/crane_control_PI.out`／`~/bringup/facade_cleaning_v2.out`，
-> `cwd` 也是 `~/bringup`）。所以下面這幾條 `g++ -o ...` **會覆蓋掉正在服役的執行檔**。
+> 🔴 **2026-09-09 更新**：兩台的程式現在跑在 **`~/run/`** 底下（搬家前是 `~/bringup/`）
+>（`/proc/<pid>/exe` → `~/run/crane_control_PI.out`／`~/run/facade_cleaning_v2.out`，
+> `cwd` 也是 `~/run`）。**建置腳本已改成輸出 `~/run/*_drv.out`（不同檔名），所以不再會覆蓋服役中的執行檔**
+> —— 但若手動下 `g++ -o` 指到服役中的檔名，仍然會覆蓋。
+> ⚠️ **判定「主程式是否還在跑」一律用 `/proc/<pid>/exe`，不要用 `pgrep -f`** ——
+>    `pgrep -f` 會咬到 cmdline 含該字串的殼層，2026-09-09 一天內誤判兩次。
 >
 > 執行中的行程不受影響（它握著舊 inode，`ls -l /proc/<pid>/exe` 會顯示 `(deleted)`），
 > 但**下一次啟動就是新版**——不管那次啟動是計畫內的還是意外的。
 >
 > 🔴 **因此建置前先留回滾點**，而且只能在舊行程還活著時留（inode 隨行程結束消失）：
 > ```
-> cp /proc/<pid>/exe ~/bringup/<name>.prevN
+> cp /proc/<pid>/exe ~/run/<name>.prev-$(date +%Y%m%d-%H%M)
 > ```
 > 既有慣例：吊機 `crane_control_PI.prevN`、本體 `facade_cleaning_v2.prevN`。
 >
@@ -366,28 +559,28 @@ ssh user@192.168.5.25 'who; ss -ltn | grep -E ":(5002|8080)"; ps -eo pid,etime,c
 > 在無意間完成部署的——所幸方向是對的（新版才是要的），但那是運氣不是設計。
 
 ```
-rsync -a --delete <repo>/{common,config,mechanism,transport,user_lib,Crane_control_PI} user@192.168.5.25:~/bringup/
+rsync -a --delete <repo>/{common,config,mechanism,transport,user_lib,Crane_control_PI} user@192.168.5.25:~/projects/facade_cleaning_v2/
 ```
 ```
-ssh user@192.168.5.25 'cd ~/bringup && g++ -std=c++17 -O2 -Icommon -Imechanism -Itransport -Iuser_lib -o crane_control_PI.out Crane_control_PI/main.cpp transport/TCP_client.cpp transport/TCP_server.cpp user_lib/{CLV900_inverter,DSZL_107,DY_500_weight_sensor,PQW_IO_16O_RLY,MH300_inverter,SD76_length_meters,SE3_inverter}.cpp -lpthread'
+ssh user@192.168.5.25 'cd ~/projects/facade_cleaning_v2 && g++ -std=c++17 -O2 -Icommon -Imechanism -Itransport -Iuser_lib -o ~/run/crane_drv.out Crane_control_PI/main.cpp transport/TCP_client.cpp transport/TCP_server.cpp user_lib/{CLV900_inverter,DSZL_107,DY_500_weight_sensor,PQW_IO_16O_RLY,MH300_inverter,SD76_length_meters,SE3_inverter}.cpp -lpthread'
 ```
 
 本體（多一個 `app/`，**16 個編譯單元**（2026-08-31 更正：原寫 14，階段 2/5 之後多了 `command/dispatcher.cpp` 與 `app/wash_robot_commands.cpp`）、平行編約 25 秒）：
 ```
-rsync -a --delete <repo>/{app,command,common,config,mechanism,transport,user_lib,facade_cleaning_v2} nexuni@192.168.5.26:~/bringup/
+rsync -a --delete <repo>/{app,command,common,config,mechanism,transport,user_lib,facade_cleaning_v2} nexuni@192.168.5.26:~/projects/facade_cleaning_v2/
 ```
 ```
-ssh nexuni@192.168.5.26 'cd ~/bringup && mkdir -p obj && printf "%s\n" facade_cleaning_v2/main.cpp app/WASH_ROBOT.cpp app/wash_robot_commands.cpp command/dispatcher.cpp transport/{Serial_port,TCP_client,TCP_server}.cpp user_lib/{DM2J_RS570,DY_500_weight_sensor,FrameAnalyzer,JC_100_METER,PQW_IO_16O_RLY,QX_DO24,WT901BC_TTL,XKC_Y25_RS485,ZDT_motor_control}.cpp | xargs -P4 -I{} sh -c "g++ -std=c++17 -O2 -Iapp -Icommand -Icommon -Imechanism -Itransport -Iuser_lib -c {} -o obj/\$(basename {} .cpp).o" && g++ -o facade_cleaning_v2.out obj/*.o -lpthread'
+ssh nexuni@192.168.5.26 'cd ~/projects/facade_cleaning_v2 && mkdir -p ~/run/obj && printf "%s\n" facade_cleaning_v2/main.cpp app/WASH_ROBOT.cpp app/wash_robot_commands.cpp command/dispatcher.cpp transport/{Serial_port,TCP_client,TCP_server}.cpp user_lib/{DM2J_RS570,DY_500_weight_sensor,FrameAnalyzer,JC_100_METER,PQW_IO_16O_RLY,QX_DO24,WT901BC_TTL,XKC_Y25_RS485,ZDT_motor_control}.cpp | xargs -P4 -I{} sh -c "g++ -std=c++17 -O2 -Iapp -Icommand -Icommon -Imechanism -Itransport -Iuser_lib -c {} -o obj/\$(basename {} .cpp).o" && g++ -o facade_cleaning_v2.out obj/*.o -lpthread'
 ```
 
 🔴 **第三個目標：`Linux_test`（2026-08-29 補）** —— 它與應用層一樣綁在 `user_lib/*.h` 的
 public 簽名上，**上面兩條指令都沒有涵蓋它**。08-28 的 `3c75351` 把 `DM2J_RS570.h` 的
 16 個 `void` 改成 `bool`＝跨模組契約改動，**只編前兩支等於只驗到契約的一端**：
 ```
-rsync -a --delete <repo>/Linux_test nexuni@192.168.5.26:~/bringup/
+rsync -a --delete <repo>/Linux_test nexuni@192.168.5.26:~/projects/facade_cleaning_v2/
 ```
 ```
-ssh nexuni@192.168.5.26 'cd ~/bringup && g++ -std=c++17 -O2 -Icommon -Itransport -Iuser_lib -o linux_test.out Linux_test/main.cpp transport/{Serial_port,TCP_client,TCP_server}.cpp user_lib/{PQW_IO_16O_RLY,ZDT_motor_control,DM2J_RS570,WT901BC_TTL,JC_100_METER,XKC_Y25_RS485,SD76_length_meters,ZS_DIO_R_RLY,SE3_inverter,MH300_inverter,QX_DO24}.cpp -lpthread'
+ssh nexuni@192.168.5.26 'cd ~/projects/facade_cleaning_v2 && g++ -std=c++17 -O2 -Icommon -Itransport -Iuser_lib -o ~/run/linux_test.out Linux_test/main.cpp transport/{Serial_port,TCP_client,TCP_server}.cpp user_lib/{PQW_IO_16O_RLY,ZDT_motor_control,DM2J_RS570,WT901BC_TTL,JC_100_METER,XKC_Y25_RS485,SD76_length_meters,ZS_DIO_R_RLY,SE3_inverter,MH300_inverter,QX_DO24}.cpp -lpthread'
 ```
 📌 **假從站測試**（`Linux_test/fake_slaves/`）的建置指令在各 `test_*.cpp` 的檔頭，
 且**全程只連 `127.0.0.1`，不碰真 485 匯流排** —— 拿到機器時值得順手跑一輪。
@@ -395,7 +588,7 @@ ssh nexuni@192.168.5.26 'cd ~/bringup && g++ -std=c++17 -O2 -Icommon -Itransport
 ⚠️ **驗建置結果要看產物，不要看管線離開碼**：`g++ … 2>&1 | tail` 的離開碼是 `tail` 的
 （2026-08-29 差點誤判）。用 `ls -la` + `md5sum` 確認檔案時間戳與雜湊真的變了。
 
-⚠️ **`~/bringup/` 是刻意跟 `~/projects/` 分開的**：`~/projects/` 是**已廢棄的** Visual Studio 遠端建置落點（VS 已於 2026-09-07 整組移除，那棵樹停在 08-25~08-27、且缺半數目錄），
+⚰️ **（2026-09-09 已反轉）** 原文：「`~/bringup/` 是刻意跟 `~/projects/` 分開的：`~/projects/` 是**已廢棄的** Visual Studio 遠端建置落點（VS 已於 2026-09-07 整組移除，那棵樹停在 08-25~08-27、且缺半數目錄），
 另一位開發者在 `main` 上迭代時會重建並覆蓋它。
 
 ### 2. 先跑起來，但不要覆蓋現有部署
@@ -403,7 +596,7 @@ ssh nexuni@192.168.5.26 'cd ~/bringup && g++ -std=c++17 -O2 -Icommon -Itransport
 🔴 **不要用 `--help` 之類的旗標試用法——這兩支 `main()` 一開頭就連硬體，等於直接啟動**
 （2026-08-28 踩過，連上了運轉中的 485 匯流排）。
 
-直接執行 `~/bringup/` 底下那支即可（它會佔用 5002 / 5001，所以必須先確認沒有別的實例在跑）。
+直接執行 `~/run/` 底下那支即可（它會佔用 5002 / 5001，所以必須先確認沒有別的實例在跑）。
 
 ### 3. 驗收：`init()` 的逐項輸出
 
@@ -625,7 +818,13 @@ bash ~/main_20260831/launch.sh <binary> <logfile> <fifo>
 事後要下本地 console 指令（`status` / `exit`）就寫進 FIFO：
 `ssh nexuni@192.168.5.26 'echo status > ~/main_20260831/wr_in; sleep 5; tail -5 ~/main_20260831/run.log'`
 
-**啟動順序**（吊機先）：
+**啟動順序（⚠️ 這一節是 `main` 分支快照 `~/main_20260831/` 專用，不是日常路徑）**：
+
+🔴🔴 **日常上機請用 §A0 的 `~/run/`（原始碼 `~/projects/facade_cleaning_v2/`）。** 照這三行跑會起到 **08-31 的舊 binary**
+（吊機 417,024 bytes，不含 09-07 之後的任何改動），**而且不會有任何徵兆**——
+init 全 `[OK]`、埠正常開、`status` 有回應。2026-09-08 就差點照這節跑下去。
+
+（吊機先）
 
 ```
 ssh user@192.168.5.25    'bash ~/main_20260831/launch.sh crane_control_PI.out crane.log crane_in'

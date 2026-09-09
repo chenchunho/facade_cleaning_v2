@@ -25,7 +25,11 @@ Shihlin SE3-210 series variable-frequency drive (VFD) for AC induction motors. P
 | Format | 1,8,E,1 (RTU) | 07-07 (P.154): 0..5; **3=1,8,N,2 RTU used by project** |
 | Function codes | 0x03, 0x06, 0x10, 0x08 | Read, write single, write multiple, diagnostic |
 
-⚠ Project bench note: USR-TCP232 set to 8N1 — SE3 UART tolerates 1 stop bit when configured for 2. Required to share bus with SD76 (locked at 8N1).
+⚠ ~~Project bench note: USR-TCP232 set to 8N1 — SE3 UART tolerates 1 stop bit when configured for 2. Required to share bus with SD76 (locked at 8N1).~~
+
+🔴 **[2026-09-09] 上句已過期。** 實查 `.30` / `.31` 兩台網關**現在是 8N2**（`sb=2`），與 SE3 的 `07-07 = 3 = 1,8,N,2` 一致。
+**當初被迫 8N1 的唯一理由是與 SD76 共線**（SD76 沒有 8N2 選項，見 `SD76_MODBUS_SUMMARY.md`），而 **2026-05-15 re-layout 已把 SD76 移到 `.34`** ⇒ 限制消失。
+📌 8N2 才是**無同位元時 Modbus RTU 要求的 11-bit 幀**，所以現在的設定不只是可行，是比較正確的那個。
 
 ## Communication Timeout (Critical for Safety)
 

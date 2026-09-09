@@ -735,13 +735,12 @@ private:
     static constexpr int PUSHER_EXTEND_BODY_PULSE       = 34000;  // body upper (slave 5,6) ~11.3 cm (2026-05-28: 30000→36000 +6000=+2cm; 2026-05-28i: 36000→33000 -3000=-1cm，bench 顯示 36000+over 害 Phase 1 fast 700rpm 撞 wall peakI 1500mA+；2026-05-29: 33000→34000 +1000=+0.8cm，邊際提速 iter loop 收斂)
     static constexpr int PUSHER_EXTEND_BODY_PULSE_SHORT = 35400;  // body lower (slave 7,8) ~11.8 cm (2026-05-28: 29400→32400 +3000=+1cm；2026-05-28h: 32400→35400 +3000=+1cm，bench log body lower wall at 42798、SHORT 仍不夠導致 iter 0 plateau,加深一輪)
     static constexpr int PUSHER_RETRACT_PULSE      = 300;   // 收腳目標 (2026-07-14: 0→300 ≈0.1cm)。高速收到 0=機械原點會撞 hardstop「叩」一聲；停在原點前 0.1cm 避免撞擊。<FAKE-DONE 容差 50°(500pulse)、300pulse=30° 仍算收好
-    static constexpr int PUSHER_RPM           = 900;     // extend 用（feet）(2026-07-14: 700→1200 激進提速；2026-07-23 per user: 1200→900 調降)
+    static constexpr int PUSHER_RPM           = 600;     // extend 用（feet）(2026-07-14: 700→1200 激進提速；2026-07-23 per user: 1200→900 調降；2026-09-09 per user: 900→600 ＝ 2/3 速)
     // [2026-07-31 per user] pusher_two_stage_retract_ 改成比照 Linux_test 功能31
     // 的破真空輔助單段直收（CH_BREAK_VACUUM 主動破壞真空 + 直接快收，不再需要
-    // 慢慢剝離）。PUSHER_RPM_RETRACT / RETRACT_SLOW_PEEL_CM / PUSHER_STAGE1_DELAY_MS
+    // 慢慢剝離）。原兩段式的常數鏈已於 2026-09-09 刪除（見下方說明）；RETRACT_SLOW_PEEL_CM 保留
     // 這三個「第一段慢脫壁」專用的常數不再被 retract 邏輯使用（保留常數定義本身，
     // 因為 RETRACT_SLOW_PEEL_CM 還有 runtime settings_ 可調路徑，懶得順便拆）。
-    static constexpr int PUSHER_RPM_RETRACT      = 150;     // [已不用於 retract] 原兩段式第一段（慢脫壁）
     static constexpr int PUSHER_RPM_RETRACT_FULL = 500;     // 破真空輔助單段直收速度 (2026-07-31 per user: 900→1000 比照 bench 初版 → bench 上又測過 900→700→500，同步拉回正式程式)
     static constexpr double RETRACT_SLOW_PEEL_CM = 1.0;     // [已不用於 retract] 原兩段式第一段慢脫壁距離
     // [2026-07-31 per user] 破真空閥時序，比照 Linux_test 功能31 bench 驗證值。
@@ -770,26 +769,32 @@ private:
     static constexpr int PUSHER_ACC_BODY_EXTEND = 255;   // body 組 extend acc（與其他組同步）
     static constexpr int PUSHER_SETTLE_MS     = 100;     // 1500 → 300 → 100 (2026-05-29): 機構震盪幾百毫秒就停,DM2J rail 跟 cup 不同軸不受影響;extend 後另有 VACUUM_SETTLE_MS=2000 兜底
 
-    // [2026-05-29] 2-stage retract delay-based (no continuous status polling).
-    // bench measured: 1 motor rev ≈ 3.08 cm pusher linear motion (combined gear+lead).
-    // 1 pulse = 0.1° (encoder spec); 30 rpm observed ~1942 pulses/sec ≈ 1.54 cm/s.
-    // Stage 1 delay = (slow_peel_cm / cm_per_sec) × safety_factor → ms.
-    // After delay, sync-fire stage 2 (high speed) — motor switches target from
-    // stage1_endpoint to 0 from wherever it is. Cup adhesion breaks within first
-    // few mm of motion, so safety_factor × peel time guarantees breakage even
-    // with ramp-up/down overhead + buffer for over-extended cup.
-    static constexpr double PUSHER_CM_PER_REV         = 3.08;   // bench-measured
-    static constexpr double PUSHER_RETRACT_CM_PER_SEC =
-        (double)PUSHER_RPM_RETRACT * PUSHER_CM_PER_REV / 60.0;  // = 1.54 cm/s @ 30 rpm
-    // Safety factor for stage 1 delay. Higher = more conservative (longer wait,
-    // gives over-extended cup more time to peel before stage 2 hits).
-    // 2026-05-29: 2.0 → 3.0 per user request, "拉長一點".
-    // 2026-07-14: 3.0 → 1.0 激進提速（腳不撐重，脫壁延遲=脫壁時間本身、不加保險）。
-    static constexpr double PUSHER_STAGE1_SAFETY_FACTOR = 1.0;
-    static constexpr int    PUSHER_STAGE1_DELAY_MS    =
-        (int)((RETRACT_SLOW_PEEL_CM / PUSHER_RETRACT_CM_PER_SEC) *
-              PUSHER_STAGE1_SAFETY_FACTOR * 1000.0);
-        // = (2.0 / 1.54) × 3.0 × 1000 ≈ 3896 ms
+    // 🔴 [2026-09-09 per user] **兩段式 retract 的整條常數鏈已刪除。**
+    //
+    // 刪的是：PUSHER_RPM_RETRACT(150) / PUSHER_CM_PER_REV(3.08) /
+    //         PUSHER_RETRACT_CM_PER_SEC / PUSHER_STAGE1_SAFETY_FACTOR /
+    //         PUSHER_STAGE1_DELAY_MS
+    //
+    // 為什麼刪：現行 retract 是**單段直收**（PUSHER_RPM_RETRACT_FULL = 500），
+    // 兩段式早已退場。留下的那條鏈**沒有任何程式碼讀它** —— 逐一查證：
+    //   PUSHER_STAGE1_DELAY_MS ← 只有自己的定義 + 一行註解提到，**零使用點**
+    //   PUSHER_RETRACT_CM_PER_SEC / SAFETY_FACTOR ← 只被上面那個死常數用
+    //   PUSHER_RPM_RETRACT ← 只被 CM_PER_SEC 用
+    // ⇒ 整條鏈的終點沒有消費者，等於一組**互相引用的死常數**。
+    //
+    // 🔴 而且它會誤導：兩個常數標著「[已不用於 retract]」卻仍出現在算式裡，
+    //    而算式的註解寫 `= (2.0 / 1.54) × 3.0 × 1000 ≈ 3896 ms`，
+    //    用的是 2.0/3.0 —— **但現行常數是 1.0/1.0**。註解、常數、實際行為三者不一致。
+    //
+    // 📌 保留備查的實測值（bench）：**1 圈 ≈ 3.08 cm 推桿線性行程**（含齒輪+導程）；
+    //    **1 pulse = 0.1°（編碼器規格）**；30 rpm 實測 ~1942 pulses/sec ≈ 1.54 cm/s。
+    //    這三個是物理事實，值得留在文字裡；但不再以 constexpr 形式存在，
+    //    避免「看起來有人在用」。
+    //
+    // ⚠️ **`RETRACT_SLOW_PEEL_CM` 刻意保留**（見上）—— 它還活著：
+    //    `settings_` 可調、`cmd_status` 有輸出、存檔也寫它。動它會改到 wire 內容。
+    //
+    // 📌 判準沿用本日的教訓：**要刪之前找「誰讀這個值」，不是「誰定義它」。**
 
     // Step parameters
     static constexpr int STEP_CM_DEFAULT  = 30;   // initial value of step_cm_ (settable via cmd_set_step_cm)
@@ -827,6 +832,9 @@ private:
     // motion ops respond fast (relay toggles + meter polling, no open-loop sleep),
     // so 2s timeout works. The 60s value was for crane_shim.py with open-loop timed
     // pay_out/retract that could hold crane_mtx_ for 15s+.
+    // [2026-09-09] crane_peer_age_ms 的新鮮度門檻。**暫定值、未經實測。**
+    // 純顯示用 —— 沒有任何自動處置吃它（刻意的：先量一陣子再談門檻）。
+    static constexpr int CRANE_PEER_STALE_MS  = 3000;
     static constexpr int WATCHDOG_TIMEOUT_MS   = 2000;
 
     // [2026-06-09] Water inlet leak-prevention watchdog.
@@ -1437,6 +1445,16 @@ private:
     // during in-flight retract. Bypasses crane_mtx_ to avoid deadlock with the
     // main thread holding it for the long-running retract reply wait.
     // Shim is multi-connection (per-conn thread); both connections work in parallel.
+    // [2026-09-09] 急停旁路重連的逾時上限。取 300ms 的理由：急停可容忍的延遲
+    // 遠大於它，但它又遠小於 connectToServer() 的 ~127s 阻塞 —— 這條路徑寧可
+    // 快速大聲失敗，也不要卡住呼叫執行緒。
+    static constexpr int ESTOP_CONNECT_MS = 300;
+    // [2026-09-09] 急停通道排空預算。
+    // ESTOP_DRAIN_MS：送 stop **之前**丟掉排隊中的 EVT，讓 ACK 不必排在它們後面。
+    // ESTOP_ACK_MS  ：送出之後等 ACK 的總時限（逐行掃，跳過 EVT）。
+    // 兩者都遠小於急停可容忍的延遲；常態下 watchdog 已經把佇列清空，排空是 no-op。
+    static constexpr int ESTOP_DRAIN_MS = 150;
+    static constexpr int ESTOP_ACK_MS   = 1000;
     TCP_client crane_cli_estop_;
     std::mutex crane_estop_mtx_;
 
@@ -1570,6 +1588,16 @@ private:
     std::atomic<bool>    imu_push_running_{false};
     std::thread          imu_push_thread_;
     TCP_client           crane_cli_imu_;
+    // [2026-09-09] 鏈路可見度：最後一次從吊機收到任何位元組的時刻（ms）。
+    // 由 imu_push_loop_ 單一執行緒寫、cmd_status 讀 ⇒ 單寫單讀，免鎖。
+    // 0 = 從未收到。
+    // ⚠️ 判讀陷阱（務必連同 cmd_status 的欄位一起看）：
+    //   ① 不推送時 age 會自然長大 —— crane_attached=off 或 IMU 讀取失敗都會讓
+    //      imu_push_loop_ 不送，所以 age 大**不等於**鏈路斷。
+    //   ② 門檻值目前**只當觀測用、不接任何自動處置**：待辦表量到隧道閒置時
+    //      空窗可達 10.6 秒，在隧道上會頻繁翻紅，切到有線之後這個數字才有意義。
+    std::atomic<int64_t> crane_peer_last_rx_ms_{0};
+
     std::mutex           crane_imu_mtx_;
     void                 imu_push_loop_();
     static constexpr int IMU_PUSH_PERIOD_MS = 250;   // ~4Hz，對齊吊機 BALANCE_TICK_MS
@@ -2107,6 +2135,15 @@ private:
     //    在它上面加探測會破壞測試前提。
     void        resolve_crane_ip_();
     std::string crane_ip_resolved_;   // 空字串 = 尚未解析（退回 CRANE_IP）
+    // [2026-09-08] 🔴 **所有**連往吊機的連線一律經由這裡取位址，不要再各自寫一份。
+    //    在此之前 crane_cli_imu_（roll 推送）與 crane_cli_estop_（急停旁路）直接讀
+    //    ep::host("CRANE", CRANE_IP)，完全沒有看 resolve_crane_ip_() 的決定 ⇒
+    //    自動探測選到有線時，主連線走有線而那兩條仍走 WiFi，三條分裂且**無任何徵兆**。
+    //    2026-09-08 之所以沒出事，只是因為探測失敗、三條剛好都落在 WiFi（巧合，不是設計）。
+    //    🔴 WiFi 拆掉之後後果是實質的：那兩條會去連一個**不存在**的位址，而
+    //    connectToServer 是無逾時的 blocking connect（見下方 tcp_reachable_ 的說明：
+    //    實測卡滿約兩分鐘）—— 而急停旁路存在的意義，正是主連線塞住時還能停機。
+    std::string crane_endpoint_ip_() const;
     // 有界的 TCP 可達性探測（非阻塞 connect + select）。
     // ⚠️ **不能用 connectToServer 來試** —— 它是無逾時的 blocking connect，
     //    對不存在的主機會卡滿 TCP SYN timeout（2026-08-31 實測約兩分鐘）。
@@ -2192,6 +2229,13 @@ private:
                                                           // 2026-06-09h: 2→4 (5 total)。M2 馬達進水
                                                           // intermittent fail，bench 需要多 retry 才能 settle
     void        crane_watchdog_loop_();
+    // [2026-09-09] Record-only half of the EVT handler: atomics + one short
+    // mutex, no printing, no broadcast — safe to call from any thread.
+    // 🔴 Background readers must call THIS, never handle_crane_evt_: the full
+    // handler broadcasts, and broadcast() blocks in send() while holding
+    // clients_mtx, which would stall the 4Hz roll push past its 750ms cliff.
+    // Returns true if a tension_total_limit was suppressed by balance cal.
+    bool        record_crane_evt_(const std::string& line);
     void        handle_crane_evt_(const std::string& line);   // dispatches EVT lines drained from RPC channel
 
     // Read max rope tension (kg) with crane DSZL-107 as primary source.
@@ -2206,6 +2250,14 @@ private:
     // crane_mtx_, so it works WHILE a retract holds that mutex (the normal
     // read_rope_weight_max_kg_ would block). Used by crane_retract_safe_'s
     // active monitor. Returns kg; -1 on comm/parse fail / detached.
+    // [2026-09-09] Emergency stop over the dedicated estop channel — never
+    // takes crane_mtx_, so it can overtake an in-flight motion command.
+    // Returns true only on an OK ack; a false MUST be surfaced by the caller.
+    bool        crane_stop_estop_();
+
+    // [2026-09-09] 丟棄急停通道上排隊的 EVT 廣播，回傳丟棄位元組數。
+    // 呼叫端必須自己持有 crane_estop_mtx_（函式名的 _locked_ 就是這個意思）。
+    int  estop_drain_locked_(int budget_ms);
     double      read_rope_weight_estop_();
     // Returns the per-sensor weight limit appropriate for current state.
     double      rope_weight_limit_per_sensor_kg_() const;

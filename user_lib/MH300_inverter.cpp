@@ -86,11 +86,34 @@ bool MH300_inverter::init(TCP_client& extClient, int id, bool debug)
     for (int i = 0; i < MAX_PROBE_ATTEMPTS; ++i) {
         uint16_t st = 0;
         if (!readParam(REG_STATUS, st)) {
+            bool aux_cleared = false;
             uint16_t err = 0;
             if (!readParam(REG_ERR_CODE, err) && (err & 0x00FF)) {
                 LOG_WRN(_log_tag, "init probe OK but error code=0x%02X set — clearAlarm",
                         (unsigned)(err & 0x00FF));
-                clearAlarm();
+                clearAlarm();          // ends by writing 0x2002 = 0
+                aux_cleared = true;
+            }
+            // [2026-09-09] Cold-start base-block release (MH300 migration Phase 3-a).
+            // base_blocked_ is process-local, but the base block itself lives in the
+            // drive. An emergencyStop() followed by a restart (exit / crash / Pi
+            // reboot) leaves 0x2002 b2 set in hardware while the new object's flag
+            // starts false, so releaseBaseBlockIfNeeded_() returns early and nothing
+            // ever clears it. The failure is silent: the run word writes fine, the
+            // drive reports no fault code, the motor simply never turns. The
+            // error-code branch above cannot catch it either — a base block is an
+            // auxiliary command bit, not an alarm. So clear 0x2002 unconditionally
+            // here; the cost is one extra Modbus write per init.
+            if (!aux_cleared) {
+                if (writeParam(REG_AUX_CMD, 0x0000)) {
+                    // Leave the flag set so the existing best-effort retry in
+                    // releaseBaseBlockIfNeeded_() clears it on the first run command.
+                    LOG_WRN(_log_tag, "init: cold-start aux 0x2002 clear failed — "
+                                      "retry armed on next run command");
+                    base_blocked_ = true;
+                } else {
+                    LOG_INF(_log_tag, "init: aux 0x2002 cleared (cold-start base-block release)");
+                }
             }
             return false;   // success
         }

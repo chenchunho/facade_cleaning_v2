@@ -49,14 +49,41 @@ import os, re, socket, sys, threading, time
 sys.stdout.reconfigure(line_buffering=True)
 
 CRANE  = ("127.0.0.1", 5002)
-WROBOT = ("192.168.5.26", 5001)
+# 🔴 [2026-09-09] 位址改為可由環境變數覆蓋，**預設維持 WiFi 不變**。
+#
+# 為什麼不直接寫死 192.168.1.100：切到有線是 per user 已拍板的方向，但**隧道的
+# 電氣干擾還沒處置**（VFD 一運轉掉 90 趴封包）。現在寫死，等於讓任何人在電氣修好
+# 之前跑這支腳本就直接撞牆，而失敗的樣子會像是機構問題。
+#
+# 📌 這也是 2026-09-08 `m1`/`m2` 的教訓：位址要**能被表達**，不要靠改常數 ——
+#    當時「強制走 WiFi」正好是那個機制唯一表達不出來的意圖。
+#
+#   FCV_WROBOT_HOST=192.168.1.100 python3 cycle_test.py ...   # 走有線
+#   （不設）                                                # 走 WiFi，與今天相同
+WROBOT_HOST = os.environ.get("FCV_WROBOT_HOST", "192.168.5.26")
+WROBOT_PORT = int(os.environ.get("FCV_WROBOT_PORT", "5001"))
+WROBOT = (WROBOT_HOST, WROBOT_PORT)
 
 CYCLES    = int(sys.argv[1]) if len(sys.argv) > 1 else 1
 STEPS     = int(sys.argv[2]) if len(sys.argv) > 2 else 5
 STEP_CM   = int(sys.argv[3]) if len(sys.argv) > 3 else 40
 VAC_OK_KPA = -50        # [2026-09-03 per user] 密封判準：至少一顆到此值
 VAC_WAIT_S = 10.0       # 等真空建立的上限秒數（超過即視為完全沒附著）
-RAIL_CM   = 100         # [2026-09-03 per user] 步驟 ③b 上滑台行程 0->RAIL_CM->0（50→100）
+# [2026-09-09] 可由環境變數覆蓋，**預設維持 09-03 的 100**。
+#
+# ⚠️ 沿革（留著是因為這是一次「假說被證偽」的完整紀錄，不要當成雜訊刪掉）：
+#   本日一度由 100 降到 50，理由是我把每步的 `停後roll +3~4°` 歸因於「滑台橫走把機體推歪」。
+#   🔴 **那個歸因是錯的**，被兩件事同時證偽：
+#     ① per user 指出：**滑台橫走時吸盤是吸著的** —— 機體錨定在玻璃上，滑台移動不會讓它擺。
+#        而 `停後roll` 是在下降 40cm **之後**量的，那時推桿已收回、機體懸空 ⇒ 量的是自由懸吊姿態。
+#     ② 實驗：`RAIL_CM` 減半（滑台耗時 6.3s→4.4s，確實變快），左右差 中位/p90/max
+#        由 4/9/10 → 3/8/**11**，**沒改善、最大值更糟**；`停後roll` 仍 +3°。
+#   ✅ 真因是 `fine_adjust_level_diff_cm` 被設成 0（＝「水平就是繩長齊平」），
+#      而本機水平時 L−R ≈ 6。**每次計米器歸零後都必須重量這個值**（見吊機 main.cpp:398 的註解）。
+#   📌 通則：把一個現象歸因給某個步驟之前，先確認**沒有那個步驟時它不出現**。
+#
+#   FCV_RAIL_CM=50 python3 cycle_test.py ...   # 要縮短滑台行程用這個
+RAIL_CM   = int(os.environ.get("FCV_RAIL_CM", "100"))
 ARM_SLOT  = 'RIGHT'     # 固定滾筒（per user）。LEFT=刮刀 / CENTER
 ARM_WALL_MM = 520       # DEPLOY 的假設牆距（僅在退回舊路徑時使用，見 ARM_TARGET_NM）
 # [2026-09-04 per user] 目標壓力 15 N·m，現場目視定案。DEPLOY_F 用它，不用 ARM_WALL_MM。
@@ -88,8 +115,10 @@ DIFF_TRIP = float(sys.argv[5]) if len(sys.argv) > 5 else 8.0
 # 真正該擋的「一側繩子卡住」，特徵是 Δ **持續擴大且不回頭**；平衡修正則是衝一下就收斂。
 # 用**持續性**而非瞬時大小來分辨。門檻本身不動，韌體的 length_diff_max_cm=10 仍是硬底線。
 #
-# ⚠️ roll 門檻**維持瞬時判定**，刻意不比照辦理：那是機體姿態的安全線，
-#    一筆真實的 6° 就該停，沒有「等它持續」的餘裕。
+# ⚠️ ~~roll 門檻維持瞬時判定，刻意不比照辦理~~ —— 🔴 [2026-09-09] **這句已被它自己下方的
+#    程式碼推翻**：09-04 就加了 `ROLL_PERSIST = 3`，roll 早就不是瞬時判定了。
+#    這是「結論改了、由它產生的敘述沒跟著改」，與 2026-09-08 記的那三條假待辦同型。
+#    保留原文只為留下沿革，**判準以下方 ROLL_PERSIST 為準**。
 DIFF_PERSIST = 3          # 連續幾筆超標才中止（取樣間隔約 0.3s → 約 1 秒持續）
 # [2026-09-04] roll 的持續筆數。取 3 與 DIFF_PERSIST 一致（約 1 秒）：
 #   實測尖峰是**單筆**的（−6.65 之後下一筆就回到 −3.35），1 秒足以區分
@@ -100,6 +129,11 @@ ROLL_PERSIST = 3
 ROLL_RECOVER_OK   = 3.0   # 修正後 |roll| 低於此值視為救回來（ROLL_TRIP 的一半）
 ROLL_RECOVER_TRY  = 3     # roll_correct 最多迭代幾次
 ROLL_RECOVER_MAXD = 4     # 單次 roll_correct 的 delta 上限（cm），避免一次動太多
+# [2026-09-09] 判定「這次修正有沒有效」的最小改善量（度）。
+# 小於它就視為沒改善 —— 避免因量測雜訊而以為還在進步、一直動繩。
+# 0.3° 的依據：本日靜止連測 3 次的重複性優於 0.02°，量測雜訊遠小於它；
+# 而一次 1cm 的修正實測會改變 3~4°，所以 0.3 不會誤殺一次有效的修正。
+ROLL_RECOVER_MIN_GAIN = 0.3
 
 # 🔴 [2026-09-03 per user 第二次重新定義] 座標語意由「繩長」改成「**離底高度**」。
 #
@@ -118,12 +152,81 @@ ROLL_RECOVER_MAXD = 4     # 單次 roll_correct 的 delta 上限（cm），避�
 #   底端 height = 0 ／ 頂端 height = TOP
 # 下行仍是 pay_out（繩變長、height 減少）；回程仍是 retract（繩變短、height 增加）。
 # 📌 SD76 量的本來就是繩長，這個換算刻意只做在腳本裡 —— 不去動韌體回報的物理量。
-TOP, BOTTOM = 231, 0
+# 🔴 [2026-09-09] TOP 改為可由環境變數覆蓋，**預設維持 231 不變**。
+#
+# 為什麼不直接改成新測值：跨距**每次來回都會漂**（本日實測 223→226→227→225→223，
+# 單趟來回約 2cm，對應 09-01 記的「單側收繩固定過衝約 1cm」）。
+# 寫死任何一個數字都只是把過期時間往後推一次，而 231 這個值帶著 09-03 的量測脈絡，
+# 改掉會讓下次有人以為它從來不存在。
+#
+#   FCV_TOP_CM=223 python3 cycle_test.py 10 5 40
+#
+# ⚠️ 開跑前實測一次再帶進來 —— 起點檢查是 abs(L0-TOP)>TOL(5)，漂超過 5cm 就會拒絕啟動。
+# 🔴 [2026-09-09 第三次重新定義] 改回**頂端歸零**（＝ runbook 的生產標準流程）。
+#
+# 沿革（三次，不要弄混；每次都改變 length_left 的符號意義）：
+#   ① 09-03 早上：玻璃最高點歸零 → 0=頂、+223=底（繩長語意）
+#   ② 09-03 傍晚：玻璃最底端歸零 → 0=底、往上為**負**（本檔原本的 height=-L 為此而寫）
+#   ③ 09-09 傍晚：`zero_meters ground`（玻璃最底點）→ 升頂 → `zero_meters top`
+#      ⇒ **回到 ①**：0=頂、+256=底，且 `home_ground_cm=256` 被寫進吊機
+#
+# 🔴🔴 ② 的 `height = -length_left` 套到 ③ 會整個反號。**但這不是靠小心避免的**——
+#      本檔改成從吊機的 `home_ground_cm` 自行判定，並把判定結果印出來讓人看見：
+#        home_ground_cm > 0  ⇒ 頂端歸零，height = home_ground_cm - L
+#        home_ground_cm == 0 ⇒ 底端歸零，height = -L                （② 的舊行為，逐位元不變）
+#      `zero_meters top` 是唯一會寫 home_ground_cm 的指令，所以它 >0 就代表頂端歸零過。
+#
+# ⚠️ `home_ground_cm` **不持久化**，吊機重啟即回 0 ⇒ 會靜默退回 ② 的慣例。
+#    擋這件事的是既有的起點檢查 `abs(L0-TOP)>TOL`：慣例錯的話 L0 會差整整一個跨距，
+#    必定拒絕啟動。**失效模式是「拒跑」，不是「跑錯方向」。**
+#    可用 FCV_ZERO_AT=top|bottom 明確指定，蓋過自動判定。
+#
+#   FCV_TOP_CM=223 python3 cycle_test.py 10 5 40      # 仍可手動指定跨距
+#
+# ⚠️ 跨距**每次來回都會漂**（09-03 實測 223→226→227→225→223，單趟約 2cm），
+#    所以自動判定時 TOP 取 home_ground_cm 的當下值，不寫死。
+def _detect_zero_convention():
+    """回傳 (zero_at, home_ground_cm)。純讀取，不改變機器狀態。"""
+    env = os.environ.get("FCV_ZERO_AT", "").strip().lower()
+    hg = 0
+    try:
+        v = field(ask(CRANE, "status", 10), "home_ground_cm")
+        if v is not None:
+            hg = int(v)
+    except Exception:
+        hg = 0
+    if env in ("top", "bottom"):
+        return env, hg
+    return ("top" if hg > 0 else "bottom"), hg
+
+
+# 🔴 這三個由 resolve_zero_convention() 在**起點檢查之前**填實值。
+#    不能在此處呼叫 —— _detect_zero_convention 依賴 ask()/field()，兩者定義在本行之後，
+#    模組載入時呼叫會 NameError。height() 是惰性的（呼叫時才讀這些全域），所以定義順序無妨。
+ZERO_AT, HOME_GROUND_CM, TOP = "bottom", 0, None
+BOTTOM = 0
+
+
+def resolve_zero_convention():
+    """填 ZERO_AT / HOME_GROUND_CM / TOP。必須在任何 height() 呼叫之前執行。"""
+    global ZERO_AT, HOME_GROUND_CM, TOP
+    ZERO_AT, HOME_GROUND_CM = _detect_zero_convention()
+    if ZERO_AT == "top" and HOME_GROUND_CM <= 0:
+        print("🔴 FCV_ZERO_AT=top 但吊機 home_ground_cm=%d —— 沒有跨距可用，"
+              "請先跑 `zero_meters top` 或改用 FCV_ZERO_AT=bottom。" % HOME_GROUND_CM)
+        sys.exit(1)
+    TOP = int(os.environ.get("FCV_TOP_CM",
+                             str(HOME_GROUND_CM if ZERO_AT == "top" else 231)))
+    print("座標慣例：**%s 歸零**（home_ground_cm=%d）⇒ height = %s；跨距 TOP=%d cm"
+          % ("頂端" if ZERO_AT == "top" else "底端", HOME_GROUND_CM,
+             "home_ground_cm - length_left" if ZERO_AT == "top" else "-length_left", TOP))
 
 
 def height(length_left):
     """繩長讀值 → 離底高度（cm）。讀不到就回 None，交給呼叫端 bail。"""
-    return None if length_left is None else -length_left
+    if length_left is None:
+        return None
+    return (HOME_GROUND_CM - length_left) if ZERO_AT == "top" else -length_left
 TOL = 5
 # 🔴 [2026-09-01 per user] 回程由 50Hz 改 30Hz。
 # 原因：50Hz 回程實測左右差瞬間衝到 9cm，而韌體自己的 length_diff_max_cm 是 10
@@ -327,6 +430,7 @@ def roll_recover(tag):
     📌 delta 與實際位移不是 1:1 —— 當日送 -2 實際兩側各動 3cm。所以用**迭代量到為止**，
        不去猜那個增益。
     """
+    prev_roll = None      # [2026-09-09] 上一輪的 roll，用來判斷「這次修正有沒有效」
     for k in range(ROLL_RECOVER_TRY):
         # 🔴 [2026-09-04] 狀態讀取要**重試**，不能一次失敗就放棄。
         #   首次實跑就踩到：`roll_correct -3` **實際上成功了**（事後量到 L=-191/R=-190、
@@ -353,20 +457,43 @@ def roll_recover(tag):
                   % (tag, roll, ROLL_RECOVER_OK, k))
             return True
         d = L - R
-        if abs(d) < 1.0:
-            print("   🔴 [%s] 繩長已齊平（L-R=%.0f）卻仍歪 %+.2f° —— **不是繩長造成的**，"
-                  "不再動繩，交回中止" % (tag, d, roll))
+        # ═══ [2026-09-09] 停止條件與修正量都改掉，原因見下 ═══
+        #
+        # 🔴 舊版有兩處共用同一個錯誤前提：「水平 ＝ 繩長齊平」。
+        #    ① 停止條件 `if abs(d) < 1.0: return False`（「繩長已齊平卻仍歪 ⇒ 不是繩長造成的」）
+        #    ② 修正量 `delta = |L-R| / 2` ⇒ **整個修正的目標就是把繩長修到齊平**
+        #
+        # 🔴 而本機的水平點**不在齊平**。2026-09-09 五個獨立資料點：
+        #      頂端齊平 +3.75° → roll_correct 1（差 4cm）→ −0.51°
+        #      高度 53 齊平 +3.73° → roll_correct 1（差 3cm）→ +0.63°
+        #      上行過程（**平衡迴路自己動的，無人下指令**）齊平三段 +3.25/+3.36/+2.89°，
+        #      一有 2cm 差就掉到 +0.75°
+        #    ⇒ 舊版會把繩長往齊平修（＝往最歪的方向），再於最歪處宣告「不是繩長問題」中止。
+        #      2026-09-09 的 10 週期就是這樣掛在週期 1 步 4（8.04° → 修成 3.89° 後放棄）。
+        #
+        # ⚠️ **舊守衛的原意是對的**（防無止境動繩），錯的是拿「齊平」當代理指標。
+        #    新版改成量**真正在乎的東西**：這次修正有沒有讓 |roll| 變小。
+        #    好處是**不需要知道水平點在哪** —— 那個點可能隨高度／載重變，我們沒有模型。
+        #
+        # 📌 方向用**實測**不用推導：2026-09-09 兩次都是 roll>0 時 `roll_correct +1` 讓它變小。
+        #    `roll_correct` 的正負號定義在待辦表上尚未結案（記載 −0.85°/cm，本日實測 −4.26°/cm，
+        #    差 5 倍），所以**刻意不從符號約定推、也不用增益去算步長**。
+        #    一次固定 1cm；若方向猜錯，下一輪的「沒改善」會立刻停下來，最多多動 1cm。
+        if prev_roll is not None and abs(roll) >= abs(prev_roll) - ROLL_RECOVER_MIN_GAIN:
+            print("   🔴 [%s] 上一次修正沒有改善 |roll|（%+.2f° → %+.2f°，L-R=%.0f）"
+                  "—— 不再動繩，交回中止" % (tag, prev_roll, roll, d))
             return False
-        delta = int(round(abs(d) / 2.0))
-        delta = max(1, min(ROLL_RECOVER_MAXD, delta))
-        if d > 0:
-            delta = -delta
+        delta = 1 if roll > 0 else -1
         print("   ⚙ [%s] 第 %d 次：L=%.0f R=%.0f（差 %+.0f）roll %+.2f° → roll_correct %d"
               % (tag, k + 1, L, R, d, roll, delta))
         r = ask(CRANE, "roll_correct %d" % delta, 120, prefixes=("OK", "ERR"))
         if not r.startswith("OK"):
             print("   ⚠ [%s] roll_correct 失敗：%s" % (tag, r[:80]))
             return False
+        # 🔴 [2026-09-09] 一定要在這裡記下「送出修正前的 roll」——
+        #    上面的「有沒有改善」判斷全靠它。漏了這行，prev_roll 永遠是 None、
+        #    停止條件永遠不會觸發，而**症狀是「看起來正常，只是從來不會停」**。
+        prev_roll = roll
         time.sleep(2.5)
     cs = ask(CRANE, "status", 10); ws = ask(WROBOT, "status", 10)
     roll = field(ws, "raw_x")
@@ -506,6 +633,7 @@ print("週期測試：%d 週期 × (下行 %d 步 × %dcm = %dcm @%dHz) + 拉回
 print("中止門檻：|roll|>%.1f°（連續 %d 筆，可自動修正） / 左右差>%.0fcm 連續 %d 筆 / tension_valid=0 / 任一指令非 OK\n"
       % (ROLL_TRIP, ROLL_PERSIST, DIFF_TRIP, DIFF_PERSIST))
 
+resolve_zero_convention()          # 🔴 必須在第一次 height() 之前
 st0 = ask(CRANE, "status", 10)
 L0 = height(field(st0, "length_left"))
 if L0 is None or abs(L0 - TOP) > TOL:

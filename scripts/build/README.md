@@ -20,11 +20,11 @@
 
 | 腳本 | 目標 | 產物 | 部署名 |
 |---|---|---|---|
-| `build_body.sh` | 本體 `facade_cleaning_v2`（16 個 TU，完整） | `~/bringup/facade_drv.out` | `facade_cleaning_v2.out` |
-| `build_body_incremental.sh` | 本體，**只重編 4 個 TU** 後重連結 | `~/bringup/facade_cleaning_v2.new` | 同上 |
-| `build_crane.sh` | 吊機 `Crane_control_PI`（單次 g++） | `~/bringup/crane_drv.out` | `crane_control_PI.out` |
+| `build_body.sh` | 本體 `facade_cleaning_v2`（16 個 TU，完整） | `~/run/facade_drv.out` | `facade_cleaning_v2.out` |
+| `build_body_incremental.sh` | 本體，**只重編 4 個 TU** 後重連結 | `~/run/facade_cleaning_v2.new` | 同上 |
+| `build_crane.sh` | 吊機 `Crane_control_PI`（單次 g++） | `~/run/crane_drv.out` | `crane_control_PI.out` |
 | `build_linux_test.sh` | bench 工具 `Linux_test`（16 TU） | `Linux_test/linux_test.out` | 手動 scp |
-| **`cleaning_arm/compile.sh`** ← 不在本目錄 | 手臂 `motor_api` | `cleaning_arm/motor_api` | `~/bringup/motor_api` |
+| **`cleaning_arm/compile.sh`** ← 不在本目錄 | 手臂 `motor_api` | `cleaning_arm/motor_api` | `~/run/motor_api` |
 
 🔴 **`cleaning_arm` 刻意不搬進本目錄**：它本來就有 `compile.sh` 且內容是對的，
 搬過來只會製造第二份副本。**一份來源** —— 那正是這次整理的主題。
@@ -33,25 +33,45 @@
 本體完整建置在 Pi 5 上約 **18 秒**（`-P4` 平行），吊機約 **62 秒**（單次編譯，未平行）。
 
 🔴 **注意 `-O2`，不是 Debug。** `CLAUDE.md` 舊文寫「`bin/ARM64/Debug`」——那是 VS 時代的路徑，
-現在的產物在 `~/bringup/`，而且是最佳化過的。
+現在的產物在 `~/run/`（2026-09-09 由 `~/bringup/` 搬家），而且是最佳化過的。
 
 ## 🔴 三個先前沒有任何文件記載的隱藏步驟
 
 這些以前只存在於操作者的記憶裡，**照著腳本跑完不會自動發生**：
 
-1. **同步**：腳本建的是 **Pi 上 `~/bringup/` 那份原始碼**，不是 repo。
+1. **同步**：腳本建的是 **Pi 上 `~/projects/facade_cleaning_v2/` 那份原始碼**（2026-09-09 前是 `~/bringup/`），不是 repo。
    動手前必須把改動 `scp` 上去，並**逐位元複驗**（`md5sum` 兩邊比對）——
    否則你建的是什麼，沒有任何東西能證明。
 2. **改名**：產物是 `facade_drv.out` / `crane_drv.out`，**部署名不一樣**。
    換上去之前先 `cp -p <部署名> <部署名>.prev-<日期>` 留備份。
 3. **停程式才換得動**：binary 正在跑的時候 `cp` 會被 `Text file busy` 擋下（這是好事）。
    先 `echo exit > <fifo>`，**等它真的停**再換。
+   🔴 **2026-09-08 補：「埠關掉了」不等於「程式退出了」。**
+   本體 `:5001` 第 **4 秒**就從 `ss -ltn` 消失，但隨即 `cp` 仍拿到 `Text file busy`——
+   關埠只代表 listener 收掉，行程還在 join 執行緒、跑正規關機路徑（本體約 5 秒、吊機約 10 秒）。
+   ⇒ **下方「同時確認埠已關」這條在停止判定上不夠**，要等到**行程本身消失**才可以換檔。
 
 ## ⚠️ 停止程式時的一個陷阱（2026-09-07 踩到）
 
 `pgrep facade_cleaning_v2` **永遠回零筆**——`pgrep` 比對的是 15 字元的 comm，而這個名字有 18 字元。
 它會印警告，但如果你只看「有沒有輸出」就會把**還在跑**判成**已停止**。
-✅ 用 `ps -eo pid,etime,cmd | grep facade` 或 `pgrep -f`，並**同時確認埠已關**。
+✅ 用 `ps -eo pid,etime,cmd | grep facade` 或 `pgrep -f`，並**同時確認埠已關**
+（⚠️ 埠關了不等於停了，見上方隱藏步驟 3 的 2026-09-08 補註）。
+
+### ⚠️ 反方向的同一族陷阱：數行程會**多**數（2026-09-08 踩到）
+
+`ps | grep facade` 數到 **2 個「殘留」**，實際上程式已經退乾淨了——
+那兩筆是**啟動器自己的 `bash -c`**，因為它的命令列字串裡含有執行檔名。
+
+| 寫法 | 這次的結果 | 問題 |
+|---|---|---|
+| `pgrep facade_cleaning_v2` | 0（永遠） | comm 截斷 ⇒ **漏數**（2026-09-07） |
+| `ps \| grep facade` | 2 | 命中自己的啟動器命令列 ⇒ **多數**（2026-09-08） |
+| ✅ `pgrep -af "^\./facade_cleaning_v2\.out"` | 0（正確） | 錨定執行檔本身 |
+
+📌 **兩次是同一族、方向相反**：一次把還在跑的判成停了，一次把停了的判成還在跑。
+**判準：停止判定要錨定執行檔本身，不要比對「命令列裡有沒有這個字」** ——
+下指令的那條命令列本身就含有它。
 
 ## 建置後一定要驗的一件事
 

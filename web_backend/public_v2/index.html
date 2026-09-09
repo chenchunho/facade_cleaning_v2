@@ -328,7 +328,7 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
          存在理由是「怎麼確認瀏覽器拿到的是新版」—— 靜態檔會被瀏覽器快取，
          改了沒生效與改錯了在畫面上長得一模一樣。 -->
     <span style="font-family:var(--mono);font-size:11px;color:var(--ink3);margin-left:10px"
-          title="建置時間（台灣）">2026.09.07-2222</span>
+          title="建置時間（台灣）">2026.09.08-1925</span>
   </div>
   <div class="sp"></div>
   <div class="conn">
@@ -1764,16 +1764,55 @@ function pollPwm(){
 
 //=========== controls ===========
 
+// [2026-09-08] 🔴 **後端回覆本身就已經是回讀結果，不必再等一輪輪詢。**
+//   `cmd_relay` 走 `pqw_set_relay_verified_()`（寫入 → 回讀 → 最多重試 3 次），
+//   回的 `OK ch<N>=<0|1>` 那個數字是**從 PQW 讀回來的實際通道狀態**
+//   （`app/wash_robot_commands.cpp:3914`；`cmd_pump` 3843 / `cmd_brush` 3862 同理）。
+//   ⇒ 立刻拿它更新開關，**不違背「不相信回傳字串」的原意** —— 用的是回讀值不是命令值。
+//
+// 🔴 **只認 `chKey` 指名的那一個通道**，這是刻意的窄化：
+//   `pwm status` 的 `ch1=5,50,65535,1` 用寬鬆的 `/ch(\d+)=([01])\b/` 會**誤命中**
+//   （duty 為 0 或 1 時 `\b` 在逗號前成立）→ 會去翻繼電器 CH1 的開關。
+//   繼電器列一定帶 `chKey`，PWM／吊機那些呼叫則傳 null ⇒ 用 `chKey` 當閘門最乾淨。
+//
+// ⚠️ 回讀整條掛掉時後端回 `OK pump_set_but_readback_fail`（3841）／
+//   `OK water_pump_set_but_readback_fail`（3928）—— **開頭仍是 OK 但沒有 ch 值**。
+//   解析不到就是「未確認」，維持「等待回讀…」讓 700ms 那輪去收，**不可以當成成功**。
+function applyRelayEcho(line, chKey){
+  if (!chKey) return false;
+  var ch = chKey.replace(/^ch/, '');
+  var m = new RegExp('\\bch' + ch + '=([01])\\b').exec(line);
+  if (!m) return false;
+  var on = m[1] === '1';
+  var row = document.querySelector('#relaygrp .ctl[data-ch="' + ch + '"]');
+  if (row){
+    var rd = row.querySelector('.rd'), sw = row.querySelector('.sw');
+    rd.textContent = on ? '1 已確認' : '0 已確認';
+    rd.className = 'rd ' + (on ? 'on' : '');
+    sw.setAttribute('aria-checked', String(on));
+  }
+  // 與 paintRelay() 的文案保持一致，免得同一個狀態在兩條路徑上長得不一樣
+  if (ch === '2') setVerif('pump',  on ? 'ok' : '', 'ch2 = ' + (on ? '1' : '0') + ' 已確認');
+  if (ch === '1') setVerif('valve', on ? 'ok' : '', 'ch1 = ' + (on ? '1' : '0') + ' 已確認');
+  return true;
+}
+
 function fire(target, cmd, verifKey, chKey){
   if (chKey){ pending[chKey] = true; }
   if (verifKey) setVerif(verifKey, 'pend', '等待回讀…');
   log('→ [' + target + '] ' + cmd, 'w');
   return send(target, cmd, 30000).then(function(l){
     var unv = /unverified/.test(l), bad = /^ERR/.test(l);
-    if (verifKey) setVerif(verifKey, bad ? 'bad' : (unv ? 'unv' : 'pend'),
-                            bad ? l.slice(0, 42) : (unv ? '已送出 · 未複驗' : '已送出 · 待回讀'));
+    // 先解除 pending，否則 applyRelayEcho / paintRelay 會以為還在等回讀而跳過這一列
     if (chKey) delete pending[chKey];
-    // 一律以回讀為準，不相信回傳字串
+    var echoed = bad ? false : applyRelayEcho(l, chKey);
+    // echo 已經把 pump/valve 的 verif 設成「已確認」了，不要再被「待回讀」蓋回去
+    var echoedVerif = echoed && (verifKey === 'pump' || verifKey === 'valve');
+    if (verifKey && !echoedVerif)
+      setVerif(verifKey, bad ? 'bad' : (unv ? 'unv' : 'pend'),
+               bad ? l.slice(0, 42) : (unv ? '已送出 · 未複驗' : '已送出 · 待回讀'));
+    // 700ms 的輪詢**保留為二次確認**（也負責 PWM 與沒有 chKey 的指令），
+    // 但它不再是唯一的更新來源 —— 按鈕翻不翻已經不必等它。
     setTimeout(function(){ pollRelay(); pollPwm(); }, 700);
     return l;
   });
@@ -1783,7 +1822,8 @@ document.addEventListener('click', function(ev){
   var b = ev.target.closest('[data-cmd]');
   if (!b) return;
   var parts = b.dataset.cmd.split('|');
-  if (b.dataset.confirm && !confirm('這會移動機器或中止動作：\n\n' + parts[1] + '\n\n確定送出？')) return;
+  // [2026-09-08] 🔴 **`confirm()` 已移除（per user）**，同 #relaygrp 那處。
+  //   `data-confirm` 屬性保留（視覺警示 + 日後條件式攔截的掛點）。
   var vk = /pwm set/.test(parts[1]) ? 'fan' : null;
   fire(parts[0], parts[1], vk, null);
 });
@@ -2320,9 +2360,12 @@ document.getElementById('relaygrp').addEventListener('click', function(ev){
   var sw = ev.target.closest('.sw'); if (!sw) return;
   var row = sw.closest('.ctl'), ch = row.dataset.ch;
   var want = sw.getAttribute('aria-checked') !== 'true';
-  if (row.dataset.danger &&
-      !confirm('CH' + ch + ' 直接控制真空系統。\n吸盤承重時操作它可能讓機器脫落。\n\n確定要' +
-               (want ? '開啟' : '關閉') + '？')) return;
+  // [2026-09-08] 🔴 **`confirm()` 已移除（per user：「按了就執行」）。**
+  //   原本 data-danger 的列（CH1 真空閥 / CH6 正壓閥）會跳確認窗，理由是
+  //   「吸盤承重時操作它可能讓機器脫落」—— 那個風險本身沒有消失，是 per user
+  //   明確要求拿掉這道攔截，**不是疏漏，不要「修好」它**。
+  //   ⚠️ `data-danger` 屬性與紅色警示樣式**刻意保留**：日後若要改成
+  //   「只在真的吸附／承重時才擋」，判斷所需的標記已經在 DOM 上了。
   var rd = row.querySelector('.rd');
   rd.textContent = '等待回讀…'; rd.className = 'rd pend';
   var vk = ch === '2' ? 'pump' : (ch === '1' ? 'valve' : null);

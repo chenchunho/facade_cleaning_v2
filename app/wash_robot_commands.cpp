@@ -3633,7 +3633,15 @@ std::string WashRobot::cmd_emergency_stop() {
     pause_flag    = false;
     motion_active_ = false;
     for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) Z_(s).emergency_stop(false);
-    crane_cmd_("stop", 2);   // Crane_control_PI uses 'stop' (no 'emergency_stop' alias)
+    // [2026-09-09] Was crane_cmd_("stop", 2) with the result dropped. crane_cmd_
+    // blocks on crane_mtx_ (held for the duration of any in-flight motion), so an
+    // emergency stop on the main channel does not fail — it waits. Use the estop
+    // channel, and surface a failure instead of dropping it: the cups have stopped
+    // and abort_flag is set, but the crane ropes have not been told anything.
+    if (!crane_stop_estop_()) {
+        std::cerr << "[emergency_stop] 🔴 CRANE STOP NOT ACKED — ropes may still be moving\n";
+        evt_("emergency_stop crane_stop_failed");
+    }
     // [2026-05-28] Invalidate arm calibration: emergency_stop may have left arm
     // in an unknown state (mid-motion abort). Next cmd_init must re-INIT.
     if (arm_calibrated_.exchange(false)) {
@@ -3733,6 +3741,27 @@ std::string WashRobot::cmd_status() {
     std::ostringstream oss;
     oss << "OK state=" << state_name(state_.load());
     oss << " crane_attached=" << (crane_attached_.load() ? "on" : "off");
+    // [2026-09-09] 鏈路可見度。照吊機 imu_roll_age_ms / imu_roll_fresh 的形狀：
+    // age + fresh 兩欄，-1 = 從未收到。
+    // 🔴 **目前純觀測，沒有任何自動處置吃這兩個欄位。** 門檻 3000ms 是暫定值、
+    //    未經實測；隧道閒置時空窗可達 10.6 秒，切到有線之後才有意義。
+    // ⚠️ crane_peer_fresh=0 **不等於**鏈路斷 —— crane_attached=off 或 IMU 讀取
+    //    失敗都會讓 imu_push_loop_ 不送，於是沒有回覆、age 自然長大。
+    //    要判鏈路，這兩欄必須連同 crane_attached 一起看。
+    {
+        const int64_t rx = crane_peer_last_rx_ms_.load();
+        const int64_t age = (rx == 0) ? -1 : (now_ms_() - rx);
+        oss << " crane_peer_age_ms=" << age;
+        oss << " crane_peer_fresh="
+            << ((age >= 0 && age <= CRANE_PEER_STALE_MS) ? 1 : 0);
+    }
+    // 🔴 [2026-09-09] 急停旁路的死活。為什麼要有這兩欄：2026-09-09 吊機重啟後
+    //    crane_cli_estop_ 沒有接回來，而它當時是靜音的 ⇒ **一條安全通道壞了
+    //    40 分鐘，status 裡完全看不出來**，是查別的事情時用 ss 才發現的。
+    //    crane_peer_* 只反映 IMU 推送那條，不涵蓋急停。
+    //    down_ms: 0=連線中 / >0=已離線毫秒數 / -1=離線但重連迴圈尚未記錄起點。
+    oss << " crane_estop_connected=" << (crane_cli_estop_.isConnected() ? 1 : 0);
+    oss << " crane_estop_down_ms="   << crane_cli_estop_.down_ms();
     oss << " arm_attached="   << (arm_attached_.load()   ? "on" : "off");
     oss << " obstacle_detect=" << (obstacle_detect_enabled_.load() ? "on" : "off");
     oss << " follower_mode="  << (follower_use_imu_.load() ? "imu" : "meter");

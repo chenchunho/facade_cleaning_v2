@@ -72,8 +72,11 @@
 //                                     #  水平時兩繩不等長，見該常數說明。計米器歸零後要重量）
 //   middle_set <rpm> <pay|retract|stop>
 //   zero_meters <ground|top>
+//   set_home_ground <cm>              # 直接設 home_ground_cm（重啟後復原用；zero_meters top 之外唯一的寫入點）
 //   home_status
-//   roll_correct <delta_cm>           # + = 左放右收
+//   roll_correct <delta_cm>           # + = 左放右收（粗調，計米器可驗，最小步階 3~4°）
+//   roll_trim_ms <+-ms>              # 脈衝式細調（|ms|<=500）；~0.3~0.45°/100ms
+//                                    # 🔴 100~150ms 時 L-R 讀數不變 ⇒ 只有 IMU 量得到
 //   tension                           # read DSZL-107 left/right kg
 //   zero_tension <left|right|all>     # zero a tension channel
 //   stop / status / ping
@@ -843,7 +846,7 @@ enum class BalanceSource { Meter, Imu };
 //    「預設 Meter」**不是** IMU 沒接時的安全退路 —— 退路在別的地方，而且是**每個 tick**
 //    重新判定的：`apply_balance_trim` 算的是
 //        use_imu = want_imu && imu_roll_fresh()
-//    `imu_roll_fresh()` 在**從未收到**（stamp==0）與**過期**（>IMU_ROLL_STALE_MS=750ms）
+//    `imu_roll_fresh()` 在**從未收到**（stamp==0）與**過期**（>IMU_ROLL_STALE_MS，2026-09-09 起 1250ms）
 //    兩種情況都回 false，而 else 分支用的 kp / deadband / 誤差式與 Meter 路徑
 //    **逐位元相同**。⇒ IMU 沒接時，`imu` 與 `meter` 兩個設定跑的是同一段控制律，
 //    唯一差別是多印一行「退回計米器」的警告（每 2 秒一次，stderr）。
@@ -881,7 +884,41 @@ static std::atomic<BalanceSource> g_balance_source {BalanceSource::Imu};   // �
 // 0.2 是由已驗證值換算：base=10 時 0.2×10 = 2.0Hz/度，與舊 kp=2 等價。
 static constexpr double BALANCE_IMU_KP_DEFAULT       = 0.2;   // base_hz 的比例 / 度
 static constexpr double BALANCE_IMU_DEADBAND_DEFAULT = 0.5;   // 度（目標帶寬 ±1°，死區取一半）
-static constexpr int    IMU_ROLL_STALE_MS            = 750;   // 3 × BALANCE_TICK_MS
+// 🔴🔴 [2026-09-09] **試過放寬到 1250（5 tick），實測更差，已回退為 750。**
+//
+// 三輪 1 週期實測（有線鏈路、起跑姿態對齊到 +0.62°/+0.63°）：
+//   | 門檻  | src=imu | 有效 roll_age 平均 | ≥10cm（韌體硬限） | 移動 s/步 |
+//   | 750  | **67%** | **149ms**          | 0/6               | 8.7  |
+//   | 1250 | 20%     | 829ms              | 1/6               | 12.0 |
+//   | 1250 | 21%     | 806ms              | 2/6               | 12.0 |  ← 重跑，高度重現
+//
+// 🔴 **放寬門檻 67%，IMU 可用率反而由 67% 掉到 20%**，且 roll_age 分布整個往後移 5 倍。
+//    重跑複製（20% vs 21%、829 vs 806ms）⇒ **不是隧道隨機變差，是門檻改動造成的。**
+//
+// 📌 **推測的機制（未實證）**：門檻寬 ⇒ 採用 800~1200ms 的舊 roll ⇒ 用過時姿態下 trim
+//    ⇒ 修正與實況不符 ⇒ 機器晃得更厲害 ⇒ VFD 動作更劇烈 ⇒ 隧道干擾更嚴重 ⇒ 推送更慢。
+//    **即：這個門檻會透過控制品質回饋到鏈路品質本身**，不只是「要不要用舊資料」。
+//    ⇒ 這是本檔他處「**過期的姿態拿來驅動馬達比不修更危險**」那句話的實測版本。
+//
+// ⚠️ 結論的限制：三輪都只有 1 個週期、都在有線鏈路、正回饋是推論。
+//    要證實需「固定隧道品質、只改門檻」，而那在**電氣干擾處置之前做不到**
+//    —— 正是 09-08 待辦表把這條排在干擾之後的理由。
+//
+// 原始改動說明（保留備查）：
+//
+// 依據（本日有線鏈路 1 週期實測，163 個 balance tick）：
+//   src=imu 109 (67%) / **src=meter 54 (33%)** ＝ 三分之一的 tick 沒有 IMU 可用；
+//   而有效樣本的 roll_age 平均 149ms、**最大 737ms —— 差 13ms 就破門檻**
+//   ⇒ 研判有相當比例的退回只是「差一點點」，放寬到 5 tick 可望救回大部分。
+//
+// ⚠️ **代價要記住**：放寬＝允許用更舊的姿態驅動馬達。1250ms 在移動中（約 5cm/s）
+//    對應機器已經走了約 6cm。本檔他處的原則是「過期的姿態拿來驅動馬達比不修更危險」，
+//    這次是在「更舊的 IMU」與「退回計米器」之間選前者。
+// 📌 前提是 **`fine_adjust_level_diff_cm` 已設對**（本日量得 6）——
+//    計米器路徑因此不再把機器推向「齊平＝歪 3.5°」，兩條路徑的落差比 09-08 小得多。
+// 🔴 **這條在 09-08 待辦表上原本排在「干擾電氣處置之後」**，per user 於本日提前執行；
+//    電氣干擾本身**仍未處置**。
+static constexpr int    IMU_ROLL_STALE_MS            = 750;   // 3 × BALANCE_TICK_MS（2026-09-09 試過 1250 ＝ 5×，實測更差，已回退 —— 見上）
 static constexpr double IMU_ROLL_SANITY_DEG          = 20.0;  // setter 上界；超過視為壞資料
 static std::atomic<double> g_balance_imu_kp       {BALANCE_IMU_KP_DEFAULT};
 static std::atomic<double> g_balance_imu_deadband {BALANCE_IMU_DEADBAND_DEFAULT};
@@ -2699,7 +2736,14 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
     const double correction_hz = std::min(g_fine_adjust_hz.load(), 8.0);
     if (fa_abort.empty()) {
         for (int pass = 1; pass <= MAX_CORRECTION_PASSES; ++pass) {
-            const int errL = finalL - target_cm;
+            // 🔴 [2026-09-09] 左側必須先減掉 level_diff 才能與 target_cm 比較 ——
+            //    target_cm 是在「已對齊座標」裡算的（curL_adj = curL_init - level_diff），
+            //    收斂迴圈的 L_stop_at 有 + level_diff 把左側推到位，這裡卻拿原始讀值去比，
+            //    於是恆定看到 +level_diff 的**假過衝**、每次都把左繩拉回來。
+            //    實機 cr_0909d.log 6/6 段：收斂後 L-R=4~6，overrun pass 一律拉回 2
+            //    （＝FINE_ADJUST_TOLERANCE_CM）⇒ level_diff 設多少都只到手 2cm。
+            //    症狀：使用者觀察到「第一次修正後是平的，第二次修正就讓它變歪」。
+            const int errL = (finalL - level_diff) - target_cm;
             const int errR = finalR - target_cm;
             const bool need_l = std::abs(errL) > FINE_ADJUST_TOLERANCE_CM;
             const bool need_r = std::abs(errR) > FINE_ADJUST_TOLERANCE_CM;
@@ -2781,7 +2825,8 @@ static std::string motion_fine_adjust_sync(bool main_motion_pay_out)
                 }
                 if (!L_corr_done) {
                     const int curL = (int)g_length_left.load();
-                    const int new_err = curL - target_cm;
+                    // 同上：左側在已對齊座標裡比較（見 errL 的說明）。
+                    const int new_err = (curL - level_diff) - target_cm;
                     // Sign flip → overshot in opposite direction; within tol → done
                     if (std::abs(new_err) <= FINE_ADJUST_TOLERANCE_CM ||
                         (errL > 0 && new_err <= 0) ||
@@ -3200,6 +3245,66 @@ static std::string motion_rope(int cm, bool is_retract) {
 }
 
 // ============ roll_correct: differential (middle winch idle) ============
+
+// [2026-09-09] roll_trim_ms —— 脈衝式姿態微調（IMU 在線時的細調段）。
+//
+// 🔴 為什麼需要它：`roll_correct` 的最小步階受**計米器 1cm 量化**限制。
+//    指令是整數 cm、兩側各走 |delta| → 最小差動 2cm；10Hz 下每側實走 2cm（過衝一倍）
+//    → 最小步階 **3~4°**，而規格帶寬只有 2°（±1°）。**降速消不掉量化下限**
+//    （見 ROLL_CORRECT_APPROACH_CM 上方的說明）。
+//
+// ✅ 本指令改用**時間**當控制量，繞過 cm 量化。2026-09-09 實機量測（單側 up_right）：
+//      100ms → −0.27°（L−R 不變）    150ms → −0.50°（L−R 不變）
+//      200ms → −0.66°（L−R +1）      300ms → −1.37°      400ms → −1.67°
+//    ⇒ 約 **0.3~0.45°/100ms**，比 roll_correct 的最小步階細 10 倍以上。
+//    🔴 **100~150ms 的修正 `L−R` 讀數完全不變** —— 動作真實存在但小於計米器解析度
+//    ⇒ **本指令的效果只有 IMU 量得到**。IMU 不在線時它不可驗證，
+//      呼叫端應退回 `roll_correct`（粗調，計米器可驗）。這與 per user
+//      「IMU 連不上就放棄」的原則一致：粗調永遠可用，細調是加分項。
+//
+// 🔴 為什麼不降 Hz 而是縮短時間：per user 2026-09-09「5Hz 幾乎吊繩不會動」
+//    ⇒ 10Hz 是繩子會動的實務下限，細度只能來自時間。
+//
+// 安全：走既有 hold 旗標（`cmd_hold`），因此**沿用 hold_loop 的張力保護**
+//    （總和門檻 + 逐側低/高/差，觸發即 hold_all_off + 廣播 EVT）。
+//    ⚠️ 刻意**不**走 `pay_out_left|right on|off` —— 那條註明「debug，無張力安全」。
+//
+// 正負號比照 roll_correct：**+ = 左放右收**（即右側 up）。
+// cmd_hold 定義在本檔後段（:4089），這裡需要前置宣告。
+static std::string cmd_hold(const std::string& dir, const std::string& onoff);
+static constexpr int ROLL_TRIM_MS_MAX = 500;   // 實測 400ms≈1.67°，再長就該用 roll_correct
+
+static std::string cmd_roll_trim_ms(int delta_ms) {
+    if (delta_ms == 0) return "OK\n";
+    const int abs_ms = std::abs(delta_ms);
+    if (abs_ms > ROLL_TRIM_MS_MAX) {
+        // 🔴 上限寫在訊息裡要由常數推導 —— 寫死數字會在改常數時靜默不同步。
+        std::ostringstream e;
+        e << "ERR out_of_range (max " << ROLL_TRIM_MS_MAX << "ms)\n";
+        return e.str();
+    }
+
+    if (!g_dev_vfd_left.load())  return "ERR vfd_left_unavailable\n";
+    if (!g_dev_vfd_right.load()) return "ERR vfd_right_unavailable\n";
+
+    // 🔴 不與運動路徑並行：motion_rope / roll_correct 期間拒絕，避免兩者同時驅動 VFD。
+    if (motion_active.load()) return "ERR motion_busy\n";
+
+    // + = 左放右收 → 右側 up（收）；- = 左收右放 → 左側 up。
+    const char* side = (delta_ms > 0) ? "up_right" : "up_left";
+
+    std::string r = cmd_hold(side, "on");
+    if (r.rfind("OK", 0) != 0) { hold_all_off(); return r; }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(abs_ms));
+
+    // 🔴 一律 hold_all_off()，不只關這一側 —— 確保任何路徑都不會把旗標留在 on。
+    hold_all_off();
+
+    std::ostringstream oss;
+    oss << "OK roll_trim_ms " << delta_ms << " (" << side << " " << abs_ms << "ms)\n";
+    return oss.str();
+}
 
 static std::string cmd_roll_correct(int delta_cm) {
     // +delta = 左放右收 |delta| cm;  -delta = 左收右放
@@ -3624,6 +3729,35 @@ static std::string cmd_middle_set(int rpm, const std::string& dir) {
         return "ERR expected_pay_retract_stop\n";
     }
     return "OK\n";
+}
+
+// [2026-09-09] home_ground_cm 的直接設定指令。
+//
+// 🔴 為什麼需要它：`home_ground_cm` **不持久化**（重啟回 0），而**唯一**會寫它的
+//    是 `zero_meters top`，那條同時會把計米器歸零。於是重啟之後想把它設回來，
+//    只能整套重做「降到底 → zero_meters ground → 升頂 → zero_meters top」——
+//    因為在頂端計米器已經讀 0，重跑 `zero_meters top` 只會存到 0。
+//    2026-09-09 實際擋住了一次搬家：一個純顯示用的數字讓吊機不能重啟。
+//
+// 📌 計米器的零點是**硬體**保存的（SD76 自己記），重啟不會動它。所以只要跨距
+//    數字還對，設回去就完全等價於原本那次 `zero_meters top` 的結果。
+//
+// ⚠️ 這個值目前**只用於顯示**（GUI「剩 = home_ground − |左繩長|」），沒有任何
+//    運動限制或安全檢查讀它。設錯不會造成危險動作，只會讓「剩」顯示錯。
+//    上限 2000cm 只是防打錯字，不是機構限制。
+static constexpr int HOME_GROUND_MAX_CM = 2000;
+
+static std::string cmd_set_home_ground(int cm) {
+    if (cm < 0 || cm > HOME_GROUND_MAX_CM) {
+        std::ostringstream e;
+        e << "ERR out_of_range (0.." << HOME_GROUND_MAX_CM << ")\n";
+        return e.str();
+    }
+    const int32_t prev = home_ground_cm.load();
+    home_ground_cm.store(cm);
+    std::ostringstream oss;
+    oss << "OK home_ground_cm=" << cm << " (was " << prev << ")\n";
+    return oss.str();
 }
 
 static std::string cmd_zero_meters(const std::string& mode) {
@@ -4764,6 +4898,11 @@ static std::string dispatch(const std::string& line) {
         HOLD_TRACE("dispatch -> cmd_hold dir=" << cmd << " onoff=" << onoff);
         return cmd_hold(cmd, onoff);
     }
+    if (cmd == "roll_trim_ms") {
+        int ms = 0; iss >> ms;
+        if (iss.fail()) return "ERR usage:roll_trim_ms_<+-ms>\n";
+        return cmd_roll_trim_ms(ms);
+    }
     if (cmd == "set_up_stop_total_kg") {
         double kg = 0; iss >> kg;
         if (iss.fail()) return "ERR usage:set_up_stop_total_kg_<kg>\n";
@@ -4914,6 +5053,11 @@ static std::string dispatch(const std::string& line) {
         int v = 0; iss >> v;
         if (iss.fail()) return "ERR usage:set_fine_adjust_level_diff_<cm>\n";
         return cmd_set_fine_adjust_level_diff(v);
+    }
+    if (cmd == "set_home_ground") {
+        int v = 0; iss >> v;
+        if (iss.fail()) return "ERR usage:set_home_ground_<cm>\n";
+        return cmd_set_home_ground(v);
     }
     if (cmd == "set_roll_finish_hz") {
         double v = 0; iss >> v;

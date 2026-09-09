@@ -1,0 +1,694 @@
+<title>FCV 通用閘道板</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Sans+TC:wght@400;500;700&display=swap">
+<style>
+  :root {
+    --ground:#F5F7F5; --surface:#FFFFFF; --sunk:#ECEFEC;
+    --ink:#14181B; --ink-2:#3D4A46; --muted:#63706B;
+    --rule:#D2D9D5; --rule-2:#E3E8E5;
+    --accent:#14655A; --accent-w:#DCEBE7;
+    --warn:#9C6114; --warn-w:#FAF0DE;
+    --danger:#94302A; --danger-w:#FAE7E4;
+    --sans:'IBM Plex Sans','Noto Sans TC',system-ui,sans-serif;
+    --cond:'IBM Plex Sans Condensed','Noto Sans TC',system-ui,sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,'Noto Sans TC',monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:#101413; --surface:#181D1B; --sunk:#1F2523;
+      --ink:#E7ECE9; --ink-2:#B6C2BD; --muted:#8B9791;
+      --rule:#2E3835; --rule-2:#242C2A;
+      --accent:#58B8A6; --accent-w:#16302C;
+      --warn:#D69B4B; --warn-w:#322717;
+      --danger:#E08078; --danger-w:#331C1A;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:#101413; --surface:#181D1B; --sunk:#1F2523;
+    --ink:#E7ECE9; --ink-2:#B6C2BD; --muted:#8B9791;
+    --rule:#2E3835; --rule-2:#242C2A;
+    --accent:#58B8A6; --accent-w:#16302C;
+    --warn:#D69B4B; --warn-w:#322717;
+    --danger:#E08078; --danger-w:#331C1A;
+  }
+
+  body { background:var(--ground); color:var(--ink); font-family:var(--sans);
+         font-size:15px; line-height:1.7; -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:1000px; margin:0 auto; padding:48px 24px 96px; }
+  .prose { max-width:68ch; }
+
+  h1 { font-family:var(--cond); font-weight:700; font-size:clamp(30px,5vw,42px);
+       line-height:1.12; letter-spacing:-0.01em; margin:0 0 10px; text-wrap:balance; }
+  h2 { font-family:var(--cond); font-weight:700; font-size:22px; line-height:1.25;
+       margin:0 0 6px; text-wrap:balance; }
+  h3 { font-family:var(--cond); font-weight:600; font-size:16px; margin:0 0 4px; }
+  p { margin:0 0 12px; }
+  .lede { font-size:17px; color:var(--ink-2); margin-bottom:0; }
+
+  .eyebrow { font-family:var(--mono); font-size:11px; font-weight:500;
+             letter-spacing:0.12em; text-transform:uppercase; color:var(--accent); margin:0 0 8px; }
+  header.head { border-bottom:2px solid var(--ink); padding-bottom:22px; }
+  .meta { display:flex; flex-wrap:wrap; gap:6px 22px; margin-top:16px;
+          font-family:var(--mono); font-size:12px; color:var(--muted); }
+  .meta b { color:var(--ink-2); font-weight:500; }
+
+  section { margin-top:52px; }
+  .sec-head { display:flex; align-items:baseline; gap:12px; margin-bottom:18px; }
+  .sec-head .tick { font-family:var(--mono); font-size:12px; color:var(--muted);
+                    border:1px solid var(--rule); border-radius:3px; padding:1px 7px; white-space:nowrap; }
+
+  figure { margin:26px 0 0; }
+  figure svg { display:block; width:100%; height:auto; color:var(--ink); }
+  .fig-frame { background:var(--surface); border:1px solid var(--rule); padding:20px 18px; overflow-x:auto; }
+  figcaption { font-size:13px; color:var(--muted); margin-top:10px; max-width:72ch; line-height:1.6; }
+  figcaption b { color:var(--ink-2); font-weight:500; }
+
+  .tbl-scroll { overflow-x:auto; margin-top:18px; }
+  table { border-collapse:collapse; width:100%; font-size:13.5px; min-width:580px; }
+  th, td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--rule-2); vertical-align:top; }
+  thead th { font-family:var(--cond); font-weight:600; font-size:12px; letter-spacing:0.06em;
+             text-transform:uppercase; color:var(--muted); border-bottom:1px solid var(--rule); }
+  tbody tr:last-child td { border-bottom:none; }
+  td code, th code, .m { font-family:var(--mono); font-size:12.5px; }
+  td.num { font-variant-numeric:tabular-nums; white-space:nowrap; }
+
+  .role { font-family:var(--mono); font-size:10.5px; font-weight:500; letter-spacing:0.07em;
+          padding:1px 6px; border-radius:2px; border:1px solid var(--rule); color:var(--muted); white-space:nowrap; }
+  .role.body { border-color:var(--accent); color:var(--accent); background:var(--accent-w); }
+  .role.crane { border-color:var(--warn); color:var(--warn); background:var(--warn-w); }
+
+  .note { border-left:3px solid var(--rule); padding:2px 0 2px 16px; margin:18px 0 0;
+          color:var(--ink-2); font-size:14px; max-width:70ch; }
+  .note.risk { border-left-color:var(--danger); }
+  .note.open { border-left-color:var(--warn); }
+  .note.good { border-left-color:var(--accent); }
+  .note strong { color:var(--ink); font-weight:600; }
+  .note .tag { font-family:var(--mono); font-size:11px; letter-spacing:0.08em;
+               text-transform:uppercase; display:block; margin-bottom:2px; }
+  .note.risk .tag { color:var(--danger); }
+  .note.open .tag { color:var(--warn); }
+  .note.good .tag { color:var(--accent); }
+  .note:not(.risk):not(.open):not(.good) .tag { color:var(--muted); }
+
+  .guarantees { display:grid; gap:1px; background:var(--rule); border:1px solid var(--rule); margin-top:20px; }
+  @media (min-width:760px) { .guarantees { grid-template-columns:repeat(3,1fr); } }
+  .g { background:var(--surface); padding:18px 16px; }
+  .g .n { font-family:var(--mono); font-size:11px; color:var(--accent);
+          letter-spacing:0.1em; display:block; margin-bottom:8px; }
+  .g p { font-size:13.5px; color:var(--ink-2); margin:6px 0 0; }
+
+  ul.tight { margin:12px 0 0; padding-left:20px; }
+  ul.tight li { margin-bottom:7px; max-width:68ch; }
+  ul.tight li::marker { color:var(--muted); }
+
+  .open-list { margin-top:20px; border-top:1px solid var(--rule); }
+  .open-item { display:grid; gap:2px 18px; padding:14px 0; border-bottom:1px solid var(--rule-2); }
+  @media (min-width:700px) { .open-item { grid-template-columns:170px 1fr; } }
+  .open-item .what { font-family:var(--cond); font-weight:600; font-size:14.5px; }
+  .open-item .why { font-size:13.5px; color:var(--ink-2); }
+  .open-item.hot .what { color:var(--danger); }
+
+  footer { margin-top:60px; padding-top:18px; border-top:1px solid var(--rule);
+           font-size:12.5px; color:var(--muted); max-width:72ch; }
+  strong.hi { color:var(--danger); font-weight:600; }
+  .chg { color:var(--accent); font-weight:600; }
+</style>
+
+<div class="wrap">
+
+  <header class="head">
+    <p class="eyebrow">facade_cleaning_v2 · 硬體提案 v0.6</p>
+    <h1>FCV 通用閘道板</h1>
+    <p class="lede">Pi 5 直接插在板上，左進下出。一片 PCB、兩種上件，取代六台 USR 網關、兩顆 PQW 繼電器模組與一顆 QX-DO24 PWM 模組。24V 單一輸入。</p>
+    <div class="meta">
+      <span><b>日期</b> 2026-09-09</span>
+      <span><b>v0.6</b> PQW 8 路經 per user 確認 · 模組會替不存在的通道編造回覆</span>
+      <span><b>狀態</b> 討論中，未定案</span>
+    </div>
+  </header>
+
+  <section>
+    <div class="sec-head"><h2>板面配置</h2><span class="tick">圖 1 · 左進下出</span></div>
+    <div class="prose">
+      <p>電源與網路從左邊進，所有現場輸出從下緣出。Pi 5 上板之後這片板子同時是 Pi 的電源、Pi 的網路、以及全部現場匯流排的前端 —— 匯流排時序（DE/RE 翻轉、t3.5 幀間隔、CRC）都收在 STM32 裡，Pi 拿到的永遠是完整的幀。</p>
+    </div>
+
+    <figure>
+      <div class="fig-frame">
+        <svg viewBox="0 0 900 580" role="img" aria-label="板面配置圖：24V 電源與 RJ45 上行從左緣進入；板上依序是電源樹、三埠交換晶片、STM32 與 Raspberry Pi 5；下緣依序輸出六段 RS485、一路 CAN、IMU 的 TTL 端子、兩路 ESC 訊號與八路繼電器接點，各輸出上方配有狀態燈。">
+          <defs>
+            <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"></path>
+            </marker>
+          </defs>
+
+          <rect x="110" y="44" width="700" height="440" rx="6" fill="none" stroke="currentColor" stroke-width="2.4"></rect>
+
+          <g stroke="currentColor" fill="none" stroke-width="1.4">
+            <rect x="142" y="92"  width="196" height="88"  rx="2"></rect>
+            <rect x="142" y="218" width="196" height="64"  rx="2"></rect>
+            <rect x="392" y="196" width="186" height="110" rx="3" stroke-width="2"></rect>
+            <rect x="612" y="92"  width="182" height="110" rx="3" stroke-width="2"></rect>
+            <rect x="142" y="346" width="652" height="78"  rx="2" stroke-dasharray="4 3"></rect>
+          </g>
+
+          <g stroke="currentColor" stroke-width="1.4" fill="none" marker-end="url(#ar)">
+            <line x1="28" y1="134" x2="106" y2="134"></line>
+            <line x1="28" y1="250" x2="106" y2="250"></line>
+            <line x1="338" y1="116" x2="608" y2="116"></line>
+            <polyline points="338,236 366,236 366,168 608,168"></polyline>
+            <line x1="338" y1="264" x2="388" y2="264"></line>
+            <line x1="485" y1="306" x2="485" y2="342"></line>
+            <line x1="200" y1="484" x2="200" y2="514"></line>
+            <line x1="320" y1="484" x2="320" y2="514"></line>
+            <line x1="415" y1="484" x2="415" y2="514"></line>
+            <line x1="512" y1="484" x2="512" y2="514"></line>
+            <line x1="700" y1="484" x2="700" y2="514"></line>
+          </g>
+
+          <line x1="600" y1="440" x2="600" y2="484" stroke="currentColor" stroke-width="1.2" stroke-dasharray="5 4" opacity="0.5"></line>
+
+          <g font-family="IBM Plex Sans, Noto Sans TC, sans-serif" font-size="12.5" fill="currentColor">
+            <text x="28" y="120" font-weight="600">24V 輸入</text>
+            <text x="28" y="152" font-size="11" opacity="0.62">2-pin · 5.08mm</text>
+            <text x="28" y="236" font-weight="600">RJ45 上行</text>
+            <text x="28" y="270" font-size="11" opacity="0.62">拖纜 / GUI</text>
+          </g>
+
+          <g font-family="IBM Plex Sans, Noto Sans TC, sans-serif" font-size="12.5" fill="currentColor" text-anchor="middle">
+            <text x="240" y="120" font-weight="600">電源樹</text>
+            <text x="240" y="140" font-size="11" opacity="0.66">保護 · TVS · 軟啟動</text>
+            <text x="240" y="157" font-size="11" opacity="0.66">5V/6A · 3V3 · 隔離場側</text>
+            <text x="240" y="174" font-size="11" opacity="0.66">24V 繼電器線圈</text>
+
+            <text x="240" y="244" font-weight="600">3-port 交換晶片</text>
+            <text x="240" y="264" font-size="11" opacity="0.66">STM32 走 RMII，省一顆 PHY</text>
+
+            <text x="485" y="240" font-size="15" font-weight="600">STM32</text>
+            <text x="485" y="260" font-size="11.5" opacity="0.68">8× USART · CAN · ETH MAC</text>
+            <text x="485" y="277" font-size="11.5" opacity="0.68">每段一個 TCP 埠</text>
+
+            <text x="703" y="140" font-size="15" font-weight="600">Raspberry Pi 5</text>
+            <text x="703" y="160" font-size="11.5" opacity="0.68">直接插在板上</text>
+            <text x="703" y="177" font-size="11.5" opacity="0.68">由板子供電</text>
+
+            <text x="468" y="372" font-size="12" opacity="0.72">隔離場側 · 輸出級 · 狀態燈</text>
+          </g>
+
+          <g font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" opacity="0.72" text-anchor="middle">
+            <text x="473" y="109">5V / 6A</text>
+            <text x="487" y="161">RJ45 短跳線</text>
+            <text x="363" y="257">RMII</text>
+          </g>
+
+          <g fill="none" stroke="currentColor" stroke-width="1.3">
+            <circle cx="163" cy="196" r="4"></circle>
+            <circle cx="181" cy="196" r="4"></circle>
+            <circle cx="199" cy="196" r="4"></circle>
+            <circle cx="404" cy="326" r="4"></circle>
+            <circle cx="422" cy="326" r="4"></circle>
+            <circle cx="176" cy="452" r="4"></circle><circle cx="192" cy="452" r="4"></circle>
+            <circle cx="208" cy="452" r="4"></circle><circle cx="224" cy="452" r="4"></circle>
+            <circle cx="240" cy="452" r="4"></circle><circle cx="256" cy="452" r="4"></circle>
+            <circle cx="320" cy="452" r="4"></circle>
+            <circle cx="415" cy="452" r="4"></circle>
+            <circle cx="505" cy="452" r="4"></circle><circle cx="521" cy="452" r="4"></circle>
+            <circle cx="652" cy="452" r="4"></circle><circle cx="666" cy="452" r="4"></circle>
+            <circle cx="680" cy="452" r="4"></circle><circle cx="694" cy="452" r="4"></circle>
+            <circle cx="708" cy="452" r="4"></circle><circle cx="722" cy="452" r="4"></circle>
+            <circle cx="736" cy="452" r="4"></circle><circle cx="750" cy="452" r="4"></circle>
+          </g>
+
+          <g font-family="IBM Plex Mono, monospace" font-size="9.5" fill="currentColor" opacity="0.72">
+            <text x="212" y="200">DC-DC 5V / 3V3 / ISO</text>
+            <text x="436" y="330">MCU RUN / ERR</text>
+          </g>
+
+          <g font-family="IBM Plex Sans, Noto Sans TC, sans-serif" font-size="12.5" fill="currentColor" text-anchor="middle">
+            <text x="200" y="534" font-weight="600">6× RS485</text>
+            <text x="200" y="551" font-size="11" opacity="0.64">6× 3-pin · 3.5mm</text>
+            <text x="320" y="534" font-weight="600">CAN ×1</text>
+            <text x="320" y="551" font-size="11" opacity="0.64">1× 3-pin · 3.5mm</text>
+            <text x="415" y="534" font-weight="600">TTL · 姿態儀</text>
+            <text x="415" y="551" font-size="11" opacity="0.64">1× 4-pin · 3.5mm</text>
+            <text x="512" y="534" font-weight="600">ESC 訊號 ×2</text>
+            <text x="512" y="551" font-size="11" opacity="0.64">1× 4-pin · 3.5mm</text>
+            <text x="700" y="534" font-weight="600">繼電器 ×8</text>
+            <text x="700" y="551" font-size="11" opacity="0.64">5.08mm · 高能量端</text>
+          </g>
+
+          <text x="604" y="472" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="currentColor" opacity="0.7">高能量隔開</text>
+        </svg>
+      </div>
+      <figcaption><b>圖 1 — 板面配置。</b>輸入全部在左緣、輸出全部在下緣，接線方向不會互相纏繞。下緣的排序刻意把<b>繼電器接點放在最遠端</b>，與 RS485／TTL 那些訊號端子之間留出間隔 —— QX-DO24 的保修條款就明列過「電源錯接到 485 導致 485 段燒毀」，端子相鄰是那類事故的溫床。狀態燈貼在各自的端子正上方，不需要看圖例。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>接頭定義</h2><span class="tick">v0.4 · 鳳凰端子</span></div>
+    <div class="prose">
+      <p>全部採鳳凰可插拔端子，<strong>刻意只用兩種節距</strong>，讓誤插在物理層就被擋掉：</p>
+    </div>
+    <div class="guarantees">
+      <div class="g">
+        <span class="n">5.08 mm</span>
+        <h3>電力</h3>
+        <p>24V 輸入、繼電器接點。載流與爬電距離都夠，而且<strong>插不進訊號座</strong>。</p>
+      </div>
+      <div class="g">
+        <span class="n">3.5 mm</span>
+        <h3>訊號</h3>
+        <p>RS485、CAN、TTL、ESC。密度高，而且<strong>插不進電力座</strong>。</p>
+      </div>
+      <div class="g">
+        <span class="n">編碼銷</span>
+        <h3>同節距之間</h3>
+        <p>每個接頭一組不同的編碼，<strong>RS485-1 的插頭插不進 RS485-3</strong>。</p>
+      </div>
+    </div>
+
+    <div class="note risk">
+      <span class="tag">🔴 編碼銷不是可選項</span>
+      六個一模一樣的 3-pin 插頭可以互換，而 <strong>ZDT 推桿 5-8 與 JC-100 真空表 5-8 刻意同號</strong>（靠實體分段避開衝突）—— 把兩個 RS485 插頭對調，正好重現 2026-08-27 那次撞號：<code class="m">FC 0x10</code> 的 write-multiple 打進 JC-100 的組態暫存器，而 JC-100 的壓力值是「放不放腳」的判準。<strong>編碼銷成本近乎零，擋掉的是墜落等級的事故。</strong>
+    </div>
+
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>位置</th><th>連接</th><th>型式</th><th>腳位</th><th>定義</th></tr></thead>
+        <tbody>
+          <tr><td>左緣</td><td>24V 輸入</td><td><code class="m">5.08mm</code> 2-pin</td><td class="num">2</td><td><code class="m">+24V / 0V</code></td></tr>
+          <tr><td>左緣</td><td>上行網路</td><td><strong>RJ45</strong> · 例外</td><td class="num">—</td><td>拖纜 / GUI / X518</td></tr>
+          <tr><td>板內</td><td>Pi 5 網路</td><td><strong>RJ45</strong> · 例外</td><td class="num">—</td><td>短跳線到 Pi 的 RJ45</td></tr>
+          <tr><td>下緣</td><td>RS485 ×6</td><td><code class="m">3.5mm</code> 3-pin ×6</td><td class="num">18</td><td><code class="m">A / B / GND</code>，逐段編碼</td></tr>
+          <tr><td>下緣</td><td>CAN ×1</td><td><code class="m">3.5mm</code> 3-pin</td><td class="num">3</td><td><code class="m">CAN_H / CAN_L / GND</code></td></tr>
+          <tr><td>下緣</td><td>TTL · 姿態儀</td><td><code class="m">3.5mm</code> 4-pin</td><td class="num">4</td><td><code class="m">VCC / TX&rarr; / &larr;RX / GND</code></td></tr>
+          <tr><td>下緣</td><td>ESC 訊號 ×2</td><td><code class="m">3.5mm</code> 4-pin</td><td class="num">4</td><td><code class="m">SIG1 / GND / SIG2 / GND</code></td></tr>
+          <tr><td>下緣</td><td>繼電器 ×8</td><td><code class="m">5.08mm</code> 2-pin ×8</td><td class="num">16</td><td>各路<strong>獨立乾接點</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note open">
+      <span class="tag">RJ45 是唯一擋不住的例外</span>
+      乙太網路走端子排會失去差動對阻抗與磁環，只能維持 RJ45，共兩個。這也是「Pi 上板 + 走 TCP」那條短跳線的來源（見下方「Pi 5 上板帶來的兩件事」）。
+    </div>
+
+    <h3 style="margin-top:32px">選 push-in，不要螺絲</h3>
+    <div class="prose">
+      <p>這台機器身上有 VFD、螺旋槳與吊繩運動，<strong>振動是常態不是例外</strong>。螺絲端子會鬆，而鬆掉的徵兆通常是間歇性通訊失敗 —— 那正是這個專案已經花很多時間在追的症狀（<code class="m">.22</code> 那條匯流排至今沒定案）。鳳凰的 push-in 彈簧籠系列抗振，也不需要定期複緊。</p>
+    </div>
+
+    <h3 style="margin-top:32px">下緣寬度：算出來約 290 mm</h3>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>群組</th><th>算式</th><th>寬度</th></tr></thead>
+        <tbody>
+          <tr><td>RS485 ×6</td><td class="num">6 × (3 × 3.5 + 4)</td><td class="num">≈ 87 mm</td></tr>
+          <tr><td>CAN</td><td class="num">3 × 3.5 + 4</td><td class="num">≈ 15 mm</td></tr>
+          <tr><td>TTL</td><td class="num">4 × 3.5 + 4</td><td class="num">≈ 18 mm</td></tr>
+          <tr><td>ESC</td><td class="num">4 × 3.5 + 4</td><td class="num">≈ 18 mm</td></tr>
+          <tr><td>繼電器 ×8</td><td class="num">8 × (2 × 5.08 + 4)</td><td class="num">≈ 113 mm</td></tr>
+          <tr><td>群組間隔</td><td class="num">4 × 10</td><td class="num">40 mm</td></tr>
+          <tr><td><strong>合計</strong></td><td>—</td><td class="num"><strong>≈ 290 mm</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note open">
+      <span class="tag">所以板子下緣至少 300 mm —— 要縮的話動繼電器</span>
+      繼電器那 113 mm 佔了將近四成。若所有繼電器負載共用同一組 24V 回路，可以改成<strong>共用 COM</strong>（分兩組各 4 路 → 2× 5-pin ≈ 60 mm，省下約 53 mm）。<strong>但代價是同組通道不再彼此隔離</strong>，而 CH6 破真空閥與 CH1 吸盤閥的失效方向正好相反（見「繼電器段」），把它們放進同一個 COM 要想清楚。<br>
+      🔴 <strong>這一步要等負載資料</strong>：共用 COM 只有在所有負載同電壓、同回路時才成立，而各負載的電壓電流目前沒有數據。
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>這片板子解掉的是什麼</h2><span class="tick">圖 2</span></div>
+    <div class="prose">
+      <p>六台網關跑的是<strong>純透明傳輸</strong>（<code class="m">mdm=0</code>）加<strong>自動打包</strong>（<code class="m">_pt=0</code>）。115200 下字元間隔只有約 0.3 ms，封包邊界完全交給網關猜 —— 一個 Modbus 回覆常被切成多個 TCP 段送出，而十二支驅動裡<strong>只有 <code class="m">QX_DO24</code> 會累積分片</strong>。</p>
+    </div>
+    <figure>
+      <div class="fig-frame">
+        <svg viewBox="0 0 900 300" role="img" aria-label="回覆路徑比較圖：現行透明網關把一個 Modbus 回覆切成多個 TCP 段送給驅動；改用 STM32 之後，一次 write 送出一個完整且已驗 CRC 的幀。">
+          <defs>
+            <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"></path>
+            </marker>
+          </defs>
+          <g font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="1" fill="currentColor">
+            <text x="24" y="26" opacity="0.55">現行 · USR 透明傳輸</text>
+            <text x="24" y="176" opacity="0.55">提案 · STM32 組幀</text>
+          </g>
+          <g stroke="currentColor" fill="none" stroke-width="1.4">
+            <rect x="24" y="46" width="112" height="48" rx="2"></rect>
+            <rect x="238" y="46" width="150" height="48" rx="2"></rect>
+            <rect x="716" y="46" width="160" height="48" rx="2"></rect>
+            <rect x="24" y="196" width="112" height="48" rx="2"></rect>
+            <rect x="238" y="196" width="150" height="48" rx="2"></rect>
+            <rect x="716" y="196" width="160" height="48" rx="2"></rect>
+          </g>
+          <g font-family="IBM Plex Sans, Noto Sans TC, sans-serif" font-size="12.5" fill="currentColor" text-anchor="middle">
+            <text x="80"  y="75">RS485 裝置</text>
+            <text x="313" y="68">USR 網關</text>
+            <text x="313" y="86" font-size="11" opacity="0.6">透明，不看幀</text>
+            <text x="796" y="68">Pi 驅動</text>
+            <text x="796" y="86" font-size="11" opacity="0.6">收到半個幀</text>
+            <text x="80"  y="225">RS485 裝置</text>
+            <text x="313" y="218">STM32</text>
+            <text x="313" y="236" font-size="11" opacity="0.6">t3.5 判幀 + 驗 CRC</text>
+            <text x="796" y="218">Pi 驅動</text>
+            <text x="796" y="236" font-size="11" opacity="0.6">零改動</text>
+          </g>
+          <g stroke="currentColor" stroke-width="1.4" fill="none" marker-end="url(#ar2)">
+            <line x1="136" y1="70" x2="234" y2="70"></line>
+            <line x1="136" y1="220" x2="234" y2="220"></line>
+            <line x1="672" y1="70" x2="712" y2="70"></line>
+            <line x1="672" y1="220" x2="712" y2="220"></line>
+          </g>
+          <g stroke="currentColor" fill="none" stroke-width="1.4" opacity="0.85">
+            <rect x="412" y="58" width="74" height="24" rx="2"></rect>
+            <rect x="500" y="58" width="52" height="24" rx="2"></rect>
+            <rect x="566" y="58" width="94" height="24" rx="2"></rect>
+          </g>
+          <g font-family="IBM Plex Mono, monospace" font-size="10" fill="currentColor" text-anchor="middle" opacity="0.7">
+            <text x="449" y="74">段 1</text>
+            <text x="526" y="74">段 2</text>
+            <text x="613" y="74">段 3</text>
+          </g>
+          <rect x="412" y="208" width="248" height="24" rx="2" fill="none" stroke="currentColor" stroke-width="2.4"></rect>
+          <text x="536" y="224" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="currentColor" text-anchor="middle">1× write = 1 個完整幀</text>
+          <g font-family="IBM Plex Sans, Noto Sans TC, sans-serif" font-size="11.5" fill="currentColor" opacity="0.62">
+            <text x="412" y="108">邊界由 0.3 ms 字元間隔決定 ⇒ 12 支驅動裡只有一支扛得住</text>
+            <text x="412" y="262">幀邊界在板上重建 ⇒ 那六支沒防護的驅動不必回頭改</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption><b>圖 2 — 回覆路徑，現行與提案。</b>唯一改變的是幀邊界在哪裡被決定。線格式仍是<b>帶 CRC 的 RTU 幀走 TCP</b>，不是標準 Modbus-TCP（MBAP header）—— 換成 MBAP 會反過來逼你改十二支驅動。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>ESC 訊號：這一路不是風扇</h2><span class="tick">v0.3 · 最需要注意的一段</span></div>
+    <div class="prose">
+      <p>文件裡到處寫「PWM 風扇」，但程式碼寫的是<strong>螺旋槳</strong>。它在<strong>收腳與吊機移動期間</strong>開到 7%、<strong>伸腳之前</strong>必寫 5%（停止）—— 也就是說，它是在四顆吸盤沒有全部抓住的那段時間提供貼牆推力的東西。<strong>把它當散熱風扇設計會做錯失效狀態。</strong></p>
+    </div>
+
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>常數</th><th>值</th><th>意義</th></tr></thead>
+        <tbody>
+          <tr><td><code class="m">PWM_STEP_CH</code></td><td class="num">1</td><td>只用一路 —— 與「2CH，其中一個備用」吻合</td></tr>
+          <tr><td><code class="m">PWM_STEP_MOVE_DUTY_PCT</code></td><td class="num">7.0 %</td><td>收腳 + 吊機移動期間</td></tr>
+          <tr><td><code class="m">PWM_STEP_OFF_DUTY_PCT</code></td><td class="num">5.0 %</td><td>停止。伸腳之前必寫</td></tr>
+          <tr><td>driver 占空比鎖</td><td class="num">5 ~ 10 %</td><td><strong>5% = 停止、10% = 全速</strong></td></tr>
+          <tr><td>driver 頻率鎖</td><td class="num">50 Hz</td><td>週期 20 ms</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note good">
+      <span class="tag">那個「安全鎖」其實是協定，不是保守值</span>
+      50 Hz 下 5% = <strong>1.0 ms</strong>、10% = <strong>2.0 ms</strong> —— 這就是標準的 RC 電子變速器脈寬協定。驅動的標頭自己寫得很清楚：<em>「占空比的 5%=停止 / 10%=全速 只有在 50Hz 才成立；換成模組的上電預設 1000Hz，同樣的 10% 只有 0.1ms，調速器收到的是無效訊號。」</em>⇒ <strong>板子要輸出的是脈寬，不是占空比</strong>；占空比只是它在 50 Hz 下的表達方式。
+    </div>
+
+    <div class="note good">
+      <span class="tag">板子在這裡可以做得比模組好</span>
+      QX-DO24 的占空比是 0.1% 一階，50 Hz 下 = <strong>20 µs</strong>，而 ESC 的可用範圍只有 1000 µs 寬 ⇒ <strong>整個油門只有 50 階</strong>。STM32 的計時器用 1 MHz 就能做到 1 µs 一階，<strong>1000 階</strong>。建議：暫存器圖照抄 QX-DO24 以維持零改動，<strong>另外開一個「直接寫脈寬（µs）」的擴充暫存器</strong>，日後想要細解析度時驅動再接上去。
+    </div>
+
+    <div class="note risk">
+      <span class="tag">🔴 失效狀態是「保持」，不是「停止」</span>
+      <code class="m">app/WASH_ROBOT.h:578</code> 記著現況：<em>「寫入失敗時模組<strong>保持前一個輸出</strong>，通訊斷掉螺旋槳不會停；<strong>左右螺旋槳共用 CH1</strong>」</em>。這是對的行為 —— 螺旋槳在收腳期間停掉，等於在最不能失去推力的時候失去推力。<br>
+      ⇒ 所以 ESC 這一路<strong>與繼電器相反</strong>：Pi 失聯時<strong>必須繼續輸出最後一個脈寬</strong>，不可以掉到 5%，更不可以停止送脈衝。
+    </div>
+
+    <div class="note risk">
+      <span class="tag">🔴 合併帶來的代價：失效隔離變差</span>
+      今天 QX-DO24 是<strong>獨立模組、有自己的 MCU</strong>，所以 Pi 當掉、網路斷掉、甚至整條匯流排掛掉，螺旋槳都還在轉。把 PWM 搬到共用的 STM32 上之後，<strong>STM32 一當機就連螺旋槳一起帶走</strong> —— 這是合併換來的隱性損失，值得在拍板前看見。<br>
+      緩解：把 ESC 的脈衝交給<strong>硬體計時器自主輸出</strong>，不依賴 Modbus/乙太堆疊是否還活著（堆疊卡住時計時器照跑）；配獨立看門狗；並確認 ESC 自己對訊號中斷的行為是保持還是停止。<strong>剩下的殘留風險是 STM32 的完整重置</strong>，那會讓 GPIO 回到 hi-Z。
+    </div>
+
+    <ul class="tight">
+      <li><strong>冷開機時不要送脈衝。</strong>ESC 需要看到最小油門一段時間才會 arm；開機當下機器不在步伐中，沒有脈衝是安全的。韌體就緒後再明確送 1.0 ms 並保持 arming 時間，之後才接受油門指令。</li>
+      <li><strong>訊號電位</strong>：多數 ESC 吃 5V 邏輯，3.3V 通常也觸發得動。建議推挽輸出並保留 5V 選項，訊號地與 ESC 共地。</li>
+    </ul>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>狀態燈</h2><span class="tick">v0.3 新增</span></div>
+    <div class="prose">
+      <p>這個專案的故障史幾乎都是同一個形狀：<strong>帳面全綠，實體沒動</strong>。滾筒刷打到不存在的通道、整段不轉了五週；水泵指令回無條件 <code class="m">OK</code> 卻沒有回讀。所以狀態燈的設計原則只有一條：</p>
+    </div>
+    <div class="note good">
+      <span class="tag">燈要反映觀測到的狀態，不是下達的命令</span>
+      繼電器燈接<strong>回讀</strong>而不是接命令暫存器；RS485 燈亮在<strong>收到有效幀</strong>而不是送出請求；TTL 燈亮在<strong>解出合法 <code class="m">0x55</code> 封包</strong>而不是收到位元組。否則燈會在最需要它的時候跟著一起說謊。
+    </div>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>群組</th><th>顆數</th><th>亮法</th></tr></thead>
+        <tbody>
+          <tr><td><strong>MCU</strong></td><td class="num">2</td><td><code class="m">RUN</code> 心跳閃爍（韌體活著）／<code class="m">ERR</code> 故障恆亮</td></tr>
+          <tr><td><strong>DC-DC</strong></td><td class="num">3</td><td><code class="m">5V</code>（Pi）／<code class="m">3V3</code>（邏輯）／<code class="m">ISO</code>（隔離場側）各一，取自實際輸出而非致能訊號</td></tr>
+          <tr><td><strong>RS485</strong></td><td class="num">6</td><td>每段一顆，雙色：<span style="color:var(--accent)">綠閃</span> = 收到有效幀、<span style="color:var(--warn)">琥珀</span> = CRC 錯或逾時。<strong>「沒回應」與「回錯」從此在板子上分得出來</strong></td></tr>
+          <tr><td><strong>CAN</strong></td><td class="num">1</td><td>同上邏輯（收到有效訊框才閃）</td></tr>
+          <tr><td><strong>TTL · 姿態儀</strong></td><td class="num">1</td><td>解出合法 <code class="m">0x55</code> 封包才閃 —— IMU 送垃圾時燈會暗，這正是要看見的</td></tr>
+          <tr><td><strong>繼電器</strong></td><td class="num">8</td><td>一路一顆，<strong>接回讀</strong>。與「回讀要讀接點實際狀態」是同一件事的兩個面</td></tr>
+          <tr><td><strong>ESC</strong></td><td class="num">2</td><td>有脈衝在輸出就亮。配合上一節的「失效＝保持」，這顆燈是唯一能一眼看出推力還在不在的東西</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul class="tight">
+      <li>共 <strong>23 顆</strong>。全部<strong>貼在各自的端子正上方</strong>（下緣），MCU 與 DC-DC 那五顆放在左側電源入口附近 —— 位置本身就是圖例，不需要另外印對照表。</li>
+      <li>亮度要能在<strong>戶外</strong>看得見。這台機器是在建築立面上工作的，console v2 的預設配色 09-04 就因為「深色在陽光下讀不到」整個換過一次。</li>
+    </ul>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>Pi 5 上板帶來的兩件事</h2><span class="tick">網路與電源</span></div>
+
+    <h3>一、Pi 的網路要靠板上的交換晶片</h3>
+    <div class="prose">
+      <p>Pi 5 的乙太網路<strong>只從它自己的 RJ45 出來</strong>，40-pin 排針上沒有。而 Pi 同時需要兩條路：跟 STM32 講 TCP，以及對外走拖纜到另一台機器與 GUI。所以板上必須有一顆三埠交換晶片。</p>
+    </div>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>交換晶片埠</th><th>接到</th><th>實體</th></tr></thead>
+        <tbody>
+          <tr><td class="num">P1</td><td>STM32</td><td>RMII 直連（MAC 模式）—— <strong>不需要另一顆 PHY</strong></td></tr>
+          <tr><td class="num">P2</td><td>Pi 5</td><td>磁環 + 板上 RJ45 → <strong>一條短跳線接到 Pi 的 RJ45</strong></td></tr>
+          <tr><td class="num">P3</td><td>對外</td><td>上行 RJ45（左緣）：拖纜 / GUI / 另一台機器 / X518</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note good">
+      <span class="tag">順帶的好處</span>
+      每片板自帶交換之後，外部那台 8-port PoE switch 的工作大部分被吸收：原本要接兩台 Pi 加六台網關，現在只剩拖纜、X518 與兩片板。
+    </div>
+    <div class="note open">
+      <span class="tag">唯一不優雅的地方，以及替代方案</span>
+      那條 Pi ↔ 板子的短跳線，是「Pi 上板」與「走 TCP」兩個決定撞在一起的產物，繞不掉。<strong>要拿掉它只有一條路：STM32 改當 USB 乙太網路裝置（CDC-NCM）</strong> —— Pi 會看到一張網卡，TCP 照用、驅動照樣零改動，不需要交換晶片也不需要跳線，Pi 的 RJ45 還空出來對外。代價是 STM32 韌體要多做一套 USB 網路堆疊。<strong>兩條都成立，看你要把複雜度放在硬體還是韌體。</strong>
+    </div>
+
+    <h3 style="margin-top:32px">二、電源</h3>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>軌</th><th>供給</th><th>估計</th></tr></thead>
+        <tbody>
+          <tr><td><code class="m">5V</code></td><td>Raspberry Pi 5</td><td class="num">≈ 25 W（5V / 5A）</td></tr>
+          <tr><td><code class="m">3V3</code></td><td>STM32、交換晶片、邏輯側</td><td class="num">≈ 1.5 W</td></tr>
+          <tr><td>隔離場側</td><td>6× RS485 + 1× CAN 的收發器與隔離器</td><td class="num">≈ 1.5 W</td></tr>
+          <tr><td><code class="m">24V</code> 直供</td><td>繼電器線圈 ×8</td><td class="num">全開約 4 W</td></tr>
+          <tr><td>—</td><td>ESC / 螺旋槳的<strong>動力</strong></td><td class="num">不經本板 · 只送訊號</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul class="tight">
+      <li><strong>5V 軌要做到 6A 連續</strong>並留散熱餘裕。Pi 5 官方是 5V/5A USB-C PD。</li>
+      <li>🔴 <strong>從 40-pin 排針餵 5V 會讓 Pi 5 認不出 5A 電源</strong>，預設把下游 USB 限到 600 mA。要嘛在 EEPROM 設定裡打開高電流模式，要嘛接受 —— <strong>但 IMU 與手臂 CAN 都不走 Pi 的 USB 了，這限制可能無所謂</strong>。</li>
+      <li>排針餵電<strong>繞過 Pi 自己的輸入保護</strong>，軟啟動、反接與過壓保護都得由板子負責。</li>
+      <li><strong>PoE 已經不成立</strong>：光是 Pi 5 就吃掉 802.3at 的整個預算。24V 是對的選擇，而現場本來就有 EPP-200-24。</li>
+    </ul>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>PWM 上板 = 本體少一整段 RS485</h2><span class="tick">連帶效果</span></div>
+    <div class="prose">
+      <p>QX-DO24 目前<strong>獨佔本體的 <code class="m">.21</code> 整條匯流排</strong>。它被拉出來是因為 2026-09-03 六次多週期測試<strong>四次整條 <code class="m">.22</code> 一起掛掉</strong>，拆開同時是一個分辨實驗。ESC 訊號收進板內之後，那個實驗與那條匯流排都不必存在了。</p>
+    </div>
+    <div class="note good">
+      <span class="tag">照抄暫存器圖 = 驅動零改動</span>
+      韌體模擬 <code class="m">slave 9</code> 的 QX-DO24 暫存器圖：<code class="m">0x00~0x03</code> 四通道占空比（0~1000 = 0~100.0%）、<code class="m">0x04~0x0B</code> 各通道頻率、<code class="m">0x0C~0x0F</code> 控制暫存器，功能碼只有 <code class="m">0x03 / 0x06 / 0x10</code>。<code class="m">user_lib/QX_DO24</code> 一行都不用改，連驅動裡那個 5~10% / 50Hz 的鎖都在原處。<strong>實體只做 2 路</strong>：寫入不存在的通道回例外碼，讀取回「無輸出」——<code class="m">pwm status</code> 會讀全部四路，讓它報錯反而像故障。
+    </div>
+    <div class="note good">
+      <span class="tag">一個待拍板項會自動消失</span>
+      QX-DO24 的 <code class="m">0x10</code>【保存輸出】寫的是<strong>壽命僅 1~2 千次的 flash</strong>，而 console v2 的 <code class="m">pwm save</code> 按鈕 09-08 因為共用 handler 一併失去了確認彈窗，目前掛在待辦上。原生 PWM 沒有這個限制 —— <strong>板子換掉之後那條待辦不必再處理。</strong>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>一片板、兩種上件</h2><span class="tick">BOM 差異</span></div>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>項目</th><th><span class="role body">本體 BODY</span></th><th><span class="role crane">吊機 CRANE</span></th></tr></thead>
+        <tbody>
+          <tr><td>RS485 段（共 6）</td><td><strong class="chg">2 段使用</strong> + 4 備用</td><td>3 段使用 + 3 備用</td></tr>
+          <tr><td>串列參數</td><td>兩段皆 <code class="m">115200 8N1</code></td><td><strong>兩段 <code class="m">8N2</code></strong>（SE3）、一段 <code class="m">8N1</code></td></tr>
+          <tr><td>CAN ×1</td><td>接線（damiao 手臂）</td><td><strong>不接</strong></td></tr>
+          <tr><td>TTL 端子</td><td>接線（WT901BC 姿態儀）</td><td><strong>不接</strong></td></tr>
+          <tr><td>ESC 訊號 ×2</td><td>接線（螺旋槳，1 用 1 備）</td><td><strong>不接</strong></td></tr>
+          <tr><td>繼電器 ×8</td><td>實際用 5 路</td><td>實際用 1 路</td></tr>
+          <tr><td>角色選擇</td><td colspan="2">板上 2-bit 座 / 0Ω 跳線 → 韌體套用對應 profile</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note">
+      <span class="tag">為什麼角色靠跳線而不是網頁設定</span>
+      六台網關各有一份可以獨立被改的網頁組態，而它們<strong>真的飄移過</strong> —— <code class="m">.30</code>／<code class="m">.31</code> 的 <code class="m">sb=2</code> 是 2026-09-09 實查才發現的，專案文件在那之前寫的是「其餘推定相同」。參數收進韌體 profile 就進了版控，飄移這件事消失。
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>埠位對應</h2><span class="tick">6 段 · 4 段是新的餘裕</span></div>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>板上埠</th><th>TCP</th><th>本體</th><th>吊機</th><th>串列</th></tr></thead>
+        <tbody>
+          <tr><td><code class="m">RS485-1</code></td><td class="num"><code class="m">4001</code></td><td>ZDT 推桿 <code class="m">5,6,7,8</code> / DM2J <code class="m">14</code></td><td>SE3 左 <code class="m">1</code> / CLV900 <code class="m">3</code></td><td class="num"><code class="m">8N1</code> / <code class="m">8N2</code></td></tr>
+          <tr><td><code class="m">RS485-2</code></td><td class="num"><code class="m">4002</code></td><td>JC-100 <code class="m">5,6,7,8</code> / XKC <code class="m">13</code></td><td>SE3 右 <code class="m">1</code>（獨佔）</td><td class="num"><code class="m">8N1</code> / <code class="m">8N2</code></td></tr>
+          <tr><td><code class="m">RS485-3</code></td><td class="num"><code class="m">4003</code></td><td>備用</td><td>SD76 <code class="m">1,2,4</code></td><td class="num"><code class="m">8N1</code></td></tr>
+          <tr><td><code class="m">RS485-4~6</code></td><td class="num"><code class="m">4004~4006</code></td><td colspan="2">備用 —— 見下方「拿餘裕去拆擁擠的匯流排」</td><td>—</td></tr>
+          <tr><td><code class="m">ESC / PWM</code></td><td class="num"><code class="m">4009</code></td><td>板內 2 路，韌體模擬 QX-DO24 <code class="m">slave 9</code></td><td>—</td><td>—</td></tr>
+          <tr><td><code class="m">RELAY</code></td><td class="num"><code class="m">4010</code></td><td colspan="2">板內 8 路，韌體模擬 PQW <code class="m">slave 12</code></td><td>—</td></tr>
+          <tr><td><code class="m">CAN</code></td><td class="num"><code class="m">4020</code></td><td>damiao <code class="m">M1 0x01</code> / <code class="m">M2 0x02</code></td><td>—</td><td>—</td></tr>
+          <tr><td><code class="m">AUX TTL</code></td><td class="num"><code class="m">4030</code></td><td>WT901BC（<code class="m">0x55</code> 封包）</td><td>—</td><td class="num"><code class="m">115200</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note good">
+      <span class="tag">拿餘裕去拆擁擠的匯流排</span>
+      6 段之後本體只用 2 段，剩下的可以用來解掉歷史上的擠壓：<strong>ZDT 推桿 ×4 與 DM2J 上滑台現在共用一條半雙工匯流排</strong>，而滑台掃動是背景執行緒、與主執行緒伸腳並行 —— 兩者只能輪流講話。把 DM2J 拆到自己一段，掃動就不再跟推桿排隊。同理 JC-100（壓力是「放不放腳」的判準）也可以跟 XKC 分開。
+    </div>
+    <div class="note risk">
+      <span class="tag">ZDT 5-8 與 JC-100 5-8 刻意同號</span>
+      推桿 N 末端的吸盤就是真空表 N，兩組靠<strong>實體分段</strong>避開衝突。六段收進同一片板子之後，收發器與端子必須維持完全獨立、任何情況下不得橋接 —— 2026-08-27 撞過一次號，<code class="m">FC 0x10</code> 把 write-multiple 打進 JC-100 的組態暫存器，而 JC-100 的壓力值正是判斷腳能不能放的依據。
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>韌體要保證的三件事</h2><span class="tick">價值都在這裡</span></div>
+    <div class="guarantees">
+      <div class="g">
+        <span class="n">01 / 幀</span>
+        <h3>一次 write，一個完整幀</h3>
+        <p>USART IDLE + DMA 做 t3.5 幀間隔判定，CRC 驗過才上送。Pi 端一次 <code class="m">recv</code> 就拿到完整幀，那六支沒有分片防護的驅動不必回頭改。</p>
+      </div>
+      <div class="g">
+        <span class="n">02 / 越界</span>
+        <h3>寫入越界要報錯，讀取回無輸出</h3>
+        <p>寫不存在的通道回 <code class="m">0x02 Illegal Data Address</code>；讀取則回「無輸出」不報錯（狀態查詢會掃全部通道）。<strong>寫錯是 bug，讀取是巡檢。</strong></p>
+      </div>
+      <div class="g">
+        <span class="n">03 / 參數</span>
+        <h3>線路參數由角色 profile 決定</h3>
+        <p>SE3 那兩段的 <code class="m">8N2</code> 變成韌體常數而不是網頁欄位。要調整就改韌體、進版控、留得下沿革。</p>
+      </div>
+    </div>
+    <div class="note risk">
+      <span class="tag">02 要防的是這個</span>
+      <strong>PQW 實體是 8 路</strong>（2026-09-09 per user 確認）。而程式裡有<strong>兩個常數超出範圍</strong>：<code class="m">CH_WATER_PUMP = 14</code>（<code class="m">app/WASH_ROBOT.h:491</code>）與 <code class="m">PQW_TOTAL_CH = 16</code>（<code class="m">:443</code>，2026-07-24 由 8 改 16，理由是「讓 <code class="m">readAllStatus()</code> 涵蓋 CH15」—— 而 CH15 從來不存在）。<br>
+      前例就在同一批改動裡：<code class="m">CH_BRUSH</code> 被改成 <strong>15</strong>，之後每次 <code class="m">controlRelay</code> 都打空，<strong class="hi">實機滾筒整段不轉、帳面全綠，五週後才發現</strong>。<br>
+      🔴 <strong>而且模組不會拒絕越界</strong>：2026-09-09 實測 <code class="m">relay_status</code> 對這顆 8 路模組回 <code class="m">ch1~ch16</code>、<strong>沒有任何 Modbus 例外</strong> ⇒ <strong>它會替不存在的通道編造回覆</strong>。這正是保證 02 要擋的東西 —— 現行硬體在這件事上會說謊，板子不可以跟著說謊。
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>繼電器段</h2><span class="tick">8 路 · 安全狀態逐路定義</span></div>
+    <div class="prose">
+      <p>板子由使用者定為 <strong>8 路</strong>。實際負載本體 6 種、吊機 1 種，而且分屬兩片板 —— 8 路綽綽有餘。把水泵由 <code class="m">CH14</code> 收回 <code class="m">CH8</code> 是<strong>因為新板只有 8 路</strong>，與舊模組一致（實體也是 8 路）；<code class="m">CH7</code>／<code class="m">CH8</code> 在下表中是空的，不會撞到任何既有用途。</p>
+    </div>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>CH</th><th>負載</th><th>用在</th><th>上電 / 重置期間</th><th>與 Pi 失聯時</th></tr></thead>
+        <tbody>
+          <tr><td class="num"><code class="m">1</code></td><td>VT307 電磁閥（4 顆吸盤共用）</td><td><span class="role body">本體</span></td><td>待定 · 見下</td><td><strong class="hi">不可自動斷</strong></td></tr>
+          <tr><td class="num"><code class="m">2</code></td><td>dp0105 真空幫浦 A</td><td><span class="role body">本體</span></td><td>待定 · 見下</td><td><strong class="hi">不可自動斷</strong></td></tr>
+          <tr><td class="num"><code class="m">3</code></td><td>真空幫浦 B（尚未啟用）</td><td><span class="role body">本體</span></td><td>OFF</td><td>OFF</td></tr>
+          <tr><td class="num"><code class="m">4</code></td><td>進水球閥</td><td><span class="role crane">吊機</span></td><td>OFF</td><td>OFF</td></tr>
+          <tr><td class="num"><code class="m">5</code></td><td>手臂滾筒刷馬達</td><td><span class="role body">本體</span></td><td>OFF</td><td>OFF</td></tr>
+          <tr><td class="num"><code class="m">6</code></td><td>破真空閥（正壓）</td><td><span class="role body">本體</span></td><td><strong class="hi">必須 OFF，不可瞬跳</strong></td><td>OFF</td></tr>
+          <tr><td class="num"><code class="m">7</code></td><td>備用</td><td>—</td><td>OFF</td><td>OFF</td></tr>
+          <tr><td class="num"><code class="m">8</code></td><td>水箱噴水泵浦（由 <code class="m">CH14</code> 移入）</td><td><span class="role body">本體</span></td><td>OFF</td><td>OFF</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note risk">
+      <span class="tag">安全狀態不是一致的 OFF</span>
+      <strong>CH6 瞬跳導通 = 四顆吸盤同時失壓 = 機器在貼牆狀態下脫落。</strong>所以每一路的驅動輸入都要加下拉，讓 MCU 在開機、重置、韌體當掉時的 hi-Z 等於繼電器 OFF。<strong>但 CH1 與 CH2 相反</strong> —— 它們維持吸附，設計成「失聯就全斷」反而會製造墜落。<strong>要逐路定義，不能寫一條全域規則。</strong><br>
+      📌 <strong>而 ESC 那一路又是第三種</strong>（失聯要保持輸出）—— 全板總共有三種失效語意，這件事本身要寫進韌體文件。
+    </div>
+    <ul class="tight">
+      <li><strong>回讀要讀接點實際狀態，不是讀回命令暫存器。</strong>現行 <code class="m">pqw_set_relay_verified_</code> 的三次重試是在對付匯流排 stale frame；改成板內回讀之後既沒有匯流排也沒有 stale frame，若同時接到實際輸出（輔助接點或電流偵測），那個 verified 才真的驗到物理 —— <strong>而繼電器狀態燈就接在這個回讀上</strong>。</li>
+      <li><strong>端子絲印寫功能名，不要只寫通道號。</strong><code class="m">CH6</code> 與 <code class="m">CH14</code> 之所以能撞，是因為「通道號」是唯一身分，而它同時活在程式常數與實體接線兩個地方。絲印寫 <code class="m">VALVE / PUMP-A / PUMP-B / INLET / BRUSH / BREAK-VAC / SPARE / SPRAY</code>，接錯就看得見。</li>
+      <li><strong>TTL 端子的方向要標。</strong>絲印寫 <code class="m">VCC · TX→ · ←RX · GND</code>（板端視角）並註明 <code class="m">TX→IMU RX</code>。<code class="m">VCC</code> 做成 <code class="m">3V3</code>/<code class="m">5V</code> 可跳，WT901BC 兩者都吃，但接錯的代價不對稱。</li>
+    </ul>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>對 Pi 端軟體的影響</h2><span class="tick">量化</span></div>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>子系統</th><th>要改什麼</th><th>規模</th></tr></thead>
+        <tbody>
+          <tr><td>12 支 RS485 驅動</td><td>不改。線格式仍是帶 CRC 的 RTU 幀走 TCP，<code class="m">TCP_client</code> 與自動重連照用</td><td><strong>0 行</strong></td></tr>
+          <tr><td><code class="m">QX_DO24</code> ESC 驅動</td><td>不改。韌體照 <code class="m">slave 9</code> 的暫存器圖回應，連 5~10% / 50Hz 的鎖都在原處</td><td><strong>0 行</strong></td></tr>
+          <tr><td>位址常數</td><td>六個網關 IP → 一個板子 IP 加不同埠</td><td>各檔數行</td></tr>
+          <tr><td>PQW 繼電器</td><td><code class="m">pqw_.init()</code> 指向繼電器埠的新 <code class="m">TCP_client</code>；<code class="m">CH_WATER_PUMP</code> <code class="m">14 → 8</code></td><td>兩處各約 2 行</td></tr>
+          <tr><td>IMU</td><td><code class="m">Serial_port</code>（<code class="m">/dev/ttyUSB0</code>）→ TCP。原本的 USB-TTL 轉接頭一併省掉</td><td>接線層數行</td></tr>
+          <tr><td>手臂 CAN</td><td><code class="m">damiao.h</code> 綁的是 <code class="m">SerialPort</code>，要改走 TCP</td><td>見下</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note open">
+      <span class="tag">CAN 的兩條路，需要選一條</span>
+      <strong>(a) 換 transport：</strong><code class="m">cleaning_arm</code> 改用 <code class="m">TCP_client</code>。爆炸半徑很小 —— 它是刻意的服務邊界、不使用 <code class="m">user_lib</code>、自建 socket 層，改動就在那個 binary 裡。<br>
+      <strong>(b) 零程式碼：</strong>Pi 上跑一支 pty 橋接把 TCP 變回 <code class="m">/dev/xxx</code>，<code class="m">damiao.h</code> 完全不知情。代價是多一個沒人記得的行程。<br>
+      傾向 <strong>(a)</strong>；(b) 適合當過渡。
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>選型與待補</h2><span class="tick">畫板之前</span></div>
+    <div class="prose">
+      <p><strong>MCU 需求</strong>：6 段 RS485 + 1 路 IMU UART + 1 路除錯 = <strong>8 個序列埠</strong>，外加 CAN、乙太網路 MAC、2 路計時器 PWM、8 支繼電器 GPIO 與 23 顆狀態燈（可用移位暫存器省腳位）。<code class="m">STM32F429</code>／<code class="m">F439</code> 有 8 個 USART/UART 加 ETH MAC 與 2× CAN，<strong>剛好吃下但沒有餘裕</strong>；想留空間就往 <code class="m">F767</code> 或 <code class="m">H743</code>。若把除錯口改走 SWO 或 USB，就多出一路可用。</p>
+    </div>
+    <div class="open-list">
+      <div class="open-item hot">
+        <div class="what">ESC 對訊號中斷的行為</div>
+        <div class="why">脈衝停掉時這顆 ESC 是<strong>保持最後油門</strong>還是<strong>切到零</strong>？這決定 STM32 重置那個殘留風險有多大 —— 若 ESC 自己會保持，風險小很多；若會切零，就得認真考慮把 ESC 脈衝隔離到不受主 MCU 重置影響的地方。廠牌型號也還沒有記錄。</div>
+      </div>
+      <div class="open-item hot">
+        <div class="what">CH1 / CH2 失電極性</div>
+        <div class="why">斷電是保住吸附還是失去吸附？決定繼電器段的 fail-safe 策略，而判斷錯的後果是墜落。文件裡沒有記載。</div>
+      </div>
+      <div class="open-item">
+        <div class="what">各負載電壓 / 電流</div>
+        <div class="why">幫浦、刷馬達、電磁閥。決定機械繼電器或 SSR、接點額定、續流二極體、24V 輸入的保險絲與銅厚。規格書的電源分組自己標明是 v1 時期、已知過期。</div>
+      </div>
+      <div class="open-item">
+        <div class="what">RS485 線長與拓樸</div>
+        <div class="why">六段都沒有記錄，也不知道是菊鏈還是星狀。決定端接電阻與失效安全偏壓的取值 —— 建議不論如何都做成可切換，等於不必先知道答案。</div>
+      </div>
+      <div class="open-item">
+        <div class="what">Pi 5 的機構與散熱</div>
+        <div class="why">主動散熱器的高度、40-pin 之外要不要另拉電源連接器（5A 走兩支 5V pin 偏緊）、以及板子在機櫃裡的固定方式。左進下出的方向也要跟機櫃開孔對得上。</div>
+      </div>
+      <div class="open-item">
+        <div class="what">要不要預留安全互鎖</div>
+        <div class="why">STM32 坐在每一條匯流排上，天生能做次毫秒的否決。現在不做可以，但要不要留這條路會決定 MCU 等級與韌體分層，事後補很貴。吊機側若要做張力互鎖，STM32 還得自己當一次 Modbus-TCP client 去讀 X518。</div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    未定案的討論稿。RS485 網段、slave ID 與串列參數來自 2026-09-09 對六台網關後台的實查與原始碼常數；繼電器、ESC 的通道、暫存器圖與失效語意來自 <code class="m">app/WASH_ROBOT.h</code>、<code class="m">app/wash_robot_commands.cpp</code>、<code class="m">Crane_control_PI/main.cpp</code>、<code class="m">user_lib/QX_DO24.h</code>、<code class="m">.claude/summaries/</code> 與 <code class="m">.claude/changelog.md</code>。ESC 的訊號中斷行為、負載規格與線長三項尚無數據，畫板之前必須補齊。
+  </footer>
+
+</div>

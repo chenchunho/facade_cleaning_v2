@@ -33,6 +33,18 @@ public:
 	~TCP_client();
 
 	bool connectToServer(const std::string& ip, int port, bool debug = false);
+
+	// [2026-09-09] 有界逾時的連線。connectToServer() 用的是**沒有逾時的阻塞
+	// connect()**，對端不可達時會卡住呼叫執行緒約 127 秒（OS SYN timeout）——
+	// 在急停這種路徑上那比失敗更糟。本函式走 reconnectLoop 同一份 nb_connect()
+	// 實作（非阻塞 + select 逾時 + SO_ERROR 判準），最壞情況就是 timeout_ms。
+	// 已連線時直接回 true，不重連。成功與失敗都會確保 reconnectLoop 已啟動。
+	bool connectWithTimeout(const std::string& ip, int port, int timeout_ms, bool debug = false);
+
+	// 0 = 目前連線中；>0 = 已離線的毫秒數；-1 = 離線但重連迴圈還沒記錄過起點。
+	// 用途是讓「通道死掉」在 status 裡看得見 —— 沒有這個，一條安全通道可以
+	// 永久壞著而不留任何徵兆（2026-09-09 急停旁路就是這樣壞了 40 分鐘沒人知道）。
+	int64_t down_ms();
 	bool sendData(const char* buf, int len, int timeout_ms);
 	int receiveData(char* buf, int bufSize, int timeout_ms);
 
@@ -131,7 +143,8 @@ private:
 	// [2026-08-31] 重連日誌限流用的狀態。見 reconnectLoop() 的說明。
 	// 只由 reconnectLoop 這一條執行緒讀寫，不需要同步。
 	int     reconn_fail_streak_   = 0;   // 目前這串連續失敗已經幾次（成功即歸零）
-	int64_t reconn_down_since_ms_ = 0;   // 這串失敗的起點（單調時鐘）
+	// atomic：reconnectLoop 執行緒寫，down_ms() 可能由任何執行緒讀。
+	std::atomic<int64_t> reconn_down_since_ms_{0};   // 這串失敗的起點（單調時鐘）
 	int64_t reconn_last_log_ms_   = 0;   // 上次印摘要的時間
 	std::atomic<bool> connected;
 

@@ -15,10 +15,23 @@
 #
 # usage: mission_run.py [trips] [top_cm] [bottom_cm] [diff_trip] [roll_trip]
 
-import re, socket, sys, threading, time
+import os, re, socket, sys, threading, time
 
 CRANE = ("127.0.0.1", 5002)
-WROBOT = ("192.168.5.26", 5001)
+# 🔴 [2026-09-09] 位址改為可由環境變數覆蓋，**預設維持 WiFi 不變**。
+#
+# 為什麼不直接寫死 192.168.1.100：切到有線是 per user 已拍板的方向，但**隧道的
+# 電氣干擾還沒處置**（VFD 一運轉掉 90 趴封包）。現在寫死，等於讓任何人在電氣修好
+# 之前跑這支腳本就直接撞牆，而失敗的樣子會像是機構問題。
+#
+# 📌 這也是 2026-09-08 `m1`/`m2` 的教訓：位址要**能被表達**，不要靠改常數 ——
+#    當時「強制走 WiFi」正好是那個機制唯一表達不出來的意圖。
+#
+#   FCV_WROBOT_HOST=192.168.1.100 python3 mission_run.py ...   # 走有線
+#   （不設）                                                # 走 WiFi，與今天相同
+WROBOT_HOST = os.environ.get("FCV_WROBOT_HOST", "192.168.5.26")
+WROBOT_PORT = int(os.environ.get("FCV_WROBOT_PORT", "5001"))
+WROBOT = (WROBOT_HOST, WROBOT_PORT)
 
 TRIPS = int(sys.argv[1]) if len(sys.argv) > 1 else 10
 # 🔴 [2026-09-03 per user] 座標語意由「繩長」改成「**離底高度**」，與 cycle_test.py 一致。
@@ -73,6 +86,8 @@ def field(line, key, cast=float):
 
 def leg(verb, cm, label):
     """One traverse with parallel monitoring. Returns (result, samples)."""
+    diff_streak, diff_near = [0], [0]     # 連續超標筆數 / 超標但自行回復的次數
+    roll_streak, roll_near = [0], [0]
     pre = ask(CRANE, "status", 5)
     bl, br = field(pre, "length_left"), field(pre, "length_right")
     stop_evt = threading.Event()
@@ -93,9 +108,21 @@ def leg(verb, cm, label):
                 if tv is not None and tv < 1:
                     abort_reason.append(f"{label}: tension_valid=0（過載保護會靜默失效）"); break
                 if diff > DIFF_TRIP:
-                    abort_reason.append(f"{label}: 左右差 {diff:.0f}cm > {DIFF_TRIP:.0f}"); break
+                    diff_streak[0] += 1
+                    if diff_streak[0] >= DIFF_PERSIST:
+                        abort_reason.append(
+                            f"{label}: 左右差連續 {diff_streak[0]} 筆 > {DIFF_TRIP:.0f}（末筆 {diff:.0f}cm）"); break
+                else:
+                    if diff_streak[0] > 0: diff_near[0] += 1   # 超標過又自行回復＝平衡迴路在工作
+                    diff_streak[0] = 0
                 if roll is not None and abs(roll) > ROLL_TRIP:
-                    abort_reason.append(f"{label}: roll {roll:.2f}° > {ROLL_TRIP:.1f}"); break
+                    roll_streak[0] += 1
+                    if roll_streak[0] >= ROLL_PERSIST:
+                        abort_reason.append(
+                            f"{label}: roll 連續 {roll_streak[0]} 筆 > {ROLL_TRIP:.1f}（末筆 {roll:.2f}°）"); break
+                else:
+                    if roll_streak[0] > 0: roll_near[0] += 1   # 擺過去又回來，不是失控
+                    roll_streak[0] = 0
             except Exception as e:
                 samples.append((round(time.time() - t0, 1), None, None, None, None))
             time.sleep(0.3)
@@ -122,7 +149,9 @@ def leg(verb, cm, label):
         result = "TIMEOUT"
     s.close()
     stop_evt.set(); th.join(timeout=6)
-    return result, samples, time.time() - t0
+    # 🔴 near 計數要回傳出去 —— 「超標過但自行回復」是**平衡迴路在工作的證據**，
+    #    只留在函式裡等於量了又丟掉，而那正是判斷「瞬態 vs 真的歪著」的依據。
+    return result, samples, time.time() - t0, {"roll": roll_near[0], "diff": diff_near[0]}
 
 
 def stats(samples):
@@ -153,6 +182,25 @@ print(f"{'趟':>3} {'方向':>4} {'秒':>6} {'n':>4} {'avg':>6} {'max':>6} {'出
 # retract 是往上收繩，等於從頂端再往上拉 229cm，會把機器拉進吊機/屋頂結構。
 # 使用者在執行前攔下。教訓：**會把機器帶出已定義區間的指令必須被拒絕，
 # 而不是靠腳本作者記得順序。**
+# 🔴 [2026-09-09] 持續性判定 —— 由 cycle_test.py 移植過來，**不是新發明的容忍度**。
+#
+# 起因：本日 1 趟煙霧測試在下降 13cm、3.3 秒、第 3 筆取樣就中止（roll -5.06° > 5.0）。
+# 但同一份吊機 log 的 5,768 筆 4Hz 取樣顯示：平均 |roll| **0.73°**、
+# 超過 3° 只有 **3 筆（0.1%）**、超過 5° 只有 **2 筆（0.0%）** —— 那是**起步瞬態**。
+# 吊機平衡 log 直接拍到：`err=0.72deg` 的下一個 tick 就是 `err=5.3deg trim=15Hz`。
+#
+# 🔴 而 cycle_test.py 在 2026-09-04 就為同一類瞬態加了 ROLL_PERSIST=3 並驗證過
+# （10d 統計「超標後自行回復（未達連續 3 筆）: 1 次」＝正確地沒為瞬態中止）。
+# **同一個修正從來沒有被帶到這支腳本**，於是同一類瞬態在這裡照樣中止整個任務。
+#
+# ⚠️ 門檻值本身**完全不動**（ROLL_TRIP 5.0 / DIFF_TRIP 8.0）—— 改的是「要連續幾筆」，
+# 不是「多大才算超標」。要更保守就把 PERSIST 調大，**別調回 1**，那等於退回瞬時判定。
+# ⚠️ tension_valid=0 **維持瞬時中止**：那是感測失效不是瞬態，過載保護會靜默失效。
+# 🔴 根因仍未解 —— 待辦表的「起步 1 秒內暴走」與「重心偏左」兩條都還開著。
+#    這是改量測，不是改機器。
+DIFF_PERSIST = 3          # 取樣間隔 0.3s ⇒ 約 1 秒持續
+ROLL_PERSIST = 3
+
 TOL = 5   # cm，端點容許
 
 def plan_leg(cur):
@@ -183,6 +231,7 @@ def check_envelope(verb, cm, cur):
     return None
 
 allr, allout, alln = [], 0, 0
+near_roll_tot, near_diff_tot = 0, 0
 for t in range(1, TRIPS + 1):
     for _half in (0, 1):
         st_ = ask(CRANE, "status", 5)
@@ -198,7 +247,8 @@ for t in range(1, TRIPS + 1):
         if bad:
             print(f"\n🔴 拒絕執行：{verb} {cm}（{bad}）")
             sys.exit(1)
-        res, smp, dur = leg(verb, cm, f"第{t}趟{label}")
+        res, smp, dur, near = leg(verb, cm, f"第{t}趟{label}")
+        near_roll_tot += near["roll"]; near_diff_tot += near["diff"]
         s_ = stats(smp)
         if s_:
             allr.append(s_["mx"]); allout += s_["out"]; alln += s_["n"]
@@ -209,6 +259,8 @@ for t in range(1, TRIPS + 1):
         if abort_reason or not res.startswith("OK"):
             print(f"\n🔴 中止：{abort_reason[0] if abort_reason else res}")
             print("   現場保留，未自動復位。")
+            print(f"   本次中止前：roll 超標後自行回復 {near_roll_tot} 次 / "
+                  f"左右差 {near_diff_tot} 次（未達連續門檻）")
             fin = ask(CRANE, "status", 5)
             print(f"   高度={height(field(fin,'length_left')):.0f}cm "
                   f"(繩長 L={field(fin,'length_left'):.0f} R={field(fin,'length_right'):.0f}) "
@@ -219,3 +271,5 @@ print(f"\n=== 任務總計 ===")
 print(f"  {TRIPS} 趟來回 / {TRIPS*2} 次橫越 全部完成")
 print(f"  取樣合計 {alln} 筆   超出 ±1°: {allout} ({100.0*allout/alln:.1f}%)")
 print(f"  各趟最大 |roll| 的最大值 {max(allr):.2f}°   平均 {sum(allr)/len(allr):.2f}°")
+print(f"  超標後自行回復（未達連續門檻）: roll {near_roll_tot} 次 / 左右差 {near_diff_tot} 次")
+print(f"    📌 這兩個數字 >0 代表平衡迴路在工作、不是故障；持續為 0 才表示全程沒逼近門檻。")

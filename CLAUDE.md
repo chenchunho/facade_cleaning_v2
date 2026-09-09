@@ -34,7 +34,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 #### `.claude/` 完整索引 —— 🔴 **新增檔案必須在這裡加一列**
 
-📌 **2026-08-28 建立。動機**：`summaries/`（**9 份**手冊摘要，2026-09-02 增 QX-DO24）在此之前**沒有出現在任何索引裡**，
+📌 **2026-08-28 建立。動機**：`summaries/`（**14 份**手冊摘要，2026-09-07 增 DSZL-107+X518／XKC-Y25／DY-500／WT901BC）在此之前**沒有出現在任何索引裡**，
 接手的人只能靠 driver 現有程式碼反推協定——**那正是 DM2J 那次踩雷的方式**。
 一份沒被指到的文件等於不存在。
 
@@ -44,7 +44,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `changelog.md` | 變更帳本（append-only，不壓縮） | 🟢 活的，只在追溯時查 |
 | `runbook.md` | 操作手冊：啟動順序、按鈕、raw command、緊急處置 | 🟢 活的 |
 | `per_program_cautions.md` | 各程式「最容易踩、後果最嚴重」的交接摘要（2026-08-28 由 main 帶入） | 🟢 活的，但 §0.2 的 bus 表已隨同批程式改動過期，見檔內 2026-08-28 更正 |
-| `summaries/` | 8 份硬體手冊摘要（原始 PDF 不在 repo） | 🟢 活的，見上一節 |
+| `summaries/` | **14 份**硬體手冊摘要（原始 PDF 在 `doc/`，不進版控） | 🟢 活的，見上一節 |
+| 🆕 `handoff/` | **AI-2 的交接文件 4 份**（吊機 watchdog 診斷／`crane_cmd_` 保護分析＋水閥修法／Phase 2.3 可行性／PCB 架構 v0.6 HTML）。🔴 **2026-09-09 由 `tmp/` 搬來** —— `tmp/` 同時被 `.gitignore` 與 `mirror-backup.sh` EXCLUDES 排除 ⇒ **零備份**，三份 `.md` 原本只有一份 | 🟢 活的，待辦已併入 `work_log.md` |
+| 🆕 `comms_interface_for_pcb.md` | **通訊介面規格（PCB 設計用）**：6 段 RS485 的裝置/slave/串口參數（**2026-09-09 六台網關全部實查**）、非 RS485 介面（X518 原生 TCP／IMU TTL／手臂 USB-CAN）、網關三個結構性問題、分段不可合併的實測理由、7 項待確認 | 🟢 活的。2026-09-09 建立，per user 要做 PCB |
 | `motion_flow.md` | **v1 規格**（已凍結） | 🟡 §2 硬體表已過期，保留作狀態機與指令協定的原始推導。📌 **2026-08-28 破例加過一次註記**（非規格變更）：§8 失效模式表說「張力過高→立即 crane stop」，同章「緊急收繩」段說「不會停」，**兩段互相矛盾**；逐行驗過程式碼後在表上加了除外註。凍結的意思是不再演進，不是「明知有誤導也不標」 |
 | `v2_app_redesign_plan.md` | **v2 規格 = 現行程式碼的權威** | 🟢 活的 |
 | `洗窗機器人設計彙整.md` | **v3 新架構設計**（沿用舊硬體改寫） | 🟢 活的，27 項待辦在 `work_log.md` |
@@ -74,10 +76,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 #### `.claude/summaries/` — 寫 driver 之前先來這裡
 
-📌 **原始 PDF 手冊不在 repo 裡**（放在 Windows 端 `D:\洗窗戶機器人\電控設備資料\`），
-所以這 9 份摘要對只有 repo 的人來說**就是手冊本身**。
+🔴 **2026-09-07 更正：原始 PDF 現在在 repo 目錄樹裡了**（`doc/`，14 個裝置／27 檔／41 MB），
+只是 `doc/` 在 `.gitignore` 裡 ⇒ **不進版控，但會進雲端鏡像**。
+本節原文寫「原始 PDF 手冊不在 repo 裡（放在 Windows 端 `D:\洗窗戶機器人\電控設備資料\`）」，
+所以這 14 份摘要對只有 repo 的人來說**就是手冊本身**。
 ⚠️ **原始 PDF 請放 `doc/`，不要放 `tmp/`** —— 兩者都不進版控，但 `tmp/` **不在雲端鏡像範圍內**
-（2026-08-31 的 SD76-C 與 2026-09-02 的 QX-DO24 都是從 `tmp/` 搬到 `doc/` 的）。動任何 `user_lib/` 的 driver 之前先查這裡，
+（2026-08-31 SD76-C／2026-09-02 QX-DO24／**2026-09-07 一次搬了 11 個裝置**，都是從 `tmp/` 搬到 `doc/` 的）。動任何 `user_lib/` 的 driver 之前先查這裡，
 不要憑 driver 現有的程式碼反推協定 —— 那正是 DM2J 那次踩雷的方式。
 
 | 檔案 | 裝置 | 特別值得看的 |
@@ -85,12 +89,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `SE3_INVERTER_MODBUS_SUMMARY.md` | 士林 SE3-210 變頻器（**bench 現用**） | 310 行、最完整。**錯誤碼表 H1007/H1008**、`P.79` 模式切換、通訊逾時的安全設定、H1101-H1106 magic command |
 | `ZDT_MODBUS_SUMMARY.md` | ZDT 閉環步進（吸盤推桿） | 兩種韌體（X / Emm5.0）暫存器語意不同，**拿錯會讀到垃圾** |
 | `DM2J_RS_MODBUS_SUMMARY.md` | DM2J-RS570（上滑台） | ⚠️ **2026-04-24 之前的版本多處錯誤**，driver 也踩了同一個雷（見檔內警告）；含 `Known Driver Bugs` 一節 |
+| 🆕 `MH300_INVERTER_MODBUS_SUMMARY.md` | Delta MH300 變頻器（**遷移未完成**，`CRANE_VFD_IS_SE3 1`） | 🔴 **本檔存在已久但 2026-09-07 之前從未進過這張索引** —— 正是這張表要防的事。driver 有被 `build_crane.sh` 編譯，沒生效的是 `main.cpp` 的旗標 |
 | `CLV900_INVERTER_MODBUS_SUMMARY.md` | CLV900 變頻器（中間絞盤，未安裝） | **不支援 `0x10` 多寫**、故障碼 U0-01 |
 | `SD76_MODBUS_SUMMARY.md` | SD76-C 計米器 | 暫存器圖、工作模式、錯誤碼、資料編碼（BCD） |
 | `JC_100_MODBUS_SUMMARY.md` | JC-100 真空壓力表 | 量程與單位（0.1 kPa int16 signed） |
 | `PQW_IO_MODBUS_SUMMARY.md` | PQW 繼電器模組 | 線圈位址、暫存器圖、輸出模式 |
 | `ZS_DIO_MODBUS_SUMMARY.md` | ZS-DIO 繼電器（已被 SE3 取代） | 保留作歷史對照 |
-| 🆕 `QX_DO24_MODBUS_SUMMARY.md` | QX-DO24 四路 PWM（`.22` slave 9，風扇） | **頻率 ≤65535 可用 FC `0x06` 單寫 `0x05`（8 bytes），不必用 FC `0x10`（13 bytes）** —— 驅動只實作了後者；`0x00~0x0F` 無限次改寫、其餘暫存器**實時寫 flash 且壽命僅 1~2 千次**；`VCC/GND` 緊鄰 `A/B`，保修條款明列「電源錯接到 485 導致 485 段燒毀」；`0xFF00`=`0xFFFF` 是恢復出廠（會打回 9600/addr 1） |
+| 🆕 `DSZL_107_X518_MODBUS_SUMMARY.md` | **張力**：DSZL-107 測力元件 + **X518 採集器** | 🔴 **driver 名稱誤導——講 Modbus 的是 X518，DSZL-107 是類比應變片**；上電清零／零位跟蹤預設值；裝置端校準沒被用到 |
+| 🆕 `XKC_Y25_MODBUS_SUMMARY.md` | XKC-Y25-RS485 液位（`.22` slave 13） | **手冊自己前後矛盾**：寫入位址比暫存器表大 1（driver 已正確處理）；RSSI 遲滯 3900/4100 在感測器內部；靈敏度是**實體旋鈕** |
+| 🆕 `DY_500_MODBUS_SUMMARY.md` | DY-500 稱重變送器（**從未安裝**） | 出廠 19200；上電清零預設開；主動上傳模式是**單向門**（只能恢復出廠救回） |
+| 🆕 `WT901BC_TTL_PROTOCOL_SUMMARY.md` | WT901BC-TTL 九軸姿態儀（`/dev/ttyUSB0`） | **非 Modbus**，0x55 封包；⚠️ 來源是近親型號 WT901C 的手冊，已與 driver 逐項對照；抓到 5 個落差（含 `0x56` 氣壓是死碼） |
+| 🆕 `QX_DO24_MODBUS_SUMMARY.md` | QX-DO24 四路 PWM（`.21` slave 9，🔴 **貼牆螺旋槳，不是散熱風扇**） | **頻率 ≤65535 可用 FC `0x06` 單寫 `0x05`（8 bytes），不必用 FC `0x10`（13 bytes）** —— 驅動只實作了後者；`0x00~0x0F` 無限次改寫、其餘暫存器**實時寫 flash 且壽命僅 1~2 千次**；`VCC/GND` 緊鄰 `A/B`，保修條款明列「電源錯接到 485 導致 485 段燒毀」；`0xFF00`=`0xFFFF` 是恢復出廠（會打回 9600/addr 1） |
 
 🔴 **一個具體例子**：既有待辦「VFD 故障碼顯示是壞的（`vfd_fault` 一邊報假警一邊讀不到）」，
 它要的 SE3 錯誤碼對照表**就在 `SE3_INVERTER_MODBUS_SUMMARY.md` 的
@@ -173,12 +182,14 @@ C++ 機器人控制系統，包含洗窗機器手臂（wash robot arm）與吊�
 
 | 目標 | 指令 | 時間 |
 |---|---|---|
-| 本體 `facade_cleaning_v2` | `ssh nexuni@192.168.5.26 'cd ~/bringup && bash bld_wr.sh'` | ~18 s |
-| 吊機 `Crane_control_PI` | `ssh -J nexuni@192.168.5.26 user@192.168.5.25 'cd ~/bringup && bash bld_cr.sh'` | ~62 s |
+| 本體 `facade_cleaning_v2` | `ssh nexuni@192.168.5.26 'bash ~/projects/facade_cleaning_v2/scripts/build/build_body.sh'` | ~18 s |
+| 吊機 `Crane_control_PI` | `ssh user@192.168.5.25 'bash ~/projects/facade_cleaning_v2/scripts/build/build_crane.sh'` | ~62 s |
 | bench `Linux_test` | `bash scripts/build/build_linux_test.sh` | — |
 | 手臂 `motor_api` | `bash cleaning_arm/compile.sh`（🔴 **不在 `scripts/build/`**，避免第二份副本） | — |
 
-🔴 **產物是 `-O2` 進 `~/bringup/`**，不是 `bin/[arch]/[config]/`。
+🔴 **產物是 `-O2` 進 `~/run/`**（2026-09-09 搬家前是 `~/bringup/`），不是 `bin/[arch]/[config]/`。
+🔴 **原始碼在兩台 Pi 的 `~/projects/facade_cleaning_v2/`**，執行期產物（執行檔／log／FIFO／回退點）在 **`~/run/`**。
+   分家的理由與搬家細節見 `.claude/runbook.md` 檔首的「2026-09-09 路徑大搬家」。
 🔴 **建置只能發生在 Pi 上**（Windows 端無 aarch64 工具鏈）。
 
 ## Repository Structure
@@ -259,10 +270,14 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 | `deploy_and_test.pdf` | 部署測試說明，由 `.claude/gen_deploy_pdf.py` 產生 | 🟡 產生腳本只能在 Windows 跑 |
 | `dm2j_manual_utf8.txt` | DM2J 手冊的**可讀**文字擷取（簡體中文） | 🟡 已被 `.claude/summaries/DM2J_RS_MODBUS_SUMMARY.md` 濃縮，保留作原文對照 |
 | `harness/` | **重構的等價性驗證**（2026-08-29 新增）：假匯流排 + 軌跡正規化 + 兩個版本比對。不需要機器 | 🟡 工具已完成並自我測試過；**尚未端到端跑過**（本機缺 `g++`） |
+| 🆕 `scripts/build/` | **建置腳本（權威版）**：本體／吊機／`Linux_test` 三支 + `README.md`。2026-09-07 由兩台 Pi 的 `~/bringup/`（2026-09-09 已搬到 `~/projects/facade_cleaning_v2/`）逐位元取回 —— 在那之前**只存在於 Pi 上、不在版控** | 🟢 活的，**VS 移除後這是唯一的建置定義**（手臂例外，見 `cleaning_arm/compile.sh`） |
+| 🆕 `scripts/bench/` | **2026-09-09 從 Pi 取回的唯一副本**：4 支搬家前的建置／啟動腳本（皆已被 `scripts/build/` 與 runbook §A0 取代）+ `README.md`。同批取回的 9 個一次性探針放在 `Linux_test/` | ⚪ 不是現行做法，留作唯一副本與歷史對照 |
+| 🆕 `web_backend/tools/` | `check_console.js`：前端靜默失敗檢查器（重複 id／寫到不存在的元素／括號／`<div>` 開合）。改前端後跑一次 | 🟢 活的。⚠️ 已知盲區：只比對字面字串，樣板字串動態組的 id 看不到（工具自己會印） |
+| `doc/` | **原廠手冊**（14 個裝置／27 檔／41 MB）。`.claude/summaries/` 的 `Source:` 都指到這裡 | ⚪ 在 `.gitignore`，**不進版控但進雲端鏡像** |
 | `command/` | 🆕 **指令層**（2026-08-30 階段 2）：`dispatcher.{h,cpp}`，由 `facade_cleaning_v2/main.cpp` 抽出的 373 行分派器 | 🟢 活的 |
 | `mechanism/` | 🆕 **機構層**（2026-08-30 階段 3）：`rope_axis.h`，吊機繩的虛擬軸（三裝置三匯流排） | 🟡 型別與狀態已就位，**閉環尚未搬進去** |
 | `config/` | 🆕 **設定檔**（2026-08-30 階段 4）：`axis_profile.txt`，機構標定 + provenance | 🟢 活的。🔴 **不存在也正常**——沒有它就走編譯進去的常數 |
-| ~~`.vs/`（43 MB）~~／`tmp/` | ⚰️ `.vs/` 已於 2026-09-07 刪除（VS 快取，不再需要）／`tmp/` 為暫存工作區 | ⚪ `tmp/` 仍在 `.gitignore` |
+| ~~`.vs/`（43 MB）~~／`tmp/` | ⚰️ `.vs/` 已於 2026-09-07 刪除（VS 快取，不再需要）／`tmp/` 為暫存工作區（現存 1.5 GB 廠商軟體包）| ⚪ `tmp/` 在 `.gitignore` **且不進雲端鏡像 ⇒ 零備份**；手冊一律放 `doc/` |
 
 🗑️ **2026-08-28 已刪除 4 個檔（228 KB）**：`main_tmp.txt`（v1 時期 `main.cpp` 開頭註解的舊副本，
 抬頭仍寫 `washrobot_new_PI`、`.21` 匯流排——**看它會得到錯的拓樸**）、
@@ -376,9 +391,24 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 
 #### 網關本身的設定（2026-08-28 由網頁後台實查，先前沒有任何記錄）
 
-📌 **2026-09-01 per user：五台 USR 網關全部都是 `USR-TCP232-304`，後台帳密一律 `admin` / `admin`。**
-先前只有 `.20` / `.22` 經 08-28 網頁後台實查，`.30` / `.31` / `.34`（吊機側）的型號沒有記錄
-——現已補齊。下表為 `.20` / `.22` 的實查值：
+📌 **2026-09-01 per user：USR 網關全部都是 `USR-TCP232-304`，後台帳密一律 `admin` / `admin`。**
+
+🔴🔴 **2026-09-09 六台全部實查完畢（先前只有 `.20` / `.21` / `.22`），而且推翻了一個推定：**
+
+| 網關 | baud | 資料位 | 校驗 | **停止位 `sb`** | 本地埠 | 最大連線 |
+|---|---|---|---|---|---|---|
+| `.20` / `.21` / `.22`（本體） | 115200 | 8 | 0（無） | **1** | 4001 | 4 |
+| `.34`（吊機感測） | 115200 | 8 | 0（無） | **1** | 4001 | 4 |
+| **`.30` / `.31`（吊機 SE3 左右）** | 115200 | 8 | 0（無） | 🔴 **2** | 4001 | 4 |
+
+🔴 **`.30` / `.31` 與其他四台不同。** 本節原文寫「其餘三台**推定相同**，未逐台實查」——
+**那個推定是錯的**，而它會直接害死任何要取代網關的硬體（SE3 那兩段串列參數設錯就整段不通）。
+⚠️ `sb` 是後台欄位值；**「2」是否等於 2 個停止位仍需在面板或手冊確認**，不要替它下結論。
+
+📌 **完整通訊介面規格（PCB 設計用）見 `.claude/comms_interface_for_pcb.md`** ——
+六段 RS485 的裝置/slave/參數、分段不可合併的實測理由、網關三個結構性問題、待確認項。
+
+下表為 `.20` / `.22` 的 08-28 實查值（其餘欄位）：
 
 | 網關 | 位址 | 掛什麼 |
 |---|---|---|
@@ -394,9 +424,9 @@ v1 時代它是 ZDT bus、2026-07 退役；現在是**新網關**，**QX-DO24 �
 2026-09-03 由本體 Pi 實查後台，設定與 `.22` 逐項相同：
 `_br=115200 / bc=8 / par=0 / sb=1 / _tlp=4001 / cmode=0 / _cnum=4 / _pt=0 / _plen=400`。
 
-🔴 **為什麼把風扇拉出來——這是分辨實驗，不只是隔離**：09-03 六次多週期測試**四次死在 `.22`**，
+🔴 **為什麼把螺旋槳拉出來——這是分辨實驗，不只是隔離**：09-03 六次多週期測試**四次死在 `.22`**，
 而掛掉時是**整條一起掛**（QX:9 與 JC100 5/6/7 同時逾時），不是單一模組故障。拆開之後：
-① 風扇的通訊問題不再能拖垮 JC100，而 JC100 是「機器還吸不吸得住」的唯一判準；
+① 螺旋槳的通訊問題不再能拖垮 JC100，而 JC100 是「機器還吸不吸得住」的唯一判準；
 ② **若 `.21` 乾淨而 `.22` 仍會掛 ⇒ 問題在 `.22` 的線路／網關**；
 ③ **反之若 `.21` 也掛 ⇒ 問題跟著模組走**。
 ⚠️ 看到舊註解寫「.21 retired」時不要據此判斷它不存在。
@@ -452,7 +482,7 @@ Raspberry Pi 5（本體主控）
   │     └─ DM2J slave 14 ── 上滑台（乘載機械手臂；2026-08-28 從 .22 搬回）
   │
   ├─ USR #2  192.168.1.21  (cli_21_)  ─── 🆕「PWM bus」2026-09-03 新增
-  │     └─ QX-DO24 slave 9 ─── PWM 風扇（**獨佔整條**）
+  │     └─ QX-DO24 slave 9 ─── PWM **貼牆螺旋槳**（**獨佔整條**）
   │
   └─ USR #3  192.168.1.22  (cli_22_)  ─── 「感測 bus」
         ├─ JC-100 slave 5~8 ── 真空壓力計（與 ZDT 同號：推桿 N 末端的吸盤 = 真空表 N）
@@ -503,8 +533,16 @@ Raspberry Pi（吊機主控）
 📌 **左右 SE3 各佔一條 bus**（不是共線）：半雙工 RTU 下兩台共線會序列化，2026-05-15 量到
 200-300ms drift，拆開後降到 ~30-50ms。
 
-⚠️ **`CRANE_VFD_IS_SE3`（`main.cpp:116`）目前是 `1`——bench 實際仍在跑 SE3，不是 MH300。**
-MH300 driver 已存在但遷移未完成（故障碼那段仍讀 SE3 的 H1007/H1008）。
+⚠️ **`CRANE_VFD_IS_SE3`（`main.cpp:127`，🔴 2026-09-08 更正行號，原記 `116`）目前是 `1`
+——bench 實際仍在跑 SE3，不是 MH300。**
+✅ **2026-09-08 複驗：遷移的 Phase 1／2／4 其實都已完成**（build 清單、`using CraneVFD` 型別 swap、
+`se3_*` → `vfd_*` wire token 全數改完，`main.cpp` 與兩份前端皆 0 殘留）
+⇒ **換硬體只要翻這一個巨集。**
+🔴 **唯一未完成的是 Phase 3（邏輯差異）**，且內容與計畫書原本寫的不同：
+`emergencyStop()` 的 base-block 已在 driver 層還原 SE3 語意（`releaseBaseBlockIfNeeded_()`），
+**但那是個 process-local 軟體旗標** ⇒ 急停後若程式重啟，硬體 0x2002 仍 set 而旗標歸零，
+下一個 run 命令會**靜默不轉**（無 fault code、Modbus 寫入回報成功）。詳見 `.claude/mh300_migration_plan.md` Phase 3。
+（故障碼那段仍讀 SE3 的 H1007/H1008。）
 
 ### 吸盤控制邏輯（🔴 已從 v1 的三區變成**單閥四吸盤**）
 
@@ -618,7 +656,7 @@ Socket timeouts: 100-500ms per device. TCP monitor thread: 500ms reconnect polli
 | `DSZL_107` | 張力感測器 × 2 通道（X518 採集板 **一台**） | Modbus-TCP (獨佔 gateway) | **2026-09-01 per user 由兩台改一台雙通道**：`192.168.1.33:502`，CH1 = 右 / CH2 = 左（`set_channel()`，讀值暫存器 `0x0A00` / `0x0A02`）。<br>🎯 **刻度已於 2026-09-01 用 4.16 kg 已知重量校正**（先前兩側共用的 `-0.01` 是 placeholder 且是錯的）：右 `-0.0236364`、左 `-0.0205816`，寫在 `Crane_control_PI/main.cpp` 的 `DSZL_SCALE_RIGHT` / `DSZL_SCALE_LEFT`。**kg 讀值自此有絕對意義**，整機總重實測約 94 kg。<br>⚠️ 左側雜訊是右側的 3 倍（±3.5 vs ±1 count）；單點校正（過原點），4.16kg 外推到工作範圍 30~60kg 的線性度未驗。<br>Washrobot 透過 `crane_cmd_("tension")` 跨 PI 拿 kg。 |
 | `CLV900_inverter` | 變頻器 × 1 | Modbus-TCP (USR_A.30 slave 3) | 中間絞盤變頻器，控制 bus 上（未安裝） |
 | `SE3_inverter` | 士林變頻器 × 2 | Modbus-TCP (USR_A 控制 bus) | 左 (USR_A.30 slave 1) / 右 (USR_A.30 slave 2)；2026-05-07 取代原 ZS_DIO_R_RLY 繼電器；2026-05-15 re-layout 右 SE3 從 USR_B 移到 USR_A、slave 1→2；hold 預設 20Hz / 自動運動 30Hz；reg 0x1101 控制位元、0x1002 頻率（RAM）、0x100A 輸出頻率 |
-| `QX_DO24` | 4 路 PWM 輸出模組 × 1（新硬體，2026-08） | Modbus-TCP (RS485_3 .22 **slave 9**) | 四川旗芯 QX-DO24，4 通道獨立占空比/頻率/控制（0=關/65535=持續輸出/1~65534=脈衝數）。**安全限制（driver 強制）**：占空比鎖 5~10%（5%=停止/10%=全速）、頻率鎖 50Hz——兩者連動，只鎖一個等於沒鎖。`Linux_test` menu 34 + Web GUI「PWM 控制」panel 已接（`pwm set/save/status`）。**bench 用廠商工具 USB-485 直連驗證過**：通道1 @ 50Hz / 占空比 5~10% 驅動馬達成功。<br>**slave 沿革（2026-08-28 per user 已改為 9）**：原本選 6 的前提是「v2 的 JC100 只用 1~4」，但 2026-08-27 把吸盤編號改成 5-8 之後 **slave 6 就撞上右腳下吸盤的真空表**，bench 出現 `[ERR] [QX:6] device rejected FC 0x10: err 0x7C`（0x7C 不是合法 Modbus exception code，那是 JC100 的回覆被 PWM driver 撿走）。撞號不只是雜訊：FC 0x10 會把 write-multiple 打進 JC100 的組態暫存器，而 JC100 壓力值是步伐的放腳判準 → 掉落風險。user 已用 USB-485 直連把模組改成 **slave 9**（cli_22_ 上 5-8 JC100／10,11 DY500／13 XKC／14 DM2J，9 是空的）。<br>**波特率（2026-08-28 per user 更正）**：模組 115200，且 **.22 這條 bus 上所有裝置都是 115200** —— 先前記載的「其他裝置 9600、必須把模組改回 9600」**不正確**，已作廢。<br>✅ **2026-08-28 已證實接在 gateway 上**：`pwm status` 有回應（`ch1=5,50,65535,1 ch2=... ch3=ERR ch4=50,1000,0,0 duty_min=5 duty_max=10 freq_lock=50`）。⚠️ 兩件待追：`ch3=ERR`（其餘三通道正常）；`ch4` 存著 `duty=50/freq=1000`，**在 driver 安全鎖（5~10% / 50Hz）之外**，那是模組殘留的廠商測試組態，啟用 ch4 前要先覆蓋。📌 `init()` 的 `presence not probed` 永遠證明不了這件事 —— 它不發包 |
+| `QX_DO24` | 4 路 PWM 輸出模組 × 1 —— 🔴 **驅動的是貼牆螺旋槳，不是散熱風扇**（新硬體，2026-08） | Modbus-TCP (RS485_3 .22 **slave 9**) | 四川旗芯 QX-DO24，4 通道獨立占空比/頻率/控制（0=關/65535=持續輸出/1~65534=脈衝數）。**安全限制（driver 強制）**：占空比鎖 5~10%（5%=停止/10%=全速）、頻率鎖 50Hz——兩者連動，只鎖一個等於沒鎖。`Linux_test` menu 34 + Web GUI「PWM 控制」panel 已接（`pwm set/save/status`）。**bench 用廠商工具 USB-485 直連驗證過**：通道1 @ 50Hz / 占空比 5~10% 驅動馬達成功。<br>**slave 沿革（2026-08-28 per user 已改為 9）**：原本選 6 的前提是「v2 的 JC100 只用 1~4」，但 2026-08-27 把吸盤編號改成 5-8 之後 **slave 6 就撞上右腳下吸盤的真空表**，bench 出現 `[ERR] [QX:6] device rejected FC 0x10: err 0x7C`（0x7C 不是合法 Modbus exception code，那是 JC100 的回覆被 PWM driver 撿走）。撞號不只是雜訊：FC 0x10 會把 write-multiple 打進 JC100 的組態暫存器，而 JC100 壓力值是步伐的放腳判準 → 掉落風險。user 已用 USB-485 直連把模組改成 **slave 9**（cli_22_ 上 5-8 JC100／10,11 DY500／13 XKC／14 DM2J，9 是空的）。<br>**波特率（2026-08-28 per user 更正）**：模組 115200，且 **.22 這條 bus 上所有裝置都是 115200** —— 先前記載的「其他裝置 9600、必須把模組改回 9600」**不正確**，已作廢。<br>✅ **2026-08-28 已證實接在 gateway 上**：`pwm status` 有回應（`ch1=5,50,65535,1 ch2=... ch3=ERR ch4=50,1000,0,0 duty_min=5 duty_max=10 freq_lock=50`）。⚠️ 兩件待追：`ch3=ERR`（其餘三通道正常）；`ch4` 存著 `duty=50/freq=1000`，**在 driver 安全鎖（5~10% / 50Hz）之外**，那是模組殘留的廠商測試組態，啟用 ch4 前要先覆蓋。📌 `init()` 的 `presence not probed` 永遠證明不了這件事 —— 它不發包 |
 
 **未使用：**
 

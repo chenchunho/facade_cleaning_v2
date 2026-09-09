@@ -1,8 +1,12 @@
 #!/bin/bash
-# Build washrobot from fix/driver-crc (refactored layout) into ~/bringup
+# Build washrobot from fix/driver-crc (refactored layout) into ~/projects/facade_cleaning_v2（原始碼）／~/run（產物）
 set -u
-cd ~/bringup || exit 1
-rm -rf obj_drv && mkdir -p obj_drv
+# [2026-09-09] 搬家：原始碼 ~/projects/facade_cleaning_v2，執行期產物 ~/run。
+# 舊路徑 ~/bringup 已不存在。
+cd ~/projects/facade_cleaning_v2 || exit 1
+OUT="$HOME/run"
+mkdir -p "$OUT"
+rm -rf "$OUT/obj_drv" && mkdir -p "$OUT/obj_drv"
 INC="-Iapp -Icommand -Icommon -Iconfig -Imechanism -Itransport -Iuser_lib"
 printf "%s\n" \
   facade_cleaning_v2/main.cpp app/WASH_ROBOT.cpp app/wash_robot_commands.cpp \
@@ -11,9 +15,9 @@ printf "%s\n" \
   user_lib/DM2J_RS570.cpp user_lib/DY_500_weight_sensor.cpp user_lib/FrameAnalyzer.cpp \
   user_lib/JC_100_METER.cpp user_lib/PQW_IO_16O_RLY.cpp user_lib/QX_DO24.cpp \
   user_lib/WT901BC_TTL.cpp user_lib/XKC_Y25_RS485.cpp user_lib/ZDT_motor_control.cpp \
-| xargs -P4 -I{} sh -c "g++ -std=c++17 -O2 $INC -c \"\$1\" -o obj_drv/\$(basename \"\$1\" .cpp).o 2>&1" _ {}
-n=$(ls obj_drv/*.o 2>/dev/null | wc -l)
+| xargs -P4 -I{} sh -c "g++ -std=c++17 -O2 $INC -c \"\$1\" -o $OUT/obj_drv/\$(basename \"\$1\" .cpp).o 2>&1" _ {}
+n=$(ls "$OUT"/obj_drv/*.o 2>/dev/null | wc -l)
 echo "=== objs: $n / 16 ==="
 [ "$n" = "16" ] || { echo "COMPILE FAILED"; exit 2; }
-g++ -o facade_drv.out obj_drv/*.o -lpthread || { echo "LINK FAILED"; exit 3; }
-ls -la --time-style=long-iso facade_drv.out; md5sum facade_drv.out
+g++ -o "$OUT/facade_drv.out" "$OUT"/obj_drv/*.o -lpthread || { echo "LINK FAILED"; exit 3; }
+ls -la --time-style=long-iso "$OUT/facade_drv.out"; md5sum "$OUT/facade_drv.out"

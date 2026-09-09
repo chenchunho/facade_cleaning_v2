@@ -297,8 +297,7 @@ bool WashRobot::init() {
     resolve_crane_ip_();
 
     // Crane (lazy — don't fail boot if crane is down)
-    const std::string ep_crane = crane_ip_resolved_.empty()
-                               ? ep::host("CRANE", CRANE_IP) : crane_ip_resolved_;
+    const std::string ep_crane = crane_endpoint_ip_();
     const int         pt_crane = ep::port("CRANE", CRANE_PORT);
     if (crane_connect_if_needed_())
         std::cerr << "[WARN] crane " << ep_crane << ":" << pt_crane << " not yet reachable\n";
@@ -347,6 +346,43 @@ bool WashRobot::init() {
     imu_push_thread_  = std::thread(&WashRobot::imu_push_loop_, this);
     std::cout << "[OK] IMU roll push -> crane started (" << IMU_PUSH_PERIOD_MS << "ms)\n";
     std::cout << "[OK] IMU monitor started\n";
+
+    // [2026-09-09] Warm up the estop bypass socket at startup.
+    //
+    // Why: crane_stop_estop_() is on two emergency paths, and connectToServer()
+    // is a BLOCKING connect with no timeout — doing it there would stall the
+    // emergency for the OS SYN timeout (~2 min) in exactly the case that matters,
+    // an unreachable crane. Connecting once here hands the socket to TCP_client's
+    // reconnectLoop (500ms retry), so by the time an emergency arrives it is
+    // either already up, or known-down and crane_stop_estop_() can fail fast.
+    //
+    // Until today this socket was never established at runtime at all: its only
+    // user was crane_retract_safe_, which has zero call sites (its weight-stop
+    // job moved to the crane as g_retract_tension_stop_kg). The dead function
+    // took the live bypass channel down with it.
+    //
+    // Quiet reconnect: crane_cli_ already reports crane-offline loudly; a second
+    // socket to the same host would just double an already-noisy log (45s of
+    // crane downtime = 107 log pairs, seen on 2026-08-31).
+    // 🔴 [2026-09-09] **刻意不靜音**。原本這裡是 set_quiet_reconnect_log(true)，
+    //    但 TCP_client.cpp 的註解早就寫過判準：「arm 是已知永遠不會接上＝純噪音；
+    //    而**吊機離線是該被看見的事件**，靜音會把該看的也藏掉。」
+    //    急停旁路是安全通道，比主連線更該被看見 —— 同日就因為它靜音，
+    //    吊機重啟後這條沒接回來、壞了 40 分鐘完全沒有徵兆。
+    //    洗版由 TCP_client 內建的節流處理（頭 3 次逐次印，之後每 30 秒一行摘要，
+    //    恢復時一定印），不需要整條靜音。
+    if (crane_cli_estop_.connectToServer(crane_endpoint_ip_(), ep::port("CRANE", CRANE_PORT)))
+        std::cout << "[OK] crane estop bypass channel connected\n";
+    else
+        std::cout << "[WARN] crane estop bypass channel not up yet (retrying in background)\n";
+
+    // [2026-09-09] 同理預熱 roll 推送通道 —— 它現在同時是鏈路探針，
+    // 迴圈內已不再 connect（見 imu_push_loop_）。
+    crane_cli_imu_.set_quiet_reconnect_log(true);
+    if (crane_cli_imu_.connectToServer(crane_endpoint_ip_(), ep::port("CRANE", CRANE_PORT)))
+        std::cout << "[OK] crane IMU push channel connected\n";
+    else
+        std::cout << "[WARN] crane IMU push channel not up yet (retrying in background)\n";
 
     crane_wd_running_ = true;
     crane_wd_thread_  = std::thread(&WashRobot::crane_watchdog_loop_, this);
@@ -686,9 +722,10 @@ void WashRobot::resolve_crane_ip_() {
 
     // 🔴 環境變數覆蓋存在時完全不探測 —— common/endpoints.h 的設計規則是
     //    「沒設環境變數時行為必須位元等價」，等價性測試靠它。有覆蓋就照用。
-    const std::string overridden = ep::host("CRANE", CRANE_IP);
-    if (overridden != wifi) {
-        crane_ip_resolved_ = overridden;
+    // [2026-09-08] 判準改為「環境變數有沒有設」，不是「解析值等不等於常數」。
+    // 舊寫法在覆蓋值 == CRANE_IP 時無法與「沒設」區分（見 endpoints.h 的說明）。
+    if (ep::has_host_override("CRANE")) {
+        crane_ip_resolved_ = ep::host("CRANE", CRANE_IP);
         std::cout << "[crane] 位址由環境變數覆蓋 = " << crane_ip_resolved_
                   << "（不做有線探測）\n";
         return;
@@ -705,13 +742,19 @@ void WashRobot::resolve_crane_ip_() {
     }
 }
 
+// [2026-09-08] 連往吊機的**單一位址來源**（宣告處有完整理由）。
+// crane_ip_resolved_ 為空表示 init 還沒跑到 resolve（或被略過）→ 退回原常數，
+// 行為與 2026-08-31 之前完全相同。
+// 執行緒安全：crane_ip_resolved_ 只在 init 的 resolve_crane_ip_() 寫入一次，
+// 而 IMU 推送執行緒與 estop 路徑都在 init 完成之後才啟動 ⇒ 其後全為唯讀。
+std::string WashRobot::crane_endpoint_ip_() const {
+    return crane_ip_resolved_.empty()
+         ? ep::host("CRANE", CRANE_IP) : crane_ip_resolved_;
+}
+
 bool WashRobot::crane_connect_if_needed_() {
     if (crane_cli_.isConnected()) return false;
-    // crane_ip_resolved_ 為空表示 init 還沒跑到 resolve（或被略過）→ 退回原常數，
-    // 行為與 2026-08-31 之前完全相同。
-    const std::string ip = crane_ip_resolved_.empty()
-                         ? ep::host("CRANE", CRANE_IP) : crane_ip_resolved_;
-    return !crane_cli_.connectToServer(ip, ep::port("CRANE", CRANE_PORT));
+    return !crane_cli_.connectToServer(crane_endpoint_ip_(), ep::port("CRANE", CRANE_PORT));
 }
 
 std::string WashRobot::crane_cmd_(const std::string& line, int timeout_sec) {
@@ -2379,8 +2422,26 @@ std::string WashRobot::do_arm_clean_sweep_continuous_(int wall_mm,
 // Crane EVT line dispatcher. Called from crane_cmd_ when an EVT line is drained
 // from the RPC channel. Records safety-critical alarms (tension_alarm /
 // tension_total_limit) into atomic flag for watchdog to escalate to PausedOnError.
-void WashRobot::handle_crane_evt_(const std::string& line) {
-    std::cout << "[crane_evt] " << line << "\n";
+// [2026-09-09] Split out of handle_crane_evt_ so a background reader can record
+// alarms without paying the full handler's cost.
+//
+// The full handler ends in evt_() -> TCP_server::broadcast(), which holds
+// clients_mtx across a BLOCKING send() per client (SEND_FLAGS is MSG_NOSIGNAL,
+// never MSG_DONTWAIT; the client sockets are never made non-blocking and carry
+// no SO_SNDTIMEO). Today that back-pressure lands on crane_cmd_, which has
+// second-scale timeouts and tolerates it. It must never land on the 4Hz roll
+// push: that path has a hard 750ms cliff (IMU_ROLL_STALE_MS), so one slow
+// browser client would stall the pusher and silently drop the crane's balance
+// back to src=meter — our own GUI causing the exact failure the tunnel caused
+// on 2026-09-08.
+//
+// So: record-only here (atomics + one short mutex), no printing, no broadcast.
+// Safe to call from any thread.
+//
+// Returns true if a tension_total_limit was suppressed by balance calibration,
+// so the full handler can log that without re-testing the same condition.
+bool WashRobot::record_crane_evt_(const std::string& line) {
+    bool suppressed = false;
     if (line.find("tension_alarm") != std::string::npos ||
         line.find("tension_total_limit") != std::string::npos) {
         // [2026-06-02 v7, per Sadie bench] Suppress tension_total_limit during
@@ -2392,8 +2453,7 @@ void WashRobot::handle_crane_evt_(const std::string& line) {
         // peak) still fires — only the total-sum gate is suppressed.
         if (balance_cal_running_.load() &&
             line.find("tension_total_limit") != std::string::npos) {
-            std::cout << "[crane_evt] suppressed (balance cal in progress): "
-                      << line << "\n";
+            suppressed = true;
         } else {
             std::lock_guard<std::mutex> lk(crane_alarm_mtx_);
             if (line.find("tension_total_limit") != std::string::npos)
@@ -2411,6 +2471,17 @@ void WashRobot::handle_crane_evt_(const std::string& line) {
     if (line.find("motion_progress") != std::string::npos) {
         crane_last_ok_ms_ = now_ms_();
     }
+    return suppressed;
+}
+
+// Full EVT handling: record, print, re-broadcast to the GUI.
+// 🔴 Stays on the crane_cmd_ path ONLY — see record_crane_evt_ for why the
+// broadcast must not reach the roll-push thread.
+void WashRobot::handle_crane_evt_(const std::string& line) {
+    std::cout << "[crane_evt] " << line << "\n";
+    if (record_crane_evt_(line))
+        std::cout << "[crane_evt] suppressed (balance cal in progress): "
+                  << line << "\n";
     // Re-broadcast to GUI so operator sees the EVT in washrobot's own log channel
     evt_("crane_relay " + line);
 }
@@ -2433,6 +2504,123 @@ void WashRobot::handle_crane_evt_(const std::string& line) {
 // a zero-offset artifact, treated as 'low tension')". A real reading never
 // approaches -9999 kg. Callers should use `pre <= WEIGHT_NO_DATA_KG` to test
 // for "no data" instead of `pre < 0` (which would also reject valid negative
+
+// [2026-09-09] Send "stop" to the crane over the dedicated estop channel.
+//
+// Why this exists as a helper: emergency paths MUST NOT go through crane_cmd_,
+// whose very first act is an unconditional `std::lock_guard lk(crane_mtx_)`.
+// A motion command holds that mutex for the whole motion (return_home's pay_out
+// budget is 300s), so an emergency stop sent on the main channel does not fail
+// — it *waits*, which is worse. crane_cli_estop_ is a separate socket with its
+// own mutex precisely so a stop can overtake an in-flight motion.
+//
+// Returns true only when the crane acknowledged with OK. Callers in emergency
+// paths must surface a false — a stop that never reached the crane means the
+// ropes are still moving while the washrobot believes it has stopped.
+//
+// NOTE: this does not consult crane_attached_. Detached mode is a bench
+// convenience; an emergency stop should always try to reach real hardware.
+//
+// Bounded by design: worst case is send 500ms + recv 1000ms. It never calls
+// connectToServer() (blocking connect, no timeout); the socket is warmed at
+// init and maintained by TCP_client's 500ms reconnectLoop.
+// [2026-09-09] 丟棄急停通道上排隊的 EVT 廣播。**兩個理由，第二個比較嚴重：**
+//
+//  ① `crane_stop_estop_` 送完 stop 只讀一次就判斷，會先讀到排隊中的 EVT
+//     → 開頭不是 "OK" → 回報「CRANE STOP NOT ACKED — ropes may still be moving」，
+//     **即使 stop 其實成功了**。急停之後最不需要的就是一個假警報。
+//
+//  ② 吊機的 `broadcast_evt()` 對**所有**連線送，而這條 client 從來不讀
+//     ⇒ 接收緩衝區只漲不消。滿了之後吊機那端的 `send()` 會**阻塞**
+//       （`SEND_FLAGS` 只有 `MSG_NOSIGNAL`、沒有 `SO_SNDTIMEO`、socket 也不是非阻塞），
+//       而 `TCP_server::broadcast()` 是**持著 `clients_mtx`** 在送
+//       ⇒ 整條 EVT 廣播路徑卡死，連帶拖住其他 client。
+//     📌 所以 watchdog 會週期性呼叫本函式，讓佇列常態是空的。
+//
+// ⚠️ `receiveData` 的 timeout 走 `SO_RCVTIMEO`，**傳 0 在 Linux 是「永不逾時」＝永久阻塞**，
+//    不是「立刻返回」。這裡一律傳正值。
+int WashRobot::estop_drain_locked_(int budget_ms) {
+    int dropped = 0;
+    char buf[512];
+    const auto deadline = std::chrono::steady_clock::now()
+                        + std::chrono::milliseconds(budget_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const int n = crane_cli_estop_.receiveData(buf, sizeof(buf), 20);
+        if (n <= 0) break;   // 0 = 佇列空了；-1 = 斷線，交給 reconnectLoop
+        dropped += n;
+    }
+    return dropped;
+}
+
+bool WashRobot::crane_stop_estop_() {
+    std::lock_guard<std::mutex> elk(crane_estop_mtx_);
+    // 🔴 Deliberately NO connect attempt here. connectToServer() blocks with no
+    // timeout, and an unreachable crane is precisely the emergency case — a
+    // ~2 min stall on this thread would be far worse than a fast, loud failure.
+    // The socket is opened at init and kept alive by TCP_client's reconnectLoop.
+    if (!crane_cli_estop_.isConnected()) {
+        // 🔴 [2026-09-09] 改為**有界自救**。原本是「完全不 connect、直接失敗」，
+        //    理由是 connectToServer() 是沒有逾時的阻塞 connect（~127s），而
+        //    「對端不可達」正是急停情境 —— **那個理由成立，但結論下錯了**：
+        //    正解不是「永不連」，是「連，但有界」。
+        //    同日實測：吊機重啟後這條通道再也沒接回來，於是這個分支變成
+        //    「永遠走這裡、永遠失敗」，急停等於沒有旁路。
+        //    connectWithTimeout 走 reconnectLoop 同一份 nb_connect（非阻塞 +
+        //    select 逾時 + SO_ERROR），最壞情況就是 ESTOP_CONNECT_MS。
+        std::cout << "[crane_stop_estop] channel down — bounded reconnect ("
+                  << ESTOP_CONNECT_MS << "ms)\n";
+        if (!crane_cli_estop_.connectWithTimeout(crane_endpoint_ip_(),
+                                                 ep::port("CRANE", CRANE_PORT),
+                                                 ESTOP_CONNECT_MS)) {
+            std::cout << "[crane_stop_estop] WARN: reconnect failed — stop NOT sent\n";
+            return false;
+        }
+    }
+    // 🔴 先排空再送 —— ACK 不能排在一堆 EVT 廣播後面（見 estop_drain_locked_）。
+    //    常態下 watchdog 已清空，這裡是 no-op。
+    const int dropped = estop_drain_locked_(ESTOP_DRAIN_MS);
+    if (dropped > 0)
+        std::cout << "[crane_stop_estop] drained " << dropped
+                  << " queued bytes before sending\n";
+
+    const char* tx = "stop\n";
+    if (!crane_cli_estop_.sendData(tx, 5, 500)) {
+        std::cout << "[crane_stop_estop] WARN: send failed — stop NOT sent\n";
+        return false;
+    }
+
+    // 🔴 到這裡 stop **已經在線上了**。以下只是「確認」。
+    //    「沒送出去」與「送了但沒收到確認」對現場的意義完全不同
+    //    （前者繩子一定還在動，後者多半已經停了），所以訊息刻意分開寫 ——
+    //    急停之後看 log 的人要靠這個差別決定下一步。
+    std::string rx;
+    char buf[256];
+    const auto deadline = std::chrono::steady_clock::now()
+                        + std::chrono::milliseconds(ESTOP_ACK_MS);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const int n = crane_cli_estop_.receiveData(buf, sizeof(buf), 100);
+        if (n < 0) {
+            std::cout << "[crane_stop_estop] WARN: link dropped waiting ACK "
+                      << "— stop WAS sent\n";
+            return false;
+        }
+        if (n == 0) continue;                 // 逾時，還沒到
+        rx.append(buf, (size_t)n);
+        size_t pos;
+        while ((pos = rx.find('\n')) != std::string::npos) {
+            std::string one = rx.substr(0, pos);
+            rx.erase(0, pos + 1);
+            if (!one.empty() && one.back() == '\r') one.pop_back();
+            if (one.empty()) continue;
+            if (one.rfind("EVT", 0) == 0) continue;   // 廣播，不是我的回覆
+            return one.rfind("OK", 0) == 0;           // 第一個非 EVT 行就是答案
+        }
+    }
+    std::cout << "[crane_stop_estop] WARN: no ACK within " << ESTOP_ACK_MS
+              << "ms — stop WAS sent (command is on the wire, ACK not seen)\n";
+    return false;
+}
+
 // readings on uncalibrated hardware).
 static constexpr double WEIGHT_NO_DATA_KG = -9999.0;
 
@@ -2514,7 +2702,7 @@ double WashRobot::read_rope_weight_estop_() {
     {
         std::lock_guard<std::mutex> lk(crane_estop_mtx_);
         if (!crane_cli_estop_.isConnected()) {
-            if (!crane_cli_estop_.connectToServer(ep::host("CRANE", CRANE_IP), ep::port("CRANE", CRANE_PORT)))
+            if (!crane_cli_estop_.connectToServer(crane_endpoint_ip_(), ep::port("CRANE", CRANE_PORT)))
                 return -1.0;
         }
         const char* tx = "tension\n";
@@ -2623,18 +2811,12 @@ std::string WashRobot::crane_retract_safe_(int cm, int timeout_sec) {
                     monitor_tripped.store(true);
                     std::cout << "[crane_retract_safe] OVERWEIGHT w=" << w
                               << "kg > limit=" << limit << "kg — sending crane stop via estop channel\n";
-                    // Use dedicated estop connection to avoid crane_mtx_ deadlock
-                    std::lock_guard<std::mutex> elk(crane_estop_mtx_);
-                    if (!crane_cli_estop_.isConnected())
-                        crane_cli_estop_.connectToServer(ep::host("CRANE", CRANE_IP), ep::port("CRANE", CRANE_PORT));
-                    if (crane_cli_estop_.isConnected()) {
-                        const char* tx = "stop\n";
-                        crane_cli_estop_.sendData(tx, 5, 500);
-                        char buf[64];
-                        crane_cli_estop_.receiveData(buf, sizeof(buf), 1000);   // drain reply
-                    } else {
-                        std::cout << "[crane_retract_safe] WARN: estop connection unavailable\n";
-                    }
+                    // [2026-09-09] Was an inline copy of the estop-channel send;
+                    // now shares crane_stop_estop_() with the two emergency paths
+                    // so there is one implementation of "stop the crane, bypassing
+                    // crane_mtx_" instead of three.
+                    if (!crane_stop_estop_())
+                        std::cout << "[crane_retract_safe] WARN: overweight stop not acked\n";
                     break;
                 }
             }
@@ -2781,6 +2963,22 @@ void WashRobot::crane_watchdog_loop_() {
         if (!crane_wd_running_.load()) break;
         if (!crane_attached_.load()) continue;
 
+        // 🔴 [2026-09-09] 週期性排空急停通道。**這不是整潔，是防死鎖**：
+        //    吊機對所有連線廣播 EVT，而這條 client 平常從來不讀 ⇒ 接收緩衝區只漲不消，
+        //    滿了之後吊機的 send() 會阻塞，而 TCP_server::broadcast() 是持著 clients_mtx
+        //    在送 ⇒ 整條 EVT 路徑卡死（理由詳見 estop_drain_locked_）。
+        //    順帶讓急停路徑的排空常態是 no-op。
+        //    ⚠️ try_lock：急停正在進行時直接跳過，絕不排在它後面。
+        {
+            std::unique_lock<std::mutex> elk(crane_estop_mtx_, std::try_to_lock);
+            if (elk.owns_lock() && crane_cli_estop_.isConnected()) {
+                const int dropped = estop_drain_locked_(50);
+                if (dropped > 0)
+                    std::cout << "[crane_watchdog] estop channel drained "
+                              << dropped << " bytes\n";
+            }
+        }
+
         // Crane safety alarm (set by handle_crane_evt_ when EVT tension_alarm
         // / tension_total_limit drained from any crane_cmd_'s recv stream).
         // Per Q3=(a) 2026-05-07 design: escalate to PausedOnError so operator
@@ -2913,6 +3111,7 @@ bool WashRobot::imu_take_baseline_() {
 //  🔴 失敗完全靜默且不重試 —— 這是「錦上添花」的資料流，不可以拖慢或吵到
 //     任何東西。吊機端資料過期就自動退回計米器路徑，本身就是安全的降級。
 void WashRobot::imu_push_loop_() {
+    std::string rxbuf;   // [2026-09-09] 跨輪保存的行緩衝，只有本執行緒碰得到
     while (imu_push_running_.load()) {
         sleep_ms_(IMU_PUSH_PERIOD_MS);
         if (!imu_push_running_.load()) break;
@@ -2925,17 +3124,40 @@ void WashRobot::imu_push_loop_() {
         const std::string line = oss.str();
 
         std::lock_guard<std::mutex> lk(crane_imu_mtx_);
-        if (!crane_cli_imu_.isConnected()) {
-            if (!crane_cli_imu_.connectToServer(ep::host("CRANE", CRANE_IP),
-                                                ep::port("CRANE", CRANE_PORT)))
-                continue;   // 靜默重試於下一輪
-            crane_cli_imu_.set_quiet_reconnect_log(true);
-        }
+        // 🔴 [2026-09-09] 這裡刻意不再 connect。connectToServer() 是**沒有逾時的
+        //    阻塞 connect()**（TCP_client.cpp:99）—— 對端不可達時整輪卡 ~127 秒
+        //    （OS SYN timeout）。以前只是「推送變慢」，現在這條迴圈同時是鏈路探針，
+        //    卡住等於**在最該報警的情境下瞎掉**。socket 改由 init 預熱、
+        //    TCP_client 的 reconnectLoop（500ms）維持。
+        if (!crane_cli_imu_.isConnected()) continue;   // 靜默重試於下一輪
         if (!crane_cli_imu_.sendData(line.c_str(), (int)line.size(), 200)) continue;
+
         // 讀掉回覆避免堆積在接收佇列 —— 2026-09-01 吊機端的 DSZL 失步
         // （Recv-Q 卡 13 bytes、txid 對不上）就是沒把回覆讀乾淨造成的。
         char buf[128];
-        crane_cli_imu_.receiveData(buf, sizeof(buf), 100);
+        const int n = crane_cli_imu_.receiveData(buf, sizeof(buf), 100);
+        if (n <= 0) continue;
+        crane_peer_last_rx_ms_.store(now_ms_());   // 收到任何位元組＝鏈路活著
+
+        // 🔴 [2026-09-09] 行緩衝是**必要項不是保險**：receiveData 是單次 recv 且
+        //    `recv(sock, buf, bufSize - 1, ...)` ⇒ 128 的 buf 單次最多 127 bytes，
+        //    而吊機的 `EVT device_state` 一行遠超過 ⇒ **必定被切成兩次以上**。
+        //    不做緩衝的話 find("tension_alarm") 對半行回 npos ⇒ 警報被靜默吃掉，
+        //    正好是這次要補的那個洞的同一種失敗形狀。
+        //    用區域變數（跨迴圈保存）而不是成員：只有這條執行緒碰得到。
+        rxbuf.append(buf, (size_t)n);
+        // 防呆：對端若吐出無換行的垃圾，不要無上限長大。
+        if (rxbuf.size() > 8192) rxbuf.clear();
+        size_t nl;
+        while ((nl = rxbuf.find('\n')) != std::string::npos) {
+            std::string one = rxbuf.substr(0, nl);
+            rxbuf.erase(0, nl + 1);
+            if (!one.empty() && one.back() == '\r') one.pop_back();
+            // 🔴 只走 record（不印、不轉播）—— 理由見 record_crane_evt_ 的說明。
+            //    也刻意不用 stod 之類會丟例外的東西：這條迴圈一停，roll 推送就
+            //    永久停止且沒人會重啟，750ms 後吊機平衡靜默降級。
+            if (one.rfind("EVT", 0) == 0) record_crane_evt_(one);
+        }
     }
 }
 
@@ -3018,7 +3240,18 @@ void WashRobot::imu_monitor_loop_() {
                           << over_stop_ms << "ms — ABORT_FLAG SET\n";
                 abort_flag    = true;
                 motion_active_ = false;
-                crane_cmd_("stop", 2);   // Crane_control_PI uses 'stop' (no 'emergency_stop' alias)
+                // [2026-09-09] Was crane_cmd_("stop", 2) with the result dropped.
+                // Two defects in one line: (a) crane_cmd_ blocks on crane_mtx_,
+                // which a motion command can hold for its whole duration — and a
+                // 45 deg tilt is most likely *while the crane is moving*, i.e.
+                // exactly when the mutex is held; (b) the result was ignored, so a
+                // stop that never reached the crane looked identical to one that
+                // did. Go through the estop channel (no crane_mtx_) and surface a
+                // failure: the washrobot has aborted, but the ropes have not.
+                if (!crane_stop_estop_()) {
+                    std::cerr << "[imu_monitor] 🔴 CRANE STOP NOT ACKED — ropes may still be moving\n";
+                    evt_("imu_emergency crane_stop_failed");
+                }
                 set_state_(State::Error);
                 std::ostringstream oss;
                 oss << "imu_emergency balance_deg=" << std::fixed << std::setprecision(1)
@@ -3424,7 +3657,9 @@ bool WashRobot::pusher_move_many_(const std::vector<int>& slaves, int pulse, int
 //                 Wall time ≈ delay + stage 2 ≈ 4s. Saves ~3-5s per retract.
 // Correctness: cup adhesion breaks in the first few mm of motion. Slow-peel
 // distance was originally chosen for position-based safety; time-based is
-// equivalent because at PUSHER_RPM_RETRACT the cup moves >1cm/sec — adhesion
+// equivalent because at the old stage-1 rpm (150) the cup moves >1cm/sec — adhesion
+// [2026-09-09] 該常數鏈已刪除（見 WASH_ROBOT.h）。本段是 pre-2026-07-31 的歷史說明、
+// 刻意保留，但符號已不存在 —— 不要照它去 grep。
 // breaks well before delay elapses. If cup over-extended (still in motion at
 // end of delay), stage 2 just updates target to 0 + speed jumps to RETRACT_FULL —
 // motor smoothly accelerates from current intermediate position. Driver accepts

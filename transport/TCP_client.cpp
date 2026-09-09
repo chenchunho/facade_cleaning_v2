@@ -6,6 +6,105 @@
 // 仍然完整可見），之後每 RECONN_SUMMARY_MS 一行摘要。狀態轉換（成功）不受限流。
 static constexpr int     RECONN_LOG_BURST  = 3;
 static constexpr int64_t RECONN_SUMMARY_MS = 30000;
+// reconnectLoop 每次嘗試的連線逾時。維持原就地版本的 1 秒（重連迴圈本來就 500ms 一輪，
+// 拉長只會讓 socket_mtx 被持有更久）。急停路徑用的是更短的值，見 connectWithTimeout 呼叫端。
+static constexpr int     RECONN_CONNECT_TIMEOUT_MS = 1000;
+
+// [2026-09-09] reconnectLoop 內原本就地實作的「非阻塞 connect + 逾時」抽成共用函式。
+//
+// 🔴 抽出來的理由不是整潔，是**正確性只有一份**：下面 SO_ERROR 那個判準是
+//    2026-08-28 上機才抓到的坑（select() 可寫 ≠ 連上，ECONNREFUSED 也會可寫，
+//    舊版因此對著沒有 listener 的埠連報 20 次 "reconnect success"）。
+//    connectWithTimeout() 需要同一段邏輯，複製一份的話遲早只修到其中一份。
+//
+// 回傳已連上且**已切回阻塞模式**的 socket；失敗回 INVALID_SOCKET（socket 已關閉，
+// 呼叫端不需要也不可以再關一次）。不碰任何成員狀態。
+static socket_t nb_connect(const std::string& ip, int port, int timeout_ms) {
+	socket_t s = socket(AF_INET, SOCK_STREAM, 0);
+	if (s == INVALID_SOCKET) return INVALID_SOCKET;
+
+	// 1. set non-blocking
+#ifdef _WIN32
+	u_long mode = 1;
+	ioctlsocket(s, FIONBIO, &mode);
+#else
+	int flags = fcntl(s, F_GETFL, 0);
+	fcntl(s, F_SETFL, flags | O_NONBLOCK);
+#endif
+
+	sockaddr_in server{};
+	server.sin_family = AF_INET;
+	server.sin_port = htons(port);
+#ifdef _WIN32
+	InetPtonA(AF_INET, ip.c_str(), &server.sin_addr);
+#else
+	inet_pton(AF_INET, ip.c_str(), &server.sin_addr);
+#endif
+
+	// 2. attempt connect
+	int res = connect(s, (sockaddr*)&server, sizeof(server));
+
+	bool success = false;
+#ifdef _WIN32
+	if (res == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) {
+#else
+	if (res == SOCKET_ERROR && errno == EINPROGRESS) {
+#endif
+		// 3. wait with bounded select timeout
+		fd_set writefds;
+		FD_ZERO(&writefds);
+		FD_SET(s, &writefds);
+		struct timeval timeout;
+		timeout.tv_sec  = timeout_ms / 1000;
+		timeout.tv_usec = (timeout_ms % 1000) * 1000;
+
+		res = select((int)s + 1, NULL, &writefds, NULL, &timeout);
+		// [2026-08-28] select() > 0 alone is NOT success. A connect that
+		// FAILED (ECONNREFUSED on a port nobody listens to) also makes the
+		// socket writable, so the old `if (res > 0) success = true` reported
+		// "reconnect success" and set connected = true against a dead peer.
+		// Measured on the bench: crane :5002 had no listener at all
+		// (confirmed with ss -ltn) and washrobot still logged 20 consecutive
+		// "reconnect success" lines, one every 500 ms.
+		// POSIX requires reading SO_ERROR to tell the two apart — that is
+		// the only thing that distinguishes them.
+		if (res > 0) {
+			int so_err = 0;
+#ifdef _WIN32
+			int errlen = sizeof(so_err);
+			if (getsockopt(s, SOL_SOCKET, SO_ERROR,
+			               (char*)&so_err, &errlen) == 0 && so_err == 0) {
+				success = true;
+			}
+#else
+			socklen_t errlen = sizeof(so_err);
+			if (getsockopt(s, SOL_SOCKET, SO_ERROR,
+			               &so_err, &errlen) == 0 && so_err == 0) {
+				success = true;
+			}
+#endif
+		}
+	}
+	else if (res == 0) {
+		success = true;
+	}
+
+	// 4. set back to blocking
+#ifdef _WIN32
+	mode = 0;
+	ioctlsocket(s, FIONBIO, &mode);
+#else
+	fcntl(s, F_SETFL, flags);
+#endif
+
+	if (success) return s;
+#ifdef _WIN32
+	closesocket(s);
+#else
+	::close(s);
+#endif
+	return INVALID_SOCKET;
+}
 
 #ifndef _WIN32
 #include <netinet/tcp.h>   // TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT
@@ -118,6 +217,49 @@ bool TCP_client::connectToServer(const std::string& ip, int port, bool debug) {
 	return true;
 }
 
+bool TCP_client::connectWithTimeout(const std::string& ip, int port, int timeout_ms, bool debug) {
+	std::lock_guard<std::mutex> lock(socket_mtx);
+	debug_mode = debug;
+	last_ip = ip;
+	last_port = port;
+	_log_tag = "TCP " + ip + ":" + std::to_string(port);
+
+	if (!initialized) return false;
+	if (connected && sock != INVALID_SOCKET) return true;
+
+	if (sock != INVALID_SOCKET) {
+#ifdef _WIN32
+		closesocket(sock);
+#else
+		::close(sock);
+#endif
+		sock = INVALID_SOCKET;
+	}
+	connected = false;
+
+	socket_t s = nb_connect(ip, port, timeout_ms);
+	if (s == INVALID_SOCKET) {
+		// 一樣要起 Monitor：之後才有人幫忙重試（與 connectToServer 的失敗路徑同義）。
+		startMonitor();
+		return false;
+	}
+
+	apply_keepalive(s);
+	sock = s;
+	connected = true;
+	rx_timeout_streak_.store(0);
+	LOG_INF(_log_tag, "Connected to %s:%d (timeout %dms)", ip.c_str(), port, timeout_ms);
+	startMonitor();
+	return true;
+}
+
+int64_t TCP_client::down_ms() {
+	if (connected) return 0;
+	const int64_t since = reconn_down_since_ms_.load();
+	if (since == 0) return -1;
+	return ::user_lib_log::now_ms_mono() - since;
+}
+
 //=========== worker thread: monitor ===========
 
 void TCP_client::startMonitor() {
@@ -168,82 +310,12 @@ void TCP_client::reconnectLoop() {
 			}
 			LOG_INF(_log_tag, "Attempting to reconnect...");
 
-			socket_t new_sock = socket(AF_INET, SOCK_STREAM, 0);
-			if (new_sock == INVALID_SOCKET) continue;
-
-			// 1. set non-blocking
-#ifdef _WIN32
-			u_long mode = 1;
-			ioctlsocket(new_sock, FIONBIO, &mode);
-#else
-			int flags = fcntl(new_sock, F_GETFL, 0);
-			fcntl(new_sock, F_SETFL, flags | O_NONBLOCK);
-#endif
-
-			sockaddr_in server{};
-			server.sin_family = AF_INET;
-			server.sin_port = htons(last_port);
-#ifdef _WIN32
-			InetPtonA(AF_INET, last_ip.c_str(), &server.sin_addr);
-#else
-			inet_pton(AF_INET, last_ip.c_str(), &server.sin_addr);
-#endif
-
-			// 2. attempt connect
-			int res = connect(new_sock, (sockaddr*)&server, sizeof(server));
-
-			bool success = false;
-#ifdef _WIN32
-			if (res == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) {
-#else
-			if (res == SOCKET_ERROR && errno == EINPROGRESS) {
-#endif
-				// 3. wait with 1s select timeout
-				fd_set writefds;
-				FD_ZERO(&writefds);
-				FD_SET(new_sock, &writefds);
-				struct timeval timeout;
-				timeout.tv_sec = 1;
-				timeout.tv_usec = 0;
-
-				res = select((int)new_sock + 1, NULL, &writefds, NULL, &timeout);
-				// [2026-08-28] select() > 0 alone is NOT success. A connect that
-				// FAILED (ECONNREFUSED on a port nobody listens to) also makes the
-				// socket writable, so the old `if (res > 0) success = true` reported
-				// "reconnect success" and set connected = true against a dead peer.
-				// Measured on the bench: crane :5002 had no listener at all
-				// (confirmed with ss -ltn) and washrobot still logged 20 consecutive
-				// "reconnect success" lines, one every 500 ms.
-				// POSIX requires reading SO_ERROR to tell the two apart — that is
-				// the only thing that distinguishes them.
-				if (res > 0) {
-					int so_err = 0;
-#ifdef _WIN32
-					int errlen = sizeof(so_err);
-					if (getsockopt(new_sock, SOL_SOCKET, SO_ERROR,
-					               (char*)&so_err, &errlen) == 0 && so_err == 0) {
-						success = true;
-					}
-#else
-					socklen_t errlen = sizeof(so_err);
-					if (getsockopt(new_sock, SOL_SOCKET, SO_ERROR,
-					               &so_err, &errlen) == 0 && so_err == 0) {
-						success = true;
-					}
-#endif
-				}
-			}
-			else if (res == 0) {
-				success = true;
-			}
-
-			// 4. set back to blocking
-#ifdef _WIN32
-			mode = 0;
-			ioctlsocket(new_sock, FIONBIO, &mode);
-#else
-			fcntl(new_sock, F_SETFL, flags);
-#endif
+			// [2026-09-09] 連線嘗試改呼叫 nb_connect()（本檔上方），與新的
+			// connectWithTimeout() 共用同一份實作。行為與原就地版本相同：
+			// 非阻塞 connect + 1s select + SO_ERROR 判準；失敗時 socket 已由
+			// nb_connect 關閉，所以下面的 else 分支不再自己關。
+			socket_t new_sock = nb_connect(last_ip, last_port, RECONN_CONNECT_TIMEOUT_MS);
+			const bool success = (new_sock != INVALID_SOCKET);
 
 			if (success) {
 				apply_keepalive(new_sock);
@@ -265,11 +337,8 @@ void TCP_client::reconnectLoop() {
 				LOG_INF(_log_tag, "Reconnect success");
 			}
 			else {
-#ifdef _WIN32
-				closesocket(new_sock);
-#else
-				::close(new_sock);
-#endif
+				// socket 已由 nb_connect() 在失敗路徑關閉 —— 這裡再關一次會是
+				// double close（new_sock 此時就是 INVALID_SOCKET）。
 				++reconn_fail_streak_;
 				if (!quiet_reconnect_log_) {
 					const int64_t now = ::user_lib_log::now_ms_mono();

@@ -47,6 +47,16 @@ inline void announce(const char* name, const char* what, const std::string& valu
 
 }  // namespace detail
 
+// [2026-09-08] 「有沒有設覆蓋」必須問這個，**不要拿解析結果去跟編譯期常數比對**。
+// 🔴 踩過的坑：resolve_crane_ip_() 原本寫 `if (ep::host(...) != CRANE_IP)` 當作
+//    「有覆蓋」的判準 —— 當使用者把覆蓋值設成**剛好等於**那個常數時（例如要強制走
+//    WiFi，而 CRANE_IP 本身就是 WiFi 位址），它與「完全沒設」無法區分，於是掉進
+//    自動探測分支、選了有線。結果是「強制走 WiFi」變成唯一做不到的事，
+//    而且 log 還照樣印出 `[endpoints] override ... = 192.168.5.25`，看起來像生效了。
+inline bool has_host_override(const char* name) {
+	return detail::lookup(name, "_HOST") != nullptr;
+}
+
 // Resolve a host. `fallback` is the compiled-in constant.
 inline std::string host(const char* name, const char* fallback) {
 	if (const char* v = detail::lookup(name, "_HOST")) {
