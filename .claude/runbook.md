@@ -262,7 +262,11 @@ ssh nexuni@192.168.5.26 'for p in $(pgrep -x sleep); do echo "$p -> $(readlink /
    不是走 tmux launcher。**要恢復 launcher 就得先裝 tmux 並把路徑改成 `~/bringup`。**
 
 3. 🔴🔴 **FIFO（本地 console）只認 `exit` / `quit` / `status`，其餘一律靜默丟棄**（2026-09-04 踩到）。
-   `Crane_control_PI/main.cpp:5249` 的 stdin 迴圈就這三個字，**沒有 dispatcher、沒有錯誤訊息**：
+   🔴 **兩台都是**（2026-09-10 確認）：吊機 `Crane_control_PI/main.cpp:5542`、
+   本體 `facade_cleaning_v2/main.cpp:139-142`，**同一段三行程式碼**。先前本節只寫吊機，
+   於是「本體的 FIFO 應該是好的」這個假設沒被檢查過——它一樣壞。
+   `Crane_control_PI/main.cpp:5542`（2026-09-10 行號，原記 5249）的 stdin 迴圈就這三個字，
+   **沒有 dispatcher、沒有錯誤訊息**：
    ```cpp
    while (std::getline(std::cin, line)) {
        if (line == "exit" || line == "quit") break;
@@ -271,6 +275,16 @@ ssh nexuni@192.168.5.26 'for p in $(pgrep -x sleep); do echo "$p -> $(readlink /
    ```
    而 `status` 有輸出 ⇒ **「FIFO 看起來是通的」**，於是 `set_*` 三道全部寫進去、全部沒生效、
    全部沒有徵兆。🔧 **執行期參數一律走 TCP `:5002`（或 GUI），不要走 FIFO。**
+   ⚠️ **2026-09-10 又踩了同一個坑一次**（本節已經寫在這裡，還是照著 FIFO 送了 `set_home_ground`／
+   `set_motion_hz`／`set_roll_correct_hz`／`water_status`，四道全部靜默丟棄）。
+   會重犯是因為手上沒有現成的 TCP 送法，FIFO 是唯一「打得出去」的動作。**現在有了**：
+   ```
+   ssh user@192.168.5.25   'cd ~/run && python3 crcmd.py "set_home_ground 256" "status"'
+   ssh nexuni@192.168.5.26 'cd ~/run && python3 crcmd.py 127.0.0.1:5001 "arm_attached off"'
+   ```
+   `~/run/crcmd.py`（09-10 放上去，正本在 repo `scripts/crcmd.py`）逐條送、濾掉 `EVT` 只印回覆。
+   **第一個參數可省略**，省略時打吊機 `127.0.0.1:5002`；要打本體就帶 `127.0.0.1:5001`。
+   🔴 它**必須持續 recv**——吊機的 `broadcast()` 在 `clients_mtx` 底下，讀端不收會把 EVT 路徑卡死。
    📌 **開機流程順序**：程式起來 → **先設參數** → 才讓任何人碰 GUI。
    2026-09-04 就是因為參數還沒設，per user 在 09:25 下的那趟 `down on` 跑在編譯預設
    （`motion_hz=50` + `balance_source=meter`）之下，資料整趟不可比。

@@ -79,7 +79,7 @@ std::string WashRobot::cmd_init_impl_() {
                       "init_brush_off")) return "ERR aborted\n";
     if (try_or_pause_([this]() { return pqw_.controlRelay(CH_WATER_PUMP, false); },
                       "init_water_pump_off")) return "ERR aborted\n";
-    // [2026-06-05] water_inlet → crane PQW (.34 slave 12 CH4)
+    // [2026-06-05] water_inlet → crane water valve (2026-09-10: ZS-DIO 4CH @ .32 slave 1, was .34 PQW slave 12)
     if (try_or_pause_([this]() { return set_water_inlet_(false); },
                       "init_water_inlet_off")) return "ERR aborted\n";
 
@@ -351,7 +351,7 @@ std::string WashRobot::do_arm_sweep_() {
     // Stop cleaning regardless of outcome
     pqw_.controlRelay(CH_BRUSH,       false);
     pqw_.controlRelay(CH_WATER_PUMP,  false);
-    set_water_inlet_(false);   // [2026-06-05] → crane PQW (.34 slave 12 CH4)
+    set_water_inlet_(false);   // [2026-06-05] → crane water valve (2026-09-10: ZS-DIO 4CH @ .32 slave 1, was .34 PQW slave 12)
 
     return err.empty() ? "OK arm_sweep_done\n" : err;
 }
@@ -3665,7 +3665,7 @@ std::string WashRobot::cmd_shutdown() {
     for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) Z_(s).emergency_stop(false);
     pqw_.controlRelay(CH_BRUSH,        false);
     pqw_.controlRelay(CH_WATER_PUMP,   false);
-    set_water_inlet_(false);   // [2026-06-05] → crane PQW (.34 slave 12 CH4)
+    set_water_inlet_(false);   // [2026-06-05] → crane water valve (2026-09-10: ZS-DIO 4CH @ .32 slave 1, was .34 PQW slave 12)
     pqw_.controlRelay(CH_VALVE_RIGHT,  false);
     pqw_.controlRelay(CH_VALVE_LEFT,   false);
     pqw_.controlRelay(CH_PUMP,         false);
@@ -3762,6 +3762,21 @@ std::string WashRobot::cmd_status() {
     //    down_ms: 0=連線中 / >0=已離線毫秒數 / -1=離線但重連迴圈尚未記錄起點。
     oss << " crane_estop_connected=" << (crane_cli_estop_.isConnected() ? 1 : 0);
     oss << " crane_estop_down_ms="   << crane_cli_estop_.down_ms();
+    // 🆕 [2026-09-10] crane watchdog 的鏈路年齡。**這三欄就是第②步要用的數字。**
+    //   crane_idle_ms      : 距上次與吊機成功往來多久（-1 = 從未往來過）
+    //   crane_idle_ms_max  : 任何狀態下的峰值（閒置時會無限長大，見下）
+    //   crane_idle_ms_max_motion : **運動中**的峰值 ← 訂 abort 門檻要看的是這個
+    //   crane_wd_abort_ms  : 0 = 純觀測不中止（今日預設）；>0 = 超過就中止運動
+    // ⚠️ 與上面的 crane_peer_age_ms 是**兩件事**：那個量的是 IMU 推送那條的回覆，
+    //    這個量的是「任何一次成功的指令往來」。兩者都是鏈路的側面，門檻各自獨立。
+    {
+        const int64_t last_ok = crane_last_ok_ms_.load();
+        oss << " crane_idle_ms="     << (last_ok == 0 ? -1 : (now_ms_() - last_ok));
+        oss << " crane_idle_ms_max=" << crane_idle_ms_max_.load();
+        oss << " crane_idle_ms_max_motion=" << crane_idle_ms_max_motion_.load();
+        oss << " crane_wd_warn_ms="  << crane_wd_warn_ms_.load();
+        oss << " crane_wd_abort_ms=" << crane_wd_abort_ms_.load();
+    }
     oss << " arm_attached="   << (arm_attached_.load()   ? "on" : "off");
     oss << " obstacle_detect=" << (obstacle_detect_enabled_.load() ? "on" : "off");
     oss << " follower_mode="  << (follower_use_imu_.load() ? "imu" : "meter");
@@ -4265,7 +4280,13 @@ std::string WashRobot::cmd_pwm_status() {
     return oss.str();
 }
 
-// [2026-06-05] Water inlet moved to crane PQW (192.168.1.34 slave 12 CH4).
+// [2026-06-05] Water inlet moved to the crane side.
+// 🔴 [2026-09-10] Hardware corrected: it is a **ZS-DIO 4CH** on its own gateway
+//   192.168.1.32 (slave 1, 115200), NOT the PQW at .34 slave 12. It had been
+//   driven as a PQW since 2026-06-05 — the two happen to share FC05 coil
+//   addresses, so it half-worked for three months.
+//   ⚠️ The wire token stays `pqw_water` on purpose: renaming buys nothing and
+//   could hit a parser we did not find.
 // Internal helper — sends crane_cmd_("water_inlet on/off"). All washrobot
 // callers (init / sweep flows / cmd_water_inlet / shutdown) route here.
 // Bypasses state guard so motion-active paths can use it.
@@ -4281,9 +4302,33 @@ std::string WashRobot::cmd_pwm_status() {
 bool WashRobot::set_water_inlet_(bool on) {
     constexpr int RETRY_MAX    = 3;
     constexpr int RETRY_GAP_MS = 500;
+
+    // [2026-09-10] Arm BEFORE sending, not after succeeding.
+    //
+    // A remote command with a physical side effect can take effect while its
+    // reply is lost. That is not hypothetical here: the crane's handler does
+    // controlRelay() plus a 3x verify-retry loop (Crane_control_PI/main.cpp:
+    // 4947-4971), so "relay moved but the OK never came back" is the LIKELIER
+    // failure than "nothing happened" on a lossy link.
+    //
+    // Stamping only on a confirmed OK left the valve physically open with the
+    // watchdog disarmed -> nothing would ever close it.
+    //
+    // The two errors are not symmetric:
+    //   false arm    -> one redundant close (idempotent) + one spurious EVT
+    //   false disarm -> water runs unattended until someone notices
+    //
+    // ⚠️ When a retry succeeds, the stamp is "when we started trying", not
+    // "when it succeeded". Deliberate: it only ever makes the watchdog fire
+    // EARLIER, and early is the safe direction.
+    if (on) water_inlet_open_ts_ms_.store(now_ms_());
+
     bool err = true;
     for (int attempt = 0; attempt < RETRY_MAX; ++attempt) {
-        std::string reply = crane_cmd_(on ? "water_inlet on" : "water_inlet off");
+        // [2026-09-10] Explicit timeout — was inheriting crane_cmd_'s 60s
+        // default meant for motion commands. See WATER_INLET_CMD_TIMEOUT_SEC.
+        std::string reply = crane_cmd_(on ? "water_inlet on" : "water_inlet off",
+                                       WATER_INLET_CMD_TIMEOUT_SEC);
         if (reply.rfind("OK", 0) == 0) { err = false; break; }
         std::cerr << "[water_inlet] " << (on ? "on" : "off")
                   << " attempt " << (attempt + 1) << "/" << RETRY_MAX
@@ -4292,15 +4337,15 @@ bool WashRobot::set_water_inlet_(bool on) {
     }
     if (err) {
         std::cerr << "[water_inlet] " << (on ? "OPEN" : "CLOSE")
-                  << " gave up after " << RETRY_MAX << " attempts — valve state UNKNOWN\n";
-        return true;
+                  << " gave up after " << RETRY_MAX
+                  << " attempts — valve state UNKNOWN (watchdog "
+                  << (water_inlet_open_ts_ms_.load() ? "ARMED" : "not armed") << ")\n";
+        return true;                        // ts left as-is — see pre-send arm above
     }
-    // Successful op — update watchdog tracker.
-    if (on) {
-        water_inlet_open_ts_ms_.store(now_ms_());
-    } else {
-        water_inlet_open_ts_ms_.store(0);   // disarmed
-    }
+    // [2026-09-10] Disarm ONLY on a confirmed close. A confirmed open needs no
+    // re-stamp: the pre-send stamp above already armed it, and re-stamping here
+    // would push the deadline out by however long the retries took.
+    if (!on) water_inlet_open_ts_ms_.store(0);   // disarmed
     return false;
 }
 
@@ -4429,12 +4474,9 @@ std::string WashRobot::cmd_pusher(const std::string& group, const std::string& p
             // ⚠️ 先前寫 16.0 是誤把「某次 extend 尋封停在 47994 脈衝 = 16cm」當成極限，
             //    那只是尋封的停止點，不是機構限制。
             // ⚠️ ≥19.5cm 已接近機械底，高速撞底的風險見 PUSHER_RETRACT_PULSE 的註解。
-            if (cm < 0.5 || cm > 20.0) {
-                std::ostringstream e;
-                e << "ERR extend_raw_cm_out_of_range " << cm << " (allowed 0.5~20.0)\n";
-                return e.str();
-            }
-            const int pulse_cm = (int)std::lround(cm * CUP_PULSE_PER_CM);
+            std::string rerr;
+            const int pulse_cm = extend_raw_pulse_(cm, rerr);
+            if (pulse_cm < 0) return rerr;
             std::cout << "[pusher extend_raw] ⚠ 指定距離 " << cm << "cm (" << pulse_cm
                       << " pulse) —— 覆蓋各 slave 預設值\n";
             for (int s : slaves) by_pulse[pulse_cm].push_back(s);
@@ -4499,7 +4541,20 @@ std::string WashRobot::cmd_imu_level() {
 // on which group the slave belongs to (feet=8cm / body upper=9.8cm /
 // body lower=9.3cm / center=10cm). Retract always goes to 0 with full RPM.
 // Acquires motion_mtx_; not allowed in Error / Running / Balancing states.
-std::string WashRobot::cmd_zdt_pusher(int slave, const std::string& action) {
+// [2026-09-10] extend_raw 的 cm → 脈衝換算 + 範圍檢查。群組版與單支版共用。
+// 上限 20.0 ＝ SMC LEYG25 的額定行程 200mm（WASH_ROBOT.h 標定段證據 5）。
+// ⚠️ ≥19.5cm 已接近機械底，高速撞底的風險見 PUSHER_RETRACT_PULSE 的註解。
+int WashRobot::extend_raw_pulse_(double cm, std::string& err) const {
+    if (cm < 0.5 || cm > 20.0) {
+        std::ostringstream e;
+        e << "ERR extend_raw_cm_out_of_range " << cm << " (allowed 0.5~20.0)\n";
+        err = e.str();
+        return -1;
+    }
+    return (int)std::lround(cm * CUP_PULSE_PER_CM);
+}
+
+std::string WashRobot::cmd_zdt_pusher(int slave, const std::string& action, double cm) {
     // [2026-08-27] 吸盤 slave 改為 CUP_SLAVE_FIRST..LAST（5-8）；沿用舊的 1-4
     // 驗證會讓 GUI 的單支推桿控制／停用全部回 ERR invalid_slave。
     if (slave < CUP_SLAVE_FIRST || slave > CUP_SLAVE_LAST) return "ERR invalid_slave\n";
@@ -4528,6 +4583,29 @@ std::string WashRobot::cmd_zdt_pusher(int slave, const std::string& action) {
             return "ERR pusher_move_fail\n";
         return "OK\n";
     }
+    // [2026-09-10 per user] 單支指定伸出長度。
+    // 🔴 **語意刻意與群組版的 `pusher <group> extend_raw <cm>` 完全相同**：
+    //    推到指定脈衝就停，**不驗真空度、不補伸、不重試、不更新 last_seal_pulse_**。
+    //    ⇒ 它**不能拿來宣稱吸附系統可用**（連驗都沒驗），用途是校正牆距與
+    //    「玻璃面有縫、本來就吸不住」那類現場條件。
+    // ⚠️ 與上面的 `extend` 是**兩種不同的東西**：`extend` 走 smart_extend_subset_
+    //    尋封序列（可補伸到 ~16cm）。同一支推桿、兩種語意，不要混用。
+    if (action == "extend_raw") {
+        int pulse;
+        if (cm > 0.0) {
+            std::string rerr;
+            pulse = extend_raw_pulse_(cm, rerr);
+            if (pulse < 0) return rerr;
+        } else {
+            pulse = preset_extend_pulse_for_slave_(slave);   // 不給 cm ⇒ 該 slave 預設
+        }
+        std::cout << "[zdt_pusher] slave " << slave << " extend_raw pulse=" << pulse
+                  << " (" << (pulse / CUP_PULSE_PER_CM) << "cm)\n";
+        std::vector<int> single = {slave};
+        if (pusher_move_many_(single, pulse))
+            return "ERR pusher_move_fail\n";
+        return "OK\n";
+    }
     if (action == "retract") {
         std::cout << "[zdt_pusher] slave " << slave << " retract → 0 (two-stage)\n";
         // Pre-clear any residual motion command in firmware queue (disable_seal
@@ -4544,7 +4622,7 @@ std::string WashRobot::cmd_zdt_pusher(int slave, const std::string& action) {
             return "ERR pusher_move_fail\n";
         return "OK\n";
     }
-    return "ERR expected_extend_or_retract\n";
+    return "ERR expected_extend_or_retract_or_extend_raw\n";
 }
 
 // Set current ZDT position as new zero for the given group (ZDT manual 3.1.3,
@@ -4624,7 +4702,7 @@ std::string WashRobot::cmd_return_home(int descent_cm) {
     // 1. Water system off (brush / pump / inlet valve)
     pqw_.controlRelay(CH_BRUSH,       false);
     pqw_.controlRelay(CH_WATER_PUMP,  false);
-    set_water_inlet_(false);   // [2026-06-05] → crane PQW (.34 slave 12 CH4)
+    set_water_inlet_(false);   // [2026-06-05] → crane water valve (2026-09-10: ZS-DIO 4CH @ .32 slave 1, was .34 PQW slave 12)
 
     // 2. Break suction on both foot groups (right/left)
     pqw_.controlRelay(CH_VALVE_RIGHT, false);
@@ -4857,6 +4935,42 @@ std::string WashRobot::cmd_crane_attached(bool on) {
         }
     }
     return on ? "OK crane_attached=on\n" : "OK crane_attached=off\n";
+}
+
+// [2026-09-10] crane watchdog 的兩個門檻做成執行期可調，理由見 WASH_ROBOT.h 宣告處：
+// 門檻必須先量再訂，而量測要在真機上跑，不該每調一次就重建一次 binary。
+// ⚠️ 兩者都**不落地**，重啟回到編譯預設（warn=2000 / abort=0）。這是刻意的——
+//    abort 是安全行為，不應該因為某天有人調過就在下次開機悄悄延續。
+std::string WashRobot::cmd_set_crane_wd_warn_ms(int ms) {
+    if (ms < 0 || ms > 120000) return "ERR range:0..120000\n";
+    const int prev = crane_wd_warn_ms_.exchange(ms);
+    crane_wd_warned_.store(false);
+    std::ostringstream oss;
+    oss << "OK crane_wd_warn_ms=" << ms << " (was " << prev << ")\n";
+    return oss.str();
+}
+
+std::string WashRobot::cmd_set_crane_wd_abort_ms(int ms) {
+    if (ms < 0 || ms > 120000) return "ERR range:0..120000\n";
+    // 🔴 擋掉「abort 比 warn 還早」的組態：那會讓運動被中止時**連一行觀測 EVT
+    //    都沒有**，事後無從判斷是差一點還是早就斷了。warn=0（關閉觀測）不受此限。
+    const int warn = crane_wd_warn_ms_.load();
+    if (ms > 0 && warn > 0 && ms < warn) return "ERR abort_ms_must_be_>=_warn_ms\n";
+    const int prev = crane_wd_abort_ms_.exchange(ms);
+    std::ostringstream oss;
+    oss << "OK crane_wd_abort_ms=" << ms << " (was " << prev << ")";
+    if (ms == 0) oss << " — 觀測模式，不會中止運動";
+    oss << "\n";
+    return oss.str();
+}
+
+std::string WashRobot::cmd_reset_crane_idle_max() {
+    const int64_t prev  = crane_idle_ms_max_.exchange(0);
+    const int64_t prevm = crane_idle_ms_max_motion_.exchange(0);
+    std::ostringstream oss;
+    oss << "OK crane_idle_ms_max=0 (was " << prev << ")"
+        << " crane_idle_ms_max_motion=0 (was " << prevm << ")\n";
+    return oss.str();
 }
 
 // Toggle whether DM2J wheels (slave 2, 4) are physically present.

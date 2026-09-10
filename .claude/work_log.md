@@ -1,5 +1,73 @@
 # Work Log
 
+## 🆕 2026-09-10 腳本整併:cycle_test.py 統一 runner(per user)
+
+6 支週期/運動腳本 → **1 支 `cycle_test.py`,用第一個位置參數選模式**:
+
+| 指令 | 做什麼 | 取代 |
+|---|---|---|
+| `cycle_test.py modes` | 列出所有模式與參數 | — |
+| `cycle_test.py full [cycles] [steps] [step_cm] [roll_trip] [diff_trip]` | 完整清潔週期 | (原本體) |
+| `cycle_test.py crane [trips]` | 純吊機頂↔底來回 + 姿態統計 | `mission_run.py` |
+| `cycle_test.py arm [cycles] [rail_cm] [slot]` | 手臂清潔動作耐久 | `cyc.py` / `arm_cycle.py` |
+
+🔴 **向後相容保留**:第一參數是數字(非模式字)= full,所以 `cycle_test.py 1 5 40` 與 Mission 後端(不帶模式)照舊。
+🎯 **crane 模式複用 `monitored_crane_move`** ⇒ 讀 `raw_x`、座標由 `resolve_zero_convention` 自動判定 ——
+   **mission_run.py 原有的「座標慣例過期、讀 roll 非 raw_x」兩個 bug 在此從結構上不存在**(共用同一份 height/監看)。
+🔴 **full 模式程式碼逐字未改**:模式分派放在 full 主程式之前,非 full 就先跑完 sys.exit,full 直接落下去。
+
+**檔案處置**:
+- `cyc10.py` / `cyc20.py` —— **刪除**(兩者逐位元相同、被參數化的 cyc 取代,零損失,git 有)。
+- `mission_run.py` / `cyc.py` / `arm_cycle.py` —— **轉成轉址墓碑**(執行會印「改用 cycle_test.py <mode>」並 exit;原始碼在 git)。
+- ⚠️ **crane / arm 模式尚未實機驗證**(需機器)。full 模式今日已多趟驗過。墓碑保留轉址,原檔在 git,模式若有 bug 可 `git show` 取回對照。
+
+📌 兩台 Pi 已部署(md5 `71143132`)。純 `Linux_test/` Python,與前端/C++ 無關。
+
+---
+
+
+## 🆕 2026-09-10 待辦：DM2J 上滑台 `rail_move` 間歇失敗,驅動要加重試(per user)
+
+**現象**:2026-09-10 WiFi 週期測試步2 `rail 0 復位失敗：ERR rail_move_command_failed`,整輪 bail。
+**性質**:間歇。同一趟步1 的 rail 正常;bail 後手動重送 `rail 0` **一次就成功**(rail_cm=0)。
+**與 WiFi 無關**:DM2J 在本體本地 `.20` bus(與 ZDT 推桿 5-8 + PQW 共線),cycle_test 走 127.0.0.1 打它,不經隧道。是 `.20` bus 的間歇 hiccup(可能與同 bus 的 ZDT/PQW 交易爭用有關)。
+
+**來源**:`app/wash_robot_commands.cpp:438` —— `PR_move_cm_nowait(...)` 回 true(送出即失敗)→ `ERR rail_move_command_failed`。**送出階段就失敗,不是動作中逾時**(逾時是另一條 `rail_move_not_confirmed`)。
+
+🔴 **per user:修改驅動增加重試。** 兩個落點:
+- **(a) 驅動層**(per user 指定「改驅動」):`user_lib/DM2J_RS570` 的 `PR_move_cm_nowait`/底層 `txn_frame_` 送出無回應時重試 N 次(比照其他驅動的 3 次)。
+- (b) 命令層:`cmd_rail_move` 的 `PR_move_cm_nowait` 失敗時重試——較淺,但擋不到 driver 其他呼叫點。
+⚠️ **重試要有上限 + 印出來**(哪一次成功),別靜默;`rail_move_not_confirmed`(動作中逾時)那條**不要**一起重試——那時滑台可能還在動,重送會疊指令。
+📌 需重建本體 binary + 重啟本體才生效,所以先記著,擇機做。
+
+---
+
+
+## 🆕 2026-09-10 待辦：Manual 手臂 M1/M2「靠上/離開」+ DEPLOY_F 雙上限（per user 已定案設計，未實作）
+
+**設計已與 per user 討論定案，尚未寫碼、機器未修好無法實機驗。**
+
+**靠上玻璃** —— 在 `DEPLOY_F` 上加距離參數，變成**壓力/距離雙上限，誰先到停誰**：
+```
+DEPLOY_F <目標壓力N·m> <slot> [預估距離mm]
+```
+- 壓力先到 → 停，`OK stopped=pressure`
+- **距離先到 → 停在那、接受當下壓力、照樣清潔**（per user 選 A：15 N·m 非硬需求，停在預估距離比為差幾 N·m 頂到硬上限安全），`OK stopped=distance`（tau 可 < 目標，不算失敗）
+- 既有兩守衛保留：接觸點 < `THETA_MIN(0.565)` → `obstacle`；沒碰到走到 `THETA_MAX(1.10)` → `no_wall`
+- 距離單位沿用 `wall_mm`（現有幾何都用它，`main_api.h` 的 wall_mm→theta 映射）
+- 預估距離可用上次接觸點 `deploy_f_last_touch_cmd_` 預填
+
+**離開玻璃** —— `PARK`，完全收回，無參數（per user：完全收）。
+
+**落地分工**：
+- 🔴 **motor_api（`cleaning_arm/main_api.cpp`）＝我**：DEPLOY_F 加距離上限分支、回覆加 `stopped=pressure|distance`。動到力控尋觸迴圈 + 壓玻璃，**寫完 syntax check、標未經硬體驗證、先不部署**，等機器修好。
+- **Manual UI ＝ AI-2**：靠上鈕 + 目標壓力框(預設15) + 預估距離框(上次接觸點預填) + 離開鈕 + slot 選擇(LEFT刮刀/CENTER/RIGHT滾筒)。
+
+📌 為什麼雙上限是對的：只有壓力 → 壓力到不了時力控一路摸到硬上限（走太遠）；只有距離 → 玻璃比預估近時壓爆。兩個誰先到 = 各擋一種風險。
+
+---
+
+
 ## 🔴🔴 2026-09-09：兩台 Pi 路徑大搬家 —— **本檔以下所有 `~/bringup` 都是歷史**
 
 `~/bringup/` 已不存在。新配置：
@@ -44,9 +112,9 @@
 
 | # | 待辦 | 狀態 |
 |---|---|---|
-| 1 | `app/WASH_ROBOT.h:443` `PQW_TOTAL_CH = 16` → **改回 8**。它由 8 改 16 的理由是「讓 `readAllStatus()` 涵蓋 CH15」，而 CH15 從來不存在；與 `CH_BRUSH=15` 同一個錯誤前提，那一半修了這一半沒修 | 🔴 未修 |
-| 2 | `:491` `CH_WATER_PUMP = 14` 確定越界，要收回 8 以內（AI-2 板子排 CH8）。⚠️ **牽涉實體接線，不逕自改** | 🔴 未修 |
-| 3 | `cmd_water_pump` 是裸 `controlRelay` + 無條件 `OK` + 無回讀。🔴 **即使加回讀也救不了**（模組對 ch14 回編造值）⇒ 真解是**通道號改對 ＋ 走 `pqw_set_relay_verified_`，缺一不可** | 🔴 未修 |
+| 1 | ~~`app/WASH_ROBOT.h:443` `PQW_TOTAL_CH = 16` → **改回 8**~~ → ✅ **2026-09-10 已改（AI-2 線）**，見 `changelog [2026-09-10a2]`。**本機完整建置通過（16/16 objs + link），未部署／未上機**（x86-64 ≠ ARM64，證明的是編譯連結正確）。 🔴 **但這不等於 PQW 修完了**：效果只是「模組偽造 `ch14=1` 的假確認」→「best-effort 分支印一行 `readback unavailable` 但仍回成功」＝**說謊降級為沉默＋證據**，真正的修法仍是第 2 列的通道號。安全性實查：6 個 `readAllStatus()` 消費者**全部先檢查長度才索引**，且 console v2 的 `RELAY` 表本來就只列 CH1~CH8（**前端早就是對的，後端那個 16 才是異數**） | ✅ 已改 |
+| 2 | `:491` `CH_WATER_PUMP = 14` 確定越界，要收回 8 以內（AI-2 板子排 CH8）。⚠️ **牽涉實體接線，不逕自改**。<br>📌 **2026-09-10 補一個會改變優先度的事實：console v2 完全沒有 water_pump 的 UI 入口**（`RELAY` 表只有 ch1~ch8，`web_backend/public_v2/index.html:2077`）⇒ 這條越界路徑**只有 raw command 打得到**，不是使用者隨時會踩的洞。**優先度可降，但不可關閉**——要決的仍是通道號（水路實體有沒有接） | 🔴 未修 |
+| 3 | ~~`cmd_water_pump` 是裸 `controlRelay` + 無條件 `OK` + 無回讀~~ 🔴 **2026-09-10 更正：這段敘述已過期。** 回讀與 `pqw_set_relay_verified_` **09-07 就補上了**（見下方 09-07 那列與 `changelog [2026-09-07m2]`），`wash_robot_commands.cpp:3970` 現在會回 `ch14=`。**還沒修的只有通道號**（＝第 2 列），不是回讀。原文「即使加回讀也救不了」講的是機制，**結論仍然成立** —— 模組對 ch14 回編造值，所以現在那個 `ch14=1` 正是一個看起來完全正常的假確認 | 🔴 **通道號未修**（回讀已有） |
 
 📌 吊機那顆宣告是對的（`Crane_control_PI/main.cpp:216 = 8`）；**過期的是本體那個 16**。
 📌 對 PCB：新板「寫入越界回 `0x02`」由防呆升級為**修正現行硬體的明確缺陷**（已納入 AI-2 設計 v0.6）。
@@ -59,8 +127,26 @@
 | # | 待辦 | 出處 |
 |---|---|---|
 | 1 | 🔴 **本體端 crane watchdog 是死碼**：`crane_last_ok_ms_` 寫 3 處**讀 0 處**、`WATCHDOG_TIMEOUT_MS` 無任何運算式使用、`crane_watchdog_loop_` 只排空張力警報。比較曾存在（`9f33c6a` 04-15），到 `4d1409c` 06-22 消失。**補回或明確刪除，二選一，現狀最壞** | `ai2-watchdog-handoff.md` |
+
+#### 🔴 2026-09-10 複驗（AI-2 線）：上表第 1、2 列屬實，**但底下還有一層**
+
+三件新的，都未動手（改行為的部分要等機器線測完）：
+
+| # | 發現 | 位置 |
+|---|---|---|
+| A | ⚠️ **`crane_keepalive_loop_` 的存在理由已經沒了**（它的檔頭寫著「background ping … **so crane_watchdog doesn't false-abort**」，而那個 false-abort 的判斷式不存在了）。🔴 **但我 09-10 初版把它寫成「現在每秒送一次 ping、搶 `crane_mtx_`」是錯的** —— agent-ai-e9 指出並經我複驗：`:405-406` 的執行緒啟動**自 2026-05-15 就被註解掉**、`crane_keepalive_running_` 建構時即 `false` ⇒ **迴圈體從來沒有執行過，零執行期成本**。⇒ 正確的描述是**死碼餵死碼**（兩邊都不動），不是「活碼餵死消費者」。📌 **我的錯誤本身就是通則 #1 再演一次**：我讀了函式體與檔頭註解，卻沒問「誰啟動這個執行緒」——**跟「誰讀這個值」是同一個問題的另一層**。連帶：(c) 刪除的清理範圍比我估的更乾淨 | `app/WASH_ROBOT.cpp:3025`；啟動點 `:405-406`（已註解） |
+| B | ⚠️ **`:2957` 的函式檔頭註解掛錯函式** —— `crane_watchdog_loop_` 頭上寫的是「Per-side retract until both L/R tension >= target_kg … Used by `bal_cal_preload_`」，那是 `crane_retract_to_weight_` 的說明。函式體被刪時註解留在原地，黏到下一個函式頭上 | `app/WASH_ROBOT.cpp:2957-2959` |
+| C | ✅ **舊實作已從 git 撈回**（`6abd8c6:user_lib/WASH_ROBOT.cpp:391`）⇒ 「補回」有底稿不是重寫；`motion_active_`／`abort_flag`／`evt_` 都還在，接得回去 | — |
+
+📌 **A 修正後仍值得留一句，但要留對的那句**：原本我想記「死碼也可以是還在跑、消費者已死的迴圈」——**那個結論建立在錯誤的前提上**。真正的收穫是**查證的順序**：判斷一個迴圈有沒有在跑，要先找它的**啟動點**，不是讀它的迴圈體。
+`crane_last_ok_ms_` 的三個寫入點（含 `:2472` 專為 `motion_progress` 補的那個）**都還帶著「為了不讓 2s watchdog 誤觸發」的註解在維護** ——
+⇒ 有人一直在有意識地餵它。**這正是 AI-2 通則 #1「要找誰讀這個值，不是誰寫這個值」的第二個實例。**
+
+🔴 **傾向補回而非刪除**：刪掉等於承認「吊機斷線時本體不需要中止動作」，那是**安全決策不是清理**。
+但補回會改變執行期行為（2s 沒回應就 `abort_flag`）⇒ **不要在上機測試的當天上。**
+若最終選刪除，**A 的 keepalive 必須一起刪**，否則留下更難懂的殘骸。
 | 2 | 🔴 `crane_retract_safe_` **零呼叫點** ⇒ `crane_cli_estop_` 整條旁路在 09-09 接上急停之前**從未於執行期建立過**。`crane_retract_to_weight_` 更是**宣告了沒定義也沒呼叫** | 同上 |
-| 3 | 🔴 **水閥**：`set_water_inlet_` **先判失敗才 return、成功才蓋時間戳**（`wash_robot_commands.cpp:4267-4275`）⇒ **開閥送到了但回覆丟了 = 閥開著、watchdog 沒武裝、沒人看管**。修法「先武裝後送」3 處小改，見 §10。另建議獨立 `WATER_INLET_CMD_TIMEOUT_SEC = 5`（現在吃 `crane_cmd_` 預設 60） | `ai2-crane-cmd-protection.md` §10 |
+| 3 | ~~🔴 **水閥**：`set_water_inlet_` 先判失敗才 return、成功才蓋時間戳 ⇒ 開閥送到了但回覆丟了 ＝ 閥開著、watchdog 沒武裝、沒人看管~~ → ✅ **2026-09-10 已改（AI-2 線）**：先武裝後送 ＋ 獨立 `WATER_INLET_CMD_TIMEOUT_SEC = 5`，兩個獨立 hunk，見 `changelog [2026-09-10]`。**本機完整建置通過（16/16 objs + link），未部署／未上機**（x86-64 ≠ ARM64，證明的是編譯連結正確）。 🔬 兩者互動：Patch 1 讓時間戳變成「開始嘗試」，Patch 2 正好把提早量由最壞 361s 壓到 ~16s ⇒ 合法最長開閥窗 185s + 16s ＜ `WATER_INLET_OPEN_MAX_MS` 300s，**不會誤觸發強制關閥**。🟡 **§10.2 的 EVT 措辭分兩種（「確定開過」/「未確認」）未做，待拍板** —— 那是 Patch 1 唯一真成本（假 EVT 稀釋真 EVT）的解藥。❌ §10.3 B3 第四條連線未做（需 per user） | `ai2-crane-cmd-protection.md` §10 |
 | 4 | 🟡 Phase 2.3 若要做走 **Option B**（拆 `record_crane_evt_`），素樸版不該上。前置是先修 `imu_push_loop_` 的無逾時 `connectToServer` —— **與 09-09 在 `crane_stop_estop_` 修的是同一個** | `ai2-peer-visibility.md` §2 |
 
 ### 📌 AI-2 帶回的通則（值得進踩坑索引）
@@ -71,6 +157,25 @@
 4. **對有物理副作用的遠端指令，收不到回覆 ≠ 沒生效**；安全側應「**先武裝、後送出**」
 5. **結論對不代表推理對**（AI-2 用「一個沒接東西的繼電器」證明模組只有 8 路，那句講的是沒接負載不是沒有通道；結論碰巧對）
 6. **越界不報錯的裝置會替不存在的通道編造回覆**（見上方 PQW 實測）
+
+7. 🔴🔴 **「看到有那段程式碼」不等於「那段程式碼會執行／會適用」—— 一定要讀到閘門那一行。**
+   📌 **2026-09-10 一天之內四次，兩個 session 各兩次**，形狀完全相同：
+
+   | # | 誰 | 讀到了什麼 | 沒讀到的閘門 | 錯誤的結論 |
+   |---|---|---|---|---|
+   | 1 | AI-2 | `crane_keepalive_loop_` 的函式本體與檔頭註解 | **執行緒啟動點 `:405-406` 早已註解掉** | 「它每秒送一次 ping、搶 `crane_mtx_`」 |
+   | 2 | agent-ai-47 | `emergency_stop` 裡有 `set_water_inlet_(false)` | **外面包著 `if (ts != 0)`** | 「運動中關不掉水的出口是急停」（無條件） |
+   | 3 | AI-2 | 自己寫的降級分支會印訊息 | **latch 沒有解除路徑** | 「停掉輪詢並說明」＝以為可接受 |
+   | 4 | agent-ai-47 | 後端 `PQW_TOTAL_CH` 由 16 降為 8 | **前端 `RELAY` 表本來就只有 ch1~ch8** | 「`ch14` 每次回讀都會落進 undefined 分支」 |
+
+   ⇒ **這是通則 #1 的推廣**：#1 說「找誰讀這個值」，#7 說**任何一段程式碼都要找它的啟用條件**
+   —— 執行緒的啟動點、`if` 閘門、迴圈的解除路徑、資料的實際範圍，都是同一種東西。
+   **它們全都不在你正在讀的那幾行裡，而那幾行看起來完全自洽。**
+
+8. 🔴 **一個正確的動作配一個錯誤的理由，照單全收會在日誌裡留下一條假因果** ——
+   而下一個人會拿它去推別的結論。**動作對不對與理由對不對要分開驗，兩者都要記對的那個。**
+   （2026-09-10 `paintRelay` 的 `data-stale`：該做，但不是因為 `ch14`。真正的理由是
+   「幀損毀但仍帶 `ch1=` 而被 `expect` 認領」，那個有前科支撐。）
 
 ## 🔴 2026-09-09 文件更正（三處，皆已改）
 
@@ -84,6 +189,203 @@
 **在兩份手冊摘要與一份架構文件裡都沒有被更新** —— 搬動裝置那次沒有回頭掃過所有引用它的文件。
 
 ---
+
+## 📋 2026-09-10 給 AI-2 的決定（跨 session 訊息未送達，改寫在這裡）
+
+⚠️ **agent-ai-e9 → AI-2 的訊息兩度被擋（一則過期未放行）**，所以決定改寫進本檔。AI-2 請以此為準。
+
+| 項目 | 決定 | 理由 |
+|---|---|---|
+| **GUI 三顆按鈕確認彈窗**（`pwm save` / `zdt_zero` / `rail_cfg_soft_enable`） | ✅ **復原** | 判準是**不對稱性**：復原錯了，代價是多按一次確認、五行就能再拿掉；不復原錯了，**`pwm save` 燒掉的 flash 壽命（1~2 千次）回不來**。AI-2 的對照組把這變成事實而非判斷 —— `rail_zero` 掛著**一模一樣的 `data-confirm="1"` 卻還有彈窗**，唯一差別是 handler 寫在自己那裡而不在共用委派裡 ⇒ **差異來自程式碼結構，不是誰比較危險**。🔴 **`#relaygrp` 完全不碰**（per user 明確要求）。📌 **這是 agent-ai-e9 拍的板，不是 per user 要求的**，已向使用者揭露、他隨時可退 |
+| **`PQW_TOTAL_CH` 16→8** | ✅ 同意已做，**同意但書** | AI-2 那句要留：**「偽造的確認比缺少確認更糟，因為前者會讓下游停止追問」**。這比「改回 8」本身有價值。📌 附帶證據：console v2 的 RELAY 表**本來就只列 CH1~CH8** ⇒ **前端早就是對的，後端那個 16 才是異數** |
+| **watchdog** | 🔴 **等 per user**：補回(b) 還是刪除(c) | 補回會改變執行期行為（2s 無回應即 `abort_flag`），**是安全決策不是清理**。今天只做零行為變更的註解歸位(a)。patch 可先寫好**不要上** |
+| **水泵通道號** | 🔴 **等 per user** | 需先確認**管路到底接了沒**。沒接＝純軟體改號可現在做；接了＝等現場 |
+
+### 🔬 agent-ai-e9 查到、AI-2 要的現場事實
+
+```
+crane_retract_safe_      呼叫點 0（只有定義 :2768 + 三處註解）
+read_rope_weight_estop_  唯一呼叫點 :2807，就在 crane_retract_safe_ 體內 ⇒ 一起死
+crane_cli_estop_ 建立點三處：
+  :374  init() 預熱                 🟢 活（今天開機實跑到）
+  :2572 crane_stop_estop_ 有界自救   🟢 活（09-09 加）
+  :2705 read_rope_weight_estop_     🔴 死
+```
+⇒ **「09-09 之前從未於執行期建立過」成立**；現在活的兩條**與 `crane_retract_safe_` 無關**，刪它不會動到急停通道。
+📌 補充：`crane_keepalive_loop_` 在 `WASH_ROBOT.cpp:406` **本來就被註解掉沒在跑** ⇒ 死碼餵死消費者，兩邊都不動，(c) 的清理範圍比估的更乾淨。
+
+### ✅ 2026-09-10 AI-2 回報：三項決定已落地 + 小工作結果
+
+| 項目 | 狀態 |
+|---|---|
+| **GUI 三顆按鈕確認彈窗** | ✅ **已復原**。共用委派重新 gate 在 `data-confirm` 上 + 逐指令確認文字（`CONFIRM_MSG`）。🔴 **`#relaygrp` 未碰** |
+| **watchdog (a) 註解歸位** | ✅ **已做**（零行為變更）。移除黏錯的 `crane_retract_to_weight_` 註解，補上如實的檔頭 |
+| **watchdog (b) 補回 patch** | ✅ **已寫、刻意未套用** → `.claude/handoff/ai2-watchdog-restore-patch.md`。🔴 **拍板前必讀下方那條**，(b) 不是貼上去就好 |
+| **`PQW_TOTAL_CH` 16→8** | ✅ 已做（見 `changelog [2026-09-10a2]`） |
+| **水泵通道號** | ⏸ 未動，等 per user |
+
+#### 🆕 2026-09-10 console v2 新增「吊機繼電器 ZS-DIO CH1–4」（agent-ai-47 指派）
+
+✅ 已做，見 `changelog [2026-09-10a3]`。**只動前端一個檔**，未在真人瀏覽器實測。
+
+✅ **2026-09-10 per user：CH4 的確認視窗已移除**（按了就執行，同 `#relaygrp`）。
+🔴 **明確要求、不是疏漏，不要補回去。** 回讀誠實度的三個機制（等回讀才翻開關／
+`data-stale`／三態模組狀態）**全部保留** —— 攔截與誠實回報是兩件事。
+⚠️ **但風險轉成只靠人記得**：未武裝的閥 watchdog 與急停都不會關，
+而「先武裝後送」還在 `app/` 未部署 ⇒ 在那之前「送到了但回覆遺失」沒有任何自動關閥，
+**而且現在沒有 UI 會提醒這件事**。見 `changelog [2026-09-10a6]`。
+
+🔴🔴 **一個要拍板的偏離**：`agent-ai-47` 給的是吊機端指令（CR `:5002`），
+**我把控制改走本體**（`WATER_CTRL_VIA = WR`），回讀才走吊機。理由：
+
+**自動關閥只有一個實作 —— 本體的 `water_inlet_watchdog_loop_`（300s 強制關），
+而它由本體的 `set_water_inlet_()` 蓋時間戳武裝；吊機端沒有任何 watchdog。**
+⇒ 直送吊機 ＝ 時間戳沒被蓋 ＝ **閥開著、沒有東西會關它**。
+（v1 `public/app.js:1025` 送的也是 `washrobot`，且**另外**還有 60s 前端 auto-OFF
+＋ watchdog toast ⇒ 直送吊機會讓 v2 的保護**比 v1 更少**。）
+
+📌 **這是同日早上剛補的那個洞換一個門走進來**：早上是「回覆丟失所以沒武裝」，
+這裡是「根本沒經過武裝那段程式」——**同一個後果、兩個成因，早上的修法擋不住這個**。
+
+⚠️ 代價：走本體多一跳，`crane_cmd_` 會搶 `crane_mtx_` ⇒ 運動中可能等。
+**要改回直送只需換一個具名常數，但那等於接受沒有自動關閥。**
+
+🟡 **另外兩件待 `agent-ai-47` 處理**（屬 C++ 線，我沒動）：
+① `CLAUDE.md` 驅動表仍把 `ZS_DIO_R_RLY` 列在「未使用」；
+② 吊機拓樸圖仍寫「`.34` PQW slave 12 CH4 ＝ 進水球閥」，實際已是 **ZS-DIO 獨佔 `.32`**。
+🔴 **而 `.32` 在本檔別處還記著是「X518 左（09-01 已移除）」⇒ 同一個 IP 換了用途，
+查舊文件會查到不存在的裝置。**
+
+#### 🔴🔴 watchdog (b) 拍板前必讀：**照舊版直接貼會誤觸發**
+
+寫 patch 時挖到的，per user 決定 (b)/(c) 之前應該先看到這條：
+
+**舊版能用 `WATCHDOG_TIMEOUT_MS = 2000`，是因為它自己每 500ms 送一次 `ping` 在餵。**
+而 `crane_keepalive_loop_` 已於 2026-05-15 停用，理由寫在 `WASH_ROBOT.cpp:399`
+（「New design: no continuous ping. Each `crane_cmd_` self-heals on fail.」）——**那個理由同樣適用於 watchdog**。
+
+⇒ 若「補回比較、但不送 ping」，`crane_last_ok_ms_` 就只有**真的有指令往來**時才刷新，
+而長時間純本體動作（ZDT 伸縮 4s+、DM2J 滑台 2-3s）期間**沒有任何東西刷新它**
+⇒ **2 秒門檻極可能誤觸發 ⇒ `abort_flag` ⇒ 運動中止。**
+📌 **而那正是 2026-05-15 當初加 keepalive 要解決的問題**——繞了一圈回到原點。
+
+🎯 **這件事本身就是這條待辦的成因再演一次：把一個自洽的設計拆成兩半、只裝回一半。**
+（原成因：張力監控退場時把急停旁路一起帶走。）
+
+⇒ **建議分三步，不要一步到位**：① 先只發 EVT、不設 `abort_flag` ② 依實測 `idle_ms` 分布**重選門檻**（2s 幾乎確定太短）③ 確認不誤觸發後才接回 `abort_flag`。
+
+#### 🔬 GUI 復原的驗證（不是「改完就算」）
+
+- 逐 tag 審計：**帶 `data-cmd` + `data-confirm` 的剛好就是那三顆**（`pwm save`／`zdt_zero`／`rail_cfg_soft_enable`）
+- `rail-zero` **有 `data-confirm` 但沒有 `data-cmd`** ⇒ 委派抓不到它，走自己的 handler ⇒ **不會變成連按兩次確認**
+- 🔴 **繼電器列兩個屬性都沒有**（`RELAY.map` 只產生 `data-ch` / `data-danger`）⇒ **委派永遠攔不到繼電器**，per user 的「按了就執行」結構上就成立，不是靠我小心
+- `tools/check_console.js` 全過；另把 2 個 inline script 抽出來跑 `node --check` **實際解析通過**（該工具只驗大括號平衡，不解析 JS）
+
+#### ⑤ `web/node_modules` 可重建性 —— ✅ 可重建，**但有一個會咬人的但書**
+
+🔴 **我沒有對兩台 Pi 下任何指令**（依指示），以下全在 WSL + scratchpad 完成，**沒有真的安裝、也沒寫進樹內**：
+
+- ✅ `express@^4.19.2` 與 `ws@^8.18.0` **在 registry 都抓得到**（各有數十個符合的版本）
+- ✅ `npm install --dry-run`（scratchpad 的 `package.json` 副本）**完整解析成功：70 個套件**
+- ⚠️ **Pi 那端有沒有網路我查不到**（不能下指令）——這一項要你確認
+
+🔴🔴 **但書：`web_backend/` 底下沒有任何 lockfile**（`package-lock.json` / `shrinkwrap` / `yarn.lock` 全無，且 git 也只追蹤 7 個檔）。
+兩個相依都是 **caret 範圍**（`^4.19.2` / `^8.18.0`）⇒ **`npm install` 給的是「當下最新的相容版」，不是 Pi 上現在跑的那個版本。**
+實測解析結果是 **express `4.22.2`／ws `8.21.3`** —— 已經比 `package.json` 寫的高了好幾個 minor。
+⇒ **「可重建」成立，「可還原成同一份」不成立。**
+
+🎯 **正解是把 `package-lock.json` 進版控**（幾十 KB，比 `node_modules` 小三個數量級）。
+🔴 **但一定要在 Pi 上、從現有的 `node_modules` 產** —— 在這裡產只會把**現在最新的版本**釘死，
+**正好丟掉那份唯一副本裡真正要保存的東西**。📌 這跟「衍生副本過期」是同一類錯誤，只是方向相反。
+
+📌 **順帶更正一條**：`node_modules` **不在 `.gitignore` 裡**（我逐行看過）。
+它不是被規則排除的，是**從來沒有人加過** ⇒ 要收進版控**沒有 gitignore 的阻礙**，不需要 `-f`。
+
+## 🟢 2026-09-10 開工現況
+
+四支程式已起（吊機 `:5002` / WEB `:8080`+`:8081` / 本體 `:5001`），繼電器全 0，機器在地面端。
+
+| 項目 | 狀態 |
+|---|---|
+| ✅ **SD76 零點撐過整台斷電** | `L=258 R=255` 與昨天收工逐位相同 ⇒ `home_ground_cm=256` 直接可用，不必重新校正（**這條以前沒驗證過**） |
+| 🔴 **Fathom-X 隧道沒通** | 本體自動退回 WiFi（`有線 192.168.1.10 探測不通 → 走 WiFi`）。兩台 eth0 都 UP、各自看得到自己那側的網關，跨不過去 ⇒ **實體項**。📌 但昨天實驗顯示隧道在 VFD 運轉時掉 90% 封包，走 WiFi 對測試反而有利 |
+| ⚠️ **WEB 起不來（已修）** | `web/node_modules` 是指向我昨天刪掉的 `~/projects/web_ver2` 的 symlink。已從 tarball 取回並改成實體目錄。🔴 **它現在是唯一副本且不在版控**，`npm install` 能否還原未驗證 |
+| 🔴 `level_diff` **刻意留 0 待實測** | 現在 `L−R=+3` 而 `roll=+1.46°`，依昨天斜率該是 −3.2° ⇒ **約 4.7° 偏移**，要調平後重量 |
+
+## ✅ 2026-09-10 收工現況（13:55）
+
+四支程式全在跑，**五條跨機連線全部走有線隧道 `192.168.1`**（per user「都走192.168.1」）：
+
+| 鏈路 | 實走（`ss -tnp` 實抓，非設定值） |
+|---|---|
+| 本體 → 吊機（主 / estop bypass / IMU push） | `192.168.1.100 → 192.168.1.10:5002` ×3 |
+| WEB :8080 / :8081 → 本體 | `192.168.1.10 → 192.168.1.100:5001` ×2 |
+| WEB → 吊機 | `127.0.0.1:5002` —— 同一台 Pi，本來就不過網路 |
+
+⚠️ **切之前 WEB 是漏網的**：本體是用 `FCV_EP_CRANE_HOST=192.168.1.10` 起的，
+但兩個 node server 起得更早、帶的是 `WROBOT_IP=192.168.5.26`（WiFi），**切隧道時沒有跟著重起**。
+📌 **通則：改鏈路要盤點「所有跨機的行程」，不是只改當時手上那一支。**
+🔧 啟動腳本已固化：吊機 `~/run/start_web.sh`、本體 `~/run/start_body.sh`（IP 寫在腳本裡，不再靠手打）。
+
+🐛 **踩到一個 shell 自殺**：`ssh <pi> 'pkill -f "node server.js"; …; node server.js …'`
+—— 遠端那個 `bash -c` **自己的命令列裡就含有 `node server.js`** ⇒ pkill 連自己一起殺，
+兩個 node 停掉但後面重啟那幾行沒跑到，`ss` 也沒印（ssh 回 255）。
+🔧 **kill 與 start 要分成兩次 ssh**，或 start 走腳本讓 pattern 不出現在命令列上。
+
+### 本體已部署（13:43）
+
+binary `557eb6fd`（回退 `~/run/facade_cleaning_v2.out.prev-20260910-1343` = `3d6f3eeb`），編譯 16/16。
+內含 AI-2 的五項：水閥**先武裝後送** + `WATER_INLET_CMD_TIMEOUT_SEC=5`／`PQW_TOTAL_CH` 16→8／
+watchdog 註解歸位／**10 處**過時註解更正／`set_water_inlet_` 宣告處的**武裝三級門檻表**。
+
+✅ 實測 `relay_status` 現在回 `ch1..ch8`（原本回到 16，其中 9~16 是模組**編造**的）。
+✅ `arm_attached` 重啟後回到建構預設 `on`，已手動設回 `off`。
+
+🔴 **為什麼這次要部署**：水閥的確認彈窗當天稍早依 per user 拿掉了，
+而那個彈窗原本承載「未武裝的閥，watchdog 與急停**都不會**關」這句警告
+⇒ 拿掉之後「先武裝後送」從「有彈窗擋著的洞」變成**唯一的防線**。
+
+### 🐛 同一個坑，一天走進去兩次
+
+`.claude/runbook.md` 早就寫著「FIFO 本地 console 只認 `exit`/`quit`/`status`，其餘靜默丟棄」，
+我上午照樣對**吊機**送了四道 `set_*`（全丟），下午又對**本體**送了 `arm_attached off` / `relay_status`（全丟）。
+
+🔴 第二次還多一層：本節先前**只寫了吊機**，於是「本體的應該是好的」這個假設**從來沒被檢查過**
+——實際上是**同一段三行程式碼**（吊機 `main.cpp:5542`、本體 `facade_cleaning_v2/main.cpp:139-142`）。
+📌 **一個坑只記在它被發現的那個地方，等於默許同族的其他地方繼續踩。**
+🔧 `scripts/crcmd.py` 已支援 `host:port`，兩台都能打；runbook 已補上本體那一半。
+
+### console v2 今日累計（AI-2 線，全部已部署到 `:8081`）
+
+吊機繼電器面板（控制走 WR／回讀走 CR）→ latch 改降頻重試 → `data-stale` →
+三顆按鈕確認窗復原 → **水閥 CH4 確認窗移除**（per user）→ **Manual 依機器重新編排**
+（`▍吊機 :5002` / `▍本體 :5001` 兩段，raw command 刻意不歸段）。目前 `44620baf`。
+❌ **仍未在瀏覽器看過** —— 最後這項改的是**版面**，而版面正是自動化驗證完全蓋不到的那一類。
+
+| 項目 | 狀態 |
+|---|---|
+| 🎉 **吊機水閥第一次真正上線** | ZS-DIO 誤用 PQW driver 三個月，已改正。`gw_w=1 pqw_water=1`，on/off round-trip 實測通過。詳見 `changelog [2026-09-10a4]` |
+| ✅ 吊機 binary | `0b8e4d0d`（回退 `~/run/crane_control_PI.out.prev-20260910-1247` = `da62fcf2`）。新增 `water_status`、`status` 補 `dev_gw_w=`/`dev_pqw_water=` |
+| ✅ console v2 | AI-2 的「吊機繼電器 ZS-DIO CH1–4」面板已部署到 `:8081`（備份 `index.html.bak-20260910-1300`）。**尚未在真人瀏覽器點過** |
+| ✅ 本體 | 吊機重啟後兩條通道都自己接回（斷線 9316s / 18318 次重試後 reconnect success）。`arm_attached=off` |
+| ✅ 執行期參數 | `home_ground_cm=256` `motion_hz=30` `roll_correct_hz=30`（重啟後已重設） |
+| ✅ IMU | `n_accel=82819` —— 昨天斷電後 `n_accel=0` 的現象**沒有復發** |
+| 🔴 `level_diff` **仍是 0 且未實測** | 現在 `L=5 R=-2`（L−R=+7）而 `roll=+1.20°`。**跑任何可比較的週期測試前必須先調平再重量** |
+
+### 🔴 新開待辦：吊機端沒有水閥 deadman
+
+自動關閥**只有一個實作**，在**本體**（`water_inlet_watchdog_loop_`，300s），由本體的
+`set_water_inlet_()` 蓋時間戳武裝。吊機端**沒有任何計時器**。
+
+⇒ 兩個後果：
+1. GUI 若直接對吊機下 `water_inlet on`（繞過本體），閥開著就**沒有任何東西會關它**
+   —— 這是 AI-2 把控制路徑改走本體的原因（`changelog [2026-09-10a3]`），該決定正確、維持。
+2. 🔴 **但走本體也堵不住全部**：本體被 SIGKILL（非正常退出，`stop()` 的補關跑不到）時，
+   閥一樣永遠開著。**繼電器在吊機手上，deadman 就該在吊機手上。**
+
+🔧 **建議**：吊機端補一個「收到 `water_inlet on` 起算，逾 N 秒自動關」的執行緒
+（ZS-DIO 本身也有硬體通訊檢測暫存器 `0x0030`，斷線 N 秒全關 —— 可能更便宜且更可靠）。
+⚠️ **未動手，等 per user 拍板。**
 
 ## 🔴 待辦總表（單一權威，2026-08-27 由 mailbox / ONBOARDING 併入）
 
@@ -9752,7 +10054,7 @@ RF1/LF1（上）與 RF2/LF2（下），所以改完之後 **31 處使用點全�
 1. **交易層重試**（`QX_DO24::sendAndReceive`，3 次、40ms backoff）——
    只重試傳輸層失敗（no reply／too short／CRC），`device rejected` 不重試（模組明確表態）。
    放在 driver 而非各呼叫端：左右螺旋槳共用 CH1，不能指望每個呼叫端都記得重試。
-2. **回讀驗證**（`cmd_pwm_set`）——寫完три個暫存器後讀回比對，不符或讀不到都回 ERR + EVT。
+2. **回讀驗證**（`cmd_pwm_set`）——寫完三個暫存器後讀回比對，不符或讀不到都回 ERR + EVT。
    理由：寫入回 true 只代表「模組收下這一幀」，不代表暫存器真的是那個值。
 3. **錯誤訊息分辨真因**（`QX_DO24::last_fail()`）——先前送**合法的 hz=50** 也會收到
    「頻率被鎖在 50Hz」，真因其實是沒回話。同型問題 `[2026-08-28b]` 在 `Linux_test`

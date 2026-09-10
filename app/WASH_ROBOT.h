@@ -195,7 +195,7 @@ public:
     //     它可能是唯一還遞得進去的命令。模組重啟後不一定回應，故指令會自行複查版本號。
     std::string cmd_pwm_restart();
     std::string cmd_water_pump(bool on);                 // water tank pump (PQW CH6)
-    std::string cmd_water_inlet(bool on);                // water inlet ball valve [2026-06-05 控制權移到 crane PQW (.34 slave 12 CH4)]
+    std::string cmd_water_inlet(bool on);                // water inlet ball valve [2026-06-05 控制權移到吊機；🔴 2026-09-10 更正：是 ZS-DIO 4CH @ .32 slave 1，不是 .34 PQW slave 12]
     std::string cmd_water_level();                       // XKC-Y25 一次性讀取水位 (2026-06-06)
     // pos: extend | retract | extend_raw
     //   extend      = smart_extend_subset_（尋封：吸不住就補伸最多到 ~16cm 並重試）
@@ -213,7 +213,9 @@ public:
     std::string cmd_pusher(const std::string& group, const std::string& pos, double cm = 0.0);
     // [2026-09-01 per user] 單獨執行同步步伐的 IMU 差動校平（見 .cpp 的說明）。
     std::string cmd_imu_level();
-    std::string cmd_zdt_pusher(int slave, const std::string& action);   // single-slave manual extend/retract (slave 1..9)
+    // [2026-09-10 per user] 第三參數：`extend_raw` 時指定公分（0.5~20.0）。
+    // 省略／0 ⇒ 沿用該 slave 的預設脈衝，與先前逐位元相同。
+    std::string cmd_zdt_pusher(int slave, const std::string& action, double cm = 0.0);
     std::string cmd_zdt_zero(const std::string& group);   // "feet"|"body"|"center"|"all" — set current ZDT pos as new zero (manual 3.1.3)
     std::string cmd_zdt_disable(int slave);  // exclude slave 1..9 from all group ZDT ops (e.g. not yet installed)
     std::string cmd_zdt_enable(int slave);   // re-include previously disabled slave
@@ -233,6 +235,10 @@ public:
     std::string cmd_continue();   // resume from PausedOnError = retry the failed op
     std::string cmd_skip();       // resume from PausedOnError = skip (assume manual fix)
     std::string cmd_crane_attached(bool on);   // toggle whether washrobot drives the crane
+    // [2026-09-10] crane watchdog 門檻（執行期可調，見成員宣告處的三步落地說明）
+    std::string cmd_set_crane_wd_warn_ms(int ms);
+    std::string cmd_set_crane_wd_abort_ms(int ms);
+    std::string cmd_reset_crane_idle_max();
     // toggle whether DM2J wheels (slave 2, 4) are present. OFF = init() skips
     // wheel retract + cmd_wheels / cmd_dm2j_group("wheels") become no-op (bench
     // without wheels won't trigger Modbus timeouts → PausedOnError).
@@ -440,7 +446,28 @@ private:
     //   physically installed」——兩邊都聲稱有實體依據，以實機跑過的那份為準。
     //   ✅ 已查 CH5 未被其他通道佔用（CH1 閥／CH2 泵／CH6 破真空／CH14 水泵）。
     static constexpr int PQW_SLAVE       = 12;
-    static constexpr int PQW_TOTAL_CH    = 16;  // 2026-07-24: 8→16 so readAllStatus()/pqw_set_relay_verified_ actually covers CH15
+    // 🔴 [2026-09-10] 16 → 8. The board is physically 8-channel (per user
+    // 2026-09-09; the crane's own copy has said 8 all along,
+    // Crane_control_PI/main.cpp:216). The 2026-07-24 bump to 16 existed only to
+    // "cover CH15" — and CH15 never existed. It was a product of the same wrong
+    // premise as CH_BRUSH=15; that half got fixed, this half did not.
+    //
+    // ⚠️ This alone does NOT fix the water pump. CH_WATER_PUMP is still 14
+    // (out of range — needs a wiring decision, see work_log). What changes is
+    // only WHERE the lie stops:
+    //   before: FC01 asked for 16 coils, the board fabricated ch9-16, and
+    //           pqw_set_relay_verified_ / cmd_water_pump got a confirmed "1"
+    //           for a channel that does not exist.
+    //   after:  FC01 asks for 8, readback is 8 long, so ch14 falls into the
+    //           best-effort branch — it logs "readback unavailable" and still
+    //           returns OK. Evidence instead of a forged confirmation.
+    // 📌 A fabricated confirmation is worse than a missing one, so this is
+    //    worth doing on its own — but it is a downgrade from lying to silence,
+    //    not a fix. The fix is the channel number.
+    //
+    // Safe to narrow: every readAllStatus() consumer bounds-checks before
+    // indexing, and the console's own relay table already lists CH1-CH8 only.
+    static constexpr int PQW_TOTAL_CH    = 8;   // 2026-09-10: 16→8, board is 8CH
     // [v2 2026-07-07] 4-cup rewiring on the same PQW @ .22 slave 12:
     //   CH1 = right-foot valve (cups slave 1,2)
     //   CH2 = vacuum pump dp0105 (was CH1 in v1)   ← moved
@@ -502,8 +529,11 @@ private:
     // 通電時間 per user 500 ms（＝ BREAK_VACUUM_TOTAL_ON_MS 現值，不必改）。
     // 名稱保留 CH_BREAK_VACUUM 不改，避免動到既有呼叫點；語意以本註解為準。
     static constexpr int CH_BREAK_VACUUM = 6;   // 正壓閥（4 顆共用）2026-08-27: 14→6 per user
-    // [2026-06-05] CH_WATER_INLET 移除 — 進水球閥控制權搬到 crane 端 PQW
-    // (192.168.1.34 slave 12 CH4)，washrobot 不再直接控制。所有原本走
+    // [2026-06-05] CH_WATER_INLET 移除 — 進水球閥控制權搬到吊機端，
+    // 🔴 [2026-09-10 更正] 那顆是 **ZS-DIO 4CH @ 192.168.1.32 slave 1**，
+    // **不是** `.34` 的 PQW slave 12（自 2026-06-05 起一直被當成 PQW 驅動，
+    // 兩者 FC05 線圈位址剛好重疊所以半通不通了三個月）。
+    // washrobot 不再直接控制。所有原本走
     // pqw_.controlRelay(CH_WATER_INLET, x) / pqw_set_relay_verified_(CH_WATER_INLET, x)
     // 的地方改成 set_water_inlet_(x)，內部送 crane_cmd_("water_inlet on/off")。
     // cli_22_ 上的 PQW CH7 物理腳位空著不接線。
@@ -845,6 +875,16 @@ private:
     // Normal sweep refill typically takes 60-120s; 5min cap leaves generous
     // headroom for slow tank fills + 5s post-full delay + comm retries.
     static constexpr int64_t WATER_INLET_OPEN_MAX_MS = 5 * 60 * 1000;   // 300 sec
+
+    // [2026-09-10] A relay toggle should not inherit crane_cmd_'s 60s default,
+    // which was tuned for fine_adjust ("30 -> 60 (2026-05-11): give fine_adjust
+    // 30s budget on top of main motion"). set_water_inlet_ simply never passed
+    // a second argument and inherited it.
+    // Crane-side handler worst case is ~1.5s (3x200ms verify loop plus Modbus
+    // round trips, Crane_control_PI/main.cpp:4947-4971) — 5s is ~3x headroom.
+    // ⚠️ Only shows up on a fault: normal path answers in ~1s either way. What
+    // changes is that a broken link is given up on in seconds, not minutes.
+    static constexpr int WATER_INLET_CMD_TIMEOUT_SEC = 5;
 
     // IMU
     static constexpr const char* IMU_PORT           = "/dev/ttyUSB0";  // TODO confirm
@@ -1508,6 +1548,34 @@ private:
     std::atomic<bool>    crane_wd_running_;
     std::atomic<int64_t> crane_last_ok_ms_;
     std::thread          crane_wd_thread_;
+
+    // 🔴 [2026-09-10] crane watchdog 逾時比較**補回**（per user:「本體發現吊機異常
+    //    是要終止」）。它在 4d1409c(06-22) 之前消失，而餵它的三個寫入點與註解全部
+    //    留著 —— 詳見 crane_watchdog_loop_ 的檔頭與 .claude/handoff/。
+    //
+    // 🔴🔴 **為什麼不是直接貼回舊版**：舊版能用 2000ms，是因為它**自己每 500ms 送
+    //    一次 ping** 去餵 crane_last_ok_ms_。那個 ping 在 2026-05-15 隨
+    //    crane_keepalive_loop_ 一起停用（WASH_ROBOT.cpp:405-406 啟動點被註解掉，
+    //    crane_keepalive_running_ 建構即 false ⇒ **從未執行**）。現在時間戳只有
+    //    「真的有指令往來」才刷新，而純本體動作期間（ZDT 伸縮 4s+、DM2J 滑台 2-3s）
+    //    沒有任何東西刷新它 ⇒ **照舊貼回去必然誤觸發、中止運動**。
+    //    把 ping 拿掉又保留 2 秒，等於把一個自洽的設計拆成兩半只裝回一半。
+    //
+    // ⇒ 落地分三步，用兩個**執行期可調**的門檻控制走到哪一步：
+    //    ① abort=0（預設）：只量、只發 EVT，**不碰 abort_flag** ← 現在在這一步
+    //    ② 依 crane_idle_ms_max 的實測分布重新選門檻
+    //    ③ 設 abort>0，中止才真的接回去
+    //    📌 abort_ms 預設 0 是刻意的：**沒有實測分布之前，任何門檻都是猜的**，
+    //       而猜錯的方向是「運動中途無故中止」。
+    std::atomic<int>     crane_wd_warn_ms_;    // >0：idle 超過就發 EVT（純觀測）
+    std::atomic<int>     crane_wd_abort_ms_;   // >0：idle 超過且運動中 → abort_flag
+    // 🔴 **兩個峰值，不是一個。** 閒置時沒有任何東西刷新 crane_last_ok_ms_
+    //    （實測：閒置 3.4 分鐘 → idle_ms = 204,900），所以「不分狀態的峰值」會被
+    //    閒置洗到無限大、對訂門檻毫無幫助。而 abort 只在 motion_active_ 時才成立
+    //    ⇒ **第②步要看的是 _motion 那個**。留著不分狀態的那個是為了看得到對比。
+    std::atomic<int64_t> crane_idle_ms_max_;         // 任何狀態下的峰值
+    std::atomic<int64_t> crane_idle_ms_max_motion_;  // ← 訂 abort 門檻要看這個
+    std::atomic<bool>    crane_wd_warned_;     // EVT 去抖：一次逾時只報一次
 
     // Crane keepalive (2026-05-15): periodically ping crane during washrobot-side
     // long ops (pusher extend, DM2J rail moves, etc.) so the crane_watchdog
@@ -2489,12 +2557,35 @@ private:
     // true only on TCP send failure.
     bool             pqw_set_relay_verified_(int ch, bool on);
 
-    // [2026-06-05] Water inlet ball valve moved to crane side (PQW on
-    // 192.168.1.34 slave 12 CH4). All washrobot-side callers go through
-    // this helper, which sends "water_inlet on|off" via crane_cmd_.
+    // [2026-06-05] Water inlet ball valve moved to the crane side.
+    // 🔴 [2026-09-10] It is a **ZS-DIO 4CH @ 192.168.1.32 slave 1**, not the PQW
+    // at .34 slave 12 (driven as a PQW since 2026-06-05; overlapping FC05 coil
+    // addresses let it half-work for three months). Wire token stays `pqw_water`.
+    // All washrobot-side callers go through this helper, which sends
+    // "water_inlet on|off" via crane_cmd_.
     // Returns false on success, true on error (TCP fail / crane refused).
     // Used by cmd_water_inlet (GUI), init cleanup, sweep flows, shutdown.
     // Bypasses state guard (used by motion-active paths).
+    //
+    // 🔴🔴 **`water_inlet_open_ts_ms_`（本函式蓋的那個時間戳）是「武裝」，
+    //      而武裝同時是保護的開關**和**保護的前提**。三條關閥路徑的門檻不一樣：
+    //
+    //   | 路徑 | 需要武裝嗎 | 出處 |
+    //   |---|---|---|
+    //   | `water_inlet_watchdog_loop_`（逾 300s 強制關） | ✅ 要（`ts == 0` 直接 continue） | wash_robot_commands.cpp |
+    //   | `cmd_emergency_stop` 的強制關閥 | ✅ **要**（`if (ts != 0)` 閘門） | 同檔 :3653 |
+    //   | `cmd_shutdown` | ❌ 不要，無條件關 | 同檔 :3668 |
+    //
+    //   ⇒ **沒被武裝的閥，watchdog 不會關它，急停也不會關它** —— 只有正常關機會。
+    //   這就是本函式 2026-09-10 改成「先武裝後送」的理由：武裝失敗的代價不是
+    //   少一層保護，是少兩層。
+    //   📌 也是「控制一律走本體、不要直送吊機」的理由（吊機端沒有任何 deadman）。
+    // [2026-09-10] cm → 脈衝，含範圍檢查。**群組版 cmd_pusher 與單支版
+    // cmd_zdt_pusher 共用這一支** —— 兩邊各寫一次範圍檢查，遲早會分岔，
+    // 而分岔的那一支通常是比較少走的那一支（本專案已有多次前例）。
+    // 回傳 <0 表示超出範圍，錯誤字串寫進 err。
+    int              extend_raw_pulse_(double cm, std::string& err) const;
+
     bool             set_water_inlet_(bool on);
 
     std::vector<int> vacuum_check_(const std::string& group);

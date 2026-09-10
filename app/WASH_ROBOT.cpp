@@ -43,6 +43,13 @@ WashRobot::WashRobot()
     , motion_active_(false)
     , crane_wd_running_(false)
     , crane_last_ok_ms_(0)
+    // [2026-09-10] warn=2000 沿用舊常數當**觀測**門檻（它至少是有來歷的數字）；
+    // abort=0 = 關閉，見宣告處的三步落地說明。
+    , crane_wd_warn_ms_(WATCHDOG_TIMEOUT_MS)
+    , crane_wd_abort_ms_(0)
+    , crane_idle_ms_max_(0)
+    , crane_idle_ms_max_motion_(0)
+    , crane_wd_warned_(false)
     , crane_keepalive_running_(false)
     , imu_roll0_(0.0)
     , imu_pitch0_(0.0)
@@ -2060,7 +2067,7 @@ std::string WashRobot::do_arm_clean_sweep_continuous_(int wall_mm,
         auto fut_pqw = std::async(std::launch::async, [this]() {
             pqw_.controlRelay(CH_BRUSH,       false);
             pqw_.controlRelay(CH_WATER_PUMP,  false);
-            set_water_inlet_(false);   // [2026-06-05] → crane PQW (.34 slave 12 CH4)
+            set_water_inlet_(false);   // [2026-06-05] → crane water valve (2026-09-10: ZS-DIO 4CH @ .32 slave 1, was .34 PQW slave 12)
         });
         // [2026-05-29] PARK timeout 30s → 10s (fast fail when motor_api 沒回覆,
         // 避免 cleanup 卡 30s × 2 attempts = 60s)。
@@ -2182,7 +2189,7 @@ std::string WashRobot::do_arm_clean_sweep_continuous_(int wall_mm,
         } else {
             std::cout << "[arm_clean_sweep_cont] water not full (out=" << out
                       << " rssi=" << rssi << ") — opening inlet valve\n";
-            if (set_water_inlet_(true)) {   // [2026-06-05] → crane PQW
+            if (set_water_inlet_(true)) {   // [2026-06-05] → crane water valve (2026-09-10: ZS-DIO 4CH @ .32 slave 1, was .34 PQW slave 12)
                 return "ERR water_inlet_open_fail\n";
             }
             int elapsed = 0;
@@ -2954,9 +2961,29 @@ std::string WashRobot::crane_pay_out_to_weight_(double target_kg, int max_cm) {
     return oss.str();
 }
 
-// [2026-06-02] Per-side retract until both L/R tension >= target_kg. See
-// header doc for why this exists vs symmetric `retract` cmd. Used by
-// bal_cal_preload_; could be general-purpose.
+// 🔴 [2026-09-10] 上面原本有三行「Per-side retract until both L/R tension >=
+// target_kg … Used by bal_cal_preload_」—— **那是 crane_retract_to_weight_ 的說明，
+// 不是這支的**。該函式的本體在某次改動中被刪掉，宣告留在 WASH_ROBOT.h:2309
+// （只有宣告、無定義、無呼叫點），註解則留在原地黏到了下一個函式頭上。
+// 已移除，避免下一個人照它去理解 watchdog。
+// 📌 通則：刪函式本體時，它的檔頭註解會靜默地變成下一個函式的檔頭註解。
+//
+// crane watchdog：每 HEARTBEAT_INTERVAL_MS 醒來一次，做三件事——
+//   ① 週期性排空急停通道（防死鎖，見下方註解）
+//   ② 把 handle_crane_evt_ 收到的張力警報升級為 PausedOnError
+//   ③ 🆕 [2026-09-10] 鏈路逾時比較（觀測 → 中止，兩段門檻）
+//
+// 🔴 **③ 是補回來的。** 原本的「吊機逾時未回應就中止動作」比較
+// （`now - crane_last_ok_ms_ > WATCHDOG_TIMEOUT_MS`）在 4d1409c(06-22) 之前就消失了，
+// 而 `crane_last_ok_ms_` 的三個寫入點、`WATCHDOG_TIMEOUT_MS`、以及三段
+// 「為了不讓 2s watchdog 誤觸發」的解釋註解**全部留在原地** ⇒ 讀這段碼的人會
+// 以為保護存在。舊實作見 `6abd8c6:user_lib/WASH_ROBOT.cpp:391`。
+// 📌 **通則：判斷保護在不在，要找「誰讀這個值」，不是「誰寫這個值」。**
+//     寫入點、常數、餵食執行緒、解釋註解可以全部健在，而比較那一行不存在。
+//
+// ⚠️ **今天預設仍不會中止任何運動**（`crane_wd_abort_ms_ = 0`）——
+//    門檻要先量再訂，理由見 WASH_ROBOT.h 的宣告處。
+// 完整分析見 .claude/handoff/ai2-watchdog-handoff.md。
 void WashRobot::crane_watchdog_loop_() {
     while (crane_wd_running_.load()) {
         sleep_ms_(HEARTBEAT_INTERVAL_MS);
@@ -3005,6 +3032,61 @@ void WashRobot::crane_watchdog_loop_() {
                     state_before_pause_ = state_.load();
             }
             set_state_(State::PausedOnError);
+        }
+
+        // ③ [2026-09-10] 鏈路逾時比較 —— 補回 4d1409c(06-22) 之前存在的那一段。
+        //    per user 拍板：「本體發現吊機異常是要終止」。
+        //    ⚠️ 走到「終止」之前先走「觀測」，理由見 WASH_ROBOT.h 宣告處。
+        {
+            const int64_t last_ok = crane_last_ok_ms_.load();
+            if (last_ok == 0) {
+                // 從未與吊機成功往來過（開機到第一道指令之間）。此時 idle 沒有意義
+                // —— 若拿 now-0 去比，開機當下就會立刻逾時。照 imu_roll_fresh() 的
+                // 慣例：st==0 一律視為「還沒有資料」而不是「資料很舊」。
+            } else {
+                const int64_t idle_ms = now_ms_() - last_ok;
+
+                // 峰值先記，且**不受任何門檻影響** —— 這是第②步要用的數字，
+                // 門檻設多少都不該改變我們量到什麼。
+                const bool in_motion = motion_active_.load();
+                int64_t prev_max = crane_idle_ms_max_.load();
+                while (idle_ms > prev_max &&
+                       !crane_idle_ms_max_.compare_exchange_weak(prev_max, idle_ms)) {}
+                if (in_motion) {
+                    int64_t prev_mm = crane_idle_ms_max_motion_.load();
+                    while (idle_ms > prev_mm &&
+                           !crane_idle_ms_max_motion_.compare_exchange_weak(prev_mm, idle_ms)) {}
+                }
+
+                const int warn_ms  = crane_wd_warn_ms_.load();
+                const int abort_ms = crane_wd_abort_ms_.load();
+
+                if (warn_ms > 0 && idle_ms > warn_ms) {
+                    if (!crane_wd_warned_.exchange(true)) {
+                        std::cout << "[crane_watchdog] link idle " << idle_ms
+                                  << "ms > warn " << warn_ms << "ms"
+                                  << " (motion_active=" << (in_motion ? 1 : 0)
+                                  << ", abort_ms=" << abort_ms << ")\n";
+                        evt_("crane_watchdog_idle idle_ms=" + std::to_string(idle_ms) +
+                             " motion=" + (in_motion ? "1" : "0"));
+                    }
+                } else {
+                    crane_wd_warned_.store(false);   // 回到門檻內 → 下次再逾時會重報
+                }
+
+                // 🔴 只有在 abort_ms 被明確設成 >0 之後，這裡才會動 abort_flag。
+                //    預設 0 ⇒ 這一段今天是純觀測，不會中止任何運動。
+                if (abort_ms > 0 && idle_ms > abort_ms && in_motion) {
+                    if (!abort_flag) {
+                        std::cerr << "[crane_watchdog] LINK TIMEOUT " << idle_ms
+                                  << "ms > abort " << abort_ms
+                                  << "ms — aborting motion\n";
+                        evt_("crane_watchdog_timeout idle_ms=" + std::to_string(idle_ms) +
+                             " abort_ms=" + std::to_string(abort_ms));
+                        abort_flag = true;
+                    }
+                }
+            }
         }
     }
 }

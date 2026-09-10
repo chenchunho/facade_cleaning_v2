@@ -876,29 +876,55 @@ bool DM2J_RS570::writeMulti(uint16_t startReg, const std::vector<uint16_t>& data
 bool DM2J_RS570::sendRecv(const std::vector<uint8_t>& tx, std::vector<uint8_t>& rx)
 {
 	if (!client) return true;
+	if (tx.empty()) return true;
+
+	// 🔴 [2026-09-10 per user] 送出重試。
+	//   起因：2026-09-10 WiFi 週期測試 `rail 0` 間歇性 `writeMulti no response`
+	//   → PR_move 回失敗 → 整輪中止；手動重送一次即成功。DM2J（slave 14）與 ZDT
+	//   推桿 5-8 / PQW 12 共用 .20 匯流排，bus 爭用下偶發單筆無回應是已知徵兆。
+	//   單筆交易本身很短，重試 2 次（共 3 次嘗試）即可吸收這種瞬時 hiccup。
+	//
+	// 🔴 **廣播（slave 0x00，writeSingle_sync）不重試**：它本來就不期待回應，
+	//   r<=0 是正常結果，重試只會白等 recv 逾時，且可能對同一個廣播動作重複觸發。
+	//   廣播沿用原本的單次語意。
+	// ⚠️ 只重試「送出即失敗 / CRC 壞」——這些代表指令沒被正確收到，重送是冪等的
+	//   （寫入相同暫存器值、觸發同一個 PR 到同一目標）。動作中逾時是另一條路徑
+	//   （dm2j_wait_done_），不在這裡，不會被重送疊指令。
+	const bool is_broadcast = (tx[0] == 0x00);
+	const int  max_attempts = is_broadcast ? 1 : 3;
 
 	// 🔴 [2026-09-01] 原子交易（見 txn_frame_ 的說明）。這條路徑同樣走共用匯流排，
-	// 原本的 drainRx + sendData + receiveData 三段式在 send 與 recv 之間會放開
-	// socket_mtx。逾時沿用原值（send 50 / recv 50）。
+	// 逾時沿用原值（send 50 / recv 50）。
 	uint8_t buf[256] = { 0 };
-	const int r = client->sendAndReceive((const char*)tx.data(), (int)tx.size(),
-	                                     (char*)buf, sizeof(buf), 50, 50);
-	if (r <= 0) return true;
+	for (int attempt = 1; attempt <= max_attempts; ++attempt) {
+		const int r = client->sendAndReceive((const char*)tx.data(), (int)tx.size(),
+		                                     (char*)buf, sizeof(buf), 50, 50);
+		bool ok = (r > 0);
 
-	// [2026-08-28] CRC check added by the driver audit. This path had no
-	// validation at all — callers received whatever bytes turned up.
-	// Slave id is deliberately NOT checked here: writeSingle_sync() broadcasts
-	// to slave 0x00, so a reply (when one appears at all) will not carry our id.
-	if (r >= 4) {
-		const uint16_t rx_crc = (uint16_t)buf[r - 2] | ((uint16_t)buf[r - 1] << 8);
-		if (crc16(buf, r - 2) != rx_crc) {
-			LOG_ERR(_log_tag, "sendRecv CRC mismatch (%d bytes) — frame dropped", r);
-			return true;
+		// [2026-08-28] CRC check added by the driver audit. This path had no
+		// validation at all — callers received whatever bytes turned up.
+		// Slave id is deliberately NOT checked here: writeSingle_sync() broadcasts
+		// to slave 0x00, so a reply (when one appears at all) will not carry our id.
+		if (ok && r >= 4) {
+			const uint16_t rx_crc = (uint16_t)buf[r - 2] | ((uint16_t)buf[r - 1] << 8);
+			if (crc16(buf, r - 2) != rx_crc) {
+				LOG_ERR(_log_tag, "sendRecv CRC mismatch (%d bytes)%s",
+				        r, (attempt < max_attempts ? " — retrying" : " — frame dropped"));
+				ok = false;
+			}
 		}
-	}
 
-	rx.assign(buf, buf + r);
-	return false;
+		if (ok) {
+			if (attempt > 1)
+				LOG_WRN(_log_tag, "sendRecv succeeded on attempt %d/%d", attempt, max_attempts);
+			rx.assign(buf, buf + r);
+			return false;
+		}
+
+		if (attempt < max_attempts)
+			std::this_thread::sleep_for(std::chrono::milliseconds(30));
+	}
+	return true;
 }
 
 //=========== utility: CRC16 (Modbus) ===========

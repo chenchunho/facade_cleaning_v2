@@ -151,6 +151,18 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
         if (s == "off") return robot.cmd_crane_attached(false);
         return "ERR expected_on_or_off\n";
     }
+    // [2026-09-10] crane watchdog 門檻（執行期可調）。用途與三步落地見 WASH_ROBOT.h。
+    if (cmd == "set_crane_wd_warn_ms") {
+        int ms; iss >> ms;
+        if (iss.fail()) return "ERR usage:set_crane_wd_warn_ms_<int>\n";
+        return robot.cmd_set_crane_wd_warn_ms(ms);
+    }
+    if (cmd == "set_crane_wd_abort_ms") {
+        int ms; iss >> ms;
+        if (iss.fail()) return "ERR usage:set_crane_wd_abort_ms_<int>\n";
+        return robot.cmd_set_crane_wd_abort_ms(ms);
+    }
+    if (cmd == "reset_crane_idle_max") return robot.cmd_reset_crane_idle_max();
     if (cmd == "wheels_attached") return "ERR removed_in_v2\n";   // [v2] DM2J wheels retired
 
     // ---- cleaning arm (damiao motors via motor_api on 127.0.0.1:9527) ----
@@ -397,8 +409,13 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
         // 沒有交集 → 這個指令在 08-27 改號後**不可能成功**。改吃同一組常數。
         if (iss.fail() || s < WashRobot::CUP_SLAVE_FIRST || s > WashRobot::CUP_SLAVE_LAST)
             return "ERR usage:zdt_pusher_<" + std::to_string(WashRobot::CUP_SLAVE_FIRST)
-                 + ".." + std::to_string(WashRobot::CUP_SLAVE_LAST) + ">_<extend|retract>\n";
-        return robot.cmd_zdt_pusher(s, a);
+                 + ".." + std::to_string(WashRobot::CUP_SLAVE_LAST)
+                 + ">_<extend|retract|extend_raw>_[cm]\n";
+        // 🔴 [2026-09-10 per user] 第三個參數可選：`extend_raw` 時指定公分（0.5~20.0）。
+        // 解析失敗時 cm 維持 0.0 ＝ 沿用該 slave 預設脈衝，與先前逐位元相同。
+        // **與群組版 `pusher <group> extend_raw [cm]` 的解析方式刻意一致**（同上 :397）。
+        double cm = 0.0; iss >> cm;
+        return robot.cmd_zdt_pusher(s, a, cm);
     }
     if (cmd == "zdt_zero") {
         std::string g; iss >> g;

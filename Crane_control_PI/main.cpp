@@ -110,7 +110,7 @@
 #include "SD76_length_meters.h"
 #include "CLV900_inverter.h"
 #include "DSZL_107.h"
-#include "PQW_IO_16O_RLY.h"
+#include "ZS_DIO_R_RLY.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Crane inverter hardware select (2026-07-08)
@@ -182,6 +182,12 @@ static std::string ts_now();
 static constexpr const char* USR_A_IP      = "192.168.1.30";   // USR gateway: SE3 left only
 static constexpr const char* USR_B_IP      = "192.168.1.31";   // USR gateway: SE3 right only
 static constexpr const char* USR_M_IP      = "192.168.1.34";   // USR gateway: SD76 meters (sensing bus)
+// 🔴 [2026-09-10] 水閥繼電器**獨佔一條網段**。原本與 SD76 共用 .34，實測三次都證實
+//    兩者共存會互相干擾：ZS-DIO 單獨在線時完全正常（繼電器連續動作 8 次零失聯），
+//    一接回 SD76 就變成回垃圾位元組或完全消失，而 SD76 始終正常。
+//    ⇒ 比照 QX-DO24 在 2026-09-03 被拉出來獨佔 .21 的處置（同樣是「整條一起掛」）。
+//    .32 是 2026-09-01 兩台 X518 併成一台後空出來的位址。
+static constexpr const char* USR_W_IP      = "192.168.1.32";   // USR gateway: ZS-DIO water relay (獨佔)
 // [2026-09-01] 單一台 X518 服務兩個通道（CH1=右 / CH2=左）。舊的 DSZL_LEFT_IP(.32)
 // 已隨硬體移除；不要再新增第二個 IP 常數，兩側共用 cli_C 這一條連線。
 static constexpr const char* DSZL_IP        = "192.168.1.33";  // X518 direct: 兩側張力（CH1=右, CH2=左）
@@ -210,10 +216,25 @@ static constexpr int DSZL_CH_RIGHT       = 1;   // [2026-09-01 per user] CH1 = �
 static constexpr int DSZL_CH_LEFT        = 2;   // [2026-09-01 per user] CH2 = 左
 
 // [2026-06-05] Water inlet ball valve relay — moved from washrobot side.
-// Shares cli_M (.34) bus with SD76 meters. PQW slave 12, CH4 = ball valve.
-static constexpr int PQW_WATER_SLAVE    = 12;  // on USR_M (.34) — shares bus with SD76 meters
-static constexpr int CH_WATER_INLET     = 4;   // CH4 of PQW_WATER_SLAVE = ball valve (tank refill from rooftop)
-static constexpr int PQW_WATER_TOTAL_CH = 8;   // 8-channel PQW board
+// Shares cli_M (.34) bus with SD76 meters. CH4 = ball valve.
+//
+// 🔴 [2026-09-10] **硬體其實是 ZS-DIO，不是 PQW。** 三個月來都用錯驅動。
+//   沿革：2026-05-07 吊機的 ZS_DIO_R_RLY 被 2×SE3 取代做收放繩，**模組留在原地**；
+//   2026-06-05 把水閥功能從本體搬過來時接到那顆留下來的 ZS-DIO，**卻沿用了 PQW 驅動**。
+//   兩者部分相容所以被掩蓋：FC05 單顆線圈與 FC01 讀狀態的位址剛好相同
+//   （兩邊都是 coil 0x0000 = CH1）⇒「看起來能用」。但不相容的部分是實質的：
+//     - 批量控制：PQW 在 0x0085、**ZS-DIO 在 0x0034** ⇒ 打到未定義位址
+//     - 站號/鮑率暫存器：PQW 0x0043/0x0044、**ZS-DIO 0x0032/0x0033**
+//     - 出廠預設鮑率：PQW 9600、**ZS-DIO 38400** ⇒ 用 PQW 手冊挑掃描範圍會整個測不到
+//   ⚠️ per user 實機以 GUI 送 `05 06 00 02 00 01` 控制成功，逐位元對上 ZS-DIO 手冊的
+//      「0x0000~0x002F = 各通道控制」與範例 `01 06 00 00 00 01`，這才確認型號。
+//
+// 🔴 **本模組是 4 路，不是 8 路**（per user 2026-09-10 目視）。原本寫 8 ⇒ 每次
+//   readAllStatus 都對只有 4 路的模組讀 8 個線圈，而它照樣回答越界的那 4 路
+//   —— 與本體那顆 PQW 同日發現的「越界不報錯、編造回覆」是同一類。
+static constexpr int ZS_WATER_SLAVE     = 1;   // on USR_W (.32) 獨佔網段 — 專屬匯流排不會撞號
+static constexpr int CH_WATER_INLET     = 4;   // CH4 = ball valve (tank refill from rooftop)
+static constexpr int ZS_WATER_TOTAL_CH  = 4;   // 🔴 4-channel ZS-DIO board（原誤記為 8）
 
 // Motion tunables (motion_flow.md §6)
 static constexpr int    MOTION_TIMEOUT_MS    = 120000;
@@ -573,6 +594,7 @@ static constexpr int    HOLD_LOOP_IDLE_MS        = 200;    // poll period when n
 static TCP_client         cli_A;       // .30 — SE3 left only  (+ future CLV900 if installed)
 static TCP_client         cli_B;       // .31 — SE3 right only
 static TCP_client         cli_M;       // .34 — SD76 meters (sensing bus, both meters share)
+static TCP_client         cli_W;       // .32 — ZS-DIO water relay (獨佔，見 USR_W_IP 的說明)
 static TCP_client         cli_C;       // .32 — X518 left tension  (direct TCP :502)
 // 🔴 [2026-09-01] cli_D 已無使用者：X518 從兩台（.32/.33）改為一台（.33 兩通道），
 // 兩側都走 cli_C。刻意**保留這個物件**不刪除 —— 它是 TCP_client，建構即啟動一條
@@ -591,7 +613,7 @@ static DSZL_107           dsz_right;      // right tension (cli_C slave 1, CH1)
 // [2026-06-05] Water inlet ball valve relay, moved from washrobot to crane side.
 // On cli_M (.34) slave 12 CH4 — shares sensing bus with SD76 meters. Bus traffic
 // is mostly meter polling (~50-100ms) + occasional relay write (sweep flow).
-static PQW_IO_16O_RLY     pqw_water;
+static ZS_DIO_R_RLY       zs_water;
       // water inlet ball valve (cli_M slave 12 CH4)
 static TCP_server         cmd_server;
 
@@ -661,6 +683,28 @@ static std::atomic<bool>    g_length_right_valid  {false};
 static std::atomic<bool>    g_length_middle_valid {false};
 static std::atomic<bool>    g_meter_loop_stop {false};
 static std::thread          g_meter_thread;
+
+// 🔴 [2026-09-10 per user]「CH4 進水球閥在 WEB 上不用經過本體」+「本體是發指令給
+//    吊機請他開球閥」⇒ 兩條路都會開這顆閥：
+//      ① 自動流程：本體 set_water_inlet_() → crane_cmd_("water_inlet on")
+//      ② 手動：WEB console 直接對吊機下 water_inlet
+//
+// 而**自動關閥的計時器一直只長在本體上**（water_inlet_watchdog_loop_ 300s，
+// 由本體的 set_water_inlet_() 蓋時間戳武裝）。② 這條路不經過那段程式
+// ⇒ 開著就沒有任何東西會關它。同理，本體被 SIGKILL 時 ① 也一樣沒人收尾。
+//
+// 🎯 **繼電器在吊機手上，deadman 就該在吊機手上。** 這裡補的是那個。
+//    本體那邊的不動 —— 兩邊都武裝時誰先到誰關，關第二次是 no-op，
+//    代價只有 log 多一行，而少一層的代價是漏水。
+//
+// ⚠️ 這**不是**「開太久」的品質判斷，是「沒人看管」的保險。正常補水實測 60~120 秒
+//    （本體 WASH_ROBOT.h 的註解），300 秒是給慢速補水 + 補水後 5 秒延遲 + 通訊重試
+//    的寬裕上限，與本體同值刻意不錯開。
+static constexpr int64_t WATER_OPEN_MAX_MS_DEFAULT = 5 * 60 * 1000;   // 300 s
+static std::atomic<int64_t> g_water_open_max_ms {WATER_OPEN_MAX_MS_DEFAULT};  // 0 = 關閉此保護
+static std::atomic<int64_t> g_water_open_ts_ms  {0};                  // 0 = 未武裝（閥是關的）
+static std::atomic<bool>    g_water_dog_stop    {false};
+static std::thread          g_water_dog_thread;
 
 // SE3 keepalive thread: when motion or hold is active, ping both SE3 every
 // ~1s with a cheap readStatusWord. Resets SE3's internal "通訊出錯次數" counter
@@ -1060,7 +1104,10 @@ static std::atomic<int32_t> g_meter_middle_cal_baseline {METER_CAL_UNSET};
 static std::atomic<bool> g_gw_a_ok           {false};   // USR_A .30 — SE3 left
 static std::atomic<bool> g_gw_b_ok           {false};   // USR_B .31 — SE3 right
 static std::atomic<bool> g_gw_m_ok           {false};   // USR_M .34 — SD76 meters
-static std::atomic<bool> g_gw_c_ok           {false};   // USR_C .32 — DSZL left
+static std::atomic<bool> g_gw_c_ok           {false};   // 🔴 註解過期修正 [2026-09-10]：
+                                                        //   實際連的是 .33（2026-09-01 兩台 X518 併成一台後
+                                                        //   由 cli_C 服務兩個通道），不是 .32
+static std::atomic<bool> g_gw_w_ok           {false};   // USR_W .32 — ZS-DIO water relay (獨佔)
 static std::atomic<bool> g_gw_d_ok           {false};   // USR_D .33 — DSZL right
 static std::atomic<bool> g_dev_vfd_left      {false};
 static std::atomic<bool> g_dev_vfd_right     {false};
@@ -1070,7 +1117,7 @@ static std::atomic<bool> g_dev_meter_middle  {false};
 static std::atomic<bool> g_dev_clv900        {false};
 static std::atomic<bool> g_dev_dsz_left      {false};
 static std::atomic<bool> g_dev_dsz_right     {false};
-static std::atomic<bool> g_dev_pqw_water     {false};   // [2026-06-05] PQW water-inlet relay (cli_M slave 12)
+static std::atomic<bool> g_dev_zs_water      {false};   // [2026-09-10] ZS-DIO water-inlet relay (cli_M slave 5)
 // ── 機構層：虛擬軸（2026-08-30 重構階段 3，見 mechanism/rope_axis.h）─────────
 // 一條繩 = 變頻器（速度輸出）+ 計米器（位置回授）+ 張力計（力回授），
 // 三個裝置、三條匯流排。這兩個實例把「側」從**名字的一部分**變成**參數**。
@@ -1103,6 +1150,7 @@ static std::string make_device_state_line() {
         << " gw_b="        << (g_gw_b_ok.load()         ? 1 : 0)
         << " gw_m="        << (g_gw_m_ok.load()         ? 1 : 0)
         << " gw_c="        << (g_gw_c_ok.load()         ? 1 : 0)
+        << " gw_w="        << (g_gw_w_ok.load()         ? 1 : 0)
         << " gw_d="        << (g_gw_d_ok.load()         ? 1 : 0)
         << " vfd_left="    << (g_dev_vfd_left.load()    ? 1 : 0)
         << " vfd_right="   << (g_dev_vfd_right.load()   ? 1 : 0)
@@ -1112,7 +1160,10 @@ static std::string make_device_state_line() {
         << " clv900="      << (g_dev_clv900.load()      ? 1 : 0)
         << " dsz_left="    << (g_dev_dsz_left.load()    ? 1 : 0)
         << " dsz_right="   << (g_dev_dsz_right.load()   ? 1 : 0)
-        << " pqw_water="   << (g_dev_pqw_water.load()   ? 1 : 0)
+        // 🔴 [2026-09-10] 硬體改判定為 ZS-DIO、內部識別字已改名，但**這個 wire token
+        //    刻意保留 `pqw_water=`**：改它零功能收益，卻可能打到我沒找到的解析端
+        //    （已查 web_backend/ Linux_test/ app/ 皆無，但那不等於外部腳本也沒有）。
+        << " pqw_water="   << (g_dev_zs_water.load()    ? 1 : 0)
         << "\n";
     return oss.str();
 }
@@ -4017,6 +4068,18 @@ static std::string cmd_status() {
     oss << " dev_gw_m="        << (g_gw_m_ok.load()         ? 1 : 0);
     oss << " dev_gw_c="        << (g_gw_c_ok.load()         ? 1 : 0);
     oss << " dev_gw_d="        << (g_gw_d_ok.load()         ? 1 : 0);
+    // [2026-09-10] gw_w / pqw_water were reachable only through the EVT
+    // device_state broadcast, so a GUI that polls `status` could not tell
+    // whether the crane water relay was on the bus at all. Wire token
+    // `dev_pqw_water=` deliberately mirrors the EVT spelling (see below).
+    oss << " dev_gw_w="        << (g_gw_w_ok.load()         ? 1 : 0);
+    oss << " dev_pqw_water="   << (g_dev_zs_water.load()    ? 1 : 0);
+    // [2026-09-10] 進水閥 deadman 的可見度。-1 = 閥是關的（未武裝）。
+    {
+        const int64_t ts = g_water_open_ts_ms.load();
+        oss << " water_open_ms="     << (ts == 0 ? -1 : (steady_now_ms() - ts));
+        oss << " water_open_max_ms=" << g_water_open_max_ms.load();
+    }
     // GUI busy/init UI uses these two flags. motion_active reflects
     // pay_out / retract / align_lengths / zero_meters_with_motion AND any
     // active hold button (see line ~2402 motion_active.store(any_hold_active())).
@@ -4828,6 +4891,83 @@ static std::string cmd_vfd_fault(const std::string& side) {
 
 // ============ Dispatcher ============
 
+static std::string zs_set_relay_verified(int ch, bool on, const char* fail_token);
+
+// [2026-09-10] 進水閥 deadman 的武裝／解除。只有 CH4 有計時器，其餘通道沒有
+// （CH1~3 未接線；真接了東西再各自決定要不要）。
+static void arm_water_dog(int ch, bool on) {
+    if (ch != CH_WATER_INLET) return;
+    g_water_open_ts_ms.store(on ? steady_now_ms() : 0);
+}
+
+// 進水閥 deadman：開超過 g_water_open_max_ms 就強制關。
+// 每 5 秒醒一次就夠 —— 它比的是分鐘級的門檻，不是控制迴路。
+static void water_dog_loop() {
+    while (!g_water_dog_stop.load()) {
+        for (int i = 0; i < 50 && !g_water_dog_stop.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (g_water_dog_stop.load()) break;
+
+        const int64_t max_ms = g_water_open_max_ms.load();
+        const int64_t ts     = g_water_open_ts_ms.load();
+        if (max_ms <= 0 || ts == 0) continue;          // 保護關閉／閥是關的
+        const int64_t open_ms = steady_now_ms() - ts;
+        if (open_ms <= max_ms) continue;
+
+        std::cerr << "[water_dog] 進水閥已開 " << (open_ms / 1000) << "s > "
+                  << (max_ms / 1000) << "s — 強制關閉" << std::endl;
+        broadcast_evt("EVT water_dog_force_close open_sec=" +
+                      std::to_string(open_ms / 1000) + "\n");
+        // zs_set_relay_verified 成功會把 ts 解除；失敗就維持武裝，下一輪再試。
+        // ⚠️ 不在這裡自己清 ts —— 清了等於「試過就當作關掉了」。
+        zs_set_relay_verified(CH_WATER_INLET, false, "water_dog_close_fail");
+    }
+}
+
+// [2026-09-10] 寫入 → 回讀 → 重試，ZS-DIO 版的 pqw_set_relay_verified_。
+// water_inlet 與 water_relay 共用，免得其中一支哪天變成「送出即宣告成功」。
+//
+// [2026-06-06] sleep 200ms（原 50ms）：當年模組還與 SD76 共用 .34，Modbus TCP
+// gateway 偶有 stale-frame buffer 現象，50ms 不夠讓殘留 frame 走完 → 回讀拿到舊
+// 狀態 → verify 假 fail/pass。09-10 搬到獨佔的 .32 之後這個理由已不成立，但值先
+// 留著：它不在任何熱路徑上，而改小的唯一收益是省 150ms。
+//
+// ⚠️ 回讀失敗時**仍回 OK**（best-effort，與本體 pqw_set_relay_verified_ 同政策）
+//    —— 呼叫端看到的 OK **不保證實體狀態**。要知道實體狀態只有 `water_status`。
+static std::string zs_set_relay_verified(int ch, bool on, const char* fail_token) {
+    // wire token `pqw_water_offline` 刻意保留，理由同 cmd_status（見該處）。
+    if (!g_dev_zs_water.load()) return "ERR pqw_water_offline\n";
+
+    if (zs_water.controlRelay(ch, on))
+        return std::string("ERR ") + fail_token + "\n";
+
+    for (int vr = 0; vr < 3; ++vr) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        // ⚠️ readCoils 的 startCh 是 **1 起算**（內部才減 1），與 PQW 的 0 起算不同。
+        //    回傳沿用 driver 慣例：true = 失敗。
+        std::vector<bool> st;
+        if (zs_water.readCoils(1, ZS_WATER_TOTAL_CH, st)) st.clear();
+        if (st.empty() || (int)st.size() < ch) {
+            std::cout << "[pqw_water] ch=" << ch << " set " << (on ? "ON" : "OFF")
+                      << " — readback unavailable, accepted best-effort\n";
+            // ⚠️ 回讀不到也要武裝。best-effort 的 OK 代表「可能開著」，
+            //    而 deadman 要防的正是這種不確定 —— 只在確認成功時才武裝，
+            //    等於在最需要保險的那條路徑上不保險。
+            arm_water_dog(ch, on);
+            return "OK\n";
+        }
+        if (st[ch - 1] == on) { arm_water_dog(ch, on); return "OK\n"; }   // confirmed
+        std::cout << "[pqw_water] ch=" << ch << " set " << (on ? "ON" : "OFF")
+                  << " verify fail vr=" << vr << ", retrying\n";
+        if (zs_water.controlRelay(ch, on))
+            return std::string("ERR ") + fail_token + "\n";
+    }
+    std::cout << "[pqw_water] ch=" << ch << " set " << (on ? "ON" : "OFF")
+              << " gave up verify after 3 retries\n";
+    arm_water_dog(ch, on);
+    return "OK\n";
+}
+
 static std::string dispatch(const std::string& line) {
     std::istringstream iss(line);
     std::string cmd;
@@ -5072,12 +5212,55 @@ static std::string dispatch(const std::string& line) {
         if (iss.fail()) return "ERR usage:vfd_fault_<left|right>\n";
         return cmd_vfd_fault(side);
     }
+    // [2026-09-10] Read-back for the crane relay module. The GUI paints relay
+    // rows from a readback rather than from what it last sent — a write that
+    // silently fails must show as OFF, not as the state we hoped for.
+    //
+    // 🔴 Wire tokens are `wchN=`, NOT `chN=` like washrobot's `relay_status`.
+    //    Same shape on two different modules is exactly the collision the v2
+    //    GUI already got bitten by once (reply matched by regex, wrong panel
+    //    painted). Today they arrive on separate sockets so it cannot happen —
+    //    the day anyone proxies crane commands through the body's :5001, it
+    //    can. Cheaper to keep them distinguishable now.
+    // [2026-09-10] deadman 門檻執行期可調。0 = 關閉保護（不建議，留給現場長時間補水）。
+    // ⚠️ 不落地，重啟回 300s —— 與其他執行期參數同性質。
+    if (cmd == "set_water_open_max_ms") {
+        long long ms = -1; iss >> ms;
+        if (iss.fail()) return "ERR usage:set_water_open_max_ms_<int>\n";
+        if (ms < 0 || ms > 3600000LL) return "ERR range:0..3600000\n";
+        const int64_t prev = g_water_open_max_ms.exchange(ms);
+        std::ostringstream oss;
+        oss << "OK water_open_max_ms=" << ms << " (was " << prev << ")";
+        if (ms == 0) oss << " — 🔴 保護已關閉，閥開著不會自動關";
+        oss << "\n";
+        return oss.str();
+    }
+    if (cmd == "water_status") {
+        // wire token `pqw_water_offline` 刻意保留，理由同 cmd_status。
+        if (!g_dev_zs_water.load()) return "ERR pqw_water_offline\n";
+        std::vector<bool> st;
+        if (zs_water.readCoils(1, ZS_WATER_TOTAL_CH, st) ||
+            (int)st.size() < ZS_WATER_TOTAL_CH) {
+            return "ERR water_read_fail\n";
+        }
+        std::ostringstream oss;
+        oss << "OK water_inlet=" << (st[CH_WATER_INLET - 1] ? 1 : 0);
+        for (int ch = 1; ch <= ZS_WATER_TOTAL_CH; ++ch) {
+            oss << " wch" << ch << "=" << (st[ch - 1] ? 1 : 0);
+        }
+        oss << " | names wch" << CH_WATER_INLET << "=water_inlet(進水球閥)"
+            << " — 其餘通道未接線\n";
+        return oss.str();
+    }
     // [2026-06-05] Water inlet ball valve — moved from washrobot to crane side.
-    // On PQW slave 12 CH4 (cli_M, .34 shared bus with SD76 meters).
-    // Uses verify-retry pattern: PQW driver's controlRelay only checks TCP
-    // send success, not actual relay state. On shared bus, occasional Modbus
-    // frame collision with SD76 polling can drop the relay write silently.
-    // Verify via FC01 readback + retry up to 3 times catches this.
+    // [2026-09-10] Hardware corrected: this is a ZS-DIO 4CH module on its own
+    // gateway (USR_W .32, slave 1, CH4), NOT "PQW slave 12 on the shared .34
+    // bus" as this comment claimed from 06-05 to 09-10. It was driven by the
+    // PQW driver that whole time — the two maps overlap on FC05 coils, which
+    // is why it half-worked. It now has .32 to itself precisely because
+    // sharing .34 with the SD76 meters knocked it off the bus every time.
+    // Uses verify-retry pattern: controlRelay only checks TCP send success,
+    // not actual relay state. Verify via FC01 readback + retry up to 3 times.
     if (cmd == "water_inlet") {
         std::string s; iss >> s;
         if (iss.fail()) return "ERR usage:water_inlet_<on|off>\n";
@@ -5085,39 +5268,31 @@ static std::string dispatch(const std::string& line) {
         if      (s == "on")  on = true;
         else if (s == "off") on = false;
         else return "ERR expected_on_or_off\n";
-        if (!g_dev_pqw_water.load()) return "ERR pqw_water_offline\n";
+        return zs_set_relay_verified(CH_WATER_INLET, on, "water_inlet_relay_fail");
+    }
 
-        // First write attempt
-        if (pqw_water.controlRelay(CH_WATER_INLET, on))
-            return "ERR water_inlet_relay_fail\n";
-
-        // Verify-retry loop (mirrors washrobot pqw_set_relay_verified_)
-        // [2026-06-06] sleep 50→200ms：cli_M 跟 SD76 共用 bus + Modbus TCP
-        // gateway 偶有 stale-frame buffer 現象。50ms 不夠長讓殘留 frame 走完
-        // → readAllStatus 拿到舊狀態 → verify 假 fail/pass。200ms 給 SD76 polling
-        // 完整週期 + buffer drain。
-        for (int vr = 0; vr < 3; ++vr) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            auto st = pqw_water.readAllStatus();
-            if (st.empty() || (int)st.size() <= CH_WATER_INLET - 1) {
-                // Can't verify (FC01 fail) — accept as best-effort
-                return "OK\n";
-            }
-            if (st[CH_WATER_INLET - 1] == on) {
-                return "OK\n";   // confirmed
-            }
-            std::cout << "[pqw_water] ch=" << CH_WATER_INLET
-                      << " set " << (on ? "ON" : "OFF")
-                      << " verify fail vr=" << vr << ", retrying\n";
-            if (pqw_water.controlRelay(CH_WATER_INLET, on))
-                return "ERR water_inlet_relay_fail\n";
-        }
-        std::cout << "[pqw_water] ch=" << CH_WATER_INLET
-                  << " set " << (on ? "ON" : "OFF")
-                  << " gave up verify after 3 retries\n";
-        // Return OK anyway (best-effort) — same policy as washrobot pqw_set_relay_verified_.
-        // Caller (washrobot) sees OK; physical state unknown.
-        return "OK\n";
+    // [2026-09-10] 通用單通道控制，比照本體的 `relay <ch> on|off`。
+    //
+    // 🔴 **為什麼需要**：ZS-DIO 的 CH1~3 目前只有「據說沒接線」這個說法，
+    //    **沒有任何人實際驗過**。本體那顆 PQW 就是靠逐顆通電才查出「CH3 被記成
+    //    空通道、實際是幫浦 B 組」。沒有單通道指令就驗不了。
+    //
+    // 🔴🔴 **CH4（進水球閥）刻意拒絕從這裡走。** 自動關閥（本體 300s watchdog）
+    //    與急停關閥兩者都靠本體的 set_water_inlet_() 蓋時間戳武裝
+    //    （app/wash_robot_commands.cpp:4303 / :3653 的 if 閘門）⇒ 繞過本體開閥
+    //    等於**同時丟掉兩層保護**，而閥開著沒人看管的後果是漏水。
+    //    要開關進水閥一律走 `water_inlet`（本體再轉過來），不要從這裡開後門。
+    if (cmd == "water_relay") {
+        int ch = 0; std::string s;
+        iss >> ch >> s;
+        if (iss.fail()) return "ERR usage:water_relay_<ch>_<on|off>\n";
+        if (ch < 1 || ch > ZS_WATER_TOTAL_CH) return "ERR ch_out_of_range\n";
+        if (ch == CH_WATER_INLET) return "ERR use_water_inlet_for_ch4\n";
+        bool on;
+        if      (s == "on")  on = true;
+        else if (s == "off") on = false;
+        else return "ERR expected_on_or_off\n";
+        return zs_set_relay_verified(ch, on, "water_relay_fail");
     }
     return "ERR unknown_cmd\n";
 }
@@ -5269,20 +5444,59 @@ int main() {
         //     meter_middle.resumeMeter();
         // }
 
-        // [2026-06-05] PQW water-inlet relay on same cli_M bus, slave 12.
-        // External-client init mode (shares cli_M with SD76 meters).
-        // [2026-06-05] debug=true 暫時打開：bench 看 firmware 收到的 ON/OFF cmd 跟
-        //               readAllStatus 回報內容，排查「first ON 沒物理動」問題。
-        //               穩定後改回 false 避免 stdout 太吵。
-        if (!pqw_water.init(cli_M, PQW_WATER_SLAVE, PQW_WATER_TOTAL_CH, true)) {
-            g_dev_pqw_water = true;
-            std::cout << "[OK]   PQW water      USR_M slave " << PQW_WATER_SLAVE
-                      << " CH" << CH_WATER_INLET << " (water inlet ball valve)" << std::endl;
+    } else {
+        std::cerr << "[WARN] USR_M down — skipping SD76 meters init" << std::endl;
+    }
+
+    // ---- USR_W (.32): ZS-DIO 水閥繼電器，獨佔一條網段 ----
+    // [2026-09-10] 從 cli_M 搬出來。理由見 USR_W_IP 上方的說明（與 SD76 共存會互相干擾）。
+    //
+    // 🔴 ZS_DIO_R_RLY::init() **只賦值、不探測**（先前誤用的 PQW 驅動 init 有存在性探測）。
+    //   直接換驅動會靜默弄丟「device not on bus」這個**開機就看得到**的判準 ——
+    //   少了它，模組不在時要等到第一次開水閥才發現，而那時機器已經在牆上。
+    //   ⇒ 探測在這裡補回來，形狀比照 PQW 驅動：唯讀的 FC01，不碰任何繼電器。
+    if (cli_W.connectToServer(ep::host("USR_W", USR_W_IP), ep::port("USR_W", USR_PORT))) {
+        g_gw_w_ok = true;
+        std::cout << "[OK]   USR_W (ZS-DIO water) @ " << USR_W_IP << ":" << USR_PORT << std::endl;
+
+        bool zs_present = false;
+        bool inlet_was_open = false;
+        if (!zs_water.init(cli_W, ZS_WATER_SLAVE, ZS_WATER_TOTAL_CH, false)) {
+            for (int attempt = 1; attempt <= 3; ++attempt) {
+                std::vector<bool> probe;
+                if (!zs_water.readCoils(1, ZS_WATER_TOTAL_CH, probe) &&
+                    (int)probe.size() >= ZS_WATER_TOTAL_CH) {
+                    zs_present = true;
+                    // 繼電器狀態是模組自己保存的，撐得過吊機程式重啟。
+                    inlet_was_open = probe[CH_WATER_INLET - 1];
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(120));
+            }
+        }
+        if (zs_present && inlet_was_open) {
+            // 🔴 [2026-09-10] 開機發現閥是開的 ⇒ **關掉，並大聲說**。
+            //    繼電器狀態存在模組裡、撐得過程式重啟，而重啟後 deadman 的時間戳
+            //    是 0（未武裝）⇒ 若放著不管，這顆閥就進入「開著而且沒有任何計時器
+            //    在看它」的狀態 —— 正是 deadman 要防的那件事，只是發生在開機前。
+            // ⚠️ 代價：若吊機在本體補水途中重啟，這會打斷那次補水。
+            //    接受這個代價 —— 中斷的補水看得見（水量不足會在流程裡暴露），
+            //    而沒人看管的開閥看不見。
+            std::cerr << "[WARN] 開機時進水閥是**開著**的 → 已關閉。"
+                         "（若剛才吊機重啟時本體正在補水，那次補水已中斷）" << std::endl;
+            zs_water.controlRelay(CH_WATER_INLET, false);
+        }
+        if (zs_present) {
+            g_dev_zs_water = true;
+            std::cout << "[OK]   ZS-DIO water   USR_W slave " << ZS_WATER_SLAVE
+                      << " CH" << CH_WATER_INLET << " of " << ZS_WATER_TOTAL_CH
+                      << " (water inlet ball valve)" << std::endl;
         } else {
-            std::cerr << "[WARN] PQW water init failed — water_inlet cmd will fail" << std::endl;
+            std::cerr << "[WARN] ZS-DIO water init/probe failed — water_inlet cmd will fail"
+                      << std::endl;
         }
     } else {
-        std::cerr << "[WARN] USR_M down — skipping both SD76 meters init + PQW water init" << std::endl;
+        std::cerr << "[WARN] USR_W " << USR_W_IP << " down — water_inlet cmd will fail" << std::endl;
     }
 
     // ---- X518 (.33): 一台兩通道，CH1=右 / CH2=左 ----
@@ -5424,6 +5638,10 @@ int main() {
               << METER_POLL_MS_IDLE << " ms idle / "
               << METER_POLL_MS_MOTION << " ms during motion)" << std::endl;
 
+    g_water_dog_thread = std::thread(water_dog_loop);
+    std::cout << "[OK] 進水閥 deadman (max open "
+              << (g_water_open_max_ms.load() / 1000) << "s，"
+              << "本體那顆不受影響，兩邊都武裝時誰先到誰關)" << std::endl;
     g_vfd_keepalive_thread = std::thread(vfd_keepalive_loop);
     std::cout << "[OK] SE3 keepalive thread (" << VFD_KEEPALIVE_INTERVAL_MS
               << "ms always-on; readStatusWord on both SE3; first 10 ticks logged individually)"
@@ -5458,10 +5676,21 @@ int main() {
     hold_loop_stop = true;
     g_meter_loop_stop = true;
     g_vfd_keepalive_stop = true;
+    g_water_dog_stop = true;
     if (watchdog_thread.joinable())       watchdog_thread.join();
     if (hold_thread.joinable())           hold_thread.join();
     if (g_meter_thread.joinable())        g_meter_thread.join();
     if (g_vfd_keepalive_thread.joinable())g_vfd_keepalive_thread.join();
+    if (g_water_dog_thread.joinable())    g_water_dog_thread.join();
+    // 🔴 [2026-09-10] 收尾一律關進水閥，**不看它有沒有武裝**。
+    //    理由與本體 cmd_shutdown 同：程式要結束了，之後沒有任何東西會關它。
+    //    ⚠️ 這裡刻意不用 g_water_open_ts_ms 當條件 —— 那個時間戳只反映
+    //    「本次執行期間我們開過它」，不反映繼電器現在的實體狀態
+    //    （例如吊機重啟前就開著的那種）。無條件關才涵蓋得到。
+    if (g_dev_zs_water.load()) {
+        std::cout << "[SHUTDOWN] 關進水閥" << std::endl;
+        zs_water.controlRelay(CH_WATER_INLET, false);
+    }
     cmd_server.stop();
     allMotionOff();
     return 0;

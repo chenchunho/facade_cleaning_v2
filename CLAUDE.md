@@ -34,7 +34,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 #### `.claude/` 完整索引 —— 🔴 **新增檔案必須在這裡加一列**
 
-📌 **2026-08-28 建立。動機**：`summaries/`（**14 份**手冊摘要，2026-09-07 增 DSZL-107+X518／XKC-Y25／DY-500／WT901BC）在此之前**沒有出現在任何索引裡**，
+📌 **2026-08-28 建立。動機**：`summaries/`（**15 份**手冊摘要，2026-09-10 增 IPCAM；2026-09-07 增 DSZL-107+X518／XKC-Y25／DY-500／WT901BC）在此之前**沒有出現在任何索引裡**，
 接手的人只能靠 driver 現有程式碼反推協定——**那正是 DM2J 那次踩雷的方式**。
 一份沒被指到的文件等於不存在。
 
@@ -44,8 +44,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `changelog.md` | 變更帳本（append-only，不壓縮） | 🟢 活的，只在追溯時查 |
 | `runbook.md` | 操作手冊：啟動順序、按鈕、raw command、緊急處置 | 🟢 活的 |
 | `per_program_cautions.md` | 各程式「最容易踩、後果最嚴重」的交接摘要（2026-08-28 由 main 帶入） | 🟢 活的，但 §0.2 的 bus 表已隨同批程式改動過期，見檔內 2026-08-28 更正 |
-| `summaries/` | **14 份**硬體手冊摘要（原始 PDF 在 `doc/`，不進版控） | 🟢 活的，見上一節 |
-| 🆕 `handoff/` | **AI-2 的交接文件 4 份**（吊機 watchdog 診斷／`crane_cmd_` 保護分析＋水閥修法／Phase 2.3 可行性／PCB 架構 v0.6 HTML）。🔴 **2026-09-09 由 `tmp/` 搬來** —— `tmp/` 同時被 `.gitignore` 與 `mirror-backup.sh` EXCLUDES 排除 ⇒ **零備份**，三份 `.md` 原本只有一份 | 🟢 活的，待辦已併入 `work_log.md` |
+| `summaries/` | **15 份**硬體手冊摘要（原始 PDF 在 `doc/`，不進版控） | 🟢 活的，見上一節 |
+| 🆕 `handoff/` | **AI-2 的交接文件 5 份**（吊機 watchdog 診斷／`crane_cmd_` 保護分析＋水閥修法／Phase 2.3 可行性／PCB 架構 v0.6 HTML／🆕 2026-09-10 `ai2-watchdog-restore-patch.md`＝watchdog 補回的預寫 patch，**刻意未套用**，等 per user 拍板 (b)/(c)）。🔴 **2026-09-09 由 `tmp/` 搬來** —— `tmp/` 同時被 `.gitignore` 與 `mirror-backup.sh` EXCLUDES 排除 ⇒ **零備份**，三份 `.md` 原本只有一份 | 🟢 活的，待辦已併入 `work_log.md` |
 | 🆕 `comms_interface_for_pcb.md` | **通訊介面規格（PCB 設計用）**：6 段 RS485 的裝置/slave/串口參數（**2026-09-09 六台網關全部實查**）、非 RS485 介面（X518 原生 TCP／IMU TTL／手臂 USB-CAN）、網關三個結構性問題、分段不可合併的實測理由、7 項待確認 | 🟢 活的。2026-09-09 建立，per user 要做 PCB |
 | `motion_flow.md` | **v1 規格**（已凍結） | 🟡 §2 硬體表已過期，保留作狀態機與指令協定的原始推導。📌 **2026-08-28 破例加過一次註記**（非規格變更）：§8 失效模式表說「張力過高→立即 crane stop」，同章「緊急收繩」段說「不會停」，**兩段互相矛盾**；逐行驗過程式碼後在表上加了除外註。凍結的意思是不再演進，不是「明知有誤導也不標」 |
 | `v2_app_redesign_plan.md` | **v2 規格 = 現行程式碼的權威** | 🟢 活的 |
@@ -94,12 +94,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `SD76_MODBUS_SUMMARY.md` | SD76-C 計米器 | 暫存器圖、工作模式、錯誤碼、資料編碼（BCD） |
 | `JC_100_MODBUS_SUMMARY.md` | JC-100 真空壓力表 | 量程與單位（0.1 kPa int16 signed） |
 | `PQW_IO_MODBUS_SUMMARY.md` | PQW 繼電器模組 | 線圈位址、暫存器圖、輸出模式 |
-| `ZS_DIO_MODBUS_SUMMARY.md` | ZS-DIO 繼電器（已被 SE3 取代） | 保留作歷史對照 |
+| `ZS_DIO_MODBUS_SUMMARY.md` | ZS-DIO 繼電器 | 🔴 **2026-09-10 起實際在用**（原記「已被 SE3 取代，保留作歷史對照」已作廢）：吊機水閥 @ `.32` slave 1 CH4。出廠 **38400**（非 PQW 的 9600）、原生 **FC06**、`readCoils` startCh 1 起算 |
 | 🆕 `DSZL_107_X518_MODBUS_SUMMARY.md` | **張力**：DSZL-107 測力元件 + **X518 採集器** | 🔴 **driver 名稱誤導——講 Modbus 的是 X518，DSZL-107 是類比應變片**；上電清零／零位跟蹤預設值；裝置端校準沒被用到 |
 | 🆕 `XKC_Y25_MODBUS_SUMMARY.md` | XKC-Y25-RS485 液位（`.22` slave 13） | **手冊自己前後矛盾**：寫入位址比暫存器表大 1（driver 已正確處理）；RSSI 遲滯 3900/4100 在感測器內部；靈敏度是**實體旋鈕** |
 | 🆕 `DY_500_MODBUS_SUMMARY.md` | DY-500 稱重變送器（**從未安裝**） | 出廠 19200；上電清零預設開；主動上傳模式是**單向門**（只能恢復出廠救回） |
 | 🆕 `WT901BC_TTL_PROTOCOL_SUMMARY.md` | WT901BC-TTL 九軸姿態儀（`/dev/ttyUSB0`） | **非 Modbus**，0x55 封包；⚠️ 來源是近親型號 WT901C 的手冊，已與 driver 逐項對照；抓到 5 個落差（含 `0x56` 氣壓是死碼） |
 | 🆕 `QX_DO24_MODBUS_SUMMARY.md` | QX-DO24 四路 PWM（`.21` slave 9，🔴 **貼牆螺旋槳，不是散熱風扇**） | **頻率 ≤65535 可用 FC `0x06` 單寫 `0x05`（8 bytes），不必用 FC `0x10`（13 bytes）** —— 驅動只實作了後者；`0x00~0x0F` 無限次改寫、其餘暫存器**實時寫 flash 且壽命僅 1~2 千次**；`VCC/GND` 緊鄰 `A/B`，保修條款明列「電源錯接到 485 導致 485 段燒毀」；`0xFF00`=`0xFFFF` 是恢復出廠（會打回 9600/addr 1） |
+| 🆕 `IPCAM_XIONGMAI_SUMMARY.md` | XiongMai 網路攝影機 ×2（`.112` / `.113`，**非 Modbus**） | 2026-09-10 新增。海思 `GK7201V200`、1080P H.264；**admin 空密碼**；RTSP 網址（結尾 `?` 不可省）、XM 私有協定 `34567` 讀設定法；🔴 NTP 停用時戳不可信、私有埠不可對外 forward |
 
 🔴 **一個具體例子**：既有待辦「VFD 故障碼顯示是壞的（`vfd_fault` 一邊報假警一邊讀不到）」，
 它要的 SE3 錯誤碼對照表**就在 `SE3_INVERTER_MODBUS_SUMMARY.md` 的
@@ -417,7 +418,8 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 | USR #3 | `192.168.1.22` | 本體 感測 bus（JC-100 ×4、XKC） |
 | USR_A | `192.168.1.30` | 吊機 SE3 左（獨佔一條 bus） |
 | USR_B | `192.168.1.31` | 吊機 SE3 右（獨佔一條 bus） |
-| USR_M | `192.168.1.34` | 吊機 SD76 ×2 + PQW slave 12 |
+| USR_M | `192.168.1.34` | 吊機 SD76 ×2（**2026-09-10 起只剩計米器**） |
+| 🆕 USR_W | `192.168.1.32` | 吊機 **ZS-DIO 4CH 繼電器獨佔一條**（CH4 = 水箱進水球閥）— 2026-09-10 新增 |
 
 🆕 **`192.168.1.21` 於 2026-09-03 重新啟用，但用途完全不同**（per user）：
 v1 時代它是 ZDT bus、2026-07 退役；現在是**新網關**，**QX-DO24 獨佔一條**。
@@ -514,14 +516,29 @@ Raspberry Pi 5（本體主控）
 Raspberry Pi（吊機主控）
   ├─ USR_A  192.168.1.30 ── SE3 變頻器（左鋼索）        ← 控制 bus
   ├─ USR_B  192.168.1.31 ── SE3 變頻器（右鋼索）        ← 控制 bus
-  ├─ USR_M  192.168.1.34 ── SD76 計米 ×2 + PQW slave 12  ← 感測 bus
-  │                          PQW CH4 = 水箱進水球閥
+  ├─ USR_M  192.168.1.34 ── SD76 計米 ×2                  ← 感測 bus
+  ├─ USR_W  192.168.1.32 ── ZS-DIO 4CH 繼電器 slave 1     ← 🆕 獨佔（2026-09-10）
+  │                          CH4 = 水箱進水球閥 ／ CH1~3 未接線
   └─ X518   192.168.1.33:502 ── DSZL-107 張力 **一台雙通道**（原生 Modbus TCP，非 :4001）
                                  CH1 (0x0A00) = 右 ／ CH2 (0x0A02) = 左
 ```
 
+🔴🔴 **2026-09-10：吊機那顆繼電器三個月來一直被當成錯的型號在驅動。**
+它是 **ZS-DIO 4CH**（2026-05-07 被 SE3 取代收繩功能後留在原地的那顆），
+2026-06-05 接水箱進水球閥時**沿用了 `PQW_IO_16O_RLY` 驅動**——兩者的 FC05 線圈位址剛好重疊，
+所以「半通不通」了三個月而沒有暴露。已改用 `ZS_DIO_R_RLY`（原生 FC06）、站號 12→1、
+通道數 8→4、鮑率改 115200。
+📌 **為什麼要獨佔 `.32` 而不是留在 `.34`**：實測三次——它單獨在 `.34` 上完全正常，
+一把 SD76 接回同一條就失聯。共用感測 bus 是它從一開始就不穩的原因之一。
+⚠️ **`.32` 這個位址在 2026-09-01 之前是 X518 左**（見下方那段）。**舊記載已作廢**——
+查到「`.32` = X518 左」的人請以本段為準，那台實體已經移除。
+⚠️ wire token 仍叫 `pqw_water=` / `dev_pqw_water=` / `ERR pqw_water_offline`，**刻意不改名**：
+零功能收益，卻可能打到沒找到的解析端。看到 `pqw_` 不代表硬體是 PQW。
+
 🔴 **2026-09-01 per user：X518 由兩台改一台。** 原本左 `.32` / 右 `.33` 各一台、各只用 CH1；
-現在移除一台，剩 `.33` 一台接兩個通道。程式仍保留**兩個 `DSZL_107` 物件**共用 `cli_C`
+現在移除一台，剩 `.33` 一台接兩個通道。
+⚠️ **`.32` 於 2026-09-10 已被重新指派給 ZS-DIO 繼電器網關（USR_W）**——本段提到的 `.32`
+只在描述 09-01 之前的歷史。看到 `.32` 不要往 X518 想。程式仍保留**兩個 `DSZL_107` 物件**共用 `cli_C`
 （各自要有獨立的 scale、錯誤計數、last-valid 快取與 `@L`/`@R` 標記，而上層 `read_tensions()`／
 `cmd_tension`／歸零／安全檢查全建立在左右對稱結構上）。`cli_D` 刻意保留不刪——沒有
 `connectToServer` 就不連線、成本為零，刪掉會連帶動到 `g_gw_d_ok` 與 GUI 正在解析的 status 欄位。
@@ -649,10 +666,10 @@ Socket timeouts: 100-500ms per device. TCP monitor thread: 500ms reconnect polli
 | `ZDT_motor_control` | 閉環步進驅動卡 × 9 | Modbus-TCP (RS485_2) | 驅動 SMC LEYG25 推桿，encoder 回饋，堵轉保護 |
 | `JC_100_METER` | 真空氣壓感測器 × 9 | Modbus-TCP (RS485_3) | 讀取壓力 (0.1 kPa)，裝於各推桿末端吸盤 |
 | `DY_500_weight_sensor` | 鋼索重量感測器 × 2 | Modbus-TCP (RS485_3) | 讀取重量 (int32/float)，裝於機體與鋼索連接處 |
-| `PQW_IO_16O_RLY` | 8CH 繼電器模組 × 2 | Modbus-TCP | washrobot cli_22_ slave 12 (CH1-6 + CH8)：dp0105 泵浦 + VT307 電磁閥 + 刷洗/水泵；crane cli_M slave 12 (CH4 only, 2026-06-05 搬遷)：水箱進水球閥（原 washrobot CH7 改空著） |
+| `PQW_IO_16O_RLY` | 8CH 繼電器模組 × 2 | Modbus-TCP | washrobot cli_22_ slave 12 (CH1-6 + CH8)：dp0105 泵浦 + VT307 電磁閥 + 刷洗/水泵。<br>🔴 **2026-09-10：吊機端已不再使用本驅動**——原記「crane cli_M slave 12 (CH4 only, 2026-06-05 搬遷)：水箱進水球閥」，實體其實是 ZS-DIO，已改由 `ZS_DIO_R_RLY` 驅動、移到獨佔網關 `.32`。**本驅動現在只服務本體那顆。** |
 | `WT901BC_TTL` | 九軸姿態儀 | USB→TTL Serial 115200 | 背景執行緒連續讀取，checksum 驗證；Roll+Pitch 平衡監控 |
 | `damiao` (header-only) + `SerialPort` | damiao 清潔手臂馬達 × 2 (M1+M2) | USB-CAN (/dev/ttyACM0 @ 921600) | M1 大臂 DM10010L (slave 0x01) + M2 工具頭 DM4340_48V (slave 0x02)；廠商驅動 header-only，由獨立服務 `cleaning_arm/motor_api` 使用，TCP :9527 對外。washrobot 透過 `arm_cmd_` 跨 process 下指令 (127.0.0.1:9527)。整個專案唯一走 CAN 的裝置 |
-| `SD76_length_meters` | 計米器 × 3 | Modbus-TCP (USR_M 感測 bus, .34) | 左 (USR_M.34 slave 1) / 右 (USR_M.34 slave 2) / 中間 (USR_M.34 slave 4, 未安裝)；2026-05-15 re-layout 全部 SD76 移到此 bus，int32 讀取，支援 pause/resume/zero。2026-06-05 起此 bus 多了 PQW slave 12（進水球閥）共用 |
+| `SD76_length_meters` | 計米器 × 3 | Modbus-TCP (USR_M 感測 bus, .34) | 左 (USR_M.34 slave 1) / 右 (USR_M.34 slave 2) / 中間 (USR_M.34 slave 4, 未安裝)；2026-05-15 re-layout 全部 SD76 移到此 bus，int32 讀取，支援 pause/resume/zero。<br>2026-06-05 ~ 2026-09-10 此 bus 曾與繼電器模組共用，**09-10 已把繼電器移到獨佔的 `.32`**（共用時它會被 SD76 的輪詢擠掉）⇒ 現在 `.34` 只有 SD76 |
 | `DSZL_107` | 張力感測器 × 2 通道（X518 採集板 **一台**） | Modbus-TCP (獨佔 gateway) | **2026-09-01 per user 由兩台改一台雙通道**：`192.168.1.33:502`，CH1 = 右 / CH2 = 左（`set_channel()`，讀值暫存器 `0x0A00` / `0x0A02`）。<br>🎯 **刻度已於 2026-09-01 用 4.16 kg 已知重量校正**（先前兩側共用的 `-0.01` 是 placeholder 且是錯的）：右 `-0.0236364`、左 `-0.0205816`，寫在 `Crane_control_PI/main.cpp` 的 `DSZL_SCALE_RIGHT` / `DSZL_SCALE_LEFT`。**kg 讀值自此有絕對意義**，整機總重實測約 94 kg。<br>⚠️ 左側雜訊是右側的 3 倍（±3.5 vs ±1 count）；單點校正（過原點），4.16kg 外推到工作範圍 30~60kg 的線性度未驗。<br>Washrobot 透過 `crane_cmd_("tension")` 跨 PI 拿 kg。 |
 | `CLV900_inverter` | 變頻器 × 1 | Modbus-TCP (USR_A.30 slave 3) | 中間絞盤變頻器，控制 bus 上（未安裝） |
 | `SE3_inverter` | 士林變頻器 × 2 | Modbus-TCP (USR_A 控制 bus) | 左 (USR_A.30 slave 1) / 右 (USR_A.30 slave 2)；2026-05-07 取代原 ZS_DIO_R_RLY 繼電器；2026-05-15 re-layout 右 SE3 從 USR_B 移到 USR_A、slave 1→2；hold 預設 20Hz / 自動運動 30Hz；reg 0x1101 控制位元、0x1002 頻率（RAM）、0x100A 輸出頻率 |
@@ -663,7 +680,7 @@ Socket timeouts: 100-500ms per device. TCP monitor thread: 500ms reconnect polli
 | Class | Description |
 |---|---|
 | `DIHOOL_control` | 馬達定位控制器，已編譯未整合 |
-| `ZS_DIO_R_RLY` | 8CH 繼電器模組（之前用作吊機左右收/放繩，2026-05-07 改用 SE3_inverter；class 保留供未來其他用途） |
+| `ZS_DIO_R_RLY` | 🔴 **2026-09-10 起實際在用**（原記「class 保留供未來其他用途」已作廢）：吊機 4CH 繼電器模組 @ `192.168.1.32` slave 1，CH4 = 水箱進水球閥。<br>沿革：原用作吊機左右收/放繩 → 2026-05-07 改用 SE3_inverter → 模組留在原地 → 2026-06-05 接水閥時**誤用 PQW 驅動**至 2026-09-10 改正。<br>⚠️ 驅動 4/8/16CH 通用，**通道數由上層 `init(..., total_relay)` 決定**；`readCoils()`／`readDiscreteInputs()` 的 `startCh` 是 **1 起算**（PQW 是 0 起算）。 |
 
 ### Driver Initialization Pattern
 

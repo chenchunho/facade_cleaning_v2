@@ -211,6 +211,189 @@ function broadcastStatus() {
     });
 }
 
+//=========== mission runner ===========
+//
+// 🔴🔴 **不要用 JS 重寫 `cycle_test.py`。** 那 948 行裡有連續超標判定、roll 救回的
+//   最小改善量、座標慣例自動判定、起點拒跑 —— 重寫等於分岔出第二份，而分岔的那份
+//   會退化。這裡只做一件事：**spawn 現有腳本、把 stdout 串回頁面。**
+//   腳本與 web 都在吊機 Pi 上（腳本連 127.0.0.1:5002），不用跨機。
+
+const { spawn } = require('child_process');
+
+const MISSION_PY   = process.env.MISSION_PY  || path.join(__dirname, '..', 'Linux_test', 'cycle_test.py');
+const MISSION_CWD  = process.env.MISSION_CWD || path.join(__dirname, '..');
+const MISSION_RING = 3000;          // 保留最後 N 行，供重新連上的瀏覽器補看
+
+const mission = {
+    proc: null, args: null, env: null, startedAt: 0,
+    ring: [], exit: null, stopping: false
+};
+
+function missionSnapshot() {
+    return {
+        running:   !!mission.proc,
+        args:      mission.args,
+        env:       mission.env,
+        startedAt: mission.startedAt,
+        exit:      mission.exit,
+        stopping:  mission.stopping
+    };
+}
+
+function missionSend(obj) { broadcast(Object.assign({ src: 'mission' }, obj)); }
+
+function missionPush(line) {
+    mission.ring.push(line);
+    if (mission.ring.length > MISSION_RING) mission.ring.shift();
+    missionSend({ line });
+}
+
+// 數值驗證：型別 + 範圍都不過就回 null。**驗完才放進 argv**（硬要求 ②）。
+function numArg(v, lo, hi, asInt) {
+    const n = Number(v);
+    if (!isFinite(n) || n < lo || n > hi) return null;
+    return asInt ? String(Math.round(n)) : String(n);
+}
+
+function missionStart(p, reply) {
+    // ④ 單一實例：已經在跑就拒絕，並回報正在跑的那組參數。
+    if (mission.proc)
+        return reply({ ok: false, err: 'already_running', running: missionSnapshot() });
+
+    // 🔴 參數順序是 cycles steps step_cm **roll_trip diff_trip**
+    //    （`cycle_test.py:67-69,103-104` 實查）。`mission_run.py` 剛好相反，
+    //    兩個都是浮點數、接反不會報錯，只會讓門檻互換 —— 別接錯。
+    const cycles = numArg(p.cycles,    1,   999, true);
+    const steps  = numArg(p.steps,     1,    99, true);
+    const stepCm = numArg(p.step_cm,   1,   200, true);
+    const roll   = numArg(p.roll_trip, 0.5,  45, false);
+    const diff   = numArg(p.diff_trip, 0.5, 100, false);
+    const topCm  = numArg(p.top_cm,    1,   999, true);
+    const railCm = numArg(p.rail_cm,   0,   999, true);
+    const bad = [];
+    if (cycles === null) bad.push('cycles(1~999)');
+    if (steps  === null) bad.push('steps(1~99)');
+    if (stepCm === null) bad.push('step_cm(1~200)');
+    if (roll   === null) bad.push('roll_trip(0.5~45)');
+    if (diff   === null) bad.push('diff_trip(0.5~100)');
+    if (topCm  === null) bad.push('top_cm(1~999)');
+    if (railCm === null) bad.push('rail_cm(0~999)');
+    if (bad.length) return reply({ ok: false, err: 'bad_params', detail: bad });
+
+    const args = ['-u', MISSION_PY, cycles, steps, stepCm, roll, diff];
+    // ⚠️ `cycle_test.py:63` 的預設 host 是 **192.168.5.26**（本體 WiFi，2026-09-10 起已不通）
+    //    ⇒ `FCV_WROBOT_HOST` 不是可選的，不帶就會連到一個不存在的位址。
+    const env = Object.assign({}, process.env, {
+        FCV_WROBOT_HOST: WASHROBOT_IP,
+        FCV_TOP_CM:      topCm,
+        FCV_RAIL_CM:     railCm
+    });
+
+    let proc;
+    try {
+        proc = spawn('python3', args, { cwd: MISSION_CWD, env });   // ② 陣列形式，不組 shell 字串
+    } catch (e) {
+        return reply({ ok: false, err: 'spawn_failed', detail: String(e && e.message) });
+    }
+
+    mission.proc      = proc;
+    mission.args      = { cycles, steps, step_cm: stepCm, roll_trip: roll, diff_trip: diff,
+                          top_cm: topCm, rail_cm: railCm };
+    mission.env       = { FCV_WROBOT_HOST: WASHROBOT_IP, FCV_TOP_CM: topCm, FCV_RAIL_CM: railCm };
+    mission.startedAt = Date.now();
+    mission.ring      = [];
+    mission.exit      = null;
+    mission.stopping  = false;
+
+    missionPush(`[web] spawn: python3 -u cycle_test.py ${cycles} ${steps} ${stepCm} ${roll} ${diff}`);
+    missionPush(`[web] env: FCV_WROBOT_HOST=${WASHROBOT_IP} FCV_TOP_CM=${topCm} FCV_RAIL_CM=${railCm}`);
+
+    // stdout/stderr 合成同一條串流：進度印在 stdout、例外與 traceback 在 stderr，
+    // 分開送的話出事時看到的會是斷開的兩半。
+    let buf = '';
+    const onData = (chunk) => {
+        buf += chunk.toString();
+        let i;
+        while ((i = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, i).replace(/\r$/, '');
+            buf = buf.slice(i + 1);
+            missionPush(line);
+        }
+    };
+    proc.stdout.on('data', onData);
+    proc.stderr.on('data', onData);
+
+    proc.on('close', (code, signal) => {
+        if (buf.length) missionPush(buf);           // 最後一行沒有換行時不要吞掉
+        mission.proc     = null;
+        mission.stopping = false;
+        mission.exit     = { code, signal, at: Date.now() };
+        missionPush(`[web] 行程結束 code=${code}${signal ? ' signal=' + signal : ''}`);
+        missionSend({ state: missionSnapshot() });
+    });
+    proc.on('error', (e) => { missionPush(`[web] 🔴 spawn error: ${e && e.message}`); });
+
+    reply({ ok: true, running: missionSnapshot() });
+    missionSend({ state: missionSnapshot() });
+}
+
+// ① 🔴🔴 **STOP 的四步順序 —— 這是安全語意，不是整潔問題。**
+//
+//   `cycle_test.py` 是 `try: … finally: cleanup()`，而 **`cleanup()` 第一件事就是
+//   `arm_park`（手臂卸力）**。手臂壓玻璃是**持續施力**（實測 6~14 Nm 持續頂著），
+//   達妙馬達長時間受力會觸發過熱／過流鎖存，**只能斷電解除**（2026-09-03 踩過）。
+//
+//   🔴 而腳本**沒有 `import signal`**（我實查過）⇒ 沒有自訂 handler：
+//     · **SIGTERM / SIGKILL → `finally` 不跑** ⇒ 手臂留著壓玻璃、`motion_hz` 卡在 50
+//     · **SIGINT → 丟 KeyboardInterrupt，穿過 try 到 finally** ⇒ 卸力 + 參數還原
+//   ⇒ **一定要用 SIGINT，不能用 SIGTERM。** 我第一版寫 SIGTERM，那會讓手臂留在牆上。
+//
+//   📌 而且**安全動作由後端透過已開的 bridge 直接做，不賭 python 收得到訊號** ——
+//      python 可能正卡在某個 socket recv 上。前兩步不依賴它。
+//
+//   四步：① 吊機 `stop`（立刻停鋼索）② 本體 `arm_park`（卸力的 backstop）
+//        ③ SIGINT（觸發腳本自己的 cleanup）④ 寬限後仍在 → SIGKILL
+const MISSION_SIGINT_GRACE_MS = 12000;   // cleanup 裡 arm_park 的 ask timeout 是 90s，
+                                         // 但第 ② 步已經直接送過，不必等那麼久。
+
+function missionStop(reply) {
+    if (!mission.proc)     return reply({ ok: false, err: 'not_running' });
+    if (mission.stopping)  return reply({ ok: false, err: 'already_stopping' });
+    mission.stopping = true;
+    missionSend({ state: missionSnapshot() });
+
+    // 步驟 ①：立刻對吊機送 stop（走 intr 連線，繞開可能塞住的主連線）。不等 python。
+    const craneTarget = routeCrane('stop');
+    const craneOk = craneTarget.send('stop');
+    missionPush(`[web] STOP ①：吊機 stop（${craneTarget.name}）` +
+                (craneOk ? ' 已送出' : ' —— 🔴 送不出去，橋接未連線'));
+
+    // 步驟 ②：本體 arm_park —— **手臂卸力的 backstop**。
+    //   即使 python 卡死收不到 SIGINT、或 cleanup 跑不完，手臂也保證會被收回。
+    //   重複卸力是 no-op；不卸力的代價是馬達鎖存後只能斷電。
+    const armOk = washrobot.send('arm_park');
+    missionPush(`[web] STOP ②：本體 arm_park（手臂卸力）` +
+                (armOk ? ' 已送出' : ' —— 🔴 送不出去，本體橋接未連線'));
+
+    // 步驟 ③：SIGINT 讓腳本跑自己的 cleanup（風扇關、motion_hz 還原、再 arm_park 一次）。
+    setTimeout(() => {
+        if (!mission.proc) return;
+        missionPush('[web] STOP ③：送 SIGINT（觸發腳本 finally:cleanup）');
+        try { mission.proc.kill('SIGINT'); } catch (e) {}
+
+        // 步驟 ④：寬限後仍在 → SIGKILL。到這一步 cleanup 已經沒機會跑了，
+        //         但 ① 與 ② 已經把兩件安全動作做完，所以可以接受。
+        setTimeout(() => {
+            if (!mission.proc) return;
+            missionPush('[web] STOP ④：SIGINT 後仍在跑 → SIGKILL' +
+                        '（cleanup 未完成，但 ①② 的停機與卸力已經送出）');
+            try { mission.proc.kill('SIGKILL'); } catch (e) {}
+        }, MISSION_SIGINT_GRACE_MS);
+    }, 700);
+
+    reply({ ok: true });
+}
+
 //=========== ws event ===========
 
 wss.on('connection', (ws) => {
@@ -224,10 +407,43 @@ wss.on('connection', (ws) => {
         arm:        arm.isConnected()
     }));
 
+    // ③ 行程不綁瀏覽器連線 ⇒ 新連上（含**重新整理／換分頁／斷線重連**）要能接得回去：
+    //    先送目前狀態，再把 ring buffer 一次補完。
+    //    🔴 不補的話，重新整理之後畫面會是空的，而任務**還在跑** ——
+    //    「看起來沒在跑」比「沒有畫面」危險得多。
+    ws.send(JSON.stringify({ src: 'mission', state: missionSnapshot() }));
+    if (mission.ring.length)
+        ws.send(JSON.stringify({ src: 'mission', backlog: mission.ring.slice() }));
+
     ws.on('message', (data) => {
         let msg;
         try { msg = JSON.parse(data.toString()); }
         catch { return ws.send(JSON.stringify({ src: 'error', line: 'invalid_json' })); }
+
+        // ---- 任務控制（不走 TCP 橋接，因此在 cmd 檢查之前處理）----
+        //
+        // 🔴 [2026-09-10] **接受兩種形狀，內部正規化成一種。**
+        //   本檔原生是 `{mission:"start"|"stop"|"state"}`，但協定討論時另一個形狀
+        //   `{target:"mission", cmd:"start"|"stop"|"status"}` 也被寫進交接訊息裡。
+        //   不接受的話，照那份文件寫的 client 會收到 `unknown_target` —— 而那個錯誤
+        //   看起來像「後端沒裝好」，不像「協定寫錯」。
+        //
+        //   🐛 **這個不一致差點沒被發現**：兩邊各自「測過」都看到 state 回來了，
+        //      但那是**連上時的主動推送**（下方 `ws.on('connection')` 會先送一次），
+        //      **不管送什麼都會出現** ⇒ 兩個人都把它當成自己那次請求的回覆。
+        //      要分辨得送一個**只有請求路徑才產得出**的東西（例如未知動作 → `ack`）。
+        //   📌 通則：驗證請求／回覆時，回覆必須是**這次請求獨有**的，
+        //      否則你驗到的可能是一個跟請求無關的訊息。
+        if (msg.target === 'mission' && typeof msg.cmd === 'string') {
+            msg = { mission: msg.cmd === 'status' ? 'state' : msg.cmd, params: msg.args || msg.params };
+        }
+        if (msg.mission) {
+            const reply = (o) => ws.send(JSON.stringify(Object.assign({ src: 'mission', ack: msg.mission }, o)));
+            if (msg.mission === 'start')  return missionStart(msg.params || {}, reply);
+            if (msg.mission === 'stop')   return missionStop(reply);
+            if (msg.mission === 'state')  return reply({ ok: true, state: missionSnapshot() });
+            return reply({ ok: false, err: 'unknown_mission_action' });
+        }
 
         if (typeof msg.cmd !== 'string' || !msg.cmd.length)
             return ws.send(JSON.stringify({ src: 'error', line: 'empty_cmd' }));
@@ -267,4 +483,7 @@ server.listen(HTTP_PORT, () => {
     console.log(`[web_backend] listening http://0.0.0.0:${HTTP_PORT}`);
     console.log(`[web_backend] washrobot  target = ${WASHROBOT_IP}:${WASHROBOT_PORT}`);
     console.log(`[web_backend] crane      target = ${CRANE_IP}:${CRANE_PORT} (main + intr connection for stop/status bypass)`);
+    // 🔴 印出來是刻意的：部署到別的目錄時，`MISSION_PY` 會指向一個不存在的檔，
+    //    而 spawn 失敗只會在按下啟動時才現形。開機就印，一眼看得出指到哪。
+    console.log(`[web_backend] mission    script = ${MISSION_PY} (cwd ${MISSION_CWD})`);
 });
