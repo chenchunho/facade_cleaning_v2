@@ -48,7 +48,17 @@ import os, re, socket, sys, threading, time
 #    影響的是「跑的當下看不看得到」——耐久測試一跑 20 分鐘，這就是全部的可觀測性。
 sys.stdout.reconfigure(line_buffering=True)
 
-CRANE  = ("127.0.0.1", 5002)
+# 🔴 [2026-09-10 per user A] CRANE 位址改為可由環境變數指定，**預設維持 127.0.0.1**
+#    （在吊機 Pi 上跑，行為與先前逐字不變）。
+# 為什麼要能改：cycle_test 每步有大量**本體**指令（風扇/真空/推桿 + 真空輪詢每 0.3s
+#   一次最多 30 次），在吊機 Pi 上跑時這些全部穿隧道（2026-09-10 實測 ping avg 130ms /
+#   max 368ms 一往返）。改到**本體 Pi** 上跑、設 FCV_CRANE_HOST=192.168.1.10：
+#   本體指令變 127.0.0.1（快），只剩吊機 pay_out 過隧道 —— 而每步的本體往返遠多於
+#   吊機往返，overhead 因此大降。這是驗證「慢是不是隧道」最快的辦法：同一支、換一邊跑。
+#   FCV_CRANE_HOST=192.168.1.10 FCV_WROBOT_HOST=127.0.0.1 python3 cycle_test.py ...  # 在本體 Pi 上
+CRANE_HOST = os.environ.get("FCV_CRANE_HOST", "127.0.0.1")
+CRANE_PORT = int(os.environ.get("FCV_CRANE_PORT", "5002"))
+CRANE  = (CRANE_HOST, CRANE_PORT)
 # 🔴 [2026-09-09] 位址改為可由環境變數覆蓋，**預設維持 WiFi 不變**。
 #
 # 為什麼不直接寫死 192.168.1.100：切到有線是 per user 已拍板的方向，但**隧道的
@@ -63,6 +73,34 @@ CRANE  = ("127.0.0.1", 5002)
 WROBOT_HOST = os.environ.get("FCV_WROBOT_HOST", "192.168.5.26")
 WROBOT_PORT = int(os.environ.get("FCV_WROBOT_PORT", "5001"))
 WROBOT = (WROBOT_HOST, WROBOT_PORT)
+
+# ============================================================================
+# 🔴 [2026-09-10 per user] 統一 runner。第一個位置參數可以是:
+#   模式    full | crane | arm
+#   查詢    modes | list | help（列出有哪些模式、各跑什麼、參數）
+#   數字    向後相容 = full 的 cycles（`cycle_test.py 1 5 40`、Mission 後端都不帶模式）
+# 用法:   cycle_test.py <模式> <次數> [其他]     例: cycle_test.py crane 10
+# 整併沿革: crane 取代舊 mission_run.py、arm 取代舊 cyc.py/cyc10/cyc20/arm_cycle.py。
+#   共用同一份 ask/field/height/座標自動判定/raw_x 監看 ⇒ mission_run 的
+#   「座標過期、讀 roll 非 raw_x」bug 在 crane 模式從結構上不存在。
+# ============================================================================
+_MODES = {
+    "full":  "完整清潔週期:頂端下行 N 步×step_cm + 拉回。參數 [cycles] [steps] [step_cm] [roll_trip] [diff_trip]",
+    "crane": "純吊機頂↔底來回 + 每趟姿態統計(讀 raw_x)。參數 [trips]",
+    "arm":   "手臂清潔動作耐久(壓上→滑台掃→收)。參數 [cycles] [rail_cm(0=不加滑台)] [slot=RIGHT|LEFT|CENTER]",
+}
+def _print_modes():
+    print("cycle_test.py 模式:")
+    for m, d in _MODES.items():
+        print("  %-6s %s" % (m, d))
+    print("用法: cycle_test.py <模式> <次數> [...]   例: cycle_test.py crane 10")
+    print("      不帶模式而給數字 = full(向後相容): cycle_test.py 1 5 40")
+if len(sys.argv) > 1 and sys.argv[1] in ("modes", "list", "help", "--help", "-h"):
+    _print_modes(); sys.exit(0)
+if len(sys.argv) > 1 and sys.argv[1] in _MODES:
+    MODE = sys.argv[1]; del sys.argv[1]   # 吃掉模式字,後面 sys.argv[n] 與 full 原定義對齊
+else:
+    MODE = "full"                          # 沒給模式 = full(向後相容)
 
 CYCLES    = int(sys.argv[1]) if len(sys.argv) > 1 else 1
 STEPS     = int(sys.argv[2]) if len(sys.argv) > 2 else 5
@@ -628,6 +666,124 @@ def cleanup():
           % (FAN_OFF, DOWN_HZ, fan(FAN_OFF), ask(CRANE, "set_motion_hz %d" % DOWN_HZ, 15)))
 
 
+# ============================================================================
+# crane / arm 模式(2026-09-10 整併)。放在 full 模式主程式之前:非 full 就在這裡
+# 跑完並 sys.exit,不會落到下方的完整清潔週期。full 模式的程式碼完全未改動。
+# ============================================================================
+def run_crane():
+    """crane 模式:純吊機頂↔底來回 + 每趟姿態統計。
+    複用 monitored_crane_move ⇒ 讀 raw_x、座標由 resolve_zero_convention 自動判定、
+    與 full 同一套中止門檻。**取代舊 mission_run.py**(其座標過期/讀 roll 的 bug 這裡不存在)。"""
+    TRIPS = int(sys.argv[1]) if len(sys.argv) > 1 else 10
+    resolve_zero_convention()
+    print("吊機來回:%d 趟  頂 %d ↔ 底 %d cm(離底高度)  "
+          "中止 |roll|>%.1f° / 左右差>%.0fcm(連續 %d 筆) / tension_valid=0"
+          % (TRIPS, TOP, BOTTOM, ROLL_TRIP, DIFF_TRIP, DIFF_PERSIST))
+    st0 = ask(CRANE, "status", 10)
+    cur = height(field(st0, "length_left"))
+    if cur is None:
+        print("🔴 讀不到吊機位置"); sys.exit(1)
+    if not (abs(cur - TOP) <= TOL or abs(cur - BOTTOM) <= TOL):
+        print("🔴 起點 %.0f cm 不在任一端點(頂 %d±%d / 底 %d±%d)——不猜方向,請先手動移到端點。"
+              % (cur, TOP, TOL, BOTTOM, TOL)); sys.exit(1)
+    print("起點高度 %.0f cm\n%3s %4s %7s %7s %8s %7s  結果"
+          % (cur, "趟", "方向", "秒", "roll均", "roll max", "出帶%"))
+    allr = []
+    for t in range(1, TRIPS + 1):
+        for _half in (0, 1):
+            st_ = ask(CRANE, "status", 5)
+            cur = height(field(st_, "length_left"))
+            if cur is None:
+                print("\n🔴 中止:讀不到吊機位置。現場保留。"); sys.exit(1)
+            if cur >= TOP - TOL:
+                verb, cm, label = "pay_out", int(cur - BOTTOM), "下"
+            elif cur <= BOTTOM + TOL:
+                verb, cm, label = "retract", int(TOP - cur), "上"
+            else:
+                print("\n🔴 中止:高度 %.0f 不在端點,無法判定方向。現場保留。" % cur); sys.exit(1)
+            if cm <= 0:
+                print("\n🔴 中止:算出移動量 %d 非正值。現場保留。" % cm); sys.exit(1)
+            timeout = int(cm / 2) + 60         # 依行程算,涵蓋加減速與匯流排爭用
+            res, st, dur = monitored_crane_move(verb, cm, "第%d趟%s" % (t, label), timeout)
+            if st:
+                allr.append(st["mx"])
+                print("%3d %4s %7.1f %7.2f %8.2f %6.0f%%  %s"
+                      % (t, label, dur, st["avg"], st["mx"], st["outpct"], res[:36]))
+            else:
+                print("%3d %4s %7.1f      -   無取樣  %s" % (t, label, dur, res[:36]))
+            if abort_reason or not res.startswith("OK"):
+                print("\n🔴 中止:%s" % (abort_reason[0] if abort_reason else res))
+                print("   現場保留,未自動復位。"); sys.exit(1)
+    print("\n=== %d 趟(%d 次橫越)完成 ===  各趟最大|roll| 的最大值 %.2f° / 平均 %.2f°"
+          % (TRIPS, TRIPS * 2, max(allr) if allr else -1.0,
+             (sum(allr) / len(allr)) if allr else -1.0))
+
+
+def run_arm():
+    """arm 模式:手臂清潔動作耐久(壓上→滑台掃→收)。**取代舊 cyc.py/cyc10/cyc20/arm_cycle.py**。
+    直連 motor_api(WROBOT 主機 :9527);其餘走本體 :5001。"""
+    CYC  = int(sys.argv[1]) if len(sys.argv) > 1 else 10
+    RAIL = int(sys.argv[2]) if len(sys.argv) > 2 else RAIL_CM
+    SLOT = sys.argv[3].upper() if len(sys.argv) > 3 else ARM_SLOT
+    if SLOT not in ("LEFT", "CENTER", "RIGHT"):
+        print("🔴 slot 必須是 LEFT/CENTER/RIGHT"); sys.exit(1)
+    TOOL = {"RIGHT": "滾筒", "LEFT": "刮刀", "CENTER": "CENTER"}[SLOT]
+    try:
+        ms = socket.create_connection((WROBOT[0], 9527), timeout=5); ms.settimeout(120)
+    except Exception as e:
+        print("🔴 連不到手臂 motor_api %s:9527 (%s) —— 手臂(motor_api)沒起?" % (WROBOT[0], e))
+        sys.exit(1)
+    mf = ms.makefile("rwb", buffering=0)
+    def mc(x):
+        mf.write((x + "\n").encode()); return mf.readline().decode(errors="replace").strip()
+    def arm_pose():
+        a = re.search(r"\[M1\] pos=([-\d.]+) vel=([-\d.]+) tau=([-\d.]+).*?\[M2\] pos=([-\d.]+)", mc("STATUS"))
+        return (float(a.group(1)), float(a.group(3)), float(a.group(4))) if a else (None, None, None)
+    def cups():
+        v = [int(x) for x in re.findall(r"p[5-8]=(-?\d+)", ask(WROBOT, "status", 15))]
+        return v if len(v) == 4 else None
+    _sweep_desc = ("滑台 0-%d-0" % RAIL) if RAIL > 0 else "不加滑台"
+    print("=== 手臂清潔 %d 週期:壓上(%s) → %s → 收 ===" % (CYC, TOOL, _sweep_desc))
+    t_all = time.time()
+    for n in range(1, CYC + 1):
+        t0 = time.time()
+        mc("M1 ENABLE"); mc("M2 ENABLE"); time.sleep(0.5)   # PARK 會停用馬達,每輪重開
+        ask(WROBOT, "brush on", 20)
+        td = time.time(); rd = mc("DEPLOY 520 %s" % SLOT); td = time.time() - td
+        time.sleep(1.5)
+        p_dep, tau_dep, m2_dep = arm_pose()
+        # DEPLOY 壓玻璃時本來就回 ERR,用實際姿態判有沒有真的壓上(θ 0.55~0.75、tau>8)
+        if p_dep is None or not (0.55 < p_dep < 0.75 and tau_dep > 8.0):
+            print("#%-2d 🔴 手臂沒有壓上  θ=%s tau=%s  DEPLOY回=%s"
+                  % (n, p_dep, tau_dep, rd[:40]))
+            ask(WROBOT, "brush off", 20); mc("PARK"); break
+        if RAIL > 0:
+            t1 = time.time(); ask(WROBOT, "rail %d" % RAIL, 60); t1 = time.time() - t1
+            t2 = time.time(); ask(WROBOT, "rail 0", 60);        t2 = time.time() - t2
+        else:
+            t1 = t2 = 0.0                                    # 不加滑台:壓上後直接收
+        t3 = time.time(); mc("PARK");                       t3 = time.time() - t3
+        time.sleep(1.0); ask(WROBOT, "brush off", 20)
+        c = cups()
+        if c is None:
+            print("#%-2d 🔴 吸盤壓力讀不到(status 解析不到 4 顆)—— 視同失敗" % n); mc("PARK"); break
+        bad = [i + 5 for i, v in enumerate(c) if v > -50]
+        _sweep = ("掃 %.1f/%.1f" % (t1, t2)) if RAIL > 0 else "無滑台"
+        print("#%-2d 壓上 %.1fs θ=%.4f tau=%+6.2f | %s | 收 %.1fs | 吸盤 %s | %.1fs%s"
+              % (n, td, p_dep, tau_dep, _sweep, t3, " ".join(str(v) for v in c),
+                 time.time() - t0, "" if not bad else "  🔴 吸盤 %s 失壓" % bad))
+        if bad:
+            print("🔴 中止:吸盤失壓"); break
+        time.sleep(1.0)
+    print("=== 結束,總耗時 %.0fs ===" % (time.time() - t_all))
+
+
+if MODE == "crane":
+    run_crane(); sys.exit(0)
+if MODE == "arm":
+    run_arm();   sys.exit(0)
+# MODE == "full":落到下方既有的完整清潔週期程式碼(未改動)
+
 print("週期測試：%d 週期 × (下行 %d 步 × %dcm = %dcm @%dHz) + 拉回 @%dHz"
       % (CYCLES, STEPS, STEP_CM, STEPS * STEP_CM, DOWN_HZ, UP_HZ))
 print("中止門檻：|roll|>%.1f°（連續 %d 筆，可自動修正） / 左右差>%.0fcm 連續 %d 筆 / tension_valid=0 / 任一指令非 OK\n"
@@ -642,7 +798,64 @@ if L0 is None or abs(L0 - TOP) > TOL:
 ws0 = ask(WROBOT, "status", 10)
 if "state=ready" not in ws0 and "state=idle" not in ws0:
     print("🔴 本體狀態非 ready/idle：%s" % ws0[:90]); sys.exit(1)
-print("起點 L=%.0f  本體 %s\n" % (L0, re.search(r"state=\w+", ws0).group(0)))
+print("起點 L=%.0f  本體 %s" % (L0, re.search(r"state=\w+", ws0).group(0)))
+
+# 🔴 [2026-09-10] 把「這一輪的平衡實際走哪條路徑」印進抬頭。
+#
+# 為什麼要有：2026-09-04 那趟 `down on` **整趟資料不可比**，原因就是平衡當時走的
+# 不是以為的那條 —— 而當時的 log 從頭到尾沒有一個字提到平衡來源。
+# 事後想確認「那一輪到底是哪種模式」時，沒有任何證據可查。
+#
+# 🔴 印的是**實際**來源，不是設定值。兩者不同，判準與吊機 main.cpp:1647 同一行：
+#       use_imu = (balance_source == imu) && imu_roll_fresh
+#   `balance_source=imu` 只代表「想用 IMU」；roll 一過期，吊機每個 tick 都會
+#   自動退回計米器，而 `balance_source` 那個欄位**不會跟著變**。
+#   ⇒ 只印設定值等於在 log 裡留下一句可能是假的話。
+_bsrc  = re.search(r"balance_source=(\w+)", st0)
+_bfrsh = re.search(r"imu_roll_fresh=(\d)", st0)
+_bage  = re.search(r"imu_roll_age_ms=(-?\d+)", st0)
+_ben   = re.search(r"balance_enabled=(\d)", st0)
+_want  = _bsrc.group(1) if _bsrc else "?"
+_fresh = (_bfrsh.group(1) == "1") if _bfrsh else False
+if _ben and _ben.group(1) == "0":
+    print("運動中平衡：🔴 **停用**（balance_enabled=0）—— 本輪全程不做平衡修正")
+elif _want == "imu" and _fresh:
+    print("運動中平衡：AUTO ⇒ 實際走 **IMU**（roll age %s ms / 門檻 750）"
+          % (_bage.group(1) if _bage else "?"))
+elif _want == "imu":
+    print("運動中平衡：AUTO 但 roll **已過期**（age %s ms > 750）⇒ 實際走 **計米器**"
+          % (_bage.group(1) if _bage else "?"))
+    print("   📌 本輪與『IMU 平衡』的結果不可直接比較。要用 IMU 請先確認本體在推送 set_imu_roll。")
+elif _want == "meter":
+    # 🔴 [2026-09-10 per user]「mission IMU 的部分一定是 auto」
+    #
+    # MANUAL(計米器) 是為**地面作業**設的（機器落地時 roll 反映的是接地姿態，
+    # 拿它驅動平衡會跟地面打架）。而週期測試整趟都在半空中 ⇒ MANUAL 在這裡
+    # 只可能是地面作業之後忘了切回來。
+    #
+    # 🔴 **改成「動手設定」而不是「擋下來」**：擋下來只是把問題丟回給人，
+    #    而人在這個時間點正要開始跑一趟 20 分鐘的測試。本腳本本來就會接管
+    #    吊機的執行期參數（`set_motion_hz` 就是，:714/:958），多接管一個同性質。
+    # ⚠️ **但一定要大聲說**——靜默改掉操作者刻意設過的值，是另一種形式的說謊。
+    print("運動中平衡：MANUAL(計米器) —— 本腳本要求 AUTO，正在改…")
+    _fix = ask(CRANE, "set_balance_source imu", 10)
+    _re  = ask(CRANE, "status", 10)
+    _rs  = re.search(r"balance_source=(\w+)", _re)
+    if _rs and _rs.group(1) == "imu":
+        _rf = re.search(r"imu_roll_fresh=(\d)", _re)
+        _ra = re.search(r"imu_roll_age_ms=(-?\d+)", _re)
+        _ok = _rf and _rf.group(1) == "1"
+        print("   ✅ 已改為 AUTO ⇒ 實際走 **%s**（roll age %s ms / 門檻 750）"
+              % ("IMU" if _ok else "計米器（roll 過期）",
+                 _ra.group(1) if _ra else "?"))
+        print("   📌 **不會改回去** —— 跑完機器在半空中／頂端，AUTO 才是該有的狀態。"
+              "地面作業要用 MANUAL 請跑完再自己切。")
+    else:
+        print("   🔴 改不動（回覆 %s，複驗 %s）—— 本輪仍走計米器，與 AUTO 的結果不可比。"
+              % (_fix.strip()[:40], _rs.group(1) if _rs else "?"))
+else:
+    print("運動中平衡：🔴 讀不到 balance_source，st0=%s" % st0[:80])
+print("")
 
 # 🔴 [2026-09-02] 真空幫浦在不在，開跑前必須實際回讀。
 #
