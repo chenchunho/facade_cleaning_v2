@@ -439,7 +439,10 @@ private:
     static constexpr const char* ARM_IP   = "127.0.0.1";
     static constexpr int         ARM_PORT = 9527;
 
-    // PQW relay channels (slave 12, now 16CH physically)
+    // PQW relay channels (slave 12). Board is physically **8CH** — see PQW_TOTAL_CH
+    // below. [2026-09-12] The old "now 16CH physically" note here contradicted
+    // PQW_TOTAL_CH=8 twenty lines down; it was left over from the 2026-07-24 bump
+    // that the 2026-09-10 correction reverted. Channel map: .claude/HARDWARE.md §3.2A.
     // [2026-08-29 merge 6523b54] CH_BRUSH 15 → 5：對方實體確認 15 是 2026-07-24 誤改、
     //   導致滾筒一直不轉。⚠ 本檔原本記的是「2026-07-24 per user: 5→15, arm now
     //   physically installed」——兩邊都聲稱有實體依據，以實機跑過的那份為準。
