@@ -4,6 +4,10 @@
 > 取代 2026-08-13 快照的 `ONBOARDING.md`。
 > 程式碼與 git log 若與此不符,以程式碼為準,並回頭更新本檔。
 > 首版:2026-09-12,基線 commit `bbbc425`。日常進度在 `.claude/work_log.md`。
+> ✅ **2026-09-12 全文以腳本對原始碼驗證過**(行數/區段行號/埠/指令數/常數/引用計數共 37 項)。
+> 行數與吊機 §3.2 區段行號**逐項命中**;修正了 7 項(指令數、v1 死碼分類、驅動清單、
+> `start_*.sh` 未版控、public_v2 單檔、cli_C 註解已修、cmd_ 計數語意)。
+> 🔴 **再次改動這些數字前請重跑比對,不要憑印象改。**
 
 ---
 
@@ -49,6 +53,11 @@
 只認 `exit/quit/status`,**其餘指令一律走 TCP**。本體 `exit` 會跑 `cmd_shutdown` → **關全部繼電器**。
 tmux 未安裝,`wr.sh` 不可用,用 `scripts/bench/launch.sh` 或 start_*.sh。
 
+🔴 **`start_body.sh` / `start_crane.sh` / `start_web.sh` 不在 repo 裡**(2026-09-12 確認),只活在兩台
+Pi 的 `~/run/`。**啟動參數沒有版控** —— 包含害過人的 `HOME_GROUND` 預設 256(頂零舊慣例,地歸零要
+傳 0,見 §3.3)、寫死的隧道 IP、佈署路徑 `.../web/`。Pi 的 SD 卡掛掉這些就沒了 → 見 §8。
+repo 內 `scripts/` 只有 build/bench/`crcmd.py`/`cams.sh`/`link_probe.sh`/`crane.sh`/`wr.sh`。
+
 ### 1.2 通訊協定
 
 行協定,回覆 `OK [data]` / `ERR <reason>` / `EVT <type> <data>`(非同步事件,GUI 靠前綴分流)。
@@ -67,9 +76,20 @@ tmux 未安裝,`wr.sh` 不可用,用 `scripts/bench/launch.sh` 或 start_*.sh。
 
 ## 2. 本體(Body)— `WashRobot`
 
-**規模**:`WASH_ROBOT.h` 3091 行 + `WASH_ROBOT.cpp` 5587 + `wash_robot_commands.cpp` + `dispatcher.cpp` 554;
-**102 個 `cmd_` 方法、~115 條指令**。一個 class 扛全部。`main.cpp`(149 行)只做 TCP 伺服 + 快/慢
-路徑分派(`is_fast` 同步、其餘丟 worker 執行緒),乾淨。
+**規模**:`WASH_ROBOT.h` 3091 行 + `WASH_ROBOT.cpp` 5587 + `wash_robot_commands.cpp` + `dispatcher.cpp` 554。
+一個 class 扛全部。`main.cpp`(149 行)只做 TCP 伺服 + 快/慢路徑分派(`is_fast` 同步、其餘丟 worker
+執行緒),乾淨。
+
+**指令/方法計數(2026-09-12 以腳本實測,勿憑印象改)**:
+
+| 量 | 數 | 說明 |
+|---|---|---|
+| dispatcher 指令(去重 `cmd == "…"`) | **99** | 其中 **15 條已掏空**成 `ERR removed_in_v2` 一行 → 實際有行為的 **84** |
+| `cmd_` header 宣告 | **102** | |
+| `cmd_` .cpp 實際定義 | **90** | 11 在 `WASH_ROBOT.cpp` + 79 在 `wash_robot_commands.cpp` |
+| 差額 = **死宣告** | **12** | header 沒跟著掏空指令一起清(清單見 §2.3) |
+
+`FAST_CMDS` 9 條:`ping/status/pause/resume/continue/skip/emergency_stop/reset/zdt_release_stall`。
 
 ### 2.1 職責拆解
 
@@ -98,9 +118,19 @@ tmux 未安裝,`wr.sh` 不可用,用 `scripts/bench/launch.sh` 或 start_*.sh。
 
 ### 2.3 已知問題
 
-- 🔴 **v1 遺留死碼**:指令面含大量 v1 走行機器人殘留(`wheels`/`cross_obstacle_*`/
-  `step_*_sweep_ba`/`run_avoid`/`run_depth_avoid`/`attach`/`detach`/sync-alt 步態),v2 吊掛式多半用不到。
-- `crane_cli_` 三條連線分散;`FrameAnalyzer` 相機樁未整合(`obstacle_detect` 旗標預設 OFF)。
+**v1 遺留分兩類,別混為一談**(2026-09-12 實測釐清,先前本節高估了待砍量):
+
+- ✅ **已掏空(15 條)** —— dispatcher 只剩 `return "ERR removed_in_v2"` 一行,**不是待砍死碼**:
+  `wheels` `wheels_attached` `dm2j_group` `dm2j_zero` `tilt_mode` `confirm_balance` `move`
+  `obstacle_detect` `obstacle_check` `obstacle_response` `run_avoid` `balance_calibrate_{start,record,abort,status}`。
+  🟡 **但 header 的 12 條 `cmd_` 宣告沒跟著清**(同名,少 `move`/`obstacle_check`/`obstacle_response`
+  加上 `cmd_wheels_attached`)→ 最便宜的一刀就是刪這 12 行宣告。
+- 🔴 **仍有實作、真的可砍(v2 吊掛式用不到)**:`attach` / `detach` /
+  `cross_obstacle_up` / `cross_obstacle_down` / `run_depth_avoid` / `depth_avoid_stop` /
+  `depth_avoid_continue` / `step_up_sweep_ba` / `step_down_sweep_ba` / `step_up_sync` / `step_down_sync`
+  (實作集中在 `wash_robot_commands.cpp` 188 / 316 / 2769 / 2795 / 2825 / 2851 附近)。
+
+其他:`crane_cli_` 三條連線分散;`FrameAnalyzer` 相機樁未整合(`obstacle_detect` 已掏空,旗標形同關閉)。
 
 ---
 
@@ -115,7 +145,7 @@ tmux 未安裝,`wr.sh` 不可用,用 `scripts/bench/launch.sh` 或 start_*.sh。
 | cli_A (.30) | SE3 左變頻 slave1;**中繩絞盤 MH300**(已裝,捲水管+隧道電纜;程式碼仍為 CLV900 `inverter` slave3,**驅動/命名待對齊**,實際匯流排/slave 待確認) |
 | cli_B (.31) | SE3 右變頻 slave2 |
 | cli_M (.34) | SD76 計米 左1 / 右2 / **中4**(實體已裝,per user;但 runtime `dev_meter_middle=0`/`length_middle=ERR` **讀不到**,待對) |
-| cli_C (.33) | X518 DSZL 張力 左CH2 / 右CH1(直連 `:502`,原生 Modbus-TCP;程式碼註解舊寫 `.32`,runtime 為 `.33`) |
+| cli_C (.33) | X518 DSZL 張力 左CH2 / 右CH1(直連 `:502`,原生 Modbus-TCP。✅ 2026-09-01 兩台併一台,碼裡註解已正確且留有「不要再新增第二個 IP 常數」警語) |
 | cli_W (.32) | ZS-DIO 進水閥(獨佔) |
 | cli_D | **已退役**(2026-09-01) |
 
@@ -195,9 +225,9 @@ pivot)。已移除細掃/th_min/剛度守衛。8 Nm 雙工具 + 滑台 0–100�
 
 | 目錄 | 角色 |
 |---|---|
-| `web_backend/` | GUI 橋接。**v2 (public_v2) 有安全閘門**(手臂武裝互鎖 + 頁面級「危險操作」閘門,不靠 window.confirm;PARK/STOP/急停/收回/繼電器/按住式不鎖)。v1 停機。⚠️ 本機目錄 `web_backend/`,**Pi 上佈署為 `.../web/`**(start_web.sh 寫死) |
+| `web_backend/` | GUI 橋接(`server.js` 544 行)。**v2 (public_v2) 有安全閘門**(手臂武裝互鎖 + 頁面級「危險操作」閘門,不靠 window.confirm;PARK/STOP/急停/收回/繼電器/按住式不鎖)。⚠️ v2 是**單檔 `index.html` 298 KB**(HTML+CSS+JS 全塞一起);v1 反而有拆(`app.js` 95 K / `index.html` 51 K / `style.css` 27 K)但已停機。⚠️ 本機目錄 `web_backend/`,**Pi 上佈署為 `.../web/`**(start_web.sh 寫死) |
 | `Linux_test/` | `cycle_test.py`(full/arm/mission;`FCV_WROBOT_HOST`/`FCV_CRANE_HOST`/`FCV_TOP_CM`/`FCV_ARM_NM`;高度帶 `FCV_SKIP_BANDS` opt-in 已放棄)+ 各上機腳本 |
-| `user_lib/` | 17 支裝置驅動(ZDT、JC100、SD76、SE3/MH300/CLV900、DSZL、PQW、ZS-DIO、QX_DO24、DM2J、WT901、XKC、DY500、FrameAnalyzer…) |
+| `user_lib/` | **16 支成對驅動**(.cpp+.h)+ 2 個純 header(`SerialPort.h`、`damiao.h`)。清單:ZDT、JC100、SD76、SE3、MH300、CLV900、DSZL_107、PQW、ZS-DIO、QX_DO24、DM2J、WT901、XKC、DY_500、FrameAnalyzer、**DIHOOL_control**。🔴 `DIHOOL_control` **全樹 0 引用 = 死驅動**;`DY_500` 只被 `WASH_ROBOT.h` include(使用者確認硬體沒用)→ 兩者都進 §8 |
 | `transport/` | TCP_client / TCP_server / Serial_port |
 | `common/` | endpoints.h(端點覆寫)、log_utils、profile |
 | `harness/` | 假匯流排回放測試(不上機驗驅動/流程) |
@@ -237,14 +267,20 @@ pivot)。已移除細掃/th_min/剛度守衛。8 Nm 雙工具 + 滑台 0–100�
 **決策(2026-09-12,jim)**:本體/吊機**暫不做完整模組拆解**(單人開發、上機 bring-up 中、時序
 bug 風險高);改做**低風險針對性瘦身**,每刀有 baseline `bbbc425` 可回。
 
-| 優先 | 元件 | 動作 | 效益 |
+📌 **2026-09-12 以腳本比對原始碼後校準過**(原先高估了 v1 死碼量,見 §2.3)。
+
+| 優先 | 元件 | 動作 | 效益 / 實測量 |
 |---|---|---|---|
-| 🔴 | 本體 | 砍 v1 死碼(wheels/cross_obstacle/步態…,對照 `.claude/reference/v1_v2_feature_map.md`) | 指令面 115 大減 |
+| ✅ 最便宜 | 本體 | 刪 header 裡 **12 條死 `cmd_` 宣告**(對應已掏空指令) | 純刪 12 行,零風險 |
+| ✅ 最便宜 | user_lib | 刪 **`DIHOOL_control.{h,cpp}`**(全樹 0 引用);`DY_500` 硬體沒用,拆 include | 刪 2 支驅動 |
+| ✅ | 手臂 | 刪 `PalletizerController.h`(352 行 0 引用)+ 死常數 `FINE_*`/`STIFF_*`/`THETA_MIN`;退役舊 DEPLOY;力控參數搬進 `damiao.cfg` | 免重編調力 |
+| 🔴 | 本體 | 砍**仍有實作**的 v1 走行殘留:`attach`/`detach`/`cross_obstacle_*`/`run_depth_avoid`/`depth_avoid_*`/`step_*_sweep_ba`/`step_*_sync`(對照 `.claude/reference/v1_v2_feature_map.md`) | 99 → 約 88 條;**掏空那 15 條已不必再砍** |
 | 🔴 | 吊機 | `crane_settings.json` 持久化執行期參數 | 解重啟忘設坑 |
 | 🔴 | 共通 | 集中網路設定(隧道/WiFi 一鍵切,不改腳本) | 解手改 IP |
-| ✅ | 手臂 | 刪 `PalletizerController.h` + 死常數;退役舊 DEPLOY;力控參數搬進 `damiao.cfg` | 免重編調力 |
-| ✅ | 吊機 | 中繩驅動對齊 CLV900→MH300(實裝);查中繩計米 runtime ERR(實體已裝);退役 cli_D;`set_*`×30 收斂成 set/get_param | 噪音減、對齊實機 |
+| 🔴 | **佈署** | **`start_*.sh` 收進 repo `scripts/run/`**,Pi 端改成 symlink/複製 | 啟動參數(HOME_GROUND、IP、web 路徑)進版控,見 §1.1 |
+| ✅ | 吊機 | 中繩驅動對齊 CLV900(23 處)→ MH300(18 處,實裝);查中繩計米 runtime ERR;退役 cli_D(殘留 3 處);`set_*`×29 收斂成 set/get_param | 噪音減、對齊實機 |
 | ✅ | 文件 | ONBOARDING 抽踩坑後歸檔、更新引用;frame_capture + FrameAnalyzer 一起定去留 | — |
+| 🟡 | web | `public_v2/index.html` 298 KB 單檔拆成 html/css/js | 可讀性;非阻塞 |
 | 🟡 | 本體 | header 3091 行瘦身;crane 三連線合併(僅在反覆出事時) | — |
 
 **何時再考慮完整拆解**:機器能穩定清潔後、或多人開發、或某模組成為反覆 bug 來源。
