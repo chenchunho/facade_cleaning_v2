@@ -1,50 +1,65 @@
 # Work Log
 
-## 🆕 2026-09-12 文書日:軟/硬架構文件成對、.claude 整理、巨檔輪替壓縮、**24V blip 根因確認**
+## 🆕 2026-09-12 文書日:軟/硬架構文件成對、.claude 整理、巨檔壓縮、**24V blip 根因確認**、ONBOARDING 歸檔、瘦身第一刀
 
-**24V blip 根因(per user 確認)**:全系統**只有一顆 LRS-150-24(150 W)**,而**手臂 M1(DM10010L)+ M2 也接在它上面**,
-與 ZDT×4/抱閘/滾筒×2/幫浦×2/繼電器/閥共用。M1 15 Nm 壓橫桿堵轉的峰值電流直接拉垮 24V → 繼電器/幫浦掉、ZDT 計數器亂。
-軟體降力 8 Nm(昨天)是緩解;**治本要把手臂/幫浦分離供電或加大 24V**。詳 `HARDWARE.md` §5。
+### 已完成
 
-**今日產出**:`SOFTWARE.md`(as-is 軟體架構,取代 ONBOARDING)+ `HARDWARE.md`(硬體架構,per user 校正 5 點)成對;
-.claude/ 整理為 reference/plans/archive(commit 1ecc6be);changelog 按月輪替 1.98MB→316KB + 往後每條瘦身規則(per user);
-work_log 07-22~09-09 壓成摘要 #8–#15(927KB→293KB,81 條待辦保全附表待併入總表);CLAUDE.md 索引同步;
-refactor_plan 標 ⏸ 暫緩(jim 拍板:本體/吊機暫不完整拆解,改針對性瘦身)。
+**🔴 24V blip 根因(per user 確認)**:全系統**只有一顆 LRS-150-24(150 W)**,而**手臂 M1(DM10010L)+ M2 也接在它上面**,
+與 ZDT×4/抱閘/滾筒×2/幫浦×2/繼電器/閥共用。M1 15 Nm 壓橫桿堵轉的峰值電流拉垮 24V → 繼電器/幫浦掉、ZDT 計數器亂。
+軟體降力 8 Nm(昨天)是緩解;**治本要分離供電或加大 24V**。詳 `HARDWARE.md` §5。
+📌 設計階段其實早有預警(總表「LRS-150-24 容量 6.5A 對現有負載偏緊」),昨天那次等於把它應驗。
+
+**文件體系**(commit `1ecc6be` / `0d8408d` / `6b39f74` / `48e3b5b`)
+- `SOFTWARE.md`(as-is 軟體架構)+ `HARDWARE.md`(硬體架構,per user 校正 5 點)成對,取代 ONBOARDING。
+- `.claude/` 整理為 reference/plans/archive;changelog 按月輪替 1.98MB→316KB + 往後每條瘦身(per user);
+  work_log 07-22~09-09 壓成摘要 #8–#15(927KB→293KB);refactor_plan 標 ⏸ 暫緩(jim 拍板:改針對性瘦身)。
+- **SOFTWARE.md 全文對原始碼驗證 37 項**:行數 8/8、吊機 §3.2 九個行號區段 9/9 **逐項命中**;
+  修正 7 項(指令數 ~115→**99**、v1 死碼分類、驅動清單漏 DIHOOL、`start_*.sh` 未版控、public_v2 單檔、
+  cli_C 註解已修、cmd_ 計數語意)。🔴 **再動這些數字前請重跑比對。**
+- **壓縮保全清單 81 條核對清空**:20 條已涵蓋/已結案、2 條前提消失作廢、59 條併入總表新節(分 6 群)。
+- **ONBOARDING 歸檔**:21 項關鍵踩坑比對後 **15 項別處查不到** ⇒ 抽成 `reference/engineering_pitfalls.md`
+  (驅動踩坑 6 類 + 工程方法 5 類 + 8 條方法論教訓);原檔凍結為 `archive/ONBOARDING-2026-08-13.md`。
+  🔴 **§4 v1↔v2 機械差異、§6 步態演進無可替代,整份留在歸檔檔** —— `motion_flow.md` 至今是 v1 快照。
+
+**瘦身第一刀(純刪,零行為改動)**
+`PalletizerController.h`(352 行)、`DIHOOL_control.{h,cpp}`(0 引用且本來就沒進 build 清單)、
+手臂死常數 `FINE_*`×4 + `STIFF_*`×5、本體 header 12 條死 `cmd_` 宣告(102→**90**,與定義完全對齊)。
+✅ **本機兩層驗證**:① 7 支原始碼 `g++ -fsyntax-only` 全過零錯誤;② 預處理輸出比對 HEAD
+(harness `prove_noop.sh` 的方法論,改用 `g++ -E -P`)—— 本體差異**恰好只有那 12 行**、手臂**恰好只有那 9 個**
+(外加 3 行 `__assert_fail` 的 `__LINE__` 位移,非語意)、吊機**完全相同** ⇒ 對編譯器無副作用。
+
+### 🔴 三個被推翻的判斷(重要,避免重犯)
+
+1. **`DEPLOY_F_THETA_MIN` 不是死常數** —— 我早上把它列進死常數,實際它是 `DEPLOY_F [θmin]` 的預設值兼
+   `th_min >= th_max` 驗證下界(`main_api.cpp:3031`),**刪了編不過**。行為用途雖已於 09-11 移除,
+   要清得連指令簽名一起改。
+2. **`removed_in_v2` 那 15 條不同質** —— 我早上寫「已掏空、不必再砍」,但 ONBOARDING §11 記著
+   **重心校正 5 條 + 窗框避障 4 條是「暫時 stub 不是廢棄決定」**,GUI 面板 per user 明確要求保留。
+   SOFTWARE.md §2.3 已改成兩類表(真退役 6 條可刪 / 暫時 stub 9 條要留)。**差點把等著重做的接口當死碼砍了。**
+3. 🎯 **「本機不能 build」是假的** —— 本機有 **g++ 9.4.0**,能 `-fsyntax-only`、能產 x86_64 `.o`、
+   能做預處理等價比對,只是產不出 aarch64。已更正三處(`CLAUDE.md` harness 列、`harness/README.md`
+   開頭的 `apt install g++`、待辦總表「2026-07 那批從未編譯驗證」)。
+   ⇒ **`harness/` 等價比對工具其實一直可以跑**(設計上就是 x86_64 自己跟自己比,見 `build.sh` 抬頭),
+   卡著只是因為那句話沒人複驗。**下次動重構,這條驗證路是通的。**
+
+### per user 拍板
+
+- **8 Nm 對刮刀可接受** —— 滾筒與刮刀共用同一 target,**不為刮刀另訂力道目標**(別再提議拆)。
+- **DSZL-107 已校正、讀值準** —— 量測面全部結案(正負號＋量值＋線性度),我原判「線性度未驗」是過時的。
+  🔴 唯一遺留是**校出來的 scale 沒地方存**:存吊機端 setting/config;吊機端暫不規劃的話本體端也會用到,
+  介面走 **Web GUI 改數值**那個既有功能。**併入「吊機執行期參數不持久化」一起做**。
 
 ### 待完成
-- 🔴 **24V 供電治本**:量總負載/峰值、決定手臂/幫浦分離供電或換大 PSU(HARDWARE §5)。
-- ✅ ~~壓縮保全清單 81 條逐條核對~~ **當日完成**:20 條已涵蓋/已結案刪除、2 條前提消失作廢、
-  其餘併入待辦總表「🟡 2026-09-12 由歷史壓縮併入」一節(分 6 群:通訊匯流排/張力平衡/手臂力控幾何/
-  滑台M2機構/本體驅動流程/GUI)。順手更正總表一處自相矛盾(DSZL 那列標已修,但線性度子項其實未驗)。
-- ✅ ~~ONBOARDING.md 抽踩坑 → 歸檔、更新引用~~ **當日完成**:21 項關鍵踩坑比對後發現 **15 項別處
-  查不到** ⇒ 抽成 `reference/engineering_pitfalls.md`(驅動踩坑 6 類 + 工程方法 5 類 + 8 條方法論教訓);
-  ONBOARDING 全檔凍結為 `archive/ONBOARDING-2026-08-13.md`(🔴 **§4 v1↔v2 機械差異、§6 步態演進
-  仍無可替代** —— `motion_flow.md` 至今是 v1 快照);更新 CLAUDE.md ×2、per_program_cautions、
-  SOFTWARE.md ×3、程式碼註解 ×4(本體 1 / 吊機 3)。
-  🔴 **順帶修正今天自己的漏判**:SOFTWARE.md §2.3 原寫「15 條已掏空」,但 ONBOARDING §11 記著
-  其中**重心校正 5 條 + 窗框避障 4 條是「暫時 stub 不是廢棄決定」**,GUI 面板 per user 明確要求保留
-  ⇒ §2.3 已改成兩類表(真退役 6 條可刪 / 暫時 stub 9 條要留)。
-- ✅ ~~針對性瘦身第一刀~~ **當日完成(純刪,零行為改動)**:`PalletizerController.h`(352 行)、
-  `DIHOOL_control.{h,cpp}`(0 引用且本來就沒進 build 清單)、手臂死常數 `FINE_*`4+`STIFF_*`5、
-  本體 header 12 條死 `cmd_` 宣告(102→90,與定義完全對齊)。
-  🔴 **`THETA_MIN` 查證後不能刪** —— 它是 `DEPLOY_F [θmin]` 的預設值兼驗證下界(`main_api.cpp:3031`),
-  刪了編不過;行為用途雖已於 09-11 移除,要清得連指令簽名一起改。
-  🟡 **仍待**:`DY_500` 移除(在 body+crane 兩份 build 清單內,要改碼+改 build,**須上機驗證**);
-  本體 v1 死碼 11 條(對照 `reference/v1_v2_feature_map.md`)。
-  ✅ **本輪改動已本機驗證(兩層)**:① 7 支原始碼 `g++ -fsyntax-only` **全過零錯誤**;
-  ② **預處理輸出比對 HEAD**(harness `prove_noop.sh` 的方法論,改用 g++ `-E -P`):
-  本體差異**恰好只有那 12 行宣告**、手臂**恰好只有那 9 個常數**(外加 3 行 `__assert_fail` 的
-  `__LINE__` 引數位移,非語意)、吊機**完全相同**。⇒ **對編譯器而言沒有任何副作用**。
-  🟡 仍需上機做 aarch64 實建與部署(本機是 x86_64)。
 
-🎯 **順帶推翻一個錯誤前提:「本機不能 build」是假的。**
-  本機有 **g++ 9.4.0**,能 `-fsyntax-only`、能產 x86_64 `.o`、能做預處理等價比對 ——
-  只是產不出 aarch64 部署檔。受影響的三處記載已更正:`CLAUDE.md` harness 那列(原寫「本機缺 g++」)、
-  `harness/README.md` 開頭的 `apt install g++`、待辦總表「2026-07 那批從未編譯驗證」那列。
-  ⇒ **`harness/` 的等價比對工具其實一直可以跑**(它本來就設計成 x86_64 自己跟自己比,見 `build.sh` 抬頭),
-  之前卡著只是因為那句話沒人複驗。下次要動重構時這條路是通的。
-- 🔴 測完改回隧道 192.168.1(web WROBOT_IP、本體 FCV_EP_CRANE_HOST)——現暫全 WiFi。
-- 🟡 下次上機:先 `zdt_home feet`(09-11 最後一次 blip 後未復位);重跑 full 驗真 8 Nm。
+- 🔴 **24V 供電治本**:量總負載/峰值、決定手臂/幫浦分離供電或換大 PSU(`HARDWARE.md` §5)。
+- 🔴 **測完改回隧道 192.168.1**(web `WROBOT_IP`、本體 `FCV_EP_CRANE_HOST`)—— 現暫全 WiFi。
+- 🟡 **下次上機開頭**:先 `zdt_home feet`(09-11 最後一次 blip 後未復位)→ 重跑 full 驗真 8 Nm
+  → **本輪純刪改動的 aarch64 實建**(`build_body.sh` / 手臂 `compile.sh`)。
+- 🟡 **瘦身第二刀(須上機驗證)**:`DY_500` 移除(在 body+crane 兩份 build 清單內 + `WASH_ROBOT.h` 有 include);
+  本體 v1 死碼 11 條(對照 `reference/v1_v2_feature_map.md`)。
+- 🟡 `start_*.sh` 收進 repo `scripts/run/` —— 啟動參數(`HOME_GROUND` 預設 256、寫死 IP、web 佈署路徑)
+  目前只活在兩台 Pi 的 `~/run/`,**完全沒版控**。
+- 🟡 `motion_flow.md` §2 硬體表仍是 v1(總表「規範文件架構圖與程式碼脫節」)—— 純文書,可無機器進行。
 
 ## 🆕 2026-09-11(深夜④)full 又 24V blip:真因=15Nm override 沒降到 → 已補
 
