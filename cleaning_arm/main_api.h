@@ -184,8 +184,14 @@ public:
     // 📌 **刻意不再由 lr_half_range 對稱推導**：舊式 LEFT=-half+0.05 / RIGHT=+half-0.1，
     //   兩邊退讓量本來就不一樣大（0.05 vs 0.10）——那正是機構不對稱的證據，卻被硬塞
     //   進對稱模型。實測中點在 -0.2400、半幅 0.7716，與假設的 0(中點)/0.7275 都不符。
-    static constexpr float M2_SLOT_LEFT_RAD  = -1.0115f;  // 刮刀
-    static constexpr float M2_SLOT_RIGHT_RAD =  0.5316f;  // 滾筒
+    // 🔴 [2026-09-10 per user 手轉實測，各讀 5 次極差 0.0000] 重新定位：
+    //       刮刀(LEFT) = +0.1913   滾筒(RIGHT) = +0.8558
+    //   舊值(刮刀 -1.0115 / 滾筒 +0.5316)已失效 —— 疑似當日刮刀方向 11.5Nm 硬撐/硬推
+    //   後 M2 傳動(皮帶/聯軸器)滑動，編碼器↔實體對應改變(位移不均勻、且 auto-home
+    //   驅到的滾筒 +0.55 與手量 +0.86 差 18°，非單純零點漂移)。per user 拍板(a)直接用
+    //   新值。⚠️ 若之後貼牆吃高扭力又滑，這兩個值會再跑掉，屆時需先解決傳動滑動。
+    static constexpr float M2_SLOT_LEFT_RAD  =  0.1913f;  // 刮刀 (2026-09-10: -1.0115→+0.1913)
+    static constexpr float M2_SLOT_RIGHT_RAD =  0.8558f;  // 滾筒 (2026-09-10: 0.5316→+0.8558)
 
     // 🔴 [2026-09-02] 同樣兩個工作位置，改以**正向機械停點**為基準表示。
     //   實測（LR_CALIBRATE Phase 1）：正向停點 = **+0.7204**（tau 3.44，明確撞到）。
@@ -198,8 +204,12 @@ public:
     // ⚠️ **只用正向那一個停點**，不用「兩個停點取中點」的舊模型：實測負向走到
     //   −1.2831 仍在 0.5 rad/s 前進、tau 僅 −1.8（純摩擦），2 rad 預算用盡而 abort
     //   ⇒ **該側在可及範圍內沒有停點**，中點模型對這個機構不成立。
-    static constexpr float M2_SLOT_LEFT_FROM_STOP  = -1.7319f;  // 刮刀
-    static constexpr float M2_SLOT_RIGHT_FROM_STOP = -0.1888f;  // 滾筒
+    // [2026-09-10] 跟著上面新絕對值一起更新(FROM_STOP = RAD − 0.7204，沿用同一停點基準)：
+    //   刮刀 0.1913 − 0.7204 = −0.5291    滾筒 0.8558 − 0.7204 = +0.1354
+    //   ⚠️ 停點基準 0.7204 未重量；若傳動已滑動,停點本身也可能變,跑校正前這組僅供參考,
+    //      目前 lr_stop_valid=false 實際用的是上面的絕對 RAD 值。
+    static constexpr float M2_SLOT_LEFT_FROM_STOP  = -0.5291f;  // 刮刀 (2026-09-10)
+    static constexpr float M2_SLOT_RIGHT_FROM_STOP =  0.1354f;  // 滾筒 (2026-09-10)
     static constexpr float M2_SLOT_CENTER_FROM_STOP = -0.7204f; // CENTER（絕對 0 相對於停點）
 
     // ---- M2 / small motor constants (左右軸) --------------------------------
@@ -291,7 +301,7 @@ public:
     //    theta_contact < THETA_MIN  => 有東西擋著（09-03「吸不到」查明是橫桿）
     //  這兩個限是**手臂幾何**、不隨高度變，這正是它取代 wall_mm 的原因。
     // ============================================================
-    static constexpr float DEPLOY_F_TARGET_NM   = 15.0f;   // per user 2026-09-04 現場目視定案
+    static constexpr float DEPLOY_F_TARGET_NM   = 8.0f;    // [2026-09-11 per user] 15→8:降力道,刷到橫桿也無傷(偵測不可靠,改低力刷過)
     static constexpr float DEPLOY_F_TOUCH_NM    = 2.0f;    // 輕觸判定：超過此值視為接觸
     static constexpr float DEPLOY_F_TOL_NM      = 1.0f;    // 收斂容差
     // 09-04 三點實測的等效剛度：Dtau/Dtheta_target = 2.54/0.0343 = 74、2.15/0.0338 = 64。
@@ -319,17 +329,39 @@ public:
                                         DEPLOY_F_KP_EFF0_RIGHT };
     static constexpr float DEPLOY_F_SEEK_STEP   = 0.010f;  // rad，~4.3mm at tip
     static constexpr int   DEPLOY_F_SEEK_MAX    = 80;      // 步數上限（0.40 -> 1.20 用不到這麼多）
+    // 🔴 [2026-09-11 per user 提速,option B] 粗壓段:輕觸(TOUCH_NM)後,用大步+短 settle
+    //   快速把 tau 壓到「紮實接觸」DEPLOY_F_COARSE_NM,再交給 Step6 割線細收到 target。
+    //   舊版從輕觸 2Nm 直接割線收到 15,每步 RELAX_MS(1500) × 實測 3 步 = 4.5s。
+    //   粗壓用 press_hold_step_(即時設 hold_pos、只等 settle),80ms/步、幾步就到 ~9Nm,
+    //   收斂只剩 9→15 一步 ⇒ 省掉約 2 個 RELAX 週期(~3s)。
+    static constexpr float DEPLOY_F_COARSE_STEP      = 0.030f;  // rad,~13mm/step(粗壓,舊 seek 0.010)
+    static constexpr int   DEPLOY_F_COARSE_SETTLE_MS = 80;      // 80(60 會 overshoot,已退回)
+    static constexpr float DEPLOY_F_COARSE_NM        = 6.0f;    // [2026-09-11 per user] 13→6:配合 TARGET 8;粗壓不再衝到 13(撞力來源)
+    // [2026-09-11 per user「限縮距離、放精細」] 細掃(fine re-seek):粗掃輕觸後退開、
+    //   用小步重逼近,把 contact θ 量到 ±2mm(粗掃 0.030rad~13mm 分不出橫桿比玻璃近的 ~4mm)。
+    static constexpr float DEPLOY_F_FINE_STEP        = 0.005f;  // rad,~2mm/step(精量接觸距離)
+    static constexpr float DEPLOY_F_FINE_BACKOFF     = 0.045f;  // rad,退開 >1.5 粗步確保脫離接觸
+    static constexpr int   DEPLOY_F_FINE_SETTLE_MS   = 120;     // 細掃每步靜置(輕觸鬆弛很小)
+    static constexpr int   DEPLOY_F_FINE_MAX         = 24;      // 細掃步數上限(0.045/0.005≈9,留裕)
+    // [2026-09-11 per user「剛度判據」] 接觸後剛度探測:橫桿(硬鋼)命令再壓 tau 暴衝(Δtau/Δcmd 大);
+    //   玻璃隔著滾筒/工具有柔度,tau 上升慢。此量與滾筒接觸點無關 ⇒ 不像 contact θ 會飄。
+    //   contact θ 已證實不可靠(橫桿 0.55–0.60 與玻璃 0.58–0.59 重疊,見 work_log 2026-09-11)。
+    static constexpr float DEPLOY_F_STIFF_STEP       = 0.010f;  // rad,剛度探測每步(~4mm)
+    static constexpr int   DEPLOY_F_STIFF_N          = 3;       // 探測步數(最多壓 0.03rad)
+    static constexpr int   DEPLOY_F_STIFF_SETTLE_MS  = 120;     // 每步靜置
+    static constexpr float DEPLOY_F_STIFF_TAU_CAP    = 8.0f;    // Nm,tau 超過即停探測(硬物,別過壓)
+    static constexpr float DEPLOY_F_STIFF_THRESHOLD  = 150.0f;  // Nm/rad,剛度超此=硬物/橫桿→obstacle(玻璃 kp_eff 47–90)
     static constexpr int   DEPLOY_F_ITER_MAX    = 4;       // 壓力收斂迭代上限
     // 09-04 實測鬆弛：DEPLOY 520 t=0 讀 17.14、1 秒後 14.99（-2.15）；
     // 490 為 12.06 -> 10.60（-1.46）。**單次讀取會把值記錯**，必須等。
-    static constexpr int   DEPLOY_F_RELAX_MS    = 1500;
+    static constexpr int   DEPLOY_F_RELAX_MS    = 900;   // 900(700 會 overshoot,已退回)
     // [2026-09-04 per user「靠上牆要過很久滑台才會動」] 收尾複驗的等待。
     // 原本是再等一次完整的 RELAX_MS(1500)，但那**與迭代裡剛等過的 1500ms 重複**：
     // 50Hz 實測鬆弛都在壓上後 **1 秒內**收斂完（490 那次 -1.46 N·m、520 那次 -2.15 N·m），
     // 迭代的 1500ms 已經涵蓋。這裡只需要一個短暫的確認窗口。
     // 實測：指令送出 → rail 起動 13.59s，其中 2.00s 是腳本的重複 settle、
     // 1.5s 是本項、1.5s 是「29 次全部 iters=2」多出來的那輪修正。
-    static constexpr int   DEPLOY_F_FINAL_MS    = 300;
+    static constexpr int   DEPLOY_F_FINAL_MS    = 200;    // [2026-09-11] 300->200
     static constexpr int   DEPLOY_F_SEEK_SETTLE_MS = 150;  // 尋觸每步的靜置（輕觸鬆弛很小）
     // [2026-09-04] 0.05 -> 0.15（與 deploy_speed 同）。實測每個尋觸步驟花 ~1.4s 而非
     // 預估的 0.4s，原因在 move_to_slot() 是**從實際位置**起 ramp（move_cur = Get_Position()）：
@@ -355,7 +387,11 @@ public:
     //     這個門檻會誤擋。真要放心得補上半部的點。
     //   📌 若日後窗口被壓縮到不可用，替代判別是**接觸後的剛度**：橫桿是硬的、
     //     玻璃隔著工具有柔度，kp_eff 的斜率不一樣。目前不需要。
-    static constexpr float DEPLOY_F_THETA_MIN   = 0.565f;
+    // [2026-09-11 per user「兩個方法並行」] th_min=0.570 保留為**距離判據**:抓滾筒撞在
+    //   低處、contact θ<0.570 的橫桿(bar_test2 34/34 那種)。滾筒撞在高處 θ 飄進玻璃區間
+    //   (0.598,full 漏掉那種)則由 Step 4c **剛度判據**接手。橫桿任一條件成立即 obstacle;
+    //   玻璃 θ≥0.58 且柔 → 兩者皆不觸發。
+    static constexpr float DEPLOY_F_THETA_MIN   = 0.570f;
     // 🔴 [2026-09-04 per user] 0.95 → **1.10**。0.95 是我憑空給的占位值，
     //   當天實測**它擋住的不是異常，是一個合法的工作點**：
     //     `ERR cannot reach 15.0 Nm — 需要 theta=0.9581 超過上限 0.9500（tau 停在 12.45）`
@@ -534,7 +570,7 @@ private:
         // `M1 SET_DEPLOY_SPEED <v>` 在執行期調整——GUI 的 DEPLOY 按鈕只送
         // `DEPLOY <mm> <slot>`、不帶速度參數，所以唯有改這個預設值才影響得到它
         // （指令列仍可用第 4 個參數做單次覆蓋）。init() 會覆寫成實際採用值。
-        float deploy_speed { 0.15f };
+        float deploy_speed { 0.40f };   // [2026-09-11 per user] 0.35->0.40(安全上限);接近段加速
 
         std::atomic<bool> enabled  { false };
         std::atomic<bool> hold_en  { false };

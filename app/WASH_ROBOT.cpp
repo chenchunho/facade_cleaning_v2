@@ -403,6 +403,20 @@ bool WashRobot::init() {
     std::cout << "[OK] water-inlet watchdog started (max open "
               << (WATER_INLET_OPEN_MAX_MS / 1000) << "s)\n";
 
+    // [2026-09-10 per user] 真空幫浦 A/B 輪替 loop。累計目前這顆的 ON 時間，達
+    // g_pump_rotate_ms_ 就 make-before-break 換到另一顆（併聯管路，真空不斷）。
+    // 計時由 init 武裝（pump_active_since_ms_）；此處只起執行緒。
+    pump_rotate_running_.store(true);
+    pump_rotate_thread_ = std::thread(&WashRobot::pump_rotate_loop_, this);
+    std::cout << "[OK] pump A/B rotation started (每 "
+              << (PUMP_ROTATE_MS_DEFAULT / 60000) << " 分輪替，0=停用)\n";
+
+    // [2026-09-11] 上滑台 JOG 監看(deadman + 行程守衛)。只在 jog 中作用。
+    rail_jog_mon_running_.store(true);
+    rail_jog_mon_thread_ = std::thread(&WashRobot::rail_jog_monitor_loop_, this);
+    std::cout << "[OK] rail JOG monitor started (deadman "
+              << RAIL_JOG_DEADMAN_MS << "ms)\n";
+
     // [DISABLED 2026-05-15] crane_keepalive_loop_ thread no longer started.
     // Reason: 14t added it to prevent watchdog false-aborts during long
     // washrobot-side ops, but 14v further analysis showed the underlying bug
@@ -458,6 +472,26 @@ void WashRobot::stop() {
     if (water_inlet_open_ts_ms_.load() != 0) {
         std::cerr << "[water_inlet] stop(): valve still armed open — sending final close\n";
         set_water_inlet_(false);
+    }
+
+    // [2026-09-10] Stop pump-rotation loop. Turning the process off leaves the
+    // relay module's last state latched, so a mid-swap exit could strand BOTH
+    // A and B on (harmless — parallel manifold) or the wrong one on. Force both
+    // off here so the next boot starts from a known "all pumps off" state; init
+    // re-opens A. (One best-effort attempt each — process is shutting down.)
+    pump_rotate_running_.store(false);
+    if (pump_rotate_thread_.joinable()) pump_rotate_thread_.join();
+    pump_active_since_ms_.store(0);
+    pqw_.controlRelay(CH_PUMP_A, false);
+    pqw_.controlRelay(CH_PUMP_B, false);
+
+    // [2026-09-11] Stop rail JOG monitor + last-chance jog_stop (滑台若還在 jog,
+    // 關機時務必停下,別讓它撞硬限位)。
+    rail_jog_mon_running_.store(false);
+    if (rail_jog_mon_thread_.joinable()) rail_jog_mon_thread_.join();
+    if (rail_jog_dir_.load() != 0) {
+        rail_jog_dir_.store(0);
+        D_(DM2J_ARM).jog_stop();
     }
 }
 
@@ -1034,6 +1068,32 @@ std::string WashRobot::cmd_arm_park() {
     // [arm rope protect TEMP 2026-05-21]
     if (r.rfind("OK", 0) == 0) arm_stow_state_.store(ArmStowState::Parked);
     return r + "\n";
+}
+
+// [2026-09-11 per user] 收手臂但**不失能**(收回 M1、馬達保持通電 holding)。
+// 為什麼要有:PARK 會失能,而 per user「失能只在校正位置時,其他狀態都不該失能」——
+// 失能時手臂會因無保持力而亂跑/漂。清潔流程每組合之間收手臂用這個,不用 PARK。
+// 走 M1 MOVETO 0(非同步),送出後等 M1 回到 ~0(moving=0)才回,好讓呼叫端知道收妥。
+std::string WashRobot::cmd_arm_retract() {
+    std::cout << "[arm] RETRACT (M1->0, keep enabled)\n";
+    std::string r = arm_cmd_("M1 MOVETO 0", 30);
+    if (r.rfind("OK", 0) != 0) return r + "\n";     // MOVETO 送出即失敗
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));   // 讓移動起動,避免一進來就讀到 moving=0
+    for (int i = 0; i < 40; ++i) {                   // 上限 ~8s
+        const std::string s = arm_cmd_("M1 STATUS", 3);
+        double pos = 1.0; int moving = 1;
+        const auto pp = s.find("pos=");
+        if (pp != std::string::npos) pos = std::strtod(s.c_str() + pp + 4, nullptr);
+        const auto mp = s.find("moving=");
+        if (mp != std::string::npos) moving = (int)std::strtol(s.c_str() + mp + 7, nullptr, 10);
+        if (moving == 0 && std::fabs(pos) < 0.06) {
+            arm_stow_state_.store(ArmStowState::Unknown);   // 收回但未 park(仍通電)
+            std::ostringstream oss; oss << "OK arm_retract pos=" << pos << "\n";
+            return oss.str();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    return "OK arm_retract (逾時等 M1 回零,可能未完全收回)\n";
 }
 
 std::string WashRobot::cmd_arm_status() {
@@ -3749,8 +3809,9 @@ bool WashRobot::pusher_move_many_(const std::vector<int>& slaves, int pulse, int
 // Slaves already past stage 1 endpoint skip stage 1 entirely (absolute stage 1
 // target would extend them back toward wall).
 // Returns true (error) on any stall during stage 2 wait, or timeout.
-bool WashRobot::pusher_two_stage_retract_(const std::vector<int>& slaves) {
+bool WashRobot::pusher_two_stage_retract_(const std::vector<int>& slaves, int rpm) {
     if (slaves.empty()) return false;
+    if (rpm <= 0) rpm = PUSHER_RPM_RETRACT_FULL;   // 0/未給 = 沿用常數(既有呼叫端行為不變)
 
     // [2026-07-15] zdt_bus_mtx_ — see declaration comment (WASH_ROBOT.h).
     std::lock_guard<std::mutex> zdt_lk(zdt_bus_mtx_);
@@ -3820,7 +3881,7 @@ bool WashRobot::pusher_two_stage_retract_(const std::vector<int>& slaves) {
     // the break-vacuum charge does that job now). Single sync-trigger fires all.
     for (int s : slaves) {
         if (Z_(s).motion_control_pos_mode_nowait(0, PUSHER_ACC_RETRACT,
-                PUSHER_RPM_RETRACT_FULL, PUSHER_RETRACT_PULSE,
+                rpm, PUSHER_RETRACT_PULSE,
                 /*abs*/1, /*sync*/1, /*retry*/1)) {
             std::cout << "[2stage_retract ZDT:" << s << "] pos_mode_nowait FAIL\n";
             return true;
@@ -5347,30 +5408,49 @@ bool WashRobot::vacuum_wait_release_(const std::vector<int>& slaves, int timeout
     constexpr int POLL_MS = 300;   // 2026-05-29: 200→300,JC100 timeout 之間隔開,給 bus 喘息
     if (slaves.empty()) return false;   // nothing to check = trivial success
 
+    // [2026-09-11 per user] Tolerate JC100 read failures (cup 7 sensor/wiring
+    // was intermittently failing at ~57%). A comm timeout means we CANNOT
+    // CONFIRM this cup's pressure — it does NOT mean the cup is still gripping.
+    // Blocking the whole feet-retract (→ PAUSE-ON-ERROR → full aborts) on an
+    // unreadable sensor is too fragile: the physical vacuum DID release (p≈0
+    // whenever cup 7 read back), and CH6 break-vacuum (the NEXT stage of the
+    // two-stage retract) forcibly releases regardless. So:
+    //   - GOOD read, p >= DETACH     → released (confirmed)
+    //   - GOOD read, p <  DETACH     → still gripping (confirmed) → keep waiting
+    //   - READ FAIL (error_flag != 0)→ unconfirmed → do NOT block; proceed
+    // Only a cup CONFIRMED still-gripping (good read below threshold) keeps us
+    // waiting / counts as stuck. Unconfirmed cups are logged (never silent).
     int elapsed = 0;
     while (elapsed < timeout_ms) {
-        bool all_released = true;
+        bool any_confirmed_gripping = false;
+        std::vector<int> unconfirmed;
         for (int s : slaves) {
             int p = read_pressure_(s);
-            // comms fail → treat as still attached (conservative); poll-based
-            // approach gives gateway transient hiccups time to recover within
-            // the timeout budget.
-            const bool released = (M_(s).error_flag == 0) && (p >= DETACH_THRESHOLD_KPA);
-            if (!released) { all_released = false; break; }
+            if (M_(s).error_flag != 0) { unconfirmed.push_back(s); continue; }
+            if (p < DETACH_THRESHOLD_KPA) { any_confirmed_gripping = true; break; }
         }
-        if (all_released) {
-            std::cout << "[vacuum_release] all released after " << elapsed << "ms\n";
+        if (!any_confirmed_gripping) {
+            if (unconfirmed.empty()) {
+                std::cout << "[vacuum_release] all released after " << elapsed << "ms\n";
+            } else {
+                std::cout << "[vacuum_release] proceeding after " << elapsed
+                          << "ms; UNCONFIRMED (read-fail) slaves:";
+                for (int s : unconfirmed) std::cout << " " << s;
+                std::cout << " — CH6 break-vacuum will release regardless\n";
+            }
             return false;
         }
         sleep_ms_(POLL_MS);
         elapsed += POLL_MS;
     }
 
-    // Timeout — collect stuck list (re-read once for fresh values), log + EVT
+    // Timeout — only cups CONFIRMED still-gripping (good read below threshold)
+    // count as stuck. Read-fail cups are NOT stuck (see rationale above); if the
+    // only problem were unreadable sensors we'd have returned false already.
     std::vector<int> stuck;
     for (int s : slaves) {
         int p = read_pressure_(s);
-        if (M_(s).error_flag != 0 || p < DETACH_THRESHOLD_KPA) stuck.push_back(s);
+        if (M_(s).error_flag == 0 && p < DETACH_THRESHOLD_KPA) stuck.push_back(s);
     }
     std::ostringstream oss;
     oss << "[vacuum_release] TIMEOUT after " << timeout_ms << "ms, stuck slaves:";

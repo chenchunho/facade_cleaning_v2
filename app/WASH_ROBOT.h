@@ -122,6 +122,10 @@ public:
     std::string cmd_rail_move(double target_cm, int rpm = 0, int acc = 0, int dec = 0);  // 絕對定位（0=左端，正向往右）
     std::string cmd_rail_pos();                            // 讀目前座標
     std::string cmd_rail_zero();                           // 設當前位置為零點
+    std::string cmd_rail_jog(const std::string& dir, int rpm);  // [2026-09-11] JOG fwd/rev/stop(按住才動,含 deadman+行程守衛)
+    std::string cmd_rail_sweep_start(double from_cm, double to_cm, int rpm);  // [2026-09-11] 區間來回 from→to→from(非同步)
+    std::string cmd_rail_sweep_stop();                          // 走完當段就停
+    std::string cmd_rail_sweep_status();                        // running/leg/target
     // 🔴 [2026-09-02 per user] 手動歸零流程用的使能控制：
     //     rail_disable → 人手把滑台推到左端硬限位 → rail_enable → rail_zero
     //   比「開機當下的位置就是 0」可靠得多——左端硬限位是**真實的物理基準**，
@@ -161,7 +165,11 @@ public:
     std::string cmd_shutdown();
     std::string cmd_status();
     std::string cmd_vacuum(const std::string& group, bool on);
-    std::string cmd_pump(bool on);                       // dp0105 vacuum pump (PQW CH_PUMP_A = CH2; verified + readback since 2026-09-03)
+    std::string cmd_pump(bool on);                       // dp0105 vacuum pump — 作用在目前輪替中那顆 (2026-09-10)
+    std::string cmd_pump_status_();                      // [2026-09-10] A/B 輪替狀態 (active/累計/門檻)
+    std::string cmd_pump_swap_();                        // [2026-09-10] 手動立即輪替到另一顆
+    std::string cmd_pump_ch_(int ch, bool on);           // [2026-09-10] 顯式控制單顆 A(CH2)/B(CH3)
+    std::string cmd_set_pump_rotate_min_(int minutes);   // [2026-09-10] 設輪替門檻(分)，0=停用
     std::string cmd_brush(bool on);                      // arm roller brush motor (PQW CH5)
 
     // [2026-09-01 per user] 繼電器現況回讀 + 通用單通道控制（bring-up / 接線盤點用）。
@@ -210,15 +218,17 @@ public:
     // 這裡採累加式（見 CLAUDE.md 介面契約）：加參數、不動既有行為。
     // ⚠️ 上限 20cm ＝ SMC LEYG25 額定行程 200mm（見本檔標定段證據 5）。
     //    先前一度寫 16cm，那是誤把某次 extend 尋封的停止點當成機構極限。
-    std::string cmd_pusher(const std::string& group, const std::string& pos, double cm = 0.0);
+    std::string cmd_pusher(const std::string& group, const std::string& pos, double cm = 0.0, int rpm = 0);  // [2026-09-11] rpm 可選(0=沿用常數)
     // [2026-09-01 per user] 單獨執行同步步伐的 IMU 差動校平（見 .cpp 的說明）。
     std::string cmd_imu_level();
     // [2026-09-10 per user] 第三參數：`extend_raw` 時指定公分（0.5~20.0）。
     // 省略／0 ⇒ 沿用該 slave 的預設脈衝，與先前逐位元相同。
-    std::string cmd_zdt_pusher(int slave, const std::string& action, double cm = 0.0);
+    std::string cmd_zdt_pusher(int slave, const std::string& action, double cm = 0.0, int rpm = 0);  // [2026-09-11] rpm 可選(0=沿用常數)
     std::string cmd_zdt_zero(const std::string& group);   // "feet"|"body"|"center"|"all" — set current ZDT pos as new zero (manual 3.1.3)
     std::string cmd_zdt_disable(int slave);  // exclude slave 1..9 from all group ZDT ops (e.g. not yet installed)
     std::string cmd_zdt_enable(int slave);   // re-include previously disabled slave
+    std::string cmd_zdt_power(int slave, bool on); // [2026-09-11] REAL driver EN on/off (0x00F3, torque-off) — hand-push re-home after 24V blip corrupts ZDT counter
+    std::string cmd_zdt_home(const std::string& group); // [2026-09-11] AUTO re-home: drive retract into hard-stop (stall) + set_zero — alt to hand-push
     std::string cmd_zdt_release_stall();     // release stall flags on all 9 ZDT slaves (operator manual intervention; safe during motion)
     std::string cmd_move(const std::string& motor, double cm);
     std::string cmd_wheels(const std::string& action);   // "retract" = abs 0, "lower" = abs -6
@@ -250,6 +260,7 @@ public:
     // [2026-09-04 per user] 力控貼合：DEPLOY_F <target_nm> <slot>，壓力是被控量。
     std::string cmd_arm_deploy_f(double target_nm, const std::string& slot);
     std::string cmd_arm_park();                                       // PARK — return + disable
+    std::string cmd_arm_retract();                                    // [2026-09-11] 收回 M1 但**不失能**(清潔流程用,失能只留給校正)
     std::string cmd_arm_status();                                     // STATUS — relay arm state line
     std::string cmd_arm_attached(bool on);                            // toggle whether washrobot drives the cleaning arm
     // Cleaning routine — water + brush ON, DEPLOY arm to wall_mm, run `rounds`
@@ -452,18 +463,16 @@ private:
     // "cover CH15" — and CH15 never existed. It was a product of the same wrong
     // premise as CH_BRUSH=15; that half got fixed, this half did not.
     //
-    // ⚠️ This alone does NOT fix the water pump. CH_WATER_PUMP is still 14
-    // (out of range — needs a wiring decision, see work_log). What changes is
-    // only WHERE the lie stops:
+    // ⚠️ [歷史] 在此之前 CH_WATER_PUMP=14 是死的（超出 8CH 範圍）。narrowing 16→8
+    // 只是讓謊言停止的位置改變：
     //   before: FC01 asked for 16 coils, the board fabricated ch9-16, and
     //           pqw_set_relay_verified_ / cmd_water_pump got a confirmed "1"
     //           for a channel that does not exist.
     //   after:  FC01 asks for 8, readback is 8 long, so ch14 falls into the
     //           best-effort branch — it logs "readback unavailable" and still
     //           returns OK. Evidence instead of a forged confirmation.
-    // 📌 A fabricated confirmation is worse than a missing one, so this is
-    //    worth doing on its own — but it is a downgrade from lying to silence,
-    //    not a fix. The fix is the channel number.
+    // ✅ [2026-09-10 per user] 真正的修正到位：CH_WATER_PUMP 14 → **CH4**（實體
+    //    噴水加壓馬達所在，在 1~8 範圍內、位址得到）。見下方 CH_WATER_PUMP 宣告。
     //
     // Safe to narrow: every readAllStatus() consumer bounds-checks before
     // indexing, and the console's own relay table already lists CH1-CH8 only.
@@ -495,34 +504,37 @@ private:
     static constexpr int CH_PUMP_A       = CH_PUMP;  // 別名：明示 CH2 是 A 組，既有呼叫點不必改
     // 🔴 [2026-09-01 per user 實測] CH3 = 真空幫浦 **B 組**。
     // 本檔原本把 CH3 記成「空通道（原左腳閥，08-27 讓出）」——**是錯的**。
-    // ⚠️ **目前刻意未啟用**（per user 2026-09-01：「幫浦先用 A 組就好，B 之後再規劃」）。
-    // `init` 只開 CH_PUMP_A，所以**真空系統從開機到現在只有一半在運轉**。
-    // 📌 這很可能與吸盤密封長期要靠 smart_extend_subset_ 反覆補伸（最多推到 ~16cm）
-    // 才吸得住有關 —— 在查明之前不要再把那個現象直接歸因於機構或吸盤本身。
-    // 待辦見 .claude/work_log.md 待辦總表。
-    static constexpr int CH_PUMP_B       = 3;  // 真空幫浦 B 組（實測確認，尚未啟用）
+    // [2026-09-10 per user] B 組啟用於 **A/B 輪替**（磨損平均）：A、B 併聯在同一
+    //   真空管路，init 仍只開 A、常開；`pump_rotate_loop_` 累計 30 分後 make-before-break
+    //   換到 B，再 30 分換回 A（詳見上方 water_inlet watchdog 之後的輪替宣告區）。
+    //   `init` 開 A 時會**同時關 B**，讓每次 init 都回到「只有 A」的已知起點。
+    static constexpr int CH_PUMP_B       = 3;  // 真空幫浦 B 組（實測確認；2026-09-10 起用於 A/B 輪替）
     static constexpr int CH_VALVE_LEFT   = CH_VALVE_RIGHT;  // 2026-08-27: 3 → 同 CH1（單閥）
     // [2026-08-28 per user] 15 → 5，實體確認滾筒接在 CH5。2026-07-24 那次
     // 「5→15，arm now physically installed」是錯的 —— 依此送出的 controlRelay(15)
     // 打到沒接東西的繼電器，bench 現象就是「清洗流程照跑但滾筒不轉」，而且
     // do_step_sync_rail_sweep_ 當時沒檢查回傳值，log 完全看不出來。
-    // CH5 目前沒有其他用途（1=閥 2=泵浦 6=破真空 14=水泵），不撞號。
+    // CH5 目前沒有其他用途（1=閥 2=泵A 3=泵B 4=噴水馬達 6=破真空），不撞號。
     static constexpr int CH_BRUSH        = 5;  // arm roller brush motor
     // [2026-08-27 per user] 水泵 CH6 → CH14，讓位給破真空閥（user 指定破真空接 CH6）。
     // ⚠ 這個讓位是強制的，不是整理：清洗流程的滾筒段會主動
     // pqw_set_relay_verified_(CH_WATER_PUMP, true)（見 sweep_with_tool 的 water_on
     // 分支）。若水泵仍指向 CH6，清洗時就會打開破真空閥 → 4 顆吸盤同時失去真空
-    // → 機器在貼牆狀態下脫落。CH14 是破真空原本用的號，剛好空出。
-    // 水泵實體尚未接管路（見 do_arm_sweep_ 內被註解掉的 CH_WATER_PUMP 呼叫），
-    // 因此改號目前不影響實際動作；接管路時務必接到 CH14。
-    static constexpr int CH_WATER_PUMP   = 14; // water tank pump (spray) (2026-08-27: 6→14)
+    // → 機器在貼牆狀態下脫落。**CH_WATER_PUMP 絕不可等於 CH_BREAK_VACUUM(=6)。**
+    // 🔴 [2026-09-10 per user] **實體噴水加壓馬達接在 CH4**，改號 14 → 4。
+    //    ⚠ 兩個關鍵事實讓舊值 14 一直是死的：
+    //      (1) PQW 板是 8CH（PQW_TOTAL_CH=8）⇒ CH14 根本超出範圍、位址不到；
+    //      (2) 舊註解說「水泵尚未接管路」⇒ 沒人發現它打不到。
+    //    現在 CH4 在 1~8 內、且是實體馬達所在，`arm_clean_sweep` 的自動噴水才會真的作用。
+    //    CH4 不撞任何已指派通道（1=閥 2=泵A 3=泵B 5=刷 6=破真空），尤其 ≠ CH6。
+    static constexpr int CH_WATER_PUMP   = 4;  // 手臂噴水加壓馬達 (2026-09-10 per user: 14→4；board 8CH，舊 14 超範圍)
     // [2026-07-31 per user] Break-vacuum valve — air-charge into the cups to
     // actively force the seal open, replacing the old two-stage slow-peel
     // retract. ON = charge air, OFF = closed. Mirrors Linux_test menu 31
     // (test_break_vacuum_leg) exactly.
     // Channel 沿革：CH16（bench 期）→ CH14（production）→ CH6（2026-08-27 per user）。
-    // 搬到 CH6 時水泵已從 CH6 讓位到 CH14（見上方 CH_WATER_PUMP 的說明）——兩者
-    // 絕不可同號，否則清洗時開水泵等於開破真空。
+    // 搬到 CH6 時水泵已從 CH6 讓走（2026-09-10 起 = CH4，見上方 CH_WATER_PUMP）——兩者
+    // 絕不可同號，否則清洗時開水泵等於開破真空。CH4 ≠ CH6，安全。
     // 🔴 [2026-09-01 per user 實測] 正確名稱是**正壓閥**，不只是「破真空」。
     // 使用者說明：吸盤吸在玻璃上時，脫離**除了**關真空閥讓接口回到大氣壓，
     // **也可以同時給正壓加速脫離**。CH6 **4 顆吸盤共用**（不分側，與 CH1 同）。
@@ -1594,6 +1606,63 @@ private:
     std::thread          water_inlet_watchdog_thread_;
     void                 water_inlet_watchdog_loop_();
 
+    // [2026-09-10 per user] 真空幫浦 A/B 輪替（磨損平均）。
+    //   A(CH_PUMP_A) 與 B(CH_PUMP_B) **併聯在同一真空管路**（per user 2026-09-10：
+    //   兩條氣管併在一起）——所以開任一顆都對整個管路加壓，切換時可先開後關、真空不斷。
+    //   init 開 A、運行期間常開；背景 loop 累計「目前這顆」的 ON 時間，達
+    //   g_pump_rotate_ms_ 就換另一顆。切換序（make-before-break）：
+    //     開進來那顆 → 併聯跑 PUMP_SWAP_OVERLAP_MS(3s) → 關出去那顆
+    //       → PUMP_SWAP_VERIFY_MS 內驗真空 → 較關前劣化逾 PUMP_SWAP_DEGRADE_KPA
+    //         ⇒ 判「真空異常」→ 重開原顆、**停用自動輪替**（防抖，等人工重新武裝）。
+    //   g_pump_rotate_ms_ = 0 → 完全停用輪替，永遠留在目前這顆（＝改動前的行為）。
+    static constexpr int64_t PUMP_ROTATE_MS_DEFAULT = 30LL * 60 * 1000;  // 30 min
+    static constexpr int64_t PUMP_SWAP_OVERLAP_MS   = 3LL * 1000;        // 併聯重疊 3s (2026-09-10: 30→5; 2026-09-11 per user: 5→3;併聯管路 B 真空幾秒即跟上)
+    static constexpr int64_t PUMP_SWAP_VERIFY_MS    = 8LL * 1000;        // 關出去顆後驗真空窗
+    static constexpr int     PUMP_SWAP_DEGRADE_KPA  = 15;                // 較關前劣化逾此(向大氣) → 異常
+    std::atomic<int>     active_pump_{CH_PUMP_A};        // 目前運轉的幫浦通道 (CH_PUMP_A / CH_PUMP_B)
+    std::atomic<int64_t> pump_active_since_ms_{0};       // 這輪計時起點；0 = 未計時(關機/手動關)
+    std::atomic<int64_t> pump_accum_ms_{0};             // 目前這顆已累計 ON 時間（跨 tick 累加）
+    std::atomic<int64_t> g_pump_rotate_ms_{PUMP_ROTATE_MS_DEFAULT};  // 0 = 停用輪替
+    std::atomic<bool>    pump_auto_rotate_enabled_{true};  // 切回後自動關閉，防止對故障顆反覆抖動
+    std::atomic<bool>    pump_swap_in_progress_{false};    // 切換互斥：自動 loop 與手動 swap 不得同時動繼電器
+    std::atomic<bool>    pump_rotate_running_{false};
+    std::thread          pump_rotate_thread_;
+    void                 pump_rotate_loop_();
+    bool                 pump_swap_(int from_ch, int to_ch);   // true = 換成功；false = 失敗/已切回
+    int                  best_vacuum_kpa_();                    // 4 顆 cup 最深(最負)壓力；讀不到回 0
+    // 對外指令（cmd_pump_status_ / _swap_ / _ch_ / set_pump_rotate_min_）宣告於 public 區，
+    // 見上方 cmd_pump 附近。
+
+    // [2026-09-11 per user] 上滑台 JOG（按住才動，速度模式）。
+    //   `rail <cm>` 是位置式,做不出「按住才動、放開即停」;JOG 用驅動器的 jog_forward/
+    //   reverse/stop + set_jog_speed。速度模式 ⇒ cmd_rail_move 的 0-130 硬限位**管不到**,
+    //   靠兩道保護:① deadman(前端每 300ms 重送刷新時間戳,>600ms 沒收到自動 jog_stop);
+    //   ② 行程守衛(jog 中每 ~100ms 讀位置,近兩端自動 jog_stop + EVT)。
+    //   ⚠️ 座標未校正(手推後未歸零)時行程守衛是假的——靠歸零流程保證(與本軸其他一切同)。
+    std::atomic<int>     rail_jog_dir_{0};            // 0=停 / +1=fwd / -1=rev
+    std::atomic<int64_t> rail_jog_last_ms_{0};        // 最後一次 fwd/rev 指令時刻(deadman 用)
+    std::atomic<bool>    rail_jog_mon_running_{false};
+    std::thread          rail_jog_mon_thread_;
+    void                 rail_jog_monitor_loop_();
+    static constexpr int64_t RAIL_JOG_DEADMAN_MS     = 600;   // >此值沒收到心跳 → 自動停
+    static constexpr int     RAIL_JOG_MON_POLL_MS    = 100;   // 監看 loop 週期
+    static constexpr int     RAIL_JOG_DEFAULT_RPM    = 100;   // rpm 省略/0 時
+    static constexpr double  RAIL_JOG_LIMIT_MARGIN_CM = 1.0;  // 近兩端此餘裕內停
+
+    // [2026-09-11 per user] 上滑台區間測試(rail_sweep)——**本體端**跑,瀏覽器關了照跑完
+    //   (原本前端串三段、斷線就停半路)。動作 = from → to → from 一次來回(3 段)。
+    //   🔴 **非同步**(detached thread,仿 cmd_pump_swap_):三段同步最長 3×180s 會卡死 web
+    //   共用 socket。每段複用 cmd_rail_move(驗證/motion_mtx/逾時)。stop=走完當段不送下一段。
+    std::atomic<bool>    rail_sweep_running_{false};
+    std::atomic<bool>    rail_sweep_stop_{false};
+    std::atomic<int>     rail_sweep_leg_{0};        // 0=idle, 1/2/3
+    std::atomic<int>     rail_sweep_from_{0};
+    std::atomic<int>     rail_sweep_to_{0};
+    std::atomic<int>     rail_sweep_target_{0};
+    std::mutex           rail_sweep_last_mtx_;
+    std::string          rail_sweep_last_{"none"};  // done / stopped / failed:<原因> / running
+    void                 rail_sweep_run_(double from, double to, int rpm);   // detached thread body
+
     // JC-100 pressure cache. Updated by:
     //   1. Motion paths via read_pressure_() — piggyback during normal reads
     //   2. cmd_status() — fresh read of all 9 when motion idle (refresh button)
@@ -2444,7 +2513,7 @@ private:
     // immediately fires stage 2 (fast retract to 0) without waiting for siblings.
     // Returns true (error) on stall / timeout. Replaces the old pusher_move_many_
     // ×2 retract pattern at every call site.
-    bool             pusher_two_stage_retract_(const std::vector<int>& slaves);
+    bool             pusher_two_stage_retract_(const std::vector<int>& slaves, int rpm = PUSHER_RPM_RETRACT_FULL);  // [2026-09-11] rpm 可選(預設=RETRACT_FULL,既有呼叫端不變)
 
     // Group extend with concurrent vacuum monitoring. As cup pressure crosses
     // VACUUM_EARLY_STOP_KPA mid-motion, immediately emergency_stop that slave's

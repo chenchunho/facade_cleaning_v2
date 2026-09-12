@@ -102,9 +102,15 @@ if len(sys.argv) > 1 and sys.argv[1] in _MODES:
 else:
     MODE = "full"                          # 沒給模式 = full(向後相容)
 
-CYCLES    = int(sys.argv[1]) if len(sys.argv) > 1 else 1
-STEPS     = int(sys.argv[2]) if len(sys.argv) > 2 else 5
-STEP_CM   = int(sys.argv[3]) if len(sys.argv) > 3 else 40
+# 🔴 [2026-09-10] 只有 full 模式吃這三個位置參數。crane/arm 模式的 sys.argv 是它們
+#    自己的參數(TRIPS / CYC RAIL SLOT),在此無條件 int() 會炸(例:arm ... RIGHT →
+#    int('RIGHT'))。crane/arm 有各自的解析(run_crane/run_arm),這裡給預設即可。
+if MODE == "full":
+    CYCLES    = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+    STEPS     = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+    STEP_CM   = int(sys.argv[3]) if len(sys.argv) > 3 else 40
+else:
+    CYCLES, STEPS, STEP_CM = 1, 5, 40   # crane/arm 用不到,只是讓後面常數運算不 NameError
 VAC_OK_KPA = -50        # [2026-09-03 per user] 密封判準：至少一顆到此值
 VAC_WAIT_S = 10.0       # 等真空建立的上限秒數（超過即視為完全沒附著）
 # [2026-09-09] 可由環境變數覆蓋，**預設維持 09-03 的 100**。
@@ -125,7 +131,10 @@ RAIL_CM   = int(os.environ.get("FCV_RAIL_CM", "100"))
 ARM_SLOT  = 'RIGHT'     # 固定滾筒（per user）。LEFT=刮刀 / CENTER
 ARM_WALL_MM = 520       # DEPLOY 的假設牆距（僅在退回舊路徑時使用，見 ARM_TARGET_NM）
 # [2026-09-04 per user] 目標壓力 15 N·m，現場目視定案。DEPLOY_F 用它，不用 ARM_WALL_MM。
-ARM_TARGET_NM = 15.0
+# [2026-09-11 per user] 15→8:降力刷過(偵測不可靠,改低力,刷到橫桿也無傷)。
+#   env FCV_ARM_NM 可覆蓋。⚠️ 手臂 DEFAULT(main_api.h DEPLOY_F_TARGET_NM)也已 8,
+#   但 cycle_test 是**顯式傳值**,故必須在這裡也降,否則 full 仍用 15。
+ARM_TARGET_NM = float(os.environ.get("FCV_ARM_NM", "8"))
 # 自動偵測：本體若還是舊 binary（沒有 arm_deploy_f 代轉）會回 `ERR unknown_cmd`，
 # 第一次遇到就整輪退回 arm_deploy 舊路徑並大聲說一次。不必手動切旗標。
 ARM_FORCE_MODE = [True]
@@ -138,8 +147,12 @@ ARM_FORCE_MODE = [True]
 #    📌 但結論不是「把 ARM_WALL_MM 調小」—— per user 現場目視後把 **15 N·m 定為目標壓力**，
 #    所以本高度的 520 剛好是對的。真正的修法是 DEPLOY_F（壓力被控），見上方 ARM_TARGET_NM。
 #    ⚠️ ARM_WALL_MM 現在只在退回舊路徑時才用得到。
-ROLL_TRIP = float(sys.argv[4]) if len(sys.argv) > 4 else 6.0
-DIFF_TRIP = float(sys.argv[5]) if len(sys.argv) > 5 else 8.0
+# [2026-09-10] 同 CYCLES 那組:只有 full 模式吃 argv[4]/[5]。arm/crane 走預設。
+if MODE == "full":
+    ROLL_TRIP = float(sys.argv[4]) if len(sys.argv) > 4 else 6.0
+    DIFF_TRIP = float(sys.argv[5]) if len(sys.argv) > 5 else 8.0
+else:
+    ROLL_TRIP, DIFF_TRIP = 6.0, 8.0
 
 # 🔴 [2026-09-01] 左右差守衛改為「**連續**超標」才中止，不再看瞬時值。
 #
@@ -294,6 +307,50 @@ press_warn_steps = [0]
 # [2026-09-04] 橫桿步數。與 no_wall 分開記：兩者都是現場條件，但成因不同
 #   （no_wall=牆太遠/沒玻璃；obstacle=有東西比玻璃更近），混在一起會看不出牆的形狀。
 obstacle_steps = [0]
+# [2026-09-11 per user] 搆不到步數（力控伸到 M1 上限仍未達目標壓力）。與 no_wall 分開：
+#   no_wall=尋觸階段就沒碰到；cannot_reach=碰到了但建力到 15Nm 需要的 theta 超過上限。
+cannot_reach_steps = [0]
+# [2026-09-11 per user] 橫桿高度跳過帶(執行期,**不進記憶檔** —— 橫桿高度隨環境變)。
+#   真因:滾筒是長圓柱,橫桿撞在滾筒上的接觸點沿桿可高可低 → M1 量到的 contact theta 會飄,
+#   甚至落進玻璃 theta 區間 → 單靠 th_min 分不出橫桿/玻璃(見 work_log 2026-09-11)。
+#   改用**與接觸角無關**的判據:吊機高度(絕對、精準)。操作者把機器停在橫桿處讀 height,
+#   開跑時用 FCV_SKIP_BANDS 傳「高度帶」進來,走到帶內就跳過手臂 deploy(根本不壓)。
+#   格式:逗號分隔;每項是 "lo-hi"(高度帶 cm)或單一 "center"(用 FCV_SKIP_MARGIN_CM,預設15)。
+#   例:FCV_SKIP_BANDS="102"  或  "82-122,200-210"
+crossbar_skip_steps = [0]
+def _parse_skip_bands():
+    raw = os.environ.get("FCV_SKIP_BANDS", "").strip()
+    if not raw:
+        return []
+    margin = float(os.environ.get("FCV_SKIP_MARGIN_CM", "15"))
+    bands = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            if "-" in item:
+                lo, hi = item.split("-", 1)
+                lo, hi = float(lo), float(hi)
+            else:
+                c = float(item)
+                lo, hi = c - margin, c + margin
+        except ValueError:
+            print("🔴 FCV_SKIP_BANDS 格式錯誤,忽略此項:%r" % item)
+            continue
+        if lo > hi:
+            lo, hi = hi, lo
+        bands.append((int(lo), int(hi)))
+    return bands
+SKIP_BANDS = _parse_skip_bands()
+def in_skip_band(h):
+    """回傳命中的 (lo,hi) 帶,沒命中回 None。h=當步清潔高度 cm。"""
+    if h is None:
+        return None
+    for lo, hi in SKIP_BANDS:
+        if lo <= h <= hi:
+            return (lo, hi)
+    return None
 timing = {"down_cm": 0.0, "down_move_s": 0.0, "down_step_s": 0.0, "down_steps": 0,
           "up_cm": 0.0, "up_s": 0.0, "up_runs": 0,
           "ext_s": 0.0, "vac_s": 0.0, "rail_s": 0.0, "ret_s": 0.0}
@@ -580,11 +637,22 @@ def _diff_summary():
     if all_roll_nearmiss:
         print("  roll 超標後自行回復（未達連續 %d 筆）: %d 次 —— 擺盪，不是姿態失控"
               % (ROLL_PERSIST, sum(all_roll_nearmiss)))
+    if crossbar_skip_steps[0]:
+        tot = timing["down_steps"] or 1
+        print("\n⚠ 橫桿高度帶跳過的步數：%d / %d（%.0f%%）—— 依吊機高度(FCV_SKIP_BANDS)判定，"
+              "該步不壓手臂、直接續到下一位置。這是**牆面結構**(橫桿),不是故障。"
+              % (crossbar_skip_steps[0], tot, 100.0 * crossbar_skip_steps[0] / tot))
     if obstacle_steps[0]:
         tot = timing["down_steps"] or 1
         print("\n⚠ 疑似橫桿的步數：%d / %d（%.0f%%）—— 手臂在比任何玻璃都近的位置就接觸，"
               "該步清潔動作被跳過。這是**牆面結構**，不是故障。"
               % (obstacle_steps[0], tot, 100.0 * obstacle_steps[0] / tot))
+    if cannot_reach_steps[0]:
+        tot = timing["down_steps"] or 1
+        print("\n⚠ 搆不到牆的步數：%d / %d（%.0f%%）—— 手臂力控伸到上限仍未達目標壓力，"
+              "該步清潔被跳過、續到下一位置。這是**牆太遠／該把 reach 不足**，不是故障"
+              "（per user 設計：搆不到就跳過）。"
+              % (cannot_reach_steps[0], tot, 100.0 * cannot_reach_steps[0] / tot))
     if no_wall_steps[0]:
         tot = timing["down_steps"] or 1
         print("\n🔴 找不到牆的步數：%d / %d（%.0f%%）—— 手臂伸到上限仍未接觸，"
@@ -653,15 +721,18 @@ def cleanup():
 
     中途中止若把 motion_hz 留在 50，下一個人下 pay_out 就是 50Hz 下行 —— 超出使用者定的上限。
 
-    🔴 [2026-09-03 per user] **補上 arm_park。** ③b 整合清潔動作之後，任何在
+    🔴 [2026-09-03 per user] **收手臂卸力。** ③b 整合清潔動作之後，任何在
     「壓上之後、收手臂之前」的中止都會**讓手臂留在壓著玻璃的狀態**（實測 6~14 Nm 持續頂著），
     而 bail() 只印「現場保留，未自動復位」—— 那句話對吊機與推桿是刻意的（保留現場好查），
     但對手臂不成立：**頂著玻璃不是「保留現場」，是持續施力**，而達妙馬達長時間受力會觸發
     過熱/過流鎖存（09-03 的 `switchControlMode failed` 就是那樣來的，只能斷電解除）。
+    🔴 [2026-09-11 per user] 由 `arm_park`(失能)改為 **`arm_retract`(收 M1 離牆卸力、但保持通電)**：
+    「只要機器上電,arm 都應該使能——失能手臂會亂跑」。arm_retract 同樣把 M1 收離玻璃(卸掉持續
+    施力、解掉過熱疑慮),但不失能,兩個目的都達成。
     ⚠️ 手臂收回**不會**破壞現場證據：θ 與 tau 在中止當下已經被記錄，收回只是卸力。
     ⚠️ 放在最前面：先卸力再處理其他，因為其他兩件都不緊急。
     """
-    print("   [收尾] 手臂 arm_park : %s" % ask(WROBOT, "arm_park", 90)[:40])
+    print("   [收尾] 手臂 arm_retract : %s" % ask(WROBOT, "arm_retract", 90)[:50])
     print("   [收尾] 風扇 %d%% / motion_hz→%d : %s / %s"
           % (FAN_OFF, DOWN_HZ, fan(FAN_OFF), ask(CRANE, "set_motion_hz %d" % DOWN_HZ, 15)))
 
@@ -720,61 +791,84 @@ def run_crane():
 
 
 def run_arm():
-    """arm 模式:手臂清潔動作耐久(壓上→滑台掃→收)。**取代舊 cyc.py/cyc10/cyc20/arm_cycle.py**。
-    直連 motor_api(WROBOT 主機 :9527);其餘走本體 :5001。"""
+    """arm 模式:手臂清潔耐久。**兩套組合/週期**(per user 2026-09-10 實機逐項驗過):
+       滾筒(RIGHT):切槽 → DEPLOY_F 貼牆 → 開水(M1下才開)→ 滾刷 → 滑台0-RAIL-0 → 關水(拉回前)→ M1拉回
+       刮刀(LEFT) :切槽 → DEPLOY_F 貼牆 → 滑台0-RAIL-0 → M1拉回
+    🔴 用水/收放守則(per user):**M1 下去才開水、滑台回0後 M1 拉回、M1 拉回前先關水、切 M2 槽前 M1 必已收回**。
+    直連 motor_api(:9527)DEPLOY_F/LR_SLOT/M1;rail/brush/water/status 走本體 :5001。"""
     CYC  = int(sys.argv[1]) if len(sys.argv) > 1 else 10
     RAIL = int(sys.argv[2]) if len(sys.argv) > 2 else RAIL_CM
-    SLOT = sys.argv[3].upper() if len(sys.argv) > 3 else ARM_SLOT
-    if SLOT not in ("LEFT", "CENTER", "RIGHT"):
-        print("🔴 slot 必須是 LEFT/CENTER/RIGHT"); sys.exit(1)
-    TOOL = {"RIGHT": "滾筒", "LEFT": "刮刀", "CENTER": "CENTER"}[SLOT]
+    NM   = int(ARM_TARGET_NM)                                   # 15 N·m 力控目標
     try:
         ms = socket.create_connection((WROBOT[0], 9527), timeout=5); ms.settimeout(120)
     except Exception as e:
-        print("🔴 連不到手臂 motor_api %s:9527 (%s) —— 手臂(motor_api)沒起?" % (WROBOT[0], e))
-        sys.exit(1)
+        print("🔴 連不到手臂 motor_api %s:9527 (%s) —— motor_api 沒起?" % (WROBOT[0], e)); sys.exit(1)
     mf = ms.makefile("rwb", buffering=0)
-    def mc(x):
-        mf.write((x + "\n").encode()); return mf.readline().decode(errors="replace").strip()
-    def arm_pose():
-        a = re.search(r"\[M1\] pos=([-\d.]+) vel=([-\d.]+) tau=([-\d.]+).*?\[M2\] pos=([-\d.]+)", mc("STATUS"))
-        return (float(a.group(1)), float(a.group(3)), float(a.group(4))) if a else (None, None, None)
+    def mc(x): mf.write((x + "\n").encode()); return mf.readline().decode(errors="replace").strip()
     def cups():
         v = [int(x) for x in re.findall(r"p[5-8]=(-?\d+)", ask(WROBOT, "status", 15))]
         return v if len(v) == 4 else None
-    _sweep_desc = ("滑台 0-%d-0" % RAIL) if RAIL > 0 else "不加滑台"
-    print("=== 手臂清潔 %d 週期:壓上(%s) → %s → 收 ===" % (CYC, TOOL, _sweep_desc))
+    def bad_cups(c): return None if c is None else [i + 5 for i, v in enumerate(c) if v > -50]
+    def m1_home(timeout=15):     # 等 M1 拉回到 ~0（MOVETO 為非同步）
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            m = re.search(r"\[M1\] pos=([-\d.]+).*?moving=(\d)", mc("STATUS"))
+            if m and abs(float(m.group(1))) < 0.06 and m.group(2) == "0":
+                return True
+            time.sleep(0.5)
+        return False
+    def deploy_f(slot):          # 力控貼牆;回 (ok, tau, reply)
+        r = mc("DEPLOY_F %d %s" % (NM, slot)); m = re.search(r"tau=([-\d.]+)", r)
+        tau = float(m.group(1)) if m else 0.0
+        # [2026-09-11 per user] 接受 OK **或 WARN**:WARN=壓上了但沒收斂到 15±tol
+        #   (例如略過壓到 16Nm)—— 對清潔掃動而言仍是紮實貼牆,不算失敗。
+        #   只要 tau 夠緊(≥10)就算貼上;ERR(no_wall/obstacle/cannot_reach)仍拒。
+        return ((r.startswith("OK") or r.startswith("WARN")) and tau >= 10.0), tau, r
+    def sweep():                 # 滑台 0-RAIL-0,回總秒數
+        if RAIL <= 0: return 0.0
+        t = time.time(); ask(WROBOT, "rail %d" % RAIL, 60); ask(WROBOT, "rail 0", 60); return time.time() - t
+
+    # 前置:腳吸盤必須已吸牢(否則耐久測試無意義,清潔動作也沒有錨定)
+    c0 = cups()
+    if c0 is None or bad_cups(c0):
+        print("🔴 起始腳吸盤未吸牢:%s —— 先讓四顆腳吸住牆(<-50kPa)再跑。" % c0); sys.exit(1)
+    print("=== 手臂清潔耐久 %d 週期 × [滾筒(噴水+刷+滑台0-%d-0) + 刮刀(滑台0-%d-0)] ===" % (CYC, RAIL, RAIL))
+    print("起始腳吸盤 %s(耐久判準:任一 >-50kPa 即中止)\n" % c0)
     t_all = time.time()
     for n in range(1, CYC + 1):
         t0 = time.time()
-        mc("M1 ENABLE"); mc("M2 ENABLE"); time.sleep(0.5)   # PARK 會停用馬達,每輪重開
+        mc("M1 ENABLE"); mc("M2 ENABLE"); time.sleep(0.3)
+        mc("M1 MOVETO 0"); m1_home()   # 保險:切槽前確保 M1 已收回（首輪可能帶著 deployed 進來,LR_SLOT 會拒絕）
+        # ---- 滾筒 combo ----（此時 M1 已收回,可切槽）
+        mc("M2 LR_SLOT RIGHT")
+        okR, tauR, rR = deploy_f("RIGHT")
+        if not okR:
+            print("#%-2d 🔴 滾筒沒貼上牆:%s" % (n, rR[:70])); mc("M1 MOVETO 0"); m1_home(); break
+        wl = ask(WROBOT, "water_level", 8)
+        if "water_full=1" not in wl:                 # M1 已下但沒水,不可乾抽
+            print("#%-2d 🔴 水箱空/讀不到:%s —— 收 M1 中止" % (n, wl[:50])); ask(WROBOT, "water_pump off", 10); mc("M1 MOVETO 0"); m1_home(); break
+        ask(WROBOT, "water_pump on", 20)             # 🔴 M1下才開水
         ask(WROBOT, "brush on", 20)
-        td = time.time(); rd = mc("DEPLOY 520 %s" % SLOT); td = time.time() - td
-        time.sleep(1.5)
-        p_dep, tau_dep, m2_dep = arm_pose()
-        # DEPLOY 壓玻璃時本來就回 ERR,用實際姿態判有沒有真的壓上(θ 0.55~0.75、tau>8)
-        if p_dep is None or not (0.55 < p_dep < 0.75 and tau_dep > 8.0):
-            print("#%-2d 🔴 手臂沒有壓上  θ=%s tau=%s  DEPLOY回=%s"
-                  % (n, p_dep, tau_dep, rd[:40]))
-            ask(WROBOT, "brush off", 20); mc("PARK"); break
-        if RAIL > 0:
-            t1 = time.time(); ask(WROBOT, "rail %d" % RAIL, 60); t1 = time.time() - t1
-            t2 = time.time(); ask(WROBOT, "rail 0", 60);        t2 = time.time() - t2
-        else:
-            t1 = t2 = 0.0                                    # 不加滑台:壓上後直接收
-        t3 = time.time(); mc("PARK");                       t3 = time.time() - t3
-        time.sleep(1.0); ask(WROBOT, "brush off", 20)
-        c = cups()
-        if c is None:
-            print("#%-2d 🔴 吸盤壓力讀不到(status 解析不到 4 顆)—— 視同失敗" % n); mc("PARK"); break
-        bad = [i + 5 for i, v in enumerate(c) if v > -50]
-        _sweep = ("掃 %.1f/%.1f" % (t1, t2)) if RAIL > 0 else "無滑台"
-        print("#%-2d 壓上 %.1fs θ=%.4f tau=%+6.2f | %s | 收 %.1fs | 吸盤 %s | %.1fs%s"
-              % (n, td, p_dep, tau_dep, _sweep, t3, " ".join(str(v) for v in c),
-                 time.time() - t0, "" if not bad else "  🔴 吸盤 %s 失壓" % bad))
+        swR = sweep()
+        ask(WROBOT, "brush off", 20)
+        ask(WROBOT, "water_pump off", 20)            # 🔴 拉回前先關水
+        mc("M1 MOVETO 0"); m1_home()                 # 🔴 滑台回0後 M1 拉回
+        cR = cups(); badR = bad_cups(cR)
+        if badR:
+            print("#%-2d 🔴 滾筒後腳吸盤失壓 %s(%s)—— 中止" % (n, badR, cR)); break
+        # ---- 刮刀 combo ----（M1 已收回,可切槽;不噴水不轉刷）
+        mc("M2 LR_SLOT LEFT")
+        okL, tauL, rL = deploy_f("LEFT")
+        if not okL:
+            print("#%-2d 🔴 刮刀沒貼上牆:%s" % (n, rL[:70])); mc("M1 MOVETO 0"); m1_home(); break
+        swL = sweep()
+        mc("M1 MOVETO 0"); m1_home()
+        c = cups(); bad = bad_cups(c)
+        print("#%-2d 滾筒 tau%+.1f 掃%.1fs | 刮刀 tau%+.1f 掃%.1fs | 腳吸盤 %s | %.0fs%s"
+              % (n, tauR, swR, tauL, swL, c, time.time() - t0, "" if not bad else "  🔴 吸盤%s失壓" % bad))
         if bad:
-            print("🔴 中止:吸盤失壓"); break
-        time.sleep(1.0)
+            print("🔴 中止:腳吸盤失壓"); break
+        time.sleep(0.5)
     print("=== 結束,總耗時 %.0fs ===" % (time.time() - t_all))
 
 
@@ -790,6 +884,9 @@ print("中止門檻：|roll|>%.1f°（連續 %d 筆，可自動修正） / 左�
       % (ROLL_TRIP, ROLL_PERSIST, DIFF_TRIP, DIFF_PERSIST))
 
 resolve_zero_convention()          # 🔴 必須在第一次 height() 之前
+if SKIP_BANDS:
+    print("橫桿跳過帶(FCV_SKIP_BANDS,執行期,不進記憶):%s cm —— 走到帶內跳過手臂 deploy"
+          % ", ".join("%d-%d" % (lo, hi) for lo, hi in SKIP_BANDS))
 st0 = ask(CRANE, "status", 10)
 L0 = height(field(st0, "length_left"))
 if L0 is None or abs(L0 - TOP) > TOL:
@@ -875,23 +972,93 @@ rs = ask(WROBOT, "relay_status", 15)
 if not rs.startswith("OK"):
     print("🔴 讀不到繼電器狀態：%s" % rs[:90]); sys.exit(1)
 _st_part, _, _names_part = rs.partition("|")
-_m = re.search(r"ch(\d+)=pumpA", _names_part)
-if not _m:
+# [2026-09-10] A/B 輪替：真空源是 A 或 B（併聯同管路），任一為 1 即有真空。
+# 通道仍從 names 欄推導（對「改通道編號」穩），只是現在要看兩顆。
+_mA = re.search(r"ch(\d+)=pumpA", _names_part)
+_mB = re.search(r"ch(\d+)=pumpB", _names_part)
+if not _mA:
     print("🔴 relay_status 沒有 pumpA 欄位，無法確認真空源：%s" % rs[:120]); sys.exit(1)
-_pump_ch = _m.group(1)
-_pump_on = re.search(r"\bch%s=1\b" % _pump_ch, _st_part) is not None
+_chA = _mA.group(1)
+_chB = _mB.group(1) if _mB else None
+_onA = re.search(r"\bch%s=1\b" % _chA, _st_part) is not None
+_onB = (_chB is not None) and (re.search(r"\bch%s=1\b" % _chB, _st_part) is not None)
+_pump_on = _onA or _onB
+_which = ("A" if _onA else "") + ("B" if _onB else "")   # 併聯窗可能兩顆都亮
 if not _pump_on:
     if not ALLOW_NO_PUMP:
-        print("🔴 真空幫浦 A 組（ch%s）是 OFF —— 沒有真空源，吸盤全程不會吸住。" % _pump_ch)
+        print("🔴 真空幫浦 A(ch%s)/B(%s) 皆 OFF —— 沒有真空源，吸盤全程不會吸住。"
+              % (_chA, _chB if _chB else "?"))
         print("   先送 `init` 給本體（它會開幫浦並印 [init] PQW relays → pump ON），或")
         print("   確定要跑無真空的對照組就用 ALLOW_NO_PUMP=1 重跑（這會記進標題列）。")
         sys.exit(1)
-    print("⚠️ 【無真空對照組】幫浦 A 組（ch%s）是 OFF，經 ALLOW_NO_PUMP=1 明示放行。" % _pump_ch)
+    print("⚠️ 【無真空對照組】幫浦 A/B 皆 OFF，經 ALLOW_NO_PUMP=1 明示放行。")
     print("   本輪的壓力欄與吸附行為不可與有真空的輪次比較。\n")
 else:
-    print("真空幫浦 A 組（ch%s）ON ✅\n" % _pump_ch)
+    print("真空幫浦 %s ON ✅（A=ch%s B=ch%s）\n" % (_which, _chA, _chB if _chB else "?"))
 
 ask(CRANE, "set_motion_hz %d" % DOWN_HZ, 15)
+
+def arm_clean_combo(slot, wet):
+    """[2026-09-11 per user] full 每步的單一工具清潔動作:
+       deploy → (wet 才:開水+滾刷) → 滑台 0-RAIL-0 → (wet 才:關水) → arm_retract(收 M1、**不失能**)。
+       走本體 arm_deploy_f/arm_retract 代轉(維持 full 的 via-body 慣例,不直連 9527)。
+       回 True=有掃到;False=no_wall/obstacle 已跳過並收手臂。
+       🔴 用水/收放守則:M1 下才開水、滑台回0後才收手臂、收手臂前先關水、收手臂不失能。"""
+    if ARM_FORCE_MODE[0]:
+        r = ask(WROBOT, "arm_deploy_f %.1f %s" % (ARM_TARGET_NM, slot), 150,
+                prefixes=("OK", "ERR", "WARN"))
+        if r.startswith("ERR unknown_cmd"):
+            ARM_FORCE_MODE[0] = False
+            print("   ⚠️ 本體無 arm_deploy_f（舊 binary）→ 退回 arm_deploy 舊路徑")
+        elif r.startswith("OK"):
+            pass                                       # 壓到目標,照常掃
+        elif r.startswith("WARN"):
+            press_warn_steps[0] += 1
+            print("   🟡 %s 壓力未收斂到 %.1f N·m,掃動照做:%s" % (slot, ARM_TARGET_NM, r[:80]))
+        elif "no_wall" in r:
+            no_wall_steps[0] += 1
+            print("   ⚠️ %s 找不到牆 —— 跳過清潔、收手臂續行:%s" % (slot, r[:80]))
+            ask(WROBOT, "arm_retract", 30); return False
+        elif "obstacle" in r:
+            obstacle_steps[0] += 1
+            print("   ⚠ %s 疑似橫桿(接觸比玻璃近)—— 跳過清潔、收手臂續行:%s" % (slot, r[:80]))
+            ask(WROBOT, "arm_retract", 30); return False
+        elif "cannot reach" in r or "cannot_reach" in r:
+            # [2026-09-11 per user]「搆不到就不刷、跳過、到下一位置」——不 bail。
+            # 力控伸到 M1 上限仍未達目標(牆太遠/該把 reach 不足/接觸後建力太慢)。
+            # 與 obstacle/no_wall 同性質(現場幾何),跳過該把、收手臂、續到下一位置。
+            cannot_reach_steps[0] += 1
+            print("   ⚠ %s 搆不到牆(力控行程用完仍未達標)—— 跳過清潔、收手臂續到下一位置:%s" % (slot, r[:90]))
+            ask(WROBOT, "arm_retract", 30); return False
+        else:
+            bail("arm_deploy_f %s 失敗:%s" % (slot, r[:120]))
+    if not ARM_FORCE_MODE[0]:
+        r = ask(WROBOT, "arm_deploy %d %s" % (ARM_WALL_MM, slot), 90)
+        time.sleep(1.5)
+        ast_ = ask(WROBOT, "arm_status", 20, prefixes=("[M1]",))
+        th = field(ast_, "pos"); tau = field(ast_, "tau")
+        if th is None or tau is None: bail("arm_status 讀不到姿態:%s" % ast_[:80])
+        if not (0.55 < th < 0.75 and tau > 8.0):
+            bail("%s 沒壓上:θ=%.4f tau=%+.2f（arm_deploy 回 %s）" % (slot, th, tau, r[:40]))
+    # ---- deployed:清潔動作 ----
+    if wet:
+        wl = ask(WROBOT, "water_level", 8)
+        if "water_full=1" not in wl:                   # M1 已下但沒水,不可乾抽
+            ask(WROBOT, "water_pump off", 10); ask(WROBOT, "arm_retract", 30)
+            bail("水箱空/水位讀不到,無法噴水:%s" % wl[:50])
+        ask(WROBOT, "water_pump on", 20)               # 🔴 M1 下才開水
+        ask(WROBOT, "brush on", 20)
+    if RAIL_CM > 0:
+        r = ask(WROBOT, "rail %d" % RAIL_CM, 60)
+        if not r.startswith("OK"): bail("%s rail %d 失敗:%s" % (slot, RAIL_CM, r))
+        r = ask(WROBOT, "rail 0", 60)
+        if not r.startswith("OK"): bail("%s rail 0 復位失敗:%s" % (slot, r))
+    if wet:
+        ask(WROBOT, "brush off", 20)
+        ask(WROBOT, "water_pump off", 20)              # 🔴 收手臂前先關水
+    ask(WROBOT, "arm_retract", 30)                     # 🔴 滑台回0後收手臂(不失能)
+    return True
+
 
 try:
     for cyc in range(1, CYCLES + 1):
@@ -949,11 +1116,14 @@ try:
                 print("   ⚠ 真空未建立（%.1fs 內無一顆到 %d kPa：%s）—— 本步跳過滑台掃動、直接收腳續行"
                       % (t_vac, VAC_OK_KPA, "/".join("%s" % p for p in (pr or []))))
 
-            # ③b [2026-09-03 per user] 上滑台 0→50→0。
-            # 位置刻意放在 ③ 與 ④ 之間：推桿仍在 10cm（機體有支撐）、風扇仍關（①的順序
-            # 是安全需求，不可為了掃動提前開）。手臂維持 PARK —— 本步只動滑台，不壓玻璃。
-            # ③b [2026-09-03 per user] 由「滑台空跑」改成**完整清潔動作**：
-            #     壓上(arm_deploy) → 滑台 0→RAIL_CM→0 → 收手臂(arm_park)
+            # ③b 上滑台清潔動作（位置刻意在 ③ 與 ④ 之間：推桿仍在 10cm 機體有支撐、
+            #    風扇仍關 ①的安全順序不可為掃動提前開）。
+            # 🔴 [2026-09-11 per user] 改成**每步雙組合**（滾筒+刮刀）並移進 arm_clean_combo：
+            #    OK/WARN→掃、no_wall/obstacle→跳過續行(obstacle 不再中止,per user 現場確認是橫桿)、
+            #    收手臂用 **arm_retract(不失能)** 不用 arm_park。下方詳細註解描述的是舊單槽流程,
+            #    行為以 arm_clean_combo 為準。以下保留 via-body 與「無附著整段跳過」兩條原則說明。
+            # ── (舊註解,單槽流程,行為已移至 arm_clean_combo) ──
+            #     壓上(arm_deploy) → 滑台 0→RAIL_CM→0 → 收手臂
             #
             # 🔴 走本體的 arm_deploy_f/arm_park 代轉，**不直接連 9527** ——
             #    ⚠️ [2026-09-04 更正] 舊註解寫的理由「motor_api 在本體的 127.0.0.1:9527，
@@ -983,71 +1153,20 @@ try:
             #    等於用一台懸空的機器去推牆，姿態會被推歪而那不屬於被測項目。
             t = time.time()                                     # ③b
             t_rail = 0.0
-            skip_press = False
-            if not skip_rail:
-                if ARM_FORCE_MODE[0]:
-                    # ⚠️ prefixes 一定要含 WARN：未收斂時前綴是 WARN 不是 OK/ERR，
-                    #    漏了它會被當成非同步事件、等到逾時，症狀長得像「手臂沒回應」。
-                    r = ask(WROBOT, "arm_deploy_f %.1f %s" % (ARM_TARGET_NM, ARM_SLOT),
-                            150, prefixes=("OK", "ERR", "WARN"))
-                    if r.startswith("ERR unknown_cmd"):
-                        # 本體還是舊 binary。整輪退回舊路徑，並大聲說一次。
-                        ARM_FORCE_MODE[0] = False
-                        print("   ⚠️ 本體無 arm_deploy_f（舊 binary）→ 本輪起改用 "
-                              "arm_deploy %d + 姿態判準。壓力不再是被控量，"
-                              "各高度的清潔力道會隨牆距浮動。" % ARM_WALL_MM)
-                    elif r.startswith("OK"):
-                        pass                                   # 壓到目標，照常掃動
-                    elif r.startswith("WARN"):
-                        press_warn_steps[0] += 1
-                        print("   🟡 壓力未收斂到 %.1f N·m，掃動照做：%s"
-                              % (ARM_TARGET_NM, r[:90]))
-                    elif "no_wall" in r:
-                        no_wall_steps[0] += 1
-                        skip_press = True
-                        print("   ⚠️ 找不到牆（手臂伸到上限仍未接觸）—— 本步跳過清潔動作、"
-                              "續行：%s" % r[:90])
-                    elif "obstacle" in r:
-                        # 🔴🔴 [2026-09-04 per user 現場確認] **由「中止」改為「跳過、續行」。**
-                        #   原本當成異常，是因為我把 obstacle 想成「不該出現的東西」。
-                        #   實測那是**橫桿** —— 這面牆的固定結構，一趟下行必然會遇到幾根。
-                        #   那跟「有些玻璃面有縫隙、吸盤本來就吸不住」是**完全同一類的現場條件**，
-                        #   而那一條 per user 明講過是「設計要求，不是妥協」。
-                        #   照舊邏輯，十週期遇到第一根橫桿就整場中止。
-                        #   ⚠️ 「不能頂著橫桿橫走滑台」這個顧慮仍然成立 ——
-                        #      正確處置是**不要掃**，不是**停止整場測試**。
-                        obstacle_steps[0] += 1
-                        skip_press = True
-                        print("   ⚠ 疑似橫桿（接觸點比任何玻璃都近）—— 本步跳過清潔動作、"
-                              "續行：%s" % r[:90])
-                    else:
-                        bail("arm_deploy_f 失敗：%s" % r[:120])
-
-                if not ARM_FORCE_MODE[0]:
-                    # 舊路徑（本體尚未安裝 arm_deploy_f 代轉時）。判準與 09-03 相同。
-                    r = ask(WROBOT, "arm_deploy %d %s" % (ARM_WALL_MM, ARM_SLOT), 90)
-                    time.sleep(1.5)
-                    # arm_status 回的是 `[M1] ... | [M2] ...`，不是 OK 開頭 —— 見 ask() 的說明
-                    ast_ = ask(WROBOT, "arm_status", 20, prefixes=("[M1]",))
-                    th  = field(ast_, "pos")
-                    tau = field(ast_, "tau")
-                    if th is None or tau is None:
-                        bail("arm_status 讀不到姿態：%s" % ast_[:80])
-                    if not (0.55 < th < 0.75 and tau > 8.0):
-                        bail("手臂沒有壓上：θ=%.4f tau=%+.2f（arm_deploy 回 %s）"
-                             % (th, tau, r[:40]))
-
-            if not skip_rail and not skip_press:
-                r = ask(WROBOT, "rail %d" % RAIL_CM, 60)
-                if not r.startswith("OK"): bail("rail %d 失敗：%s" % (RAIL_CM, r))
-                r = ask(WROBOT, "rail 0", 60)
-                if not r.startswith("OK"): bail("rail 0 復位失敗：%s" % r)
-            if not skip_rail:
-                # 🔴 no_wall 也要收：手臂已經伸出去了（尋觸走到上限），
-                #    跳過的只是掃動，不是收回。留在外面會一路撞到下一步。
-                r = ask(WROBOT, "arm_park", 90)
-                if not r.startswith("OK"): bail("arm_park 失敗：%s" % r)
-                t_rail = time.time() - t
+            # [2026-09-11 per user] 每步雙組合清潔:滾筒(噴水+滾刷)+ 刮刀(乾掃),
+            #   收手臂用 arm_retract(不失能)。詳見 arm_clean_combo。
+            t = time.time()
+            # [2026-09-11 per user] 橫桿高度帶 → 跳過手臂 deploy(不壓橫桿),續到下一位置。
+            #   與接觸角/力控無關,純看吊機高度(見上方 SKIP_BANDS 說明)。
+            skip_bar = in_skip_band(cur)
+            if skip_bar is not None:
+                crossbar_skip_steps[0] += 1
+                print("   ⚠ 高度 %d cm 落在橫桿跳過帶 %d-%d cm —— 跳過手臂 deploy(不壓橫桿)、續到下一位置"
+                      % (int(cur), skip_bar[0], skip_bar[1]))
+            if not skip_rail and skip_bar is None:
+                arm_clean_combo("RIGHT", wet=True)    # 滾筒:噴水 + 滾刷 + 滑台掃
+                arm_clean_combo("LEFT",  wet=False)   # 刮刀:乾掃(不噴不刷)
+            t_rail = time.time() - t
 
             t = time.time()                                     # ④
             r = ask(WROBOT, "pusher all retract", 90)

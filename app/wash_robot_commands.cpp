@@ -71,6 +71,15 @@ std::string WashRobot::cmd_init_impl_() {
     // and trapping the user (re-running init would hit the same fail).
     if (try_or_pause_([this]() { return pqw_.controlRelay(CH_PUMP, true); },
                       "init_pump_on")) return "ERR aborted\n";
+    // [2026-09-10] A/B 輪替：init 一律回到「只有 A 在跑」的已知起點——開 A(上一行)、
+    // 關 B，並把輪替計時歸零、重新武裝自動輪替（若上次因真空異常被停用，init 重開）。
+    // 併聯管路關掉 B 不影響真空（A 仍在抽）；controlRelay 失敗只記錄、不擋 init。
+    if (pqw_.controlRelay(CH_PUMP_B, false))
+        std::cerr << "[init] warn: close CH_PUMP_B failed (輪替起點可能兩顆都在跑)\n";
+    active_pump_.store(CH_PUMP_A);
+    pump_accum_ms_.store(0);
+    pump_active_since_ms_.store(now_ms_());
+    pump_auto_rotate_enabled_.store(true);
     if (try_or_pause_([this]() { return pqw_.controlRelay(CH_VALVE_RIGHT, false); },
                       "init_valve_right_off")) return "ERR aborted\n";
     if (try_or_pause_([this]() { return pqw_.controlRelay(CH_VALVE_LEFT, false); },
@@ -477,6 +486,149 @@ std::string WashRobot::cmd_rail_zero() {
     if (!lk.owns_lock()) return "ERR busy: another motion holds motion_mtx_\n";
     if (D_(DM2J_ARM).home_set_current_pos_zero()) return "ERR rail_zero_failed\n";
     return "OK rail_zero (目前位置已設為 0)\n";
+}
+
+// [2026-09-11 per user] 上滑台 JOG（按住才動）。fwd/rev/stop [rpm]。
+//   前端按住每 300ms 重送 fwd|rev 當心跳(刷新 rail_jog_last_ms_);放開送 stop。
+//   兩道保護在 rail_jog_monitor_loop_:deadman(>600ms 沒心跳自動停)+ 行程守衛(近兩端自動停)。
+//   ⚠️ 速度模式,cmd_rail_move 的 0-130 硬限位管不到;座標未校正時行程守衛是假的。
+std::string WashRobot::cmd_rail_jog(const std::string& dir, int rpm) {
+    if (dir == "stop") {
+        rail_jog_dir_.store(0);   // 先解除武裝,監看 loop 不再管
+        std::unique_lock<std::mutex> lk(motion_mtx_, std::try_to_lock);   // best-effort;停一定要送出去
+        D_(DM2J_ARM).jog_stop();
+        return "OK rail_jog stop\n";
+    }
+    State cur = state_.load();
+    if (cur == State::Error) return state_violation_(cur);
+    int d;
+    if      (dir == "fwd") d = +1;
+    else if (dir == "rev") d = -1;
+    else return "ERR usage:rail_jog_<fwd|rev|stop>_[rpm]\n";
+    if (rpm <= 0) rpm = RAIL_JOG_DEFAULT_RPM;
+    if (rpm < 10 || rpm > 500) return "ERR rail_jog_rpm_out_of_range (10..500)\n";
+
+    std::unique_lock<std::mutex> lk(motion_mtx_, std::try_to_lock);
+    if (!lk.owns_lock()) return "ERR busy: another motion holds motion_mtx_\n";
+
+    // 行程守衛(啟動時):已到該方向端點就不再往那邊 jog(避免頂硬限位)。
+    double pos = 0.0;
+    if (!D_(DM2J_ARM).read_position_cm(pos)) {
+        if (d > 0 && pos >= ARM_RAIL_TRAVEL_MAX_CM - RAIL_JOG_LIMIT_MARGIN_CM) {
+            D_(DM2J_ARM).jog_stop(); rail_jog_dir_.store(0);
+            return "OK rail_jog at_fwd_limit pos=" + std::to_string(pos) + "\n";
+        }
+        if (d < 0 && pos <= RAIL_JOG_LIMIT_MARGIN_CM) {
+            D_(DM2J_ARM).jog_stop(); rail_jog_dir_.store(0);
+            return "OK rail_jog at_rev_limit pos=" + std::to_string(pos) + "\n";
+        }
+    }
+    // set_jog_speed + jog_forward/reverse。重送(每 300ms)是冪等的:同向同速只是續跑。
+    if (D_(DM2J_ARM).set_jog_speed(rpm)) return "ERR rail_jog set_speed_fail\n";
+    const bool err = (d > 0) ? D_(DM2J_ARM).jog_forward() : D_(DM2J_ARM).jog_reverse();
+    if (err) return "ERR rail_jog start_fail\n";
+    rail_jog_dir_.store(d);
+    rail_jog_last_ms_.store(now_ms_());   // 刷新 deadman 心跳
+    std::ostringstream oss;
+    oss << "OK rail_jog " << dir << " rpm=" << rpm << "\n";
+    return oss.str();
+}
+
+// [2026-09-11] JOG 監看 loop(100ms):只在 jog 中(dir!=0)作用。
+//   ① deadman:>RAIL_JOG_DEADMAN_MS 沒收到心跳 → jog_stop(瀏覽器當/斷線/切分頁的保命)。
+//   ② 行程守衛:讀位置,近該方向端點 → jog_stop + EVT(前端據此清按鈕)。
+void WashRobot::rail_jog_monitor_loop_() {
+    while (rail_jog_mon_running_.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(RAIL_JOG_MON_POLL_MS));
+        const int d = rail_jog_dir_.load();
+        if (d == 0) continue;                      // 沒在 jog
+        // ① deadman
+        if (now_ms_() - rail_jog_last_ms_.load() > RAIL_JOG_DEADMAN_MS) {
+            D_(DM2J_ARM).jog_stop();
+            rail_jog_dir_.store(0);
+            evt_("rail_jog_deadman_stop");
+            continue;
+        }
+        // ② 行程守衛
+        double pos = 0.0;
+        if (!D_(DM2J_ARM).read_position_cm(pos)) {
+            if ((d > 0 && pos >= ARM_RAIL_TRAVEL_MAX_CM - RAIL_JOG_LIMIT_MARGIN_CM) ||
+                (d < 0 && pos <= RAIL_JOG_LIMIT_MARGIN_CM)) {
+                D_(DM2J_ARM).jog_stop();
+                rail_jog_dir_.store(0);
+                evt_("rail_jog_limit pos=" + std::to_string(pos));
+            }
+        }
+    }
+}
+
+// [2026-09-11 per user] 上滑台區間來回 rail_sweep(本體端、非同步)。
+//   from → to → from(3 段);每段複用 cmd_rail_move(驗證/motion_mtx/逾時);
+//   段間檢查 stop(走完當段就不送下一段);EVT 報進度。detached thread 跑,立刻回 OK。
+void WashRobot::rail_sweep_run_(double from, double to, int rpm) {
+    const double legs[3] = { from, to, from };
+    std::string result = "done";
+    for (int leg = 1; leg <= 3; ++leg) {
+        if (rail_sweep_stop_.load()) { result = "stopped"; break; }
+        rail_sweep_leg_.store(leg);
+        rail_sweep_target_.store((int)legs[leg - 1]);
+        // 複用 cmd_rail_move:它 try_lock motion_mtx、驗範圍、_nowait+等完成、逾時依行程算。
+        const std::string r = cmd_rail_move(legs[leg - 1], rpm, 0, 0);
+        if (r.rfind("OK", 0) != 0) {
+            std::string reason = r; if (!reason.empty() && reason.back() == '\n') reason.pop_back();
+            result = "failed:" + reason;
+            evt_("rail_sweep_failed leg=" + std::to_string(leg) + " err=" + reason);
+            break;
+        }
+        evt_("rail_sweep_leg n=" + std::to_string(leg) + "/3 pos=" + std::to_string((int)legs[leg - 1]));
+    }
+    { std::lock_guard<std::mutex> lk(rail_sweep_last_mtx_); rail_sweep_last_ = result; }
+    rail_sweep_leg_.store(0);
+    rail_sweep_running_.store(false);
+    if      (result == "done")    evt_("rail_sweep_done");
+    else if (result == "stopped") evt_("rail_sweep_stopped");
+    // failed 已在迴圈內發過 EVT
+}
+
+std::string WashRobot::cmd_rail_sweep_start(double from_cm, double to_cm, int rpm) {
+    State cur = state_.load();
+    if (cur == State::Error) return state_violation_(cur);
+    if (from_cm < 0.0 || from_cm > ARM_RAIL_TRAVEL_MAX_CM ||
+        to_cm   < 0.0 || to_cm   > ARM_RAIL_TRAVEL_MAX_CM)
+        return "ERR rail_sweep_out_of_range (0.0.." + std::to_string((int)ARM_RAIL_TRAVEL_MAX_CM) + " cm)\n";
+    if (rail_sweep_running_.exchange(true)) return "ERR sweep_in_progress\n";
+    rail_sweep_stop_.store(false);
+    rail_sweep_from_.store((int)from_cm);
+    rail_sweep_to_.store((int)to_cm);
+    rail_sweep_leg_.store(0);
+    { std::lock_guard<std::mutex> lk(rail_sweep_last_mtx_); rail_sweep_last_ = "running"; }
+    std::thread([this, from_cm, to_cm, rpm]() { rail_sweep_run_(from_cm, to_cm, rpm); }).detach();
+    std::ostringstream oss;
+    oss << "OK rail_sweep_started from=" << (int)from_cm << " to=" << (int)to_cm
+        << " rpm=" << (rpm > 0 ? rpm : ARM_SWEEP_RPM) << "\n";
+    return oss.str();
+}
+
+std::string WashRobot::cmd_rail_sweep_stop() {
+    if (!rail_sweep_running_.load()) return "OK rail_sweep not_running\n";
+    rail_sweep_stop_.store(true);
+    return "OK rail_sweep_stopping (走完進行中那段就停)\n";
+}
+
+std::string WashRobot::cmd_rail_sweep_status() {
+    std::ostringstream oss;
+    oss << "OK rail_sweep";
+    if (rail_sweep_running_.load()) {
+        oss << " running=1 leg=" << rail_sweep_leg_.load() << "/3"
+            << " target=" << rail_sweep_target_.load()
+            << " from=" << rail_sweep_from_.load()
+            << " to="   << rail_sweep_to_.load();
+    } else {
+        std::string last; { std::lock_guard<std::mutex> lk(rail_sweep_last_mtx_); last = rail_sweep_last_; }
+        oss << " running=0 last=" << last;
+    }
+    oss << "\n";
+    return oss.str();
 }
 
 // 手動歸零流程：rail_enable off -> 人手推到左端硬限位 -> rail_enable on -> rail_zero
@@ -3668,7 +3820,9 @@ std::string WashRobot::cmd_shutdown() {
     set_water_inlet_(false);   // [2026-06-05] → crane water valve (2026-09-10: ZS-DIO 4CH @ .32 slave 1, was .34 PQW slave 12)
     pqw_.controlRelay(CH_VALVE_RIGHT,  false);
     pqw_.controlRelay(CH_VALVE_LEFT,   false);
-    pqw_.controlRelay(CH_PUMP,         false);
+    pqw_.controlRelay(CH_PUMP_A,       false);
+    pqw_.controlRelay(CH_PUMP_B,       false);   // [2026-09-10] 輪替後 B 可能正在跑，一併關
+    pump_active_since_ms_.store(0);               // 暫停輪替計時
     return "OK shutdown\n";
 }
 
@@ -3875,16 +4029,211 @@ std::string WashRobot::cmd_vacuum(const std::string& group, bool on) {
 std::string WashRobot::cmd_pump(bool on) {
     State cur = state_.load();
     if (cur == State::Error) return state_violation_(cur);
-    if (pqw_set_relay_verified_(CH_PUMP_A, on)) return "ERR pump_fail\n";
+    // [2026-09-10] `pump on/off` 作用在**目前輪替中的那顆**（不再寫死 A），這樣
+    // GUI 的「幫浦開/關」不會與輪替打架（輪到 B 時關的就是 B）。顯式控制單顆用
+    // `pump a on|off` / `pump b on|off`（cmd_pump_ch_）。
+    const int ch = active_pump_.load();
+    if (pqw_set_relay_verified_(ch, on)) return "ERR pump_fail\n";
+
+    // 手動開/關同步輪替計時：關 = 暫停累計（since=0）、開 = 重新起算。
+    if (on) pump_active_since_ms_.store(now_ms_());
+    else    pump_active_since_ms_.store(0);
 
     // pqw_set_relay_verified_ reports success when it cannot read back at all
     // (best-effort by design, so downstream vacuum checks stay the authority).
-    // Echo the real state anyway — a caller that gets no ch2= field knows the
+    // Echo the real state anyway — a caller that gets no chN= field knows the
     // readback path itself is down, instead of reading a bare OK as confirmation.
     const std::vector<bool> st = pqw_.readAllStatus();
-    if ((int)st.size() < CH_PUMP_A) return "OK pump_set_but_readback_fail\n";
+    if ((int)st.size() < ch) return "OK pump_set_but_readback_fail\n";
     std::ostringstream oss;
-    oss << "OK ch" << CH_PUMP_A << "=" << (st[CH_PUMP_A - 1] ? 1 : 0) << "\n";
+    oss << "OK ch" << ch << "=" << (st[ch - 1] ? 1 : 0)
+        << " active=" << (ch == CH_PUMP_A ? "A" : "B") << "\n";
+    return oss.str();
+}
+
+// [2026-09-10] 顯式控制單顆幫浦（A=CH_PUMP_A / B=CH_PUMP_B），bring-up / bench 用。
+// 不動 active_pump_（那是輪替狀態）；只有 cmd_pump / 輪替會改 active。若手動開的正好
+// 是目前 active 顆，同步計時；開/關非 active 顆不影響計時。
+std::string WashRobot::cmd_pump_ch_(int ch, bool on) {
+    State cur = state_.load();
+    if (cur == State::Error) return state_violation_(cur);
+    if (ch != CH_PUMP_A && ch != CH_PUMP_B) return "ERR pump_ch_must_be_A_or_B\n";
+    if (pqw_set_relay_verified_(ch, on)) return "ERR pump_fail\n";
+    if (ch == active_pump_.load()) pump_active_since_ms_.store(on ? now_ms_() : 0);
+    const std::vector<bool> st = pqw_.readAllStatus();
+    if ((int)st.size() < ch) return "OK pump_set_but_readback_fail\n";
+    std::ostringstream oss;
+    oss << "OK ch" << ch << "=" << (st[ch - 1] ? 1 : 0)
+        << " pump=" << (ch == CH_PUMP_A ? "A" : "B") << "\n";
+    return oss.str();
+}
+
+// [2026-09-10] 4 顆 cup 真空壓力中「最深（最負）」的那個；讀不到任何一顆回 0（大氣）。
+// 用於 A/B 切換後判斷 B 是否撐得住真空。
+int WashRobot::best_vacuum_kpa_() {
+    int best = 0;
+    bool any = false;
+    for (int s : group_slaves_("all")) {
+        int p = read_pressure_(s);
+        if (pressure_stale_[s - 1].load()) continue;   // read_pressure_ 剛更新這個 flag
+        if (!any || p < best) { best = p; any = true; }
+    }
+    return any ? best : 0;
+}
+
+// [2026-09-10] A/B 切換：make-before-break。回 true=換成功；false=失敗或因真空異常已切回。
+//   1. 開 to（進來顆）——失敗即放棄，維持 from
+//   2. 併聯跑 PUMP_SWAP_OVERLAP_MS（兩顆同時抽，記關前基準真空）
+//   3. 關 from（出去顆）
+//   4. PUMP_SWAP_VERIFY_MS 內驗真空：若基準本來就深(≤-30) 且關後劣化逾
+//      PUMP_SWAP_DEGRADE_KPA（向大氣）⇒ 真空異常 → 重開 from、停用自動輪替、回 false
+bool WashRobot::pump_swap_(int from_ch, int to_ch) {
+    const char* fromN = (from_ch == CH_PUMP_A) ? "A" : "B";
+    const char* toN   = (to_ch   == CH_PUMP_A) ? "A" : "B";
+
+    // 互斥：自動輪替 loop 與手動 swap 兩個呼叫端不得同時操作 A/B 繼電器。
+    // 若已在切換中，直接放棄（不重置旗標——那是另一個 swap 持有的）。
+    if (pump_swap_in_progress_.exchange(true)) {
+        evt_("pump_swap_busy 已有切換進行中 — 略過本次");
+        return false;
+    }
+    struct InProgressGuard {
+        std::atomic<bool>& f;
+        ~InProgressGuard() { f.store(false); }
+    } _ipg{pump_swap_in_progress_};
+
+    // 1. 開進來顆（先開後關）
+    if (pqw_set_relay_verified_(to_ch, true)) {
+        evt_(std::string("pump_swap_abort open_") + toN + "_fail — 維持 " + fromN);
+        return false;
+    }
+
+    // 2. 併聯重疊，讓 to 的真空跟上；期間可被 stop() 打斷
+    for (int i = 0; i < PUMP_SWAP_OVERLAP_MS / 1000 && pump_rotate_running_.load(); ++i)
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    if (!pump_rotate_running_.load()) return false;   // shutting down
+    const int base = best_vacuum_kpa_();              // 兩顆併聯下的基準真空
+
+    // 3. 關出去顆
+    if (pqw_set_relay_verified_(from_ch, false)) {
+        // 關不掉 from → 兩顆都在跑：真空無虞（併聯），但沒真的完成輪替。
+        // 視為失敗、下輪再試；不改 active（外層會 reset 計時）。
+        evt_(std::string("pump_swap_warn close_") + fromN + "_fail — 兩顆暫時併聯，下輪再試");
+        return false;
+    }
+
+    // 4. 驗真空：只有基準本來就撐著真空(≤-30)才有意義，否則(cup 未密封)不誤判
+    const int64_t t0 = now_ms_();
+    while (now_ms_() - t0 < PUMP_SWAP_VERIFY_MS && pump_rotate_running_.load()) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        const int p = best_vacuum_kpa_();
+        if (base <= -30 && p > base + PUMP_SWAP_DEGRADE_KPA) {
+            evt_("pump_swap_revert 真空異常 base=" + std::to_string(base) +
+                 "kPa now=" + std::to_string(p) + "kPa — 切回 " + fromN + "、停用自動輪替");
+            pqw_set_relay_verified_(from_ch, true);        // 重開原顆
+            pump_auto_rotate_enabled_.store(false);        // 防抖：等人工 pump_swap / init 重新武裝
+            return false;
+        }
+    }
+    evt_(std::string("pump_swap_ok ") + fromN + "→" + toN +
+         " base=" + std::to_string(base) + "kPa");
+    return true;
+}
+
+// [2026-09-10] 幫浦 A/B 輪替 loop。每 10s 醒一次；累計目前這顆的 ON 時間，達
+// g_pump_rotate_ms_ 就換到另一顆。計時武裝在 init（pump_active_since_ms_ != 0）；
+// 手動 pump off / shutdown 會把它歸零（暫停計時）。g_pump_rotate_ms_==0 = 停用。
+void WashRobot::pump_rotate_loop_() {
+    while (pump_rotate_running_.load()) {
+        for (int i = 0; i < 10 && pump_rotate_running_.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (!pump_rotate_running_.load()) break;
+        if (!pump_auto_rotate_enabled_.load()) continue;   // 上次切回後停用，等人工重啟
+        const int64_t rot = g_pump_rotate_ms_.load();
+        if (rot <= 0) continue;                             // 停用輪替
+        const int64_t since = pump_active_since_ms_.load();
+        if (since == 0) continue;                           // 未計時（關機/手動關）
+        const int64_t now = now_ms_();
+        pump_accum_ms_.fetch_add(now - since);
+        pump_active_since_ms_.store(now);
+        if (pump_accum_ms_.load() < rot) continue;
+
+        const int from = active_pump_.load();
+        const int to   = (from == CH_PUMP_A) ? CH_PUMP_B : CH_PUMP_A;
+        evt_("pump_rotate_begin " + std::string(from == CH_PUMP_A ? "A→B" : "B→A") +
+             " accum_min=" + std::to_string(pump_accum_ms_.load() / 60000));
+        if (pump_swap_(from, to)) {
+            active_pump_.store(to);
+            pump_accum_ms_.store(0);
+            pump_active_since_ms_.store(now_ms_());
+            evt_(std::string("pump_rotate_done active=") + (to == CH_PUMP_A ? "A" : "B"));
+        } else {
+            // 失敗/切回：留在 from，計時歸零（避免下一 tick 立刻又試）。
+            // 若因真空異常，pump_auto_rotate_enabled_ 已在 pump_swap_ 內關掉。
+            pump_accum_ms_.store(0);
+            pump_active_since_ms_.store(now_ms_());
+            evt_(std::string("pump_rotate_failed stay=") + (from == CH_PUMP_A ? "A" : "B") +
+                 (pump_auto_rotate_enabled_.load() ? "" : " auto_rotate=OFF"));
+        }
+    }
+}
+
+// [2026-09-10] 幫浦輪替狀態（給 WEB / bench 對照）。
+std::string WashRobot::cmd_pump_status_() {
+    const int64_t since = pump_active_since_ms_.load();
+    const int64_t accum = pump_accum_ms_.load() + (since ? now_ms_() - since : 0);
+    const int64_t rot   = g_pump_rotate_ms_.load();
+    const std::vector<bool> st = pqw_.readAllStatus();
+    int a = -1, b = -1;
+    if ((int)st.size() >= CH_PUMP_A) a = st[CH_PUMP_A - 1] ? 1 : 0;
+    if ((int)st.size() >= CH_PUMP_B) b = st[CH_PUMP_B - 1] ? 1 : 0;
+    std::ostringstream oss;
+    oss << "OK active=" << (active_pump_.load() == CH_PUMP_A ? "A" : "B")
+        << " accum_min=" << (accum / 60000)
+        << " rotate_min=" << (rot / 60000)
+        << " auto_rotate=" << (pump_auto_rotate_enabled_.load() ? 1 : 0)
+        << " counting=" << (since ? 1 : 0)
+        << " swapping=" << (pump_swap_in_progress_.load() ? 1 : 0)
+        << " chA=" << a << " chB=" << b << "\n";
+    return oss.str();
+}
+
+// [2026-09-10] 手動立即輪替（換到另一顆）。
+// 🔴 **非同步**：pump_swap_ 同步耗時 ~40s（併聯 30s + 驗真空 8s）。web 對本體只有
+//    一條共用 socket，若在此阻塞 40s 會讓整個畫面回讀排隊、且 fire() 的 30s send
+//    逾時會先回一個假的 local_timeout。故此處起一條 detached thread 跑切換、立刻回
+//    `OK swap_started`；真正結果靠 EVT（pump_swap_ok/revert）+ 之後的 `pump status`。
+//    切換中 `pump status` 的 swapping=1，前端據此標「切換中」。
+std::string WashRobot::cmd_pump_swap_() {
+    State cur = state_.load();
+    if (cur == State::Error) return state_violation_(cur);
+    if (pump_swap_in_progress_.load()) return "ERR swap_in_progress\n";
+    std::thread([this]() {
+        const int from = active_pump_.load();
+        const int to   = (from == CH_PUMP_A) ? CH_PUMP_B : CH_PUMP_A;
+        if (pump_swap_(from, to)) {
+            active_pump_.store(to);
+            pump_accum_ms_.store(0);
+            pump_active_since_ms_.store(now_ms_());
+            pump_auto_rotate_enabled_.store(true);   // 手動成功換 → 自動輪替恢復
+        } else {
+            // 失敗/切回：留在 from，計時歸零。真空異常時 pump_auto_rotate_enabled_
+            // 已在 pump_swap_ 內關掉；EVT 已發，前端收到會點亮紅字橫幅。
+            pump_accum_ms_.store(0);
+            pump_active_since_ms_.store(now_ms_());
+        }
+    }).detach();
+    return "OK swap_started (約40s,狀態看 pump status / EVT)\n";
+}
+
+// [2026-09-10] 設 A/B 輪替門檻（分鐘）。0 = 停用輪替（永遠留在目前這顆，＝改動前行為）。
+// 改門檻不重置累計：若新門檻已小於已累計時間，下一 tick 就會立刻換。
+std::string WashRobot::cmd_set_pump_rotate_min_(int minutes) {
+    if (minutes < 0) return "ERR minutes_must_be_>=0\n";
+    g_pump_rotate_ms_.store((int64_t)minutes * 60 * 1000);
+    if (minutes > 0) pump_auto_rotate_enabled_.store(true);  // 明確設門檻 = 重新武裝
+    std::ostringstream oss;
+    oss << "OK pump_rotate_min=" << minutes << (minutes == 0 ? " (輪替停用)\n" : "\n");
     return oss.str();
 }
 
@@ -3924,10 +4273,10 @@ std::string WashRobot::cmd_relay_status() {
     // 已知用途一併印出，讓這一行自己就能對照，不必去翻表。
     oss << " | names ch" << CH_VALVE_RIGHT  << "=valve"
         <<          " ch" << CH_PUMP_A       << "=pumpA"
-        <<          " ch" << CH_PUMP_B       << "=pumpB(未啟用)"
+        <<          " ch" << CH_PUMP_B       << "=pumpB(A/B輪替)"
         <<          " ch" << CH_BRUSH        << "=brush"
         <<          " ch" << CH_BREAK_VACUUM << "=正壓閥"
-        <<          " ch" << CH_WATER_PUMP   << "=water_pump(未接管路)";
+        <<          " ch" << CH_WATER_PUMP   << "=噴水加壓馬達(手臂)";
     oss << "\n";
     return oss.str();
 }
@@ -4397,9 +4746,11 @@ std::string WashRobot::cmd_water_level() {
     return oss.str();
 }
 
-std::string WashRobot::cmd_pusher(const std::string& group, const std::string& pos, double cm) {
+std::string WashRobot::cmd_pusher(const std::string& group, const std::string& pos, double cm, int rpm) {
     State cur = state_.load();
     if (cur == State::Error) return state_violation_(cur);
+    // [2026-09-11 per user] rpm 可選:0=沿用常數(extend 600/retract 500);給值就用,範圍 50..1000。
+    if (rpm != 0 && (rpm < 50 || rpm > 1000)) return "ERR pusher_rpm_out_of_range (50..1000)\n";
 
     // On emergency_stop abort: clear abort_flag and restore pre-cmd state.
     // Manual pusher ops don't leave mechanical state uncertain enough to
@@ -4446,7 +4797,7 @@ std::string WashRobot::cmd_pusher(const std::string& group, const std::string& p
         auto slaves = group_slaves_(group);
         if (slaves.empty()) return "ERR unknown_group\n";
         const std::string ctx = "manual_pusher_" + group + "_retract";
-        if (try_or_pause_([this, &slaves]() { return pusher_two_stage_retract_(slaves); }, ctx)) return on_abort();
+        if (try_or_pause_([this, &slaves, rpm]() { return pusher_two_stage_retract_(slaves, rpm); }, ctx)) return on_abort();
         return "OK\n";
     }
     if (pos == "extend_raw") {
@@ -4491,7 +4842,8 @@ std::string WashRobot::cmd_pusher(const std::string& group, const std::string& p
             auto& grp = kv.second;
             std::cout << "[pusher extend_raw] pulse=" << pulse
                       << " (" << (pulse / 3000.0) << "cm) slaves=" << grp.size() << "\n";
-            if (try_or_pause_([this, pulse, &grp]() { return pusher_move_many_(grp, pulse); },
+            const int use_rpm = (rpm > 0) ? rpm : PUSHER_RPM;
+            if (try_or_pause_([this, pulse, &grp, use_rpm]() { return pusher_move_many_(grp, pulse, use_rpm); },
                               "manual_pusher_" + group + "_extend_raw")) return on_abort();
         }
         return "OK\n";
@@ -4554,11 +4906,13 @@ int WashRobot::extend_raw_pulse_(double cm, std::string& err) const {
     return (int)std::lround(cm * CUP_PULSE_PER_CM);
 }
 
-std::string WashRobot::cmd_zdt_pusher(int slave, const std::string& action, double cm) {
+std::string WashRobot::cmd_zdt_pusher(int slave, const std::string& action, double cm, int rpm) {
     // [2026-08-27] 吸盤 slave 改為 CUP_SLAVE_FIRST..LAST（5-8）；沿用舊的 1-4
     // 驗證會讓 GUI 的單支推桿控制／停用全部回 ERR invalid_slave。
     if (slave < CUP_SLAVE_FIRST || slave > CUP_SLAVE_LAST) return "ERR invalid_slave\n";
     if (disabled_zdt_slaves_.count(slave)) return "ERR slave_disabled\n";
+    // [2026-09-11 per user] rpm 可選:0=沿用常數;給值範圍 50..1000(與群組版一致)。
+    if (rpm != 0 && (rpm < 50 || rpm > 1000)) return "ERR pusher_rpm_out_of_range (50..1000)\n";
 
     State cur = state_.load();
     if (cur == State::Error || cur == State::Running || cur == State::Balancing
@@ -4602,7 +4956,7 @@ std::string WashRobot::cmd_zdt_pusher(int slave, const std::string& action, doub
         std::cout << "[zdt_pusher] slave " << slave << " extend_raw pulse=" << pulse
                   << " (" << (pulse / CUP_PULSE_PER_CM) << "cm)\n";
         std::vector<int> single = {slave};
-        if (pusher_move_many_(single, pulse))
+        if (pusher_move_many_(single, pulse, (rpm > 0) ? rpm : PUSHER_RPM))
             return "ERR pusher_move_fail\n";
         return "OK\n";
     }
@@ -4618,7 +4972,7 @@ std::string WashRobot::cmd_zdt_pusher(int slave, const std::string& action, doub
         // — if this cup was sealed, single-stage fast retract risks ZDT stall
         // on lingering cup adhesion.
         std::vector<int> single = {slave};
-        if (pusher_two_stage_retract_(single))
+        if (pusher_two_stage_retract_(single, rpm))
             return "ERR pusher_move_fail\n";
         return "OK\n";
     }
@@ -4645,6 +4999,112 @@ std::string WashRobot::cmd_zdt_enable(int slave) {
     disabled_zdt_slaves_.erase(slave);
     std::cout << "[zdt_enable] slave " << slave << " re-included in group ops\n";
     return "OK\n";
+}
+
+// [2026-09-11 per user] REAL ZDT driver enable/disable (motion_control_driver_EN,
+// Reg 0x00F3 = torque on/off). Distinct from cmd_zdt_disable, which ONLY excludes a
+// slave from GROUP ops and never de-energizes. Needed to hand-push a pusher back to
+// its retracted hard-stop when a 24V-bus blip corrupts the driver's position counter
+// (ZDT has no homing → the only way to re-establish zero is to physically place it at
+// a known stop, then zdt_zero). ⚠ Motor loses holding torque while OFF.
+std::string WashRobot::cmd_zdt_power(int slave, bool on) {
+    if (slave < CUP_SLAVE_FIRST || slave > CUP_SLAVE_LAST) return "ERR invalid_slave\n";
+    if (on) Z_(slave).release_stall_flag();   // clear any latched stall before re-enable
+    if (Z_(slave).motion_control_driver_EN(on))
+        return std::string("ERR zdt_power_fail slave=") + std::to_string(slave) + "\n";
+    std::cout << "[zdt_power] slave " << slave << " driver EN "
+              << (on ? "ON" : "OFF (torque off — hand-push OK)") << "\n";
+    return "OK\n";
+}
+
+// [2026-09-11 per user] AUTO ZDT re-home by driving into the retracted hard-stop.
+// Alternative to the hand-push re-home (zdt_power off + hand-push + zdt_zero) for when
+// a 24V-bus blip corrupts the ZDT position counter (ZDT has no homing). Drives each
+// pusher retract toward an absolute target WELL PAST 0 at LOW rpm; the physical 0cm
+// hard-stop stalls it — that stall IS physical 0cm → set_zero there.
+// - dir=0 / mode=1 (ABSOLUTE) like every other pusher move; the driver computes the
+//   direction from the (negative) target, so NO relative-direction guess (relative
+//   mode is never used elsewhere — its CW/CCW retract sense is unestablished).
+// - zdt_wait_motion_done_(defer_stall_release=true) treats the stall as the desired
+//   endpoint (returns false). No stall within timeout → do NOT zero (fail-safe).
+// - LOW rpm keeps the force into the hard-stop gentle.
+// Retract = LOWER position count (extend target 30000 = out, retract 300 = in);
+// this scale/sign is a physical-encoder property → holds even when a 24V blip
+// shifts the ZERO (offset), so a RELATIVE probe (observe ΔP sign) recovers the
+// retract direction regardless of the corrupted offset.
+// [2026-09-11 FIX] Previous version used absolute target -66000 to "force retract"
+// — WRONG: ZDT packs pulse UNSIGNED, so -66000 became a huge +value → drove EXTEND
+// into the 20cm stop and zeroed there. Correct approach: RELATIVE mode (mode=0) with
+// a self-probed direction (relative CW/CCW retract sense is otherwise unestablished
+// — no other code uses relative mode).
+std::string WashRobot::cmd_zdt_home(const std::string& group) {
+    State cur = state_.load();
+    if (cur == State::Error) return state_violation_(cur);
+    auto slaves = group_slaves_(group);
+    if (slaves.empty()) return "ERR unknown_group\n";
+
+    std::lock_guard<std::mutex> zdt_lk(zdt_bus_mtx_);
+    dm2j_motion_active_.store(true);
+    struct ClearMotionFlag { std::atomic<bool>* f; ~ClearMotionFlag(){ f->store(false); } } _clr{&dm2j_motion_active_};
+
+    constexpr int    PROBE_PULSE = 1000;   // ~0.33cm relative probe to detect direction
+    constexpr int    PROBE_RPM   = 60;     // gentle probe
+    constexpr int    HOME_RPM    = 100;    // gentle drive into the hard-stop
+    constexpr int    BIG_PULSE   = 66000;  // ~22cm relative retract → guaranteed to reach 0cm stop from anywhere
+    constexpr double MOVED_DEG   = 30.0;   // |ΔP| above this = "moved freely"; below = blocked at a stop
+
+    auto read_pos = [&](int s, double& out)->bool {   // true = read fail
+        if (Z_(s).get_system_status()) return true;
+        out = Z_(s).status.real_pos;
+        return false;
+    };
+
+    std::ostringstream oss;
+    oss << "OK zdt_home group=" << group;
+    for (int s : slaves) {
+        Z_(s).release_stall_flag();
+        double p0 = 0;
+        if (read_pos(s, p0)) { oss << " s" << s << "=read_fail"; continue; }
+
+        // ---- probe direction with a small RELATIVE move ----
+        int retract_dir = -1;
+        Z_(s).motion_control_pos_mode_nowait(0, PUSHER_ACC_RETRACT, PROBE_RPM, PROBE_PULSE, 0 /*relative*/, 0, 1);
+        zdt_wait_motion_done_(s, 8000, /*defer_stall_release=*/true);
+        Z_(s).release_stall_flag();
+        double p1 = p0;
+        if (read_pos(s, p1)) { oss << " s" << s << "=read_fail2"; continue; }
+        double d = p1 - p0;
+        if (std::fabs(d) >= MOVED_DEG) {
+            retract_dir = (d > 0) ? 1 : 0;   // dir0 moved OUT(+)→extend→retract=1 ; moved IN(-)→retract=0
+        } else {
+            // dir0 blocked (already against a stop) → probe dir1 (moves away from it)
+            Z_(s).motion_control_pos_mode_nowait(1, PUSHER_ACC_RETRACT, PROBE_RPM, PROBE_PULSE, 0, 0, 1);
+            zdt_wait_motion_done_(s, 8000, true);
+            Z_(s).release_stall_flag();
+            double p2 = p1;
+            if (read_pos(s, p2)) { oss << " s" << s << "=read_fail3"; continue; }
+            double d2 = p2 - p1;
+            if (std::fabs(d2) < MOVED_DEG) { oss << " s" << s << "=probe_stuck(兩向都不動)"; continue; }
+            retract_dir = (d2 < 0) ? 1 : 0;  // dir1 moved IN(-)→retract=1 ; OUT(+)→retract=0
+        }
+
+        // ---- drive RETRACT into the physical 0cm hard-stop, stall = endpoint ----
+        Z_(s).release_stall_flag();
+        if (Z_(s).motion_control_pos_mode_nowait(retract_dir, PUSHER_ACC_RETRACT, HOME_RPM, BIG_PULSE, 0 /*relative*/, 0, 1)) {
+            oss << " s" << s << "=drive_fail"; continue;
+        }
+        if (zdt_wait_motion_done_(s, 25000, /*defer_stall_release=*/true)) {  // true = fail/timeout, NO stall → don't zero
+            Z_(s).release_stall_flag();
+            oss << " s" << s << "=no_stall(未撞到硬限位,未歸零)"; continue;
+        }
+        // stalled at the retract hard-stop = physical 0cm
+        if (Z_(s).set_zero()) { Z_(s).release_stall_flag(); oss << " s" << s << "=zero_fail"; continue; }
+        Z_(s).release_stall_flag();                 // clear stall so the hold write is accepted
+        Z_(s).motion_control_pos_mode_nowait(0, PUSHER_ACC_RETRACT, HOME_RPM, 0, 1 /*absolute*/, 0, 1);  // hold at new zero
+        oss << " s" << s << "=homed(dir=" << retract_dir << ")";
+    }
+    oss << "\n";
+    return oss.str();
 }
 
 // Manual operator intervention: release latched stall flag on all 9 ZDT slaves.
@@ -4729,8 +5189,10 @@ std::string WashRobot::cmd_return_home(int descent_cm) {
     }
     if (check_abort_()) return fail("ERR aborted\n");
 
-    // 7. Vacuum pump off
-    pqw_.controlRelay(CH_PUMP, false);
+    // 7. Vacuum pump off（A/B 輪替後 B 可能正在跑，兩顆都關並暫停計時）
+    pqw_.controlRelay(CH_PUMP_A, false);
+    pqw_.controlRelay(CH_PUMP_B, false);
+    pump_active_since_ms_.store(0);
 
     // [arm rope protect TEMP 2026-05-21 — DISABLED 2026-05-22] stow arm before long pay_out
     //if (ensure_arm_center_for_rope_("return_home_pre_pay_out"))

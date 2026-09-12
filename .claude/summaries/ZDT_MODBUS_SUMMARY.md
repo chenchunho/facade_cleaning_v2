@@ -272,3 +272,31 @@ uint16_t modbusCRC(const uint8_t* data, int len) {
 ```
 
 CRC is appended LSB first: `[CRC_L] [CRC_H]`
+
+---
+
+## 專案實作對照 / 異常紀錄（2026-09-11 複審 per user）
+
+複審 `user_lib/ZDT_motor_control.{h,cpp}` vs 本手冊,暫存器/幀格式全數一致
+（set_zero 0x000A、release_stall 0x000E、driver_EN 0x00F3、pos_mode 0x00FD、
+speed 0x00F6、estop 0x00FE、batch read 0x04/0x0043/0x10、狀態旗標、CRC16）。兩點要記:
+
+### 🔴 1. ZDT 有原生 homing,但 body 從沒使用
+- 驅動實作了 `trigger_home`(Reg **0x009A**,含 **mode 0x02 = 無感撞限位歸位**)、
+  `set_home_zero_position`(0x0093)、`abort_home`(0x009C),完全對上本手冊 §3.3。
+- 但 `app/*.cpp` **從未呼叫** —— ZDT 吸盤推桿實務上被當成「無 homing」。
+- ⚠️ 程式裡「這台沒有原點感測器、不要 `home_start()`」那段註解(WASH_ROBOT.h)
+  講的是 **DM2J 上滑台**(DM2J_RS570,`0x6002←0x0020/0x0021`、狀態 0x1003),
+  **不是 ZDT**。兩者的 homing 能力與暫存器完全不同,曾被混淆。
+- 2026-09-11 因此手刻了 `cmd_zdt_home`(相對驅動撞硬限位+set_zero)來做 24V-blip
+  後的重歸零 —— 那其實重造了 ZDT 原生的撞限位歸位(mode 0x02)。
+- 🔮 待辦:試 `trigger_home(0x02)`,能用就換原生歸位(撞限參數見 §3.3.6,可能要調);
+  不能用則保留手刻 zdt_home(已實機驗證可用)。
+
+### ⚠️ 2. pos_mode 的 pulse 是無號,驅動未擋負值
+- §3.2.11:pulse 範圍 0x00000000–0xFFFFFFFF(**無號**),方向由 `dir` 決定。
+- `motion_control_pos_mode(int pulse, ...)` 收**有號 int** 直接打包,**沒有 pulse<0 守衛**
+  → 傳負值會被打包成巨大正值 → 反方向全速衝。
+- 2026-09-11 實例:`zdt_home` 第一版用「絕對負目標 -66000」想收回,結果伸錯方向撞到
+  伸出端 20cm 硬限位並在那 set_zero。改用「相對模式 + 方向自偵測」才修正。
+- 🔴 待辦:驅動 `motion_control_pos_mode` 加 `pulse < 0` 守衛(拒絕或取 abs+報錯)。

@@ -111,6 +111,31 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
     }
     if (cmd == "rail_pos")  return robot.cmd_rail_pos();
     if (cmd == "rail_zero") return robot.cmd_rail_zero();
+    // [2026-09-11] 上滑台 JOG:rail_jog <fwd|rev|stop> [rpm]。按住每 300ms 重送 fwd/rev
+    //   當心跳(deadman);放開送 stop。rpm 省略=預設。
+    if (cmd == "rail_jog") {
+        std::string dir; int rpm = 0;
+        iss >> dir;
+        if (iss.fail()) return "ERR usage:rail_jog_<fwd|rev|stop>_[rpm]\n";
+        iss >> rpm;   // 選填;讀不到維持 0(cmd_rail_jog 內轉預設)
+        return robot.cmd_rail_jog(dir, rpm);
+    }
+    // [2026-09-11] 上滑台區間來回(本體端、非同步):
+    //   rail_sweep <from> <to> [rpm]  → 立刻回 started;from→to→from 一次來回
+    //   rail_sweep stop               → 走完當段就停
+    //   rail_sweep status             → running/leg/target
+    if (cmd == "rail_sweep") {
+        std::string sub; iss >> sub;
+        if (iss.fail()) return "ERR usage:rail_sweep_<from>_<to>_[rpm]_|_stop_|_status\n";
+        if (sub == "stop")   return robot.cmd_rail_sweep_stop();
+        if (sub == "status") return robot.cmd_rail_sweep_status();
+        // 否則 sub 是 from(數值),再讀 to [rpm]
+        double from_cm = std::atof(sub.c_str());
+        double to_cm; int rpm = 0;
+        if (!(iss >> to_cm)) return "ERR usage:rail_sweep_<from>_<to>_[rpm]\n";
+        iss >> rpm;
+        return robot.cmd_rail_sweep_start(from_cm, to_cm, rpm);
+    }
     if (cmd == "rail_cfg_soft_enable") return robot.cmd_rail_cfg_soft_enable();
     if (cmd == "rail_enable") {
         std::string v; iss >> v;
@@ -167,8 +192,9 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
 
     // ---- cleaning arm (damiao motors via motor_api on 127.0.0.1:9527) ----
     if (cmd == "arm_init")   return robot.cmd_arm_init();
-    if (cmd == "arm_park")   return robot.cmd_arm_park();
-    if (cmd == "arm_status") return robot.cmd_arm_status();
+    if (cmd == "arm_park")    return robot.cmd_arm_park();
+    if (cmd == "arm_retract") return robot.cmd_arm_retract();   // [2026-09-11] 收 M1 不失能
+    if (cmd == "arm_status")  return robot.cmd_arm_status();
     if (cmd == "arm_deploy") {
         int wall_mm = 0;
         std::string slot;
@@ -336,10 +362,31 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
     }
     if (cmd == "pump") {
         std::string s; iss >> s;
-        if (iss.fail()) return "ERR usage:pump_<on|off>\n";
-        if (s == "on")  return robot.cmd_pump(true);
-        if (s == "off") return robot.cmd_pump(false);
-        return "ERR expected_on_or_off\n";
+        if (iss.fail()) return "ERR usage:pump_<on|off|status|swap|a_<on|off>|b_<on|off>>\n";
+        // [2026-09-10] A/B 輪替：
+        //   pump on|off      → 目前輪替中那顆
+        //   pump status      → active/累計/門檻/自動輪替旗標
+        //   pump swap        → 立即手動換另一顆（成功則恢復自動輪替）
+        //   pump a|b on|off  → 顯式控制單顆（bench）
+        if (s == "on")     return robot.cmd_pump(true);
+        if (s == "off")    return robot.cmd_pump(false);
+        if (s == "status") return robot.cmd_pump_status_();
+        if (s == "swap")   return robot.cmd_pump_swap_();
+        if (s == "a" || s == "b" || s == "A" || s == "B") {
+            std::string s2; iss >> s2;
+            if (iss.fail()) return "ERR usage:pump_<a|b>_<on|off>\n";
+            const int ch = (s == "a" || s == "A") ? 2 /*CH_PUMP_A*/ : 3 /*CH_PUMP_B*/;
+            if (s2 == "on")  return robot.cmd_pump_ch_(ch, true);
+            if (s2 == "off") return robot.cmd_pump_ch_(ch, false);
+            return "ERR expected_on_or_off\n";
+        }
+        return "ERR expected_on_off_status_swap_a_b\n";
+    }
+    // [2026-09-10] 設定 A/B 幫浦輪替門檻（分鐘）；0 = 停用輪替（永遠留在目前這顆）。
+    if (cmd == "set_pump_rotate_min") {
+        int min; iss >> min;
+        if (iss.fail() || min < 0) return "ERR usage:set_pump_rotate_min_<minutes>=0..\n";
+        return robot.cmd_set_pump_rotate_min_(min);
     }
     // [2026-08-26] QX-DO24 4-ch PWM output (cli_22_ slave 6), web panel 用。
     //   pwm set <ch1-4> <hz> <control> <duty%>   暫存寫入（斷電還原）
@@ -399,8 +446,12 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
         if (iss.fail()) return "ERR usage:pusher_<group>_<extend|retract|extend_raw>_[cm]\n";
         // 🔴 [2026-09-02] 第三個參數可選：extend_raw 時指定公分（0.5~16.0）。
         // 不給就沿用各 slave 預設脈衝（行為與先前相同）。校正牆距用。
-        double cm = 0.0; iss >> cm;   // 解析失敗時 cm 維持 0.0
-        return robot.cmd_pusher(g, p, cm);
+        // [2026-09-11] rpm 可選。⚠️ retract 沒有 cm,它的下一 token 就是 rpm;
+        //   extend_raw 是 cm 然後 rpm。分開解析,別把 retract 的 rpm 讀成 cm。
+        double cm = 0.0; int rpm = 0;
+        if (p == "retract") { iss >> rpm; }
+        else                { iss >> cm; iss >> rpm; }
+        return robot.cmd_pusher(g, p, cm, rpm);
     }
     if (cmd == "zdt_pusher") {
         int s = 0; std::string a;
@@ -414,8 +465,11 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
         // 🔴 [2026-09-10 per user] 第三個參數可選：`extend_raw` 時指定公分（0.5~20.0）。
         // 解析失敗時 cm 維持 0.0 ＝ 沿用該 slave 預設脈衝，與先前逐位元相同。
         // **與群組版 `pusher <group> extend_raw [cm]` 的解析方式刻意一致**（同上 :397）。
-        double cm = 0.0; iss >> cm;
-        return robot.cmd_zdt_pusher(s, a, cm);
+        // [2026-09-11] rpm 可選(同群組版):retract 下一 token=rpm;extend_raw=cm 再 rpm。
+        double cm = 0.0; int rpm = 0;
+        if (a == "retract") { iss >> rpm; }
+        else                { iss >> cm; iss >> rpm; }
+        return robot.cmd_zdt_pusher(s, a, cm, rpm);
     }
     if (cmd == "zdt_zero") {
         std::string g; iss >> g;
@@ -442,6 +496,21 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
             return "ERR usage:zdt_enable_<" + std::to_string(WashRobot::CUP_SLAVE_FIRST)
                  + ".." + std::to_string(WashRobot::CUP_SLAVE_LAST) + ">\n";
         return robot.cmd_zdt_enable(s);
+    }
+    if (cmd == "zdt_power") {
+        int s = 0; std::string v;
+        iss >> s >> v;
+        if (iss.fail() || s < WashRobot::CUP_SLAVE_FIRST || s > WashRobot::CUP_SLAVE_LAST)
+            return "ERR usage:zdt_power_<" + std::to_string(WashRobot::CUP_SLAVE_FIRST)
+                 + ".." + std::to_string(WashRobot::CUP_SLAVE_LAST) + ">_<on|off>\n";
+        if (v == "on")  return robot.cmd_zdt_power(s, true);
+        if (v == "off") return robot.cmd_zdt_power(s, false);
+        return "ERR expected_on_or_off\n";
+    }
+    if (cmd == "zdt_home") {
+        std::string g; iss >> g;
+        if (iss.fail()) return "ERR usage:zdt_home_<feet|all>\n";
+        return robot.cmd_zdt_home(g);
     }
     if (cmd == "zdt_release_stall") return robot.cmd_zdt_release_stall();
     if (cmd == "return_home") {

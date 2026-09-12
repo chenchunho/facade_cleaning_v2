@@ -82,6 +82,36 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 
 const server = http.createServer(app);
 
+//=========== 牆面高度（2026-09-11 per user，地面歸零慣例）===========
+//
+// 🔴 慣例：**地面最低點 = SD76 0**，升到頂端 length_left 為負，取絕對值 = 牆高。
+//    「② 最高點設定」在頂端**純讀** |length_left| 存進來，**不歸零**（`zero_meters top`
+//    會把 0 搬到頂端，與慣例相反 —— 2026-09-11 實機踩過一次、已撤回）。
+// 為什麼放在 server.js 而不是瀏覽器：牆高是「這個工地」的值，平板與筆電要看到同一個；
+//    也不放吊機的 home_ground_cm —— cycle_test.py 用 home_ground_cm>0 判斷「頂端歸零慣例」，
+//    塞進去會讓腳本誤判慣例。存檔在 ~/run/wall_height.json，node 重啟不掉。
+// full 需要 FCV_TOP_CM=牆高：從這裡帶進 env（cycle_test 拿不到時會落到預設 231 = 錯）。
+const fs = require('fs');
+const WALL_FILE = path.join(process.env.HOME || '/home/user', 'run', 'wall_height.json');
+// [2026-09-11 per user] ① 地面歸零與 ② 最高點各自獨立、各自記憶：
+//   ① 的「SD76=0」活在吊機硬體，這裡只記**上次成功的時間**（ground_at）讓 GUI 標示；
+//   ② 的牆高（cm）在這裡。任務啟動要兩者都有；只重做其中一個，另一個沿用記憶值。
+let wall = { cm: 0, at: null, left_raw: null, ground_at: null };
+try {
+    const w = JSON.parse(fs.readFileSync(WALL_FILE, 'utf8')) || {};
+    wall = {
+        cm:        (Number.isFinite(w.cm) && w.cm > 0) ? w.cm : 0,
+        at:        w.at || null,
+        left_raw:  (w.left_raw === undefined ? null : w.left_raw),
+        ground_at: w.ground_at || null
+    };
+} catch (_) { /* 沒檔＝尚未建置 */ }
+function wallSave() {
+    try { fs.mkdirSync(path.dirname(WALL_FILE), { recursive: true }); fs.writeFileSync(WALL_FILE, JSON.stringify(wall)); }
+    catch (e) { console.error('[wall] save failed', e && e.message); }
+}
+function wallMsg() { return { src: 'wall', cm: wall.cm, at: wall.at, left_raw: wall.left_raw, ground_at: wall.ground_at }; }
+
 //=========== ws ===========
 
 const wss = new WebSocketServer({ server });
@@ -268,7 +298,10 @@ function missionStart(p, reply) {
     const stepCm = numArg(p.step_cm,   1,   200, true);
     const roll   = numArg(p.roll_trip, 0.5,  45, false);
     const diff   = numArg(p.diff_trip, 0.5, 100, false);
-    const topCm  = numArg(p.top_cm,    1,   999, true);
+    // [2026-09-11 per user，同日反轉] 地面歸零慣例下 home_ground_cm 恆為 0，腳本拿不到
+    // FCV_TOP_CM 會落到預設 231（錯）⇒ **牆高由 server 的 wall 儲存帶進去**，不由表單填。
+    // 未建置就拒絕啟動，不讓腳本用錯高度往下衝（它的起點檢查會擋，但按了才知道）。
+    const topCm  = (wall.cm > 0 && wall.ground_at) ? wall.cm : null;   // ① 與 ② 都要有
     const railCm = numArg(p.rail_cm,   0,   999, true);
     const bad = [];
     if (cycles === null) bad.push('cycles(1~999)');
@@ -276,16 +309,16 @@ function missionStart(p, reply) {
     if (stepCm === null) bad.push('step_cm(1~200)');
     if (roll   === null) bad.push('roll_trip(0.5~45)');
     if (diff   === null) bad.push('diff_trip(0.5~100)');
-    if (topCm  === null) bad.push('top_cm(1~999)');
     if (railCm === null) bad.push('rail_cm(0~999)');
     if (bad.length) return reply({ ok: false, err: 'bad_params', detail: bad });
+    if (topCm === null) return reply({ ok: false, err: 'wall_height_unset', detail: (wall.ground_at ? '' : '① 地面歸零未做；') + (wall.cm > 0 ? '' : '② 最高點未量') });
 
     const args = ['-u', MISSION_PY, cycles, steps, stepCm, roll, diff];
     // ⚠️ `cycle_test.py:63` 的預設 host 是 **192.168.5.26**（本體 WiFi，2026-09-10 起已不通）
     //    ⇒ `FCV_WROBOT_HOST` 不是可選的，不帶就會連到一個不存在的位址。
     const env = Object.assign({}, process.env, {
         FCV_WROBOT_HOST: WASHROBOT_IP,
-        FCV_TOP_CM:      topCm,
+        FCV_TOP_CM:      topCm,       // = 牆高（② 最高點設定量到的 |length_left|）
         FCV_RAIL_CM:     railCm
     });
 
@@ -306,7 +339,7 @@ function missionStart(p, reply) {
     mission.stopping  = false;
 
     missionPush(`[web] spawn: python3 -u cycle_test.py ${cycles} ${steps} ${stepCm} ${roll} ${diff}`);
-    missionPush(`[web] env: FCV_WROBOT_HOST=${WASHROBOT_IP} FCV_TOP_CM=${topCm} FCV_RAIL_CM=${railCm}`);
+    missionPush(`[web] env: FCV_WROBOT_HOST=${WASHROBOT_IP} FCV_TOP_CM=${topCm}（牆高，server 儲存） FCV_RAIL_CM=${railCm}`);
 
     // stdout/stderr 合成同一條串流：進度印在 stdout、例外與 traceback 在 stderr，
     // 分開送的話出事時看到的會是斷開的兩半。
@@ -412,6 +445,7 @@ wss.on('connection', (ws) => {
     //    🔴 不補的話，重新整理之後畫面會是空的，而任務**還在跑** ——
     //    「看起來沒在跑」比「沒有畫面」危險得多。
     ws.send(JSON.stringify({ src: 'mission', state: missionSnapshot() }));
+    ws.send(JSON.stringify(wallMsg()));   // 牆高：每個新連線都要知道
     if (mission.ring.length)
         ws.send(JSON.stringify({ src: 'mission', backlog: mission.ring.slice() }));
 
@@ -436,6 +470,27 @@ wss.on('connection', (ws) => {
         //      否則你驗到的可能是一個跟請求無關的訊息。
         if (msg.target === 'mission' && typeof msg.cmd === 'string') {
             msg = { mission: msg.cmd === 'status' ? 'state' : msg.cmd, params: msg.args || msg.params };
+        }
+        if (msg.wall) {
+            const reply = (o) => ws.send(JSON.stringify(Object.assign({ src: 'wall', ack: msg.wall }, o)));
+            if (msg.wall === 'get')   return reply(Object.assign({ ok: true }, wallMsg()));
+            if (msg.wall === 'clear') { wall = { cm: 0, at: null, left_raw: null, ground_at: null }; wallSave(); broadcast(wallMsg()); return reply({ ok: true }); }
+            // ① 成功後由前端呼叫：只更新 ground_at，**牆高保留**（只重校最低點時沿用記憶值）
+            if (msg.wall === 'ground') {
+                wall.ground_at = new Date().toISOString();
+                wallSave(); broadcast(wallMsg());
+                return reply(Object.assign({ ok: true }, wallMsg()));
+            }
+            // ② 只更新牆高，**ground_at 保留**（只重校最高點時沿用 ①）
+            if (msg.wall === 'set') {
+                const cm = Number(msg.cm);
+                if (!Number.isFinite(cm) || cm < 1 || cm > 999) return reply({ ok: false, err: 'bad_cm(1~999)' });
+                wall.cm = Math.round(cm); wall.at = new Date().toISOString();
+                wall.left_raw = Number.isFinite(Number(msg.left_raw)) ? Number(msg.left_raw) : null;
+                wallSave(); broadcast(wallMsg());
+                return reply(Object.assign({ ok: true }, wallMsg()));
+            }
+            return reply({ ok: false, err: 'unknown_wall_action' });
         }
         if (msg.mission) {
             const reply = (o) => ws.send(JSON.stringify(Object.assign({ src: 'mission', ack: msg.mission }, o)));

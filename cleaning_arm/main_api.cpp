@@ -3098,11 +3098,16 @@ std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 	float theta_contact = 0.0f;
 	float touch_cmd     = 0.0f;
 	bool  touched       = false;
+	// [2026-09-11 per user 提速] 尋觸也用**粗步 + 短 settle**：從 theta_start 到接觸的
+	// 大半是空氣段(cmd~0.95、接觸 pos~0.62),舊版 0.010×150ms 爬 ~55 步 ≈ 8s 是 deploy
+	// 的真正瓶頸(暖啟動對兩槽交替失效 ⇒ 近乎每次冷啟動)。粗步 0.030×80ms ⇒ ~18 步 ≈ 1.4s。
+	// 接觸判定仍用輕觸 TOUCH_NM(一步過頭僅 +~2Nm、非硬撞);theta_contact 解析度 ±0.03,
+	// 與 th_min(0.565)/接觸(~0.62)的 0.055 餘裕相容,守衛仍成立。
 	for (int i = 0; i < DEPLOY_F_SEEK_MAX; ++i) {
-		theta_cmd += DEPLOY_F_SEEK_STEP;
+		theta_cmd += DEPLOY_F_COARSE_STEP;
 		if (theta_cmd > th_max) break;                 // 守衛 A（下方統一回報）
 		// 🔴 用 hold step 不用 move_to_slot —— 後者每步會把力卸掉再重加載（見宣告處）。
-		if (!press_hold_step_(theta_cmd, DEPLOY_F_SEEK_SETTLE_MS, pos, tau))
+		if (!press_hold_step_(theta_cmd, DEPLOY_F_COARSE_SETTLE_MS, pos, tau))
 			return "ERR DEPLOY_F: seek failed (M1 not enabled?)";
 		if (tau >= DEPLOY_F_TOUCH_NM) {
 			theta_contact = pos;                       // 守衛用**實際位置**
@@ -3116,6 +3121,10 @@ std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 		}
 	}
 
+	// [2026-09-11 per user「移除偵測」] 細掃/th_min/剛度 三個橫桿判據全移除 ——
+	//   M1 訊號(contact θ、剛度)物理上分不出橫桿與玻璃(θ 重疊、剛度皆 9.8),
+	//   改採**降低下壓力道(TARGET 8/COARSE 6)低力刷過**,刷到橫桿也無傷。
+	//   只保留守衛 A(no_wall,牆太遠/沒玻璃)與 Step6 的 cannot_reach。
 	// ---- 守衛 A：找不到牆 -----------------------------------------------------
 	if (!touched) {
 		std::ostringstream e;
@@ -3128,14 +3137,25 @@ std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 		return e.str();
 	}
 
-	// ---- 守衛 B：太近就碰到 = 障礙物 ------------------------------------------
-	if (theta_contact < th_min) {
-		std::ostringstream e;
-		e << std::fixed << std::setprecision(4)
-		  << "ERR DEPLOY_F: obstacle — 接觸於 theta=" << theta_contact
-		  << "，低於下限 " << th_min << "（比任何真實玻璃都近，疑似橫桿或異物）";
-		std::cerr << "[DEPLOY_F] " << e.str() << "\n";
-		return e.str();
+	// ---- Step 5: 粗壓（per user 2026-09-11 提速，option B）--------------------
+	// 輕觸(TOUCH_NM)後不直接進割線收斂 —— 先用大步 + 短 settle 快速把 tau 壓到
+	// 紮實接觸 DEPLOY_F_COARSE_NM。tau 的大半在這段便宜地建起來（press_hold_step_
+	// 即時設 hold_pos、只等 settle，非 ramp），Step6 只需從 ~COARSE_NM 細收到 target
+	// （割線 ~1 步），省掉舊版「從 2Nm 割線收到 15」的 2~3 個 RELAX_MS(1500) 週期。
+	{
+		int coarse_steps = 0;
+		while (tau < DEPLOY_F_COARSE_NM && coarse_steps < DEPLOY_F_SEEK_MAX) {
+			float nxt = theta_cmd + DEPLOY_F_COARSE_STEP;
+			if (nxt > th_max) break;   // 壓不到紮實接觸就交給 Step6 的 cannot-reach 判定
+			if (!press_hold_step_(nxt, DEPLOY_F_COARSE_SETTLE_MS, pos, tau))
+				return "ERR DEPLOY_F: coarse press failed (M1 not enabled?)";
+			theta_cmd = nxt;
+			++coarse_steps;
+		}
+		std::cout << std::fixed << std::setprecision(4)
+		          << "[DEPLOY_F] coarse theta_cmd=" << theta_cmd
+		          << " tau=" << std::setprecision(2) << tau
+		          << " steps=" << coarse_steps << "\n";
 	}
 
 	// ---- Step 6: 壓力收斂（割線法，kp_eff 由實測取代猜測）---------------------

@@ -162,10 +162,44 @@
     <h2>manual — vacuum</h2>
     <div class="row">
       <!-- [2026-08-27] 標籤對齊 WASH_ROBOT.h 的實際 channel 定義。
-           原本寫「pump (CH1)」是錯的——CH1 是右腳電磁閥，真空泵一直都是 CH2。 -->
-      <span class="label">真空泵 pump (CH2):</span>
+           原本寫「pump (CH1)」是錯的——CH1 是右腳電磁閥，真空泵一直都是 CH2。
+           [2026-09-10] 🔴 標籤不能再寫「(CH2)」——A/B 輪替上線後 `pump on|off` 的語意
+           已改成「作用在目前輪替中那顆」（dispatcher.cpp:345）。輪到 B 的時候，
+           標著 CH2 的按鈕會去動 CH3。改寫標籤並補上單顆控制與 SWAP 的說明。 -->
+      <span class="label">真空泵 pump (A/B 輪替):</span>
       <button data-tgt="washrobot" data-cmd="pump on">ON</button>
       <button data-tgt="washrobot" data-cmd="pump off">OFF</button>
+      <button data-tgt="washrobot" data-cmd="pump swap">SWAP</button>
+      <ul class="hint">
+        <li>⚠ ON / OFF 作用在<strong>目前輪替中那顆</strong>，不再固定 CH2</li>
+        <li>A=CH2、B=CH3，兩顆併聯同一條真空管路；累計 ON 滿門檻（預設 30 分）自動換手</li>
+        <li>單顆控制走 raw command：<code>pump a on|off</code> / <code>pump b on|off</code></li>
+        <li>SWAP 立即換另一顆 — 指令會**立刻**回 <code>OK swap_started</code>，但切換本身
+            約 11 秒（併聯 3s + 驗真空 8s）。真結果看下面那列與 EVT</li>
+      </ul>
+    </div>
+    <!-- [2026-09-10] 🔴 這一列是 SWAP 鈕的**必要配件**，不是裝飾。
+         沒有它，按下 SWAP 之後的 ~11 秒完全沒有回饋：看不到現在轉哪顆、切到一半沒、
+         也看不到「真空異常已切回並停用自動輪替」——那正是最需要被看到的一種結果。
+         （完整的視覺卡在 console v2 :8081；這裡是 v1 的精簡版，同一份 `pump status`。） -->
+    <div class="row">
+      <span class="label">輪替狀態:</span>
+      <span class="vac-cell" id="pump-rot-cell">?</span>
+      <button id="btn-refresh-pump-status">refresh</button>
+    </div>
+    <!-- [2026-09-10 per user] 輪替門檻擺在 pumpA(CH2)/pumpB(CH3) 旁邊 ——
+         它是這兩顆繼電器的參數。
+         🔴 **刻意用「套用」按鈕，不用旁邊張力欄位那種 debounce 即時送。**
+            兩個理由：
+            ① 那個 wire() 會擋掉 `v <= 0`，而 **0 是合法值＝停用輪替**，
+               即時送的寫法會靜默拒絕「停用」這個選項。
+            ② 即時送會把打字途中的值送出去 —— 要打 30 會先送出 3。
+               目前累計若已超過 3 分，那個中途值會**當場觸發一次真的輪替**。 -->
+    <div class="row">
+      <span class="label">輪替門檻 (分, 0=停用):</span>
+      <input type="number" id="pump-rotate-min-input" min="0" max="240" step="1" style="width:6em">
+      <button id="btn-pump-rotate-apply">套用</button>
+      <span class="label" id="pump-rotate-now">目前 —</span>
     </div>
     <!-- [2026-08-27 per user] 真空閥不再分左右：實體只剩一顆閥在 CH1，控制全部 4 顆
          吸盤。原本的 right / left 兩列已移除——它們現在都會打到同一個 CH1，留著只會
@@ -187,7 +221,9 @@
     <!-- [2026-06-09] Water inlet — 互動 panel with state indicator + open timer
                        + auto-OFF countdown + watchdog warning subscription -->
     <div class="row water-inlet-row">
-      <span class="label">進水球閥 (crane PQW CH4):</span>
+      <!-- [2026-09-10] 原寫「crane PQW CH4」——吊機上那顆是 **ZS-DIO 4CH**，
+           不是 PQW（PQW 在本體）。兩塊板都有 CH4，寫錯板名會讓人找錯機櫃。 -->
+      <span class="label">進水球閥 (吊機 ZS-DIO CH4):</span>
       <span class="water-inlet-indicator" id="water-inlet-indicator">
         <span class="water-inlet-dot" id="water-inlet-dot"></span>
         <span class="water-inlet-state" id="water-inlet-state">OFF</span>
@@ -210,12 +246,20 @@
       <li>背景 sweep 流程開閥不會在這顯示（只追蹤 GUI 手動操作）</li>
     </ul>
     <div class="row">
-      <span class="label">水位 (XKC slave 13):</span>
+      <!-- [2026-09-10 per user] 這顆 XKC 裝在**水箱最低位置** ⇒ 它偵測的是
+           「水箱空了沒」，不是「滿了沒」。原本顯示 FULL / NOT FULL 會讓人把
+           `water_full=0` 讀成「還沒滿、可以繼續補」，方向剛好相反。
+           實測：乾 rssi<1700、濕 rssi>4800，乾濕分明。 -->
+      <span class="label">水箱水位 (XKC slave 13 · 裝在最低位):</span>
       <span class="vac-cell" id="water-level-cell">?</span>
       <button id="btn-refresh-water-level">refresh</button>
     </div>
     <div class="row">
-      <span class="label">水箱泵浦 (CH6):</span>
+      <!-- [2026-09-10] 🔴 這個標籤原本寫 (CH6) 是**錯的且危險**：
+           `water_pump` 的通道搬過兩次（6 → 14 → 2026-09-10 起 = **CH4**），
+           而 **CH6 現在是破真空閥**。照著標籤去推「按這顆會動 CH6」＝推成
+           「會開破真空閥」，那是四顆吸盤同時失真空的那一顆。 -->
+      <span class="label">噴水加壓馬達 (手臂 · CH4):</span>
       <button data-tgt="washrobot" data-cmd="water_pump on">ON</button>
       <button data-tgt="washrobot" data-cmd="water_pump off">OFF</button>
     </div>

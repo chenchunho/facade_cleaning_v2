@@ -661,6 +661,9 @@ function onWashrobotLine(line) {
     // "OK water_full=<0|1> rssi=<N>" or "ERR xkc_unreachable"
     parseWaterLevel(line);
 
+    // [2026-09-10] Update A/B pump rotation cell from cmd_pump_status reply
+    parsePumpRotation(line);
+
     // [2026-08-26] Update PWM panel from cmd_pwm_status / pwm error replies
     parsePwmStatus(line);
 
@@ -778,7 +781,14 @@ if (btnRefreshVacuum) {
 
 //=========== water level (XKC) ===========
 // Parse "water_full=<0|1> rssi=<N>" from cmd_water_level reply.
-// Cell shows "FULL rssi=N" (green) / "NOT FULL rssi=N" (orange) / "ERR" (red).
+//
+// [2026-09-10 per user] The sensor sits at the BOTTOM of the tank, so it answers
+// "is there still water?", not "is the tank full?". The field name water_full is
+// therefore misleading: 1 = water present, 0 = tank empty / needs refilling.
+// Showing it as FULL / NOT FULL invited the exact opposite reading ("not full yet,
+// keep filling") for the state that actually means "empty". Wording fixed here;
+// the field name stays as the firmware sends it.
+// Measured: dry rssi < 1700, wet rssi > 4800 — the two states are far apart.
 function parseWaterLevel(line) {
     const cell = document.getElementById('water-level-cell');
     if (!cell) return;
@@ -786,7 +796,7 @@ function parseWaterLevel(line) {
     if (m) {
         const full = m[1] === '1';
         const rssi = m[2];
-        cell.textContent = full ? `FULL  (rssi=${rssi})` : `NOT FULL  (rssi=${rssi})`;
+        cell.textContent = full ? `有水  (rssi=${rssi})` : `空箱 — 需補水  (rssi=${rssi})`;
         cell.classList.remove('vac-strong', 'vac-weak', 'vac-none');
         cell.classList.add(full ? 'vac-strong' : 'vac-weak');
         return;
@@ -802,6 +812,99 @@ const btnRefreshWaterLevel = document.getElementById('btn-refresh-water-level');
 if (btnRefreshWaterLevel) {
     btnRefreshWaterLevel.onclick = () => send('washrobot', 'water_level');
 }
+
+//=========== vacuum pump A/B rotation ===========
+// Compact counterpart of the console v2 card. Parses
+//   "OK active=A accum_min=12 rotate_min=30 auto_rotate=1 counting=1 swapping=0 chA=1 chB=0"
+//
+// Why this exists at all: the SWAP button above starts a ~40 s relay switch. Without a
+// readout the operator gets no feedback for those 40 s — and, worse, never sees the one
+// outcome that matters most (vacuum degraded → reverted → auto-rotation disabled).
+// A button that starts something invisible is worse than no button.
+let pumpStatusUnsupported = false;
+function parsePumpRotation(line) {
+    const cell = document.getElementById('pump-rot-cell');
+    if (!cell) return;
+
+    // Old firmware only knows `pump on|off`, so `pump status` comes back as
+    // "ERR expected_on_or_off" — NOT "unknown_cmd", because `pump` itself has always
+    // existed. Stop polling instead of repainting an error twice a second.
+    if (/expected_on_or_off|unknown_cmd|usage:pump/.test(line)) {
+        pumpStatusUnsupported = true;
+        cell.textContent = '本體未支援 pump status（舊版韌體）';
+        cell.classList.remove('vac-strong', 'vac-weak');
+        cell.classList.add('vac-none');
+        return;
+    }
+    // Require both fields: `status` replies are long and must not be mistaken for this one.
+    const ma = line.match(/\bactive=([AB])\b/);
+    const mc = line.match(/\baccum_min=(\d+)\b/);
+    if (!ma || !mc) return;
+    pumpStatusUnsupported = false;
+
+    const num = (k) => { const m = line.match(new RegExp('\\b' + k + '=(-?\\d+)\\b')); return m ? parseInt(m[1], 10) : null; };
+    const active = ma[1], accum = parseInt(mc[1], 10);
+    const rot = num('rotate_min'), auto = num('auto_rotate');
+    const counting = num('counting'), swapping = num('swapping');
+
+    // rotate_min = 0 means rotation is switched off, not "threshold is zero minutes".
+    const budget = rot === 0 ? '輪替已停用' : `累計 ${accum} / ${rot} 分`;
+    let text, cls;
+    if (swapping === 1) {
+        // Covers the whole switch: 30 s both-on overlap AND the 8 s vacuum check after
+        // the outgoing pump is closed (readback is back to a single pump by then).
+        text = `${active} · 切換中（約 11 秒）`;
+        cls = 'vac-weak';
+    } else if (auto === 0) {
+        text = `🔴 自動輪替已停用 — 上次切換真空異常，已切回 ${active}。按 SWAP 或重下 init 重新武裝`;
+        cls = 'vac-none';
+    } else if (counting === 0) {
+        text = `${active} · 未計時（幫浦未開）· ${budget}`;
+        cls = 'vac-weak';
+    } else {
+        text = `${active} 運轉中 · ${budget}`;
+        cls = 'vac-strong';
+    }
+    cell.textContent = text;
+    cell.classList.remove('vac-strong', 'vac-weak', 'vac-none');
+    cell.classList.add(cls);
+
+    // Current threshold, shown next to the input so "what is it now" never needs a guess.
+    const now = document.getElementById('pump-rotate-now');
+    if (now) now.textContent = rot === null ? '目前 —' : (rot === 0 ? '目前 停用' : `目前 ${rot} 分`);
+}
+
+// Rotation threshold. Deliberately an explicit Apply button, not the debounced
+// live-send used by the tension inputs next door:
+//   1. that helper rejects v <= 0, but 0 is a LEGAL value here (= disable rotation),
+//      so live-send would silently swallow the one setting that turns the feature off;
+//   2. live-send emits intermediate keystrokes — typing "30" sends "3" first, and if
+//      the current pump has been on longer than 3 minutes that fires a real swap.
+const btnPumpRotateApply = document.getElementById('btn-pump-rotate-apply');
+if (btnPumpRotateApply) {
+    btnPumpRotateApply.onclick = () => {
+        const input = document.getElementById('pump-rotate-min-input');
+        const v = parseInt(input.value, 10);
+        if (isNaN(v) || v < 0 || v > 240) { alert('請輸入 0 ~ 240 的整數（0 = 停用輪替）'); return; }
+        const msg = v === 0
+            ? '把輪替門檻設為 0 = 停用 A/B 輪替，永遠留在目前這顆。\n\n確定？'
+            : `把輪替門檻設為 ${v} 分。\n\n⚠️ 若目前累計已超過 ${v} 分，下一個 tick 就會立刻換手。\n\n確定？`;
+        if (!confirm(msg)) return;
+        send('washrobot', `set_pump_rotate_min ${v}`);
+        setTimeout(() => send('washrobot', 'pump status'), 600);
+    };
+}
+
+const btnRefreshPumpStatus = document.getElementById('btn-refresh-pump-status');
+if (btnRefreshPumpStatus) {
+    btnRefreshPumpStatus.onclick = () => { pumpStatusUnsupported = false; send('washrobot', 'pump status'); };
+}
+
+// 6 s is plenty: accum_min only changes once a minute. The one thing that needs to be
+// caught quickly is a swap, and that lasts ~40 s.
+setInterval(() => {
+    if (lastStatus.washrobot && !pumpStatusUnsupported) sendSilent('washrobot', 'pump status');
+}, 6000);
 
 //=========== [2026-08-26] QX-DO24 PWM panel ===========
 //
