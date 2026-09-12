@@ -589,7 +589,7 @@ AI-2 做 PCB 時提出「PQW 是 8CH 而程式用 CH14」。我複驗時列出�
 
 📌 順帶解開「鎖 5~10% / 50Hz」之謎：50Hz 下 5%=1.0ms、10%=2.0ms ⇒ **標準 RC 電變（ESC）脈寬協定**，不是保守值。
 
-已改：`CLAUDE.md` 五處、`.claude/comms_interface_for_pcb.md` 新增 §6b。
+已改：`CLAUDE.md` 五處、`.claude/reference/comms_interface_for_pcb.md` 新增 §6b。
 
 ### ② ⚠️ 「PQW 是 8CH 而程式用 CH14」—— **前提複驗不成立，證據互相矛盾**
 
@@ -8131,7 +8131,7 @@ FRICTION_TAU 2.3→2.8 部署後實測，DEPLOY 300 LEFT 兩次都幾乎沒移�
 使用者確認 `Crane_easy_PI` 硬體已physically 拔除，整個子系統（含 bench 測試用的 crane_shim 替代方案）不再需要。**規範權威：** 無新規範，整個功能退役，相關規範文件（`easy_crane_test_mode.md`）隨程式一起刪除，不是搬到別處。
 ### ⚠ 尚未編譯驗證
 ### 附註
-`.claude/mailbox.md`、`.claude/changelog.md`、`.claude/work_log.md` 裡歷史紀錄仍會提到 `Crane_easy_PI`/`crane_shim`（例如 2026-04-22 那則 SIGPIPE 修復記錄），這些是「當時做了什麼」的歷史留存，不是還在用的參照，故意不動。
+`.claude/archive/mailbox.md`、`.claude/changelog.md`、`.claude/work_log.md` 裡歷史紀錄仍會提到 `Crane_easy_PI`/`crane_shim`（例如 2026-04-22 那則 SIGPIPE 修復記錄），這些是「當時做了什麼」的歷史留存，不是還在用的參照，故意不動。
 
 ## 2026-08-04f Claude (Sadie) — 拿掉網頁上 easy crane control 相關的所有部分
 ### 需求（user）
@@ -8558,7 +8558,7 @@ User 明確要求每次清洗前都重新做完整校正，覆蓋掉 2026-05-28 
   - `do_arm_sweep_()`：取消註解 `pqw_.controlRelay(CH_BRUSH, true)`；`CH_WATER_INLET`/`CH_WATER_PUMP` 兩行維持註解（水閥/水泵尚未接管路）
   - `do_step_sync_rail_sweep_()`：補回 `arm_cmd_("DEPLOY " + ARM_CLEAN_WALL_MM + " CENTER")` + `CH_BRUSH` 開/關 + 收尾 `arm_cmd_("PARK")`，跟原本純 rail 掃動包在同一段時間內執行；DEPLOY 失敗（no reply / obstacle）非致命，跳過開刷但 rail 掃動照跑，不擋 step。未動水閥/水泵（維持不接）
 ### 原因
-手臂已經物理裝上機體（CH_BRUSH 也已在稍早改到 CH15、PQW 擴到 16CH 反映同一件事），`do_step_sync_`（同步步伐）該接回的清洗掛鉤（v2_app_redesign_plan.md §5.6 提到的位置）可以真的動起來；水閥管路還沒接，維持全部關閉/註解，避免乾轉的泵浦誤動作或漏電磁閥誤開。**規範權威：** `.claude/v2_app_redesign_plan.md` §5.6（掛鉤重新接回的規劃位置）；本次為 do_step_sync_ 專屬掛鉤 (`do_step_sync_rail_sweep_`)，非該節描述的舊 v1 pipeline 復用。
+手臂已經物理裝上機體（CH_BRUSH 也已在稍早改到 CH15、PQW 擴到 16CH 反映同一件事），`do_step_sync_`（同步步伐）該接回的清洗掛鉤（v2_app_redesign_plan.md §5.6 提到的位置）可以真的動起來；水閥管路還沒接，維持全部關閉/註解，避免乾轉的泵浦誤動作或漏電磁閥誤開。**規範權威：** `.claude/reference/v2_app_redesign_plan.md` §5.6（掛鉤重新接回的規劃位置）；本次為 do_step_sync_ 專屬掛鉤 (`do_step_sync_rail_sweep_`)，非該節描述的舊 v1 pipeline 復用。
 ### ⚠ 尚未編譯驗證
 
 ## 2026-07-24a Claude (Sadie) — feet pusher preset 縮短：5.7/6.0cm → 3.5/3.8cm
@@ -9005,7 +9005,7 @@ user 直接指定數值；今天稍早才把 `motion_rope` 加上到位減速（
   - 新增 `do_step_sync_rail_sweep_`：`D_(DM2J_ARM).PR_move_cm(...)` 0→-10cm→0 一次來回，跟 `do_arm_sweep_` 同款寫法（`try_or_pause_` 包每一段），但完全不碰 `arm_cli_`/motor_api、不開 CH5 刷滾筒繼電器；任何失敗都非致命（log + 直接 return，不讓整個 step 失敗——這時候 4 顆吸盤已經重新吸好，滑台的問題不影響安全）
   - `do_step_sync_` 第 5 步之後（吸盤已確認重新吸好）呼叫 `do_step_sync_rail_sweep_(tag)`，才印 done/回傳
 ### 原因
-使用者要滑台在同步步伐裡也能來回掃一次，但明確表示手臂還沒裝、不要牽扯進來。**規範權威：** `.claude/v2_app_redesign_plan.md` §5.6（完整手臂清洗流程重新接回的既有規劃，這次只借用其中的「rail-only」子集，不觸發 §5.6 其餘手臂/水泵相關步驟）。
+使用者要滑台在同步步伐裡也能來回掃一次，但明確表示手臂還沒裝、不要牽扯進來。**規範權威：** `.claude/reference/v2_app_redesign_plan.md` §5.6（完整手臂清洗流程重新接回的既有規劃，這次只借用其中的「rail-only」子集，不觸發 §5.6 其餘手臂/水泵相關步驟）。
 ### ⚠ 尚未編譯驗證 + 速度未調
 本機無法交叉編譯，需部署到 Pi 後測試。**RPM=300 只是保守初始值，沒有實機測過**，第一次上機建議先在旁邊看著跑，觀察滑台加減速是否平順、有沒有失步，再依情況調整 `DM2J_ARM_STEP_SWEEP_RPM`。
 
@@ -9998,7 +9998,7 @@ user 要求把重吸補伸 iter 上限改回原本 5 次（配合 stop_on_first_
 - `user_lib/WASH_ROBOT.h`：`LEVEL_MAX_EXTRA_CM(15)` → `LEVEL_MAX_DELTA_CM(80)`（硬上限）
 - `user_lib/WASH_ROBOT.cpp`（`crane_level_match_cmd_`）：原本 `|delta| > step+15` → 退回固定 step；改成**走完整 |delta|**（re-level），只有 `|delta| > 80cm` 才 clamp 到 80 + warn（剩下的下一步再修）
 ### 原因
-Bench log：`[step_level] left delta=-47cm implausible (>step+15) — fixed step 20cm fallback`。slave 4 重吸/backup（step_up 左 backup=pay_out 往下）讓左繩多放、加上先前幾步的修正也被 `step+15=35` 這個 guard 擋掉 → 左比右長 47cm、越積越歪。User 指正：**每步左繩除非重吸否則應與右走同距離、計米位置也應相同；重吸後下一步要照 v1 DM2J「絕對目標自動補償」的機制修回**（已核對 WASH_ROBOT.cpp:6483：v1 最終用絕對 rail 目標、carryover 已移除）。我的「左對齊右絕對計米」正是同機制，錯的只是上限太緊。User 定**計米兩邊差 / 單次移動上限 = 80cm**。修正後 47cm 這種合法修正照做、一步就收斂。**規範權威：** `.claude/v2_app_redesign_plan.md` §11。
+Bench log：`[step_level] left delta=-47cm implausible (>step+15) — fixed step 20cm fallback`。slave 4 重吸/backup（step_up 左 backup=pay_out 往下）讓左繩多放、加上先前幾步的修正也被 `step+15=35` 這個 guard 擋掉 → 左比右長 47cm、越積越歪。User 指正：**每步左繩除非重吸否則應與右走同距離、計米位置也應相同；重吸後下一步要照 v1 DM2J「絕對目標自動補償」的機制修回**（已核對 WASH_ROBOT.cpp:6483：v1 最終用絕對 rail 目標、carryover 已移除）。我的「左對齊右絕對計米」正是同機制，錯的只是上限太緊。User 定**計米兩邊差 / 單次移動上限 = 80cm**。修正後 47cm 這種合法修正照做、一步就收斂。**規範權威：** `.claude/reference/v2_app_redesign_plan.md` §11。
 
 ## 2026-07-08p Claude (Sadie) — 方案1：左繩對齊右計米（消左右累積歪）
 ### 修改檔案
@@ -10009,7 +10009,7 @@ Bench log：`[step_level] left delta=-47cm implausible (>step+15) — fixed step
   - 新增 `crane_level_match_cmd_`：master(右)→固定 `dir_word step`；follower(左)→讀 crane status `length_left`/`length_right`（cm）算 `delta = master − self`，回 `pay_out_/retract_<side> <|delta|>` 讓該側對齊另一側。`|delta|<0.5`→不動；`|delta|>step+15`（meter glitch）或讀不到→fixed step fallback。
   - `do_step_down_` / `do_step_up_` 的 `run_side` 加 `is_follower` 參數 + pre_cycle 改用 `crane_level_match_cmd_`；call site 右=false（master 走固定 step）、左=true（follower 對齊右計米）。
 ### 原因
-Sadie 回報：計米正常時多走幾步機體會歪，根因＝左右各用自身 SD76 獨立走 step、誤差**獨立累積** → 繩長差 → roll。方案1（Sadie 選定）把左側從「走固定 step」改成「放/收到左計米=右計米」→ 每步重新對齊、誤差**不累積**（殘差僅左右計米互差，固定不長大）。crane status length 本來就是 cm（cmd_side_measured 迴圈 `|len−base|>=cm` 為證），故全在 washrobot 實作、不動 crane。方案2（IMU 微調殘差）待方案1 bench 驗證後再視需要疊。**規範權威：** `.claude/v2_app_redesign_plan.md` §11。
+Sadie 回報：計米正常時多走幾步機體會歪，根因＝左右各用自身 SD76 獨立走 step、誤差**獨立累積** → 繩長差 → roll。方案1（Sadie 選定）把左側從「走固定 step」改成「放/收到左計米=右計米」→ 每步重新對齊、誤差**不累積**（殘差僅左右計米互差，固定不長大）。crane status length 本來就是 cm（cmd_side_measured 迴圈 `|len−base|>=cm` 為證），故全在 washrobot 實作、不動 crane。方案2（IMU 微調殘差）待方案1 bench 驗證後再視需要疊。**規範權威：** `.claude/reference/v2_app_redesign_plan.md` §11。
 
 ## 2026-07-08o Claude (Sadie) — realign 單顆門檻 1.5 → 1.0 cm
 ### 修改檔案
@@ -10023,7 +10023,7 @@ user 要求把單顆觸發門檻收緊到 1.0cm（更早觸發 realign、減少�
 
 ## 2026-07-08n Claude (Sadie) — [規劃] 累積歪的左右繩長差校正分析（plan §11，未動程式碼）
 ### 修改檔案
-- `.claude/v2_app_redesign_plan.md`（新增 §11）
+- `.claude/reference/v2_app_redesign_plan.md`（新增 §11）
 ### 內容
 Sadie 回報：計米正常時多走幾步機體會歪（根因＝左右各用自身 SD76 獨立走 step、誤差獨立累積 → 繩長差 → roll）。記錄 user 提的兩方案（1: 左繩對齊右計米；2: IMU 平衡微調）+ 方案3 結合 + Claude 建議（先做方案1 殺累積、殘差再疊 IMU）。**未動 step 程式碼**——等 Sadie 拍板方案（依「改檔前先確認」）。與 §10（計米*壞掉*的 IMU 降級）互補但不同情境。
 
@@ -10034,7 +10034,7 @@ Sadie 回報：計米正常時多走幾步機體會歪（根因＝左右各用�
   - `cmd_run_script` 同款重寫：純迴圈跑 `do_step_down_`，每步 `sweep` flag 解析/回報但不作用（全當 plain 下降）。
   - v1 sweep 版整段保留在 `#if 0`，改名 `_retired_cmd_run_v1_sweep_` / `_retired_cmd_run_script_v1_sweep_`（不編譯、供日後 arm 裝回參考）。
 ### 原因
-用戶盤點：`run`/`run_script`「是否都改成 v2 step 方式」。查出：step 本身**已是 v2**（都呼叫 `do_step_down_/up_`：吊機 + 4 cup + cycle_group_ + 每步末 realign），但外層還拖著 v1「邊走邊刷」arm-sweep pipeline，而 v2 `do_step_down_/up_` 把 sweep hook `(void)` 掉 → 整套 dead code，還會 launch thread 誤連不存在的 arm service (127.0.0.1:9527)。用戶選 (A) 拆乾淨。日後 arm 裝回的接回步驟寫在 plan §5.6（含 hook 觸發點要重新對應 v2 兩側 cycle_group_ 結構、非單純 uncomment）。**規範權威：** `.claude/v2_app_redesign_plan.md` §5.6。
+用戶盤點：`run`/`run_script`「是否都改成 v2 step 方式」。查出：step 本身**已是 v2**（都呼叫 `do_step_down_/up_`：吊機 + 4 cup + cycle_group_ + 每步末 realign），但外層還拖著 v1「邊走邊刷」arm-sweep pipeline，而 v2 `do_step_down_/up_` 把 sweep hook `(void)` 掉 → 整套 dead code，還會 launch thread 誤連不存在的 arm service (127.0.0.1:9527)。用戶選 (A) 拆乾淨。日後 arm 裝回的接回步驟寫在 plan §5.6（含 hook 觸發點要重新對應 v2 兩側 cycle_group_ 結構、非單純 uncomment）。**規範權威：** `.claude/reference/v2_app_redesign_plan.md` §5.6。
 
 ## 2026-07-08l Claude (Sadie) — step down/up 真空判準放寬：一組 ≥1 顆吸住即算吸好
 ### 修改檔案
@@ -10069,7 +10069,7 @@ Bench log：slave 4 伸到搜尋上限（pulse 30012 ≈ 10cm）仍 `fresh_p=0kP
   - `do_step_down_` / `do_step_up_` 收尾（兩側都完成、4 顆全吸）呼叫 `do_feet_realign_(apply_threshold=true, caller_holds_lock=true)`，**非致命**（失敗只 log + evt_，step 照回 OK）。
   - `cmd_realign` 改呼叫 `do_feet_realign_(false, false)`（手動：無門檻、自己鎖）。
 ### 原因
-用戶要求把 realign 接回 step。realign 需 4 顆全吸才能做（保持吸住縮）→ 只能在**每步末兩側都錨定**時跑，mid-step 不可能（一定有一側放開）；因此觸發時機由物理條件定死＝每步末。門檻沿用 v1 的 1.5/1.0（settings 可調），超過才真的動、自動節流。in-step 失敗非致命對齊 v1（realign 不解真空、stall 也仍安全）。關鍵技術點：解掉 step 已持 `motion_mtx_` 的同執行緒 deadlock。**規範權威：** `.claude/v2_app_redesign_plan.md` §5.5（realign）。
+用戶要求把 realign 接回 step。realign 需 4 顆全吸才能做（保持吸住縮）→ 只能在**每步末兩側都錨定**時跑，mid-step 不可能（一定有一側放開）；因此觸發時機由物理條件定死＝每步末。門檻沿用 v1 的 1.5/1.0（settings 可調），超過才真的動、自動節流。in-step 失敗非致命對齊 v1（realign 不解真空、stall 也仍安全）。關鍵技術點：解掉 step 已持 `motion_mtx_` 的同執行緒 deadlock。**規範權威：** `.claude/reference/v2_app_redesign_plan.md` §5.5（realign）。
 
 ## 2026-07-08i Claude (Sadie) — Web GUI 對齊 v2 硬體結構（移除退役 UI、group 改 right/left）
 ### 修改檔案
@@ -10102,7 +10102,7 @@ v2 機械結構：4 吸盤（右2/左2）、無中心吸盤、無 DM2J 輪/滑�
 - `facade_cleaning_v2/main.cpp`
   - `realign` 指令從 `ERR removed_in_v2` 改回接 `robot.cmd_realign()`。
 ### 原因
-用戶：「現在只有左右腳，realign 改成全部一起往內縮就好，不用放繩也不用收繩。」v1 realign 有 feet+body+center、靠 crane 收放繩輔助 + feet/body 交替；v2 只剩 4 顆 feet。經 AskUserQuestion 確認「**不解真空、保持吸住縮**」（維持絕不同時放開 4 顆的安全不變式）。實作上正好對應 v1 realign 裡「feet 全程不解真空」的 Phase 2，抽出來去掉 crane/body 即可。**規範權威：** `.claude/v2_app_redesign_plan.md`（realign 節）+ memory `project_v2_mechanical_gait.md`（4 顆全吸不變式）。
+用戶：「現在只有左右腳，realign 改成全部一起往內縮就好，不用放繩也不用收繩。」v1 realign 有 feet+body+center、靠 crane 收放繩輔助 + feet/body 交替；v2 只剩 4 顆 feet。經 AskUserQuestion 確認「**不解真空、保持吸住縮**」（維持絕不同時放開 4 顆的安全不變式）。實作上正好對應 v1 realign 裡「feet 全程不解真空」的 Phase 2，抽出來去掉 crane/body 即可。**規範權威：** `.claude/reference/v2_app_redesign_plan.md`（realign 節）+ memory `project_v2_mechanical_gait.md`（4 顆全吸不變式）。
 
 ## 2026-07-08g Claude (Sadie) — 腳組 ZDT 伸長量改短（v2 牆距）5.7/6.0 cm
 ### 修改檔案
@@ -10129,7 +10129,7 @@ v2 機體牆距比 v1 短，腳組推桿伸長量由 ~9.7/10.0 cm 縮到 5.7/6.0
     - step_up：主 `retract_*`（上），backup `pay_out_*`（下）← 用戶指定「往下放繩退回原位」
   - **累積退回以原位為上限**：新增 `cumulative_backup_cm`（vacuum + rescue 共用），每次退回前 dry_run 檢查剩餘空間 `remaining = step - cumulative`；`remaining <= 0.5` → 回報 `<group>_backup_at_origin` 讓 cycle_group_ 停止重試進 PausedOnError；最後一跳 clamp 成剛好落在原位。補回 v1 靠 rail `[0,step]` range 擋、v2 無 rail 而漏掉的上限（否則最多退 VACUUM_RETRY_MAX×VACUUM_BACKUP_CM = 5×10 = 50cm，遠超一個 step）。
 ### 原因
-用戶回報：step up 失敗重吸時後退方向錯了，應該往下放繩（退 10cm 直到原本的位置）。根因是 v2 rewrite 把 backup 沿用主動作的 crane_word（同方向），且未移植 v1 的「退回不超過起點」上限。**規範權威：** `.claude/v2_app_redesign_plan.md` §4（attach/step 序列）。
+用戶回報：step up 失敗重吸時後退方向錯了，應該往下放繩（退 10cm 直到原本的位置）。根因是 v2 rewrite 把 backup 沿用主動作的 crane_word（同方向），且未移植 v1 的「退回不超過起點」上限。**規範權威：** `.claude/reference/v2_app_redesign_plan.md` §4（attach/step 序列）。
 
 ## 2026-07-08e Claude (Sadie) — Crane 變頻器編譯期切換 SE3↔MH300（bench 先用士林）
 ### 修改檔案
@@ -10165,7 +10165,7 @@ Bench 現場硬體仍是舊士林 SE3，但遷移後的 crane 程式碼寫死驅
 
 ## 2026-07-08b Claude (Sadie) — 規劃：計米器失效 → IMU 平衡保護/降級步進（未實作）
 ### 修改檔案
-- `.claude/v2_app_redesign_plan.md` §10（新增）
+- `.claude/reference/v2_app_redesign_plan.md` §10（新增）
 ### 原因
 user 提需求：計米器連不到/壞掉時，用 IMU 保持平衡作保護。
 ### 內容
@@ -10203,7 +10203,7 @@ v2 機械大改：4 吸盤（右{ZDT 1,2}/左{3,4}）、無 DM2J 腳/輪滑軌�
 
 ## 2026-07-07b Claude (Sadie) — 規範記錄（尚未動 code）
 ### 修改檔案
-- `.claude/v2_app_redesign_plan.md` §2 — PQW 左右閥 CH 腳位由「待定」→ 確認值
+- `.claude/reference/v2_app_redesign_plan.md` §2 — PQW 左右閥 CH 腳位由「待定」→ 確認值
 - memory `project_v2_mechanical_gait` — 補 PQW 通道細節
 ### 原因
 user 2026-07-07 確認 v2 PQW（@ 192.168.1.22 slave 12）實際接線。
@@ -10220,7 +10220,7 @@ user 2026-07-07 確認 v2 PQW（@ 192.168.1.22 slave 12）實際接線。
 ### 修改檔案
 - `Crane_control_PI/main.cpp` — 新增 `cmd_side_measured()` + dispatcher 分流
 ### 原因
-v2 應用層重寫第 1 步（`.claude/v2_app_redesign_plan.md` §5 / §9）：step 步態需要
+v2 應用層重寫第 1 步（`.claude/reference/v2_app_redesign_plan.md` §5 / §9）：step 步態需要
 「單側放/收繩 Δcm、SD76 計米量到就停」，crane 端原本只有雙繩同步(`pay_out`/`retract`)
 + raw 單側 on/off，缺量測式單側移動。
 ### 內容
@@ -10246,7 +10246,7 @@ v2 應用層重寫第 1 步（`.claude/v2_app_redesign_plan.md` §5 / §9）：s
 - `user_lib/MH300_inverter.{h,cpp}` — 加 `base_blocked_` 機制（run 前自動解除急停 B.B）
 - `web_backend/public/{app.js,index.html}` — 裝置識別碼 `se3_left/se3_right` → `vfd_left/vfd_right`
 ### 原因
-接 `.claude/mh300_migration_plan.md`，把吊機程式從士林 SE3-210 換成 Delta MH300。
+接 `.claude/archive/mh300_migration_plan.md`，把吊機程式從士林 SE3-210 換成 Delta MH300。
 scope：只換左右繩兩台；CLV900 中間不動；keepalive 先保留。
 ### 主要改動
 1. **型別**：`SE3_inverter` → `MH300_inverter`（全 ~35 處，含 helper 簽名）；常數/atomic/helper 的 `SE3_`→`VFD_`、`se3_`→`vfd_`
@@ -10305,7 +10305,7 @@ scope：只換左右繩兩台；CLV900 中間不動；keepalive 先保留。
 接續 2026-06-25a，user 要求 RPi 端部署目錄（兩台 Pi clone 的 repo 目錄 `~/washrobot_new_PI/`）也跟著改名 facade_cleaning_v2。
 ### 影響
 - 部署到 RPi 時 repo clone 目錄請用 `~/facade_cleaning_v2/`（runbook / easy_crane_test_mode 已對齊）。
-- **刻意保留（待 user 決定）**：`.claude/gen_deploy_pdf.py` 用的是另一套 `~/washrobot_build/washrobot_new_PI/` build 暫存方案 + 過時開發機路徑，且改它要重跑 fpdf 重產 `deploy_and_test.pdf` 才同步，故先不動。
+- **刻意保留（待 user 決定）**：`.claude/archive/gen_deploy_pdf.py` 用的是另一套 `~/washrobot_build/washrobot_new_PI/` build 暫存方案 + 過時開發機路徑，且改它要重跑 fpdf 重產 `deploy_and_test.pdf` 才同步，故先不動。
 - **依舊不動**：README 的 GitHub 上游 repo URL（v1 身分）、changelog 與舊 work_log 歷史條目、CLAUDE.md/motion_flow 描述原始碼專案名的散文。
 
 ---
@@ -12073,8 +12073,8 @@ const 改回 -60 / -50。
 - `user_lib/WASH_ROBOT.h` —
   - `REALIGN_THRESHOLD_CM` 3.0 → 1.5
   - `REALIGN_THRESHOLD_MEAN_CM` 2.0 → 1.0
-- `.claude/step_speedup_phase1_plan.md` — 新增 Phase 1 加速計畫文件
-- `.claude/crane_balance_hold_plan.md` — Crane balance hold 計畫存檔（暫緩實作）
+- `.claude/archive/step_speedup_phase1_plan.md` — 新增 Phase 1 加速計畫文件
+- `.claude/archive/crane_balance_hold_plan.md` — Crane balance hold 計畫存檔（暫緩實作）
 ### 原因
 Step 加速計畫 F1.2：降 realign threshold，讓 realign 早 trigger。
 **原理**：之前 threshold 3cm/2cm 設定，drift 累積到 ~3cm 才 realign，導致：
@@ -18970,7 +18970,7 @@ trace：
 ## 2026-05-14w Claude (Sadie)
 ### 修改檔案
 - `user_lib/SE3_inverter.cpp` — `sendModbus` recv timeout 300ms → **150ms**（[跨界: user_lib]）
-- `.claude/mailbox.md` — 通知 Jim
+- `.claude/archive/mailbox.md` — 通知 Jim
 ### 原因
 bench 看到 `[dual_se3_concurrent] asymmetric cmd dispatch L=1228ms R=7ms (errL=0 errR=0)` — L 端 cli_A jitter 觸發 driver watchdog + reliable_*_one 8x retry。每次 writeParam fail 等 300ms recv timeout，累積 ~1.2s。
 
@@ -19147,7 +19147,7 @@ L 的 `READ_FAIL` 是 cli_A 偶發單次 byte loss、不是 L 真的沒跑。但
 ### 修改檔案
 - `Crane_control_PI/main.cpp`
   - `meter_loop`：每側 SD76 read 加 sanity filter (`meter_jump_check`) — 若新讀回值跟前值差 > **30cm** 就 reject、保留前值 + log 前 3 次/分鐘
-- `.claude/mailbox.md` — 🔴 通知 Jim：`SD76_length_meters::readRegister` 沒驗 CRC（其他 driver 可能也有）
+- `.claude/archive/mailbox.md` — 🔴 通知 Jim：`SD76_length_meters::readRegister` 沒驗 CRC（其他 driver 可能也有）
 ### 原因
 **bench 實況：** user 反映 balance err 連飆 `err=224cm trim=5Hz` / `err=-214cm trim=-5Hz` / `err=266cm trim=5Hz`，**但實際繩長差才 30cm 量級**。同時 SE3 keepalive 顯示 `clears=18/30s`（很多，但 fail=0 → 不是 OPT 通訊問題、是其他 fault 類型 OC/OL）。
 
@@ -19333,7 +19333,7 @@ driver 端 `readFaultCode()` method **保留不撤**（純 additive、零副作�
   - 新增 `se3_fault_name(uint8_t)` 對照表（OPT / OC1-3 / OV1-3 / OHT / EEP / OL2 / OLS / IPF / SCP / CPU / CPR / THT / THN / NTC / PID / AErr）— 對照來源 `.claude/summaries/SE3_INVERTER_MODBUS_SUMMARY.md`
   - 新增 `format_se3_fault_codes()` 一次組成 `fault_codes=[160/OPT 0/- 0/- 0/-]` 格式
   - `se3_keepalive_loop` 偵測 fault + cooldown 允許清 alarm 時，先讀 fault code 並 log；維持原本 5s cooldown
-- `.claude/mailbox.md` — 通知 Jim：SE3 加 readFaultCode（[跨界: user_lib]）
+- `.claude/archive/mailbox.md` — 通知 Jim：SE3 加 readFaultCode（[跨界: user_lib]）
 ### 原因
 bench segfault 修掉後（2026-05-14g）SE3 keepalive 終於跑起來，發現左右繩 SE3 反覆進 fault state (status=0x80) → auto-clear → 又 fault 的 loop。clearAlarm 機制有作用、最終會穩定下來，但**不知道根因是 OPT (160) / OC / OV 還是其他**。光看 status word 只能看到「有 fault」，不能看 fault code。
 
@@ -19351,7 +19351,7 @@ byte ordering（H1007 high 或 low 哪邊 latest）手冊不清楚，bench 觀�
 ### 修改檔案
 - `Crane_control_PI/main.cpp`
   - `allMotionOff()` / `allMotionEmergencyStop()`：CLV900 stopDecel 前加 `if (g_dev_clv900.load())` 守備
-- `.claude/mailbox.md` — 通知 Jim：CLV900_inverter（以及可能 SD76/SE3/DSZL）需要 null-client 防護
+- `.claude/archive/mailbox.md` — 通知 Jim：CLV900_inverter（以及可能 SD76/SE3/DSZL）需要 null-client 防護
 ### 原因
 **Bug fix — 啟動 segfault**：bench 跑這次 build 在「[INFO] EVT device_state ...」之後立刻 segfault。trace 是 `allMotionOff() → inverter.stopDecel() → writeParam → sendModbus → client->sendAndReceive(nullptr deref)`。CLV900 在 2026-05-14e 為了中間管線未裝跳過 init，但 `client` 留 nullptr，後續任何呼叫都會 null-deref。修法暫時在 application 層守住兩個 startup 必呼叫的 helper；underlying driver 防護放 mailbox 給架構方 review。
 
@@ -22066,7 +22066,7 @@ bench 實測 CH1/CH2 raw 是死值（拉力不會變動）→ 一度懷疑 cell 
 - `Linux_test/x518_probe.py` (新增) — Modbus TCP 直戳 X518，讀 CH1/CH2 raw + 設備 IP/port/mode/slave/baud/format/unit 暫存器
 - `Linux_test/x518_portscan.py` (新增) — 12 個常見工業 port TCP 掃描
 - `Linux_test/x518_wide_scan.py` (新增) — 擴大 TCP/UDP 掃描 + 開 PC:8000 listener 收 X518 client 連線
-- `.claude/mailbox.md` — 加 [2026-05-08] DSZL driver 架構決策請求給 Jim
+- `.claude/archive/mailbox.md` — 加 [2026-05-08] DSZL driver 架構決策請求給 Jim
 - `memory/project_x518_architecture_mismatch.md`（user memory，新增）
 
 ### 發現
@@ -24645,7 +24645,7 @@ RPM 拉到 1500 後需要更短停止距離。Leadshine ACC/DEC 單位是 ms/100
 
 ### 修改檔案
 - `user_lib/WASH_ROBOT.cpp`：移除 `pusher_move_many_()` 與 `pusher_extend_with_vacuum_stop_()` 兩處對 `trigger_sync_move()` 回傳值的檢查，加 TODO 註解
-- `.claude/mailbox.md`：給 Jim 提報 user_lib bug
+- `.claude/archive/mailbox.md`：給 Jim 提報 user_lib bug
 
 ### 為什麼
 新加的 trigger 檢查在現場一直 false positive — body extend 實際成功，但 log 一直印「trigger_sync_move FAIL」。原因：`ZDT_motor_control::trigger_sync_move()` 是 Modbus 廣播（slave 0x00），依協定**不應有回應**，但 driver 實作 `return resp.empty()` 把「沒回應」當成 error → 永遠回傳 true。屬 user_lib 範圍 bug，已 mailbox 給 Jim，WashRobot 暫時忽略回傳值。
@@ -27516,7 +27516,7 @@ Sadie 要求：
 `DM2J_RS570::motor_enable()` / `motor_disable()` 在 header 宣告但 `.cpp` 沒實作 → link 報 `undefined reference`。這是 user_lib 範圍（Jim）的事，正式要補進 `DM2J_RS570.cpp`。為了今天能測，Linux_test 自己送 Modbus function 0x06 frame 寫 0x1801 register。日後 Jim 補完可以移除本地 helper。
 
 ### 需要 mailbox
-建議往 `.claude/mailbox.md` 發訊息給 Jim：DM2J motor_enable/disable 實作缺失。
+建議往 `.claude/archive/mailbox.md` 發訊息給 Jim：DM2J motor_enable/disable 實作缺失。
 
 ## 2026-04-24e — Claude Code — Linux_test 新增選項 16「DM2J group sync move」
 
@@ -28014,7 +28014,7 @@ Sadie 需求：主體目前只裝 slave 1~8 SMC 推桿（slave 9 中心未裝）
 - `washrobot_new_PI/main.cpp` — `main()` 最前面加 `signal(SIGPIPE, SIG_IGN)`（`#ifndef _WIN32` 守衛）
 - `Crane_control_PI/main.cpp` — 同上
 - `Crane_easy_PI/main.cpp` — 同上
-- `.claude/mailbox.md` — 留訊息給 Jim，請評估 user_lib `TCP_client::sendData` / `TCP_server::sendToClient` 改用 `MSG_NOSIGNAL`
+- `.claude/archive/mailbox.md` — 留訊息給 Jim，請評估 user_lib `TCP_client::sendData` / `TCP_server::sendToClient` 改用 `MSG_NOSIGNAL`
 
 ### 原因
 Sadie 回報 washrobot 跑到一半印 `Broken pipe` 被 shell 殺掉。根因：`TCP_client.cpp:175` / `TCP_server.cpp:175` 都用 `send(sock, buf, len, 0)` 不帶 `MSG_NOSIGNAL`，Linux 下對已關閉對端的 socket 寫入會送 SIGPIPE，預設處置 terminate → 整個 process 死。任何一端斷（web 後端、crane、RS485 gateway、Linux_test 退出）都會踩到。

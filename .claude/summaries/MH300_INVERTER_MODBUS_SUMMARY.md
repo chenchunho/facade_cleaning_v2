@@ -1,6 +1,6 @@
 # MH300 Inverter (台達 MH300) — Commissioning 參數與 SE3 差異摘要
 
-Source: `.claude/mh300_migration_plan.md` Phase 0 / Phase 3（keypad 值經手冊確認）
+Source: `.claude/archive/mh300_migration_plan.md` Phase 0 / Phase 3（keypad 值經手冊確認）
 
 > 📌 **2026-08-31 建立。** 這份的內容原本**只存在於 `mh300_migration_plan.md` 裡**，
 > 是**唯一副本**（待辦總表記為 🔴）。計畫檔完成後會被封存甚至清除，而
@@ -46,4 +46,4 @@ Source: `.claude/mh300_migration_plan.md` Phase 0 / Phase 3（keypad 值經手�
 
 - Driver：`user_lib/MH300_inverter.{h,cpp}`（已存在；🔴 2026-09-07 更正：`vcxproj` 已刪除，該檔在 `scripts/build/build_crane.sh` 裡**有被編譯**，未生效的是 `main.cpp` 的 `CRANE_VFD_IS_SE3 1`）
 - 型號切換：`Crane_control_PI/main.cpp` 的 `#define CRANE_VFD_IS_SE3`
-- 完整遷移步驟（Phase 0~4）：`.claude/mh300_migration_plan.md`
+- 完整遷移步驟（Phase 0~4）：`.claude/archive/mh300_migration_plan.md`

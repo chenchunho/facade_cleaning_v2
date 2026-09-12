@@ -4,7 +4,7 @@
 // 設定檔載入 —— 極簡的 `key = value`，不使用任何外部相依
 // （CLAUDE.md：no external dependencies beyond POSIX/WinSock and the C++ stdlib）。
 //
-// [2026-08-30] 重構階段 4（見 .claude/refactor_plan.md §7.1）。
+// [2026-08-30] 重構階段 4（見 .claude/plans/refactor_plan.md §7.1）。
 //
 // 🔴 設計規則（與 common/endpoints.h 同一條）：
 //    **沒有設定檔時，行為必須與編譯進去的常數逐位元相同。**

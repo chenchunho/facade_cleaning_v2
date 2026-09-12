@@ -5,7 +5,7 @@
 // at fake slaves on 127.0.0.1 without touching a single hardcoded address.
 //
 // [2026-08-29] Added for the refactor's equivalence harness (see
-// .claude/refactor_plan.md §5). The refactor's success criterion is "same
+// .claude/plans/refactor_plan.md §5). The refactor's success criterion is "same
 // bytes on the bus as main-final", which requires running both builds against
 // the same fake devices — and that in turn requires the addresses to be
 // injectable. This header is the entire mechanism.

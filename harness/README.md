@@ -1,6 +1,6 @@
 # harness — 重構的等價性驗證（不需要機器）
 
-> 建於 2026-08-29，服務 `.claude/refactor_plan.md` 階段 0。
+> 建於 2026-08-29，服務 `.claude/plans/refactor_plan.md` 階段 0。
 > **目的只有一個**：證明重構之後，程式對外的行為沒有變。
 
 ## 判準

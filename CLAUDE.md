@@ -69,8 +69,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 世代 | 文件 | 狀態 |
 |---|---|---|
 | v1 | `.claude/motion_flow.md` | **已凍結**。§2 硬體表仍是 `DM2J×5`／`ZDT×9`，與現行程式碼不符；保留作為狀態機與指令協定的原始推導 |
-| v2 | `.claude/v2_app_redesign_plan.md` | ✅ **現行程式碼的權威**（4 吸盤／2 區真空／吊機繩位移／無 DM2J） |
-| v3 | `.claude/洗窗機器人設計彙整.md` | 🆕 新架構方向：四輪滾動＋兩具 22 吋螺旋槳貼牆＋橫向滑台＋雙主控，**沿用既有硬體改寫** |
+| v2 | `.claude/reference/v2_app_redesign_plan.md` | ✅ **現行程式碼的權威**（4 吸盤／2 區真空／吊機繩位移／無 DM2J） |
+| v3 | `.claude/reference/洗窗機器人設計彙整.md` | 🆕 新架構方向：四輪滾動＋兩具 22 吋螺旋槳貼牆＋橫向滑台＋雙主控，**沿用既有硬體改寫** |
 
 > ⚠️ 因為是「舊硬體改寫」，`user_lib/` 的驅動層大致沿用 —— **既有的驅動層技術債不會隨應用層重寫而消失，它跟著硬體走**。
 
@@ -196,7 +196,7 @@ C++ 機器人控制系統，包含洗窗機器手臂（wash robot arm）與吊�
 ## Repository Structure
 
 📌 **2026-08-27 起分層**，**2026-08-30 重構擴充為 6 層 + 1 橫切**
-（見 `.claude/refactor_plan.md`）。上層呼叫下層，**下層不認識上層**。
+（見 `.claude/plans/refactor_plan.md`）。上層呼叫下層，**下層不認識上層**。
 
 ```
 web_backend/         # ── 介面層：Node.js server + 前端 GUI（獨立行程，在吊機那台）
@@ -268,7 +268,7 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 | `README.md` | repo 門面。🔴 **唯一記載 fork 出身**：自 `washrobot_new_PI` commit `9f174f9`（tag `v2-fork-from-v1`）於 2026-06-25 分出 | 🟡 「跟 v1 主要差別」多數仍是 TBD |
 | `ONBOARDING.md` | **52 KB、11 章的知識庫**：硬體驅動踩坑、工程心法、v2 步態引擎詳解、crane 通訊 hardening 三疊 bug、已退役子系統 | 🟢 活的。⚠️ 第 2 章「尚未解決」已改為指標，**待辦只在 `work_log.md`** |
 | ~~`facade_cleaning_v2.sln`~~ | ⚰️ **2026-09-07 連同 4 個 `.vcxproj` 一併刪除**（VS 不再使用） | ⚪ 取回見 git `79a2312` |
-| `deploy_and_test.pdf` | 部署測試說明，由 `.claude/gen_deploy_pdf.py` 產生 | 🟡 產生腳本只能在 Windows 跑 |
+| `deploy_and_test.pdf` | 部署測試說明，由 `.claude/archive/gen_deploy_pdf.py` 產生 | 🟡 產生腳本只能在 Windows 跑 |
 | `dm2j_manual_utf8.txt` | DM2J 手冊的**可讀**文字擷取（簡體中文） | 🟡 已被 `.claude/summaries/DM2J_RS_MODBUS_SUMMARY.md` 濃縮，保留作原文對照 |
 | `harness/` | **重構的等價性驗證**（2026-08-29 新增）：假匯流排 + 軌跡正規化 + 兩個版本比對。不需要機器 | 🟡 工具已完成並自我測試過；**尚未端到端跑過**（本機缺 `g++`） |
 | 🆕 `scripts/build/` | **建置腳本（權威版）**：本體／吊機／`Linux_test` 三支 + `README.md`。2026-09-07 由兩台 Pi 的 `~/bringup/`（2026-09-09 已搬到 `~/projects/facade_cleaning_v2/`）逐位元取回 —— 在那之前**只存在於 Pi 上、不在版控** | 🟢 活的，**VS 移除後這是唯一的建置定義**（手臂例外，見 `cleaning_arm/compile.sh`） |
@@ -406,7 +406,7 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 **那個推定是錯的**，而它會直接害死任何要取代網關的硬體（SE3 那兩段串列參數設錯就整段不通）。
 ⚠️ `sb` 是後台欄位值；**「2」是否等於 2 個停止位仍需在面板或手冊確認**，不要替它下結論。
 
-📌 **完整通訊介面規格（PCB 設計用）見 `.claude/comms_interface_for_pcb.md`** ——
+📌 **完整通訊介面規格（PCB 設計用）見 `.claude/reference/comms_interface_for_pcb.md`** ——
 六段 RS485 的裝置/slave/參數、分段不可合併的實測理由、網關三個結構性問題、待確認項。
 
 下表為 `.20` / `.22` 的 08-28 實查值（其餘欄位）：
@@ -558,7 +558,7 @@ Raspberry Pi（吊機主控）
 🔴 **唯一未完成的是 Phase 3（邏輯差異）**，且內容與計畫書原本寫的不同：
 `emergencyStop()` 的 base-block 已在 driver 層還原 SE3 語意（`releaseBaseBlockIfNeeded_()`），
 **但那是個 process-local 軟體旗標** ⇒ 急停後若程式重啟，硬體 0x2002 仍 set 而旗標歸零，
-下一個 run 命令會**靜默不轉**（無 fault code、Modbus 寫入回報成功）。詳見 `.claude/mh300_migration_plan.md` Phase 3。
+下一個 run 命令會**靜默不轉**（無 fault code、Modbus 寫入回報成功）。詳見 `.claude/archive/mh300_migration_plan.md` Phase 3。
 （故障碼那段仍讀 SE3 的 H1007/H1008。）
 
 ### 吸盤控制邏輯（🔴 已從 v1 的三區變成**單閥四吸盤**）

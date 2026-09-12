@@ -1,7 +1,7 @@
 # v2 應用層重寫計畫 — init / attach / step（新機械）
 
 > 規範權威：本檔（應用層流程）。機械架構見 memory `project_v2_mechanical_gait`；
-> 吊機變頻器見 `project_new_crane_vfd_mh300` + `.claude/mh300_migration_plan.md`。
+> 吊機變頻器見 `project_new_crane_vfd_mh300` + `.claude/archive/mh300_migration_plan.md`。
 > 本階段 scope：**init / attach / step_down / step_up**。其他（return_home /
 > balance_cal / 清洗 / obstacle）之後另議。
 

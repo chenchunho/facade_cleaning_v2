@@ -286,7 +286,7 @@ ZDT 伸出+計數器亂 → `zdt_home feet` 逐顆自探退硬限位歸零(4/4 d
 **web GUI 上滑台卡片(AI-2,版號 `2026.09.11-1156`)**:標題只留「上滑台」;移除 rail_pos 回讀/7s 輪詢/座標可信度列/rail_cfg_soft_enable 列;RPM 上限修 1000→**500**(本體實限 `cmd_rail_move`);校正歸零改**兩步鈕**(rail_enable off→手推左端硬限位→rail_enable on+rail_zero,與 cmd_rail_enable 註解的三道指令一致、後端不動)。
 - 🔮 **伏筆/決策**:**行程守衛「可設定」落在 GUI 端軟限位**(localStorage/每瀏覽器一份),因**本體沒有 `set_rail_max` 指令**、硬限位 `ARM_RAIL_TRAVEL_MAX_CM=130` 不受影響。若日後要真正可設定的**硬限位**,需在本體加 `set_rail_max`(本體側工作)。
 
-📌 **決策(被否決,per user)**:原打算把 v1 功能**逐項移植**進 v2(AI-2 已做完整對照 `.claude/v1_v2_feature_map.md`、分 A~I 九組)。jim 改方向:**「不用看 V1,V2 自己定義新方式」** ⇒ **不做逐項移植**,v2 依實際作業需要自訂功能、不追 v1 清單。
+📌 **決策(被否決,per user)**:原打算把 v1 功能**逐項移植**進 v2(AI-2 已做完整對照 `.claude/reference/v1_v2_feature_map.md`、分 A~I 九組)。jim 改方向:**「不用看 V1,V2 自己定義新方式」** ⇒ **不做逐項移植**,v2 依實際作業需要自訂功能、不追 v1 清單。
 - ⇒ 「切換前問 jim 日常按哪幾項」待辦**作廢**;`v1_v2_feature_map.md` 降為參考文件、§3 待移植表不再是待辦。
 - tier-1 安全五項(昨補)**保留**(v2 自己該有,與 v1 無關)。v1 續跑 :8080 暫不移除;v2 何時成唯一 GUI 改由「v2 自訂功能到哪」決定,不再由 v1 parity 決定。
 - (留這行免得下次盤點又把那九組當待辦拿出來排。)
@@ -806,7 +806,7 @@ watchdog 註解歸位／**10 處**過時註解更正／`set_water_inlet_` 宣告
 >
 > | 來源 | 開放項目數 | 現況 |
 > |---|---|---|
-> | `.claude/mailbox.md`（`### → 架構（Jim）`，2026-04-22 ~ 2026-05-14） | **16** | 已退休，檔案改為墓碑 |
+> | `.claude/archive/mailbox.md`（`### → 架構（Jim）`，2026-04-22 ~ 2026-05-14） | **16** | 已退休，檔案改為墓碑 |
 > | `ONBOARDING.md` `## ⚠️ 尚未解決 / 待處理事項` | **6** | 該節改為指標，其餘章節不動 |
 > | 本檔各日期條目的「待確認 / 尚未處理 / 待完成」段（2026-04-23 ~ 2026-08-17） | **44** | 原文保留在下方各日期條目中 |
 > | **合計** | **66 筆 → 表中 60 列** | **66 筆全部入表，無遺漏** |
@@ -908,7 +908,7 @@ watchdog 註解歸位／**10 處**過時註解更正／`set_water_inlet_` 宣告
 | ✅ | `CLV900_inverter` 缺 null-client 防護：跳過 `init()` 時 `client == nullptr`，`sendModbus` 直接 null-deref segfault（應用層已用 `g_dev_clv900` 守起來，driver 本身沒守） | `user_lib/CLV900_inverter.cpp:66` | ✅ **已修（2026-08-29）**：`sendModbus` 進場 `if (!client) { LOG_ERR; respLen=0; return true; }`，沿用 `DM2J_RS570::sendRecv` 的既有慣例。🔴 **未編譯**（同上）。⚠️ **但這條只關掉 12 支裡的 1 支**——見下方新增列 | mailbox 2026-05-14｜2026-08-29 修 |
 | ✅ | ~~**null-client 守衛：12 支 driver 裡有 8 支的傳輸路徑沒守**~~ ⚠️ **原記「10 支」是錯的（2026-08-29 當日更正）**：那次用 grep pattern `!client\b` 判定，而 `!client->sendData(...)` 也會匹配，於是把 `JC_100_METER:57` 與 `XKC_Y25_RS485:70,180,214` （寫法是 `if (!client \|\| !client->isConnected())`）誤判成沒守，同時把 `DM2J_RS570` 誤判成守好了（它只守 `sendRecv`，六支 `read_*` 與 `recv_frame_` 是裸的）。**逐函式讀原始碼後實際是 8 支。**| `user_lib/`：ZDT(18)／DM2J(7)／PQW(5)／DY_500(3)／DSZL(2)／MH300(1)／SD76(1)／SE3(1)＝**38 處**，外加先前的 CLV900(1) | ✅ **已修（2026-08-29）**：守衛插在各函式進場，回傳值依各自慣例（Modbus 系 `true`=錯／`recv_frame_` 回 `-1`／回 vector 的回 `{}`／`close()` 直接 `return`）。本來就守好的是 `JC_100`／`XKC_Y25`／`QX_DO24`。🔴 **未編譯** | 2026-08-29 修 CLV900 時帶出，同日修完 |
 | ✅ | ~~`TCP_client` 缺 `SO_ERROR` 驗證 → 影響 reconnect 的邊界 case~~ ⚠️ **本列與表格第一列是同一件事**（2026-06-09 與 2026-08-28 各記了一次），2026-08-29 合併確認 | `transport/TCP_client.cpp:208,214` | **已修（`56bfa5c`／`ce8ba81`）** — 詳見表格第一列（含雙向斷言實機驗證） | work_log 2026-06-09｜2026-08-29 判為重複列 |
-| 🟡 | MH300 實機必驗清單未跑：方向映射、電流 scale、2101H run bit、fault code | `Crane_control_PI/main.cpp`（`VFD_DIR_*` 巨集）、`.claude/mh300_migration_plan.md` | **未修** ✔（註解仍寫 `RE-VERIFY on MH300`） | work_log 2026-07-07 |
+| 🟡 | MH300 實機必驗清單未跑：方向映射、電流 scale、2101H run bit、fault code | `Crane_control_PI/main.cpp`（`VFD_DIR_*` 巨集）、`.claude/archive/mh300_migration_plan.md` | **未修** ✔（註解仍寫 `RE-VERIFY on MH300`） | work_log 2026-07-07 |
 | ✅ | ~~**4 個 `.vcxproj.user` 被 git 追蹤**~~ → 🎉 **2026-09-07 徹底結案：整個 VS 檔案組已刪除**（`.sln` + 4 個 `.vcxproj` + 4 個 `.vcxproj.user` + `.vs/` 43 MB，per user「不用 VS 了」）。⚠️ **先前以為它結案了，其實沒有**：`.gitignore` 早就有 `*.vcxproj.user`，但 **gitignore 對已追蹤的檔案無效**，四個檔一直還在版控裡。📌 **「規則加了」≠「規則生效了」** —— 加 ignore 規則時要一併 `git rm --cached`。 | — | **已刪除** | 多處 |
 | 🟡 | 沒有 hot re-init：裝置 flag 只在啟動時設一次，硬體中途修好要重開 crane | `Crane_control_PI/main.cpp` | **未修** | work_log 2026-05-08 |
 | 🟡 | 沒有任何機制偵測「M2 被重新安裝過」；重裝後若位置落在 ±1.5 rad 內，INIT 會**靜默**移到錯的 CENTER | `cleaning_arm/main_api.cpp:1992-2028` | **未修** | work_log 2026-08-17 |
@@ -1100,7 +1100,7 @@ threshold 再實作」：① `cmd_hold` 與 motion 互斥（避免 hold 跟 moti
 
 ---## 🆕 新架構待辦（2026-08-27 設計彙整，與上表的現行程式碼待辦分開，共 27 項）
 
-> 📌 **這一節屬於新一代機器的規格文件 `.claude/洗窗機器人設計彙整.md`（v3，2026-08-27），
+> 📌 **這一節屬於新一代機器的規格文件 `.claude/reference/洗窗機器人設計彙整.md`（v3，2026-08-27），
 > 全部是設計階段的未定案與未解項——不是現行程式碼的 bug。**
 >
 > 新架構是「沿用既有硬體的改寫」：四輪貼玻璃滾動升降 ＋ 兩具 22 吋螺旋槳提供貼牆推力 ＋
@@ -1781,7 +1781,7 @@ per user 依序設地面點與頂樓點：`zero_meters ground`（底端，`left_
 | 檔案 | 改了什麼 |
 |---|---|
 | `.claude/runbook.md` | 🆕 §A0 日常啟動／收尾（實測指令）；§A4 標為 `main` 快照專用 + 警語；連線資訊段三條更正 + 隧道延遲表 |
-| `.claude/mh300_migration_plan.md` | 新增「現況」對照表；Phase 1／2／4 標完成並附證據；**Phase 3 整段改寫** |
+| `.claude/archive/mh300_migration_plan.md` | 新增「現況」對照表；Phase 1／2／4 標完成並附證據；**Phase 3 整段改寫** |
 | `CLAUDE.md` | `CRANE_VFD_IS_SE3` 行號 116 → **127**；補遷移實際狀態與 Phase 3 的真實風險 |
 
 ### 🖥 GUI 線：console v2 繼電器「拿掉彈窗 + 消除 700ms 回饋延遲」（由機器線 `agent-ai-8b` 移交）
@@ -9523,7 +9523,7 @@ base 回 `ERR usage:zdt_pusher_<1..4>`、cand 回 `OK`。ZDT/JC100 的位元組�
 
 ### 已完成
 
-**① `.claude/refactor_plan.md` 進版控**（`CLAUDE.md` 的 `.claude/` 索引已加一列）
+**① `.claude/plans/refactor_plan.md` 進版控**（`CLAUDE.md` 的 `.claude/` 索引已加一列）
 
 📌 **參考文件 `architecture.md` 只是通用描述，不照抄** —— 它假設「一個裝置 = 一個軸」，
 而這台機器上 14 支 driver 裡**真正的位置軸只有 2 支**（ZDT 推桿、DM2J 上滑台）。
@@ -11252,7 +11252,7 @@ git show HEAD:user_lib/WASH_ROBOT.cpp > /tmp/head.cpp
 
 ### 歷史摘要 #1（2026-07-07 ~ 2026-07-23）— v2 應用層重寫 / crane 三起實機事故 / depth camera 上線
 
-> **規範權威：** `.claude/changelog.md` 2026-07-15b~f、2026-07-21、2026-07-21b、2026-07-22e、2026-07-23；`.claude/motion_flow.md` §4b「同步步伐」；`.claude/v2_app_redesign_plan.md`（應用層重寫）＋ `.claude/mh300_migration_plan.md`（吊機變頻器）；memory `project_v2_mechanical_gait` / `project_new_crane_vfd_mh300`。
+> **規範權威：** `.claude/changelog.md` 2026-07-15b~f、2026-07-21、2026-07-21b、2026-07-22e、2026-07-23；`.claude/motion_flow.md` §4b「同步步伐」；`.claude/reference/v2_app_redesign_plan.md`（應用層重寫）＋ `.claude/archive/mh300_migration_plan.md`（吊機變頻器）；memory `project_v2_mechanical_gait` / `project_new_crane_vfd_mh300`。
 
 **決策**
 - v2 是新硬體 fork：4 吸盤（推桿 slave 右 {1,2} / 左 {3,4}）、真空 **2 區**（左閥/右閥）無中心杯、**無 DM2J**（無滑軌無輪組、無橫向）；垂直位移改成「單側吊機放/收繩 ＋ SD76 計米量測」取代 v1 的滑軌，水平靠 IMU ＋ 左右繩長差。PQW 通道重配為 CH1=右腳閥 / CH2=幫浦 / CH3=左腳閥。
@@ -11393,7 +11393,7 @@ git show HEAD:user_lib/WASH_ROBOT.cpp > /tmp/head.cpp
 - ❌ DY-500 重量感測器硬體有問題，**確認暫不啟用**（規格保留）；❌ 機械手臂 USB→CAN **本版不整合**，保留未來擴充。
 - 🔮 安全性事實：絞盤斷電為**自動剎車**（電磁剎車失電夾持），DM2J 步進失電**鎖死** —— 所以「斷電即脫離」原則下，機器人脫牆後是由剎車懸吊，不會墜落也不會繼續下滑。
 - 🔮 **Log 格式規範**：`user_lib/log_utils.h` 的 4 個 `LOG_*` 巨集 ＋ `LOG_HEX`，格式 `[HH:MM:SS.mmm] [LEVEL] [DEVICE:ID] <msg>`；**所有 level 統一由 `debug_mode` 成員控制**（關掉完全靜默，錯誤靠 bool return 通知呼叫端）；輸出到 stderr、不落檔、不加鎖（輕量 A 方案）。14 個驅動全改造，禁用 printf/cout/cerr。⚠ **`DIHOOL_control` 與 `QX_DO24` 刻意維持 inverted convention（true=success），與全專案 false=success 相反 —— 這是有意保留的例外，不要「順手改正」。**
-- 多人協作機制（角色表 ／ `user_lib/*.h` public API 為介面契約、跨界 PR 標 `[跨界: user_lib]` ／ `.claude/mailbox.md` 協作信箱 ／ 開 session 三步驟）—— ⚠ **此機制已於 2026-08-27 整個退休**（改單人開發，mailbox 改為墓碑），歷史條目裡的「等 Jim review」「屬 Sadie 範圍」等分工字樣一律作廢。
+- 多人協作機制（角色表 ／ `user_lib/*.h` public API 為介面契約、跨界 PR 標 `[跨界: user_lib]` ／ `.claude/archive/mailbox.md` 協作信箱 ／ 開 session 三步驟）—— ⚠ **此機制已於 2026-08-27 整個退休**（改單人開發，mailbox 改為墓碑），歷史條目裡的「等 Jim review」「屬 Sadie 範圍」等分工字樣一律作廢。
 
 **⚠ 踩坑 / 教訓**
 1. **(04-17)** 一度以為現況是「washrobot 當 server、crane 當 client」，想翻轉成 crane server 以利救援 —— 實際翻代碼確認**現況早就是想要的架構**：washrobot `:5001` 給 Web Backend 連、crane `:5002` 同時接 Web Backend 與 washrobot 兩個 client，washrobot 掛掉時 Web Backend → crane 的救援路徑完全不經 washrobot。**結論：一行都不用改。此條純備忘，就是為了避免未來又誤會一次。**
@@ -11411,7 +11411,7 @@ git show HEAD:user_lib/WASH_ROBOT.cpp > /tmp/head.cpp
 
 ### 歷史摘要 #7（2026-04-10 ~ 2026-04-12）— user_lib 全驅動審查、初版分散式架構、首次遠端編譯
 
-> **規範權威：** `.claude/motion_flow.md`（初版：Phase 1~5、硬體對照、可調參數表）；`CLAUDE.md`（架構圖、分散式系統通訊章節）；`.claude/summaries/` 下各驅動摘要（ZDT / DM2J / JC-100 / DY500 / SD76 / PQW / ZS_DIO）；`deploy_and_test.pdf` Gate 0~6 ＋ 產生器 `.claude/gen_deploy_pdf.py`。
+> **規範權威：** `.claude/motion_flow.md`（初版：Phase 1~5、硬體對照、可調參數表）；`CLAUDE.md`（架構圖、分散式系統通訊章節）；`.claude/summaries/` 下各驅動摘要（ZDT / DM2J / JC-100 / DY500 / SD76 / PQW / ZS_DIO）；`deploy_and_test.pdf` Gate 0~6 ＋ 產生器 `.claude/archive/gen_deploy_pdf.py`。
 
 **決策**
 - 分散式架構定案：吊機 RPi `192.168.1.101` TCP server `:5002`、洗窗 RPi `192.168.1.100` TCP server `:5001`、Web Backend（Node.js）橋接 WebSocket ↔ 兩台 TCP；協定為行為單位的文字指令，回 `OK` / `ERR` / `EVT`。

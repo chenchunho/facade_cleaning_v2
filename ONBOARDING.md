@@ -15,7 +15,7 @@
 📌 **這一節的內容已於 2026-08-27 併入 `.claude/work_log.md` 最上方的「🔴 待辦總表」，
 請直接去那裡看，不要在這裡維護第二份清單。**
 
-原因：專案改為單人開發，退休了 `.claude/mailbox.md` 的協作信箱機制。原本散在
+原因：專案改為單人開發，退休了 `.claude/archive/mailbox.md` 的協作信箱機制。原本散在
 mailbox（16 條）、本節（6 條）、`work_log.md` 各日期條目的待辦段（44 條）三個地方的
 未結案項目，全部合併成一張帶優先度、涉及檔案、現況（未修／已修／待查）與**原始日期**
 的表，讓每一筆技術債放了多久看得見。
@@ -170,7 +170,7 @@ v2 對 v1 做了大幅簡化：
 
 基本步態流程（以 step_down 為例，右先左後）：確認兩側真空+推桿無 stall → **右**：解真空→縮腳→放右繩 step_cm→開真空→補伸右腳→確認 → **左**：同樣流程 → 水平check（IMU roll≈0 + 左右繩長差 tol）→ 完成一步。伸腳一律沿用 2.8 節的 valve-before-extend + staged extend，禁止單發盲伸。
 
-程式層面的完整重寫計畫記在 git 追蹤的 `.claude/v2_app_redesign_plan.md`，若要查「v2 某功能原本設計打算怎麼做」可以先去那份文件找。
+程式層面的完整重寫計畫記在 git 追蹤的 `.claude/reference/v2_app_redesign_plan.md`，若要查「v2 某功能原本設計打算怎麼做」可以先去那份文件找。
 
 ---
 
@@ -269,7 +269,7 @@ v2 的 `do_feet_realign_`/`cmd_realign` 只處理 4 顆 feet，**全程不解真
 
 ### 6.8 清潔手臂：從拆除到裝回（2026-07-24 起）
 
-`cmd_run`/`cmd_run_script` 的 v1「邊走邊刷」sweep pipeline 因為手臂當時未裝，被拆成純 step 迴圈（`#if 0` 保留原始碼在 `_retired_..._v1_` 系列）。**2026-07-24 手臂已實機裝上**，但只有 `do_step_sync_` 這條新路徑接了真手臂動作（`do_step_sync_rail_sweep_()`），`do_step_down_`/`do_step_up_`（交替走法）還沒接（照 `.claude/v2_app_redesign_plan.md` §5.6 的步驟）。
+`cmd_run`/`cmd_run_script` 的 v1「邊走邊刷」sweep pipeline 因為手臂當時未裝，被拆成純 step 迴圈（`#if 0` 保留原始碼在 `_retired_..._v1_` 系列）。**2026-07-24 手臂已實機裝上**，但只有 `do_step_sync_` 這條新路徑接了真手臂動作（`do_step_sync_rail_sweep_()`），`do_step_down_`/`do_step_up_`（交替走法）還沒接（照 `.claude/reference/v2_app_redesign_plan.md` §5.6 的步驟）。
 
 硬體變動：PQW 確認物理有 16 CH；`CH_BRUSH`（刷洗滾筒馬達）從 CH5 移到 **CH15**；水閥/水泵管路仍未接（相關呼叫維持註解）。
 

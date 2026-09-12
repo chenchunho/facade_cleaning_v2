@@ -168,7 +168,7 @@ per user 大方向：測試完成後改走 192.168.1。
 
 ⇒ **順序：電氣干擾處置 → `link_probe.sh` 複驗（Gate 1：HOLD 期間最長空窗 < 750ms）
 → 才切 192.168.1 → 再談本計畫的驗收。**
-（詳見 `.claude/wired_switch_and_loop_test_plan.md`。）
+（詳見 `.claude/plans/wired_switch_and_loop_test_plan.md`。）
 
 ---
 

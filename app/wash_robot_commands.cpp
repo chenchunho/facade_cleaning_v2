@@ -3298,7 +3298,7 @@ std::string WashRobot::cmd_run(int steps, int cm, const std::string& direction, 
     // reach the (absent) arm service. This is now a plain step loop over the v2
     // do_step_down_/up_ (crane rope + 4 cups + cycle_group_ retry + end-of-step
     // realign). The full v1 pipeline is preserved verbatim under #if 0 as
-    // _retired_cmd_run_v1_sweep_ below — see .claude/v2_app_redesign_plan.md
+    // _retired_cmd_run_v1_sweep_ below — see .claude/reference/v2_app_redesign_plan.md
     // §"arm sweep 重新接回" for how to wire it back once the arm returns.
     //
     // Direction: down / up. The v1 down_sweep_af / up_sweep_af variants are still

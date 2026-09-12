@@ -13,7 +13,7 @@
 
 一律回 `OK`：目的不是模擬吊機，是讓那條路徑**有界地結束**。
 ⚠️ 代價：吊機端真正的回覆內容沒有被涵蓋。要測那些得起真正的 Crane_control_PI，
-   那是另一個題目（見 .claude/refactor_plan.md 的 crane_smoke.txt）。
+   那是另一個題目（見 .claude/plans/refactor_plan.md 的 crane_smoke.txt）。
 """
 import argparse
 import socketserver

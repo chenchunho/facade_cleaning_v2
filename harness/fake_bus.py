@@ -3,7 +3,7 @@
 
 與 `Linux_test/fake_slaves/fake_rtu.py` 的差別：那支是**單一 slave + 故意送壞幀**，
 用來驗 driver 的回覆驗證路徑；這支是**整條 bus + 永遠送好幀**，用來讓整支主程式
-跑起來並產生可比對的黃金軌跡（見 .claude/refactor_plan.md §5）。
+跑起來並產生可比對的黃金軌跡（見 .claude/plans/refactor_plan.md §5）。
 
     python3 fake_bus.py --port 15020 --proto rtu
     python3 fake_bus.py --port 15032 --proto tcp     # X518 (DSZL) 原生 Modbus TCP

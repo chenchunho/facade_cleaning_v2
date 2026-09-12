@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Generate the deploy-and-test PDF for washrobot_new_PI.
-Run:  python .claude/gen_deploy_pdf.py
+Run:  python .claude/archive/gen_deploy_pdf.py
 Output: deploy_and_test.pdf (project root)
 """
 import os
