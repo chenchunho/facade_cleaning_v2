@@ -24,7 +24,7 @@
 ## 用法
 
 ```bash
-sudo apt install -y g++          # 只需一次；本機目前沒有
+# g++ 本機已有（9.4.0，2026-09-12 實測）——「本機目前沒有」那句是舊的
 ./harness/negative_control.sh    # 🔴 先跑這個
 ./harness/compare.sh main-final HEAD
 ```

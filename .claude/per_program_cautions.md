@@ -3,7 +3,9 @@
 寫給**接手這個專案的下一位同事**。這份只講「每支程式各自最容易踩、踩到後果最嚴重」的事，
 不是完整規格。
 
-- 系統整體背景 / 歷史脈絡 → `ONBOARDING.md`
+- 驅動層踩坑 / 工程方法 → `.claude/reference/engineering_pitfalls.md`
+- 軟體架構現況 → `.claude/SOFTWARE.md`；硬體架構現況 → `.claude/HARDWARE.md`
+- 歷史脈絡（v1↔v2 機械差異、步態演進）→ `.claude/archive/ONBOARDING-2026-08-13.md`（已凍結快照）
 - 操作步驟（怎麼開機、按哪顆按鈕）→ `.claude/runbook.md`
 - 運動流程規格 → `.claude/motion_flow.md`
 - 每次改動的來龍去脈 → `.claude/changelog.md`

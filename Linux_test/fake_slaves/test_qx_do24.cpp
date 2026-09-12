@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
     //    ⚠️ 不要「順手改回來」：`bool init(...)` 的簽名在兩種語意下長得一模一樣，
     //    看 .h 分不出來（見 CLAUDE.md 介面契約節）。
     //    📌 逐支讀過原始碼的結果（2026-08-29）：`user_lib/` 14 支 driver 裡
-    //       **只有 QX_DO24 一支是 true=成功**（DIHOOL_control 亦是，但全 repo 無呼叫端＝死碼），
+    //       **只有 QX_DO24 一支是 true=成功**（DIHOOL_control 亦曾是，該支 2026-09-12 已刪除），
     //       其餘 12 支（含 SE3 / MH300 / DM2J）都是 Modbus 風格的 false=成功。
     //    ⚠️ 我一度用「函式最後一個 return」去推，把 SE3 / MH300 也歸成 true=成功——
     //       **推錯了**，它們最後一個 return 是失敗路徑。歸因前要逐支讀，不要靠形狀猜。

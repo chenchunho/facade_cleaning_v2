@@ -16,8 +16,33 @@ refactor_plan 標 ⏸ 暫緩(jim 拍板:本體/吊機暫不完整拆解,改針�
 - ✅ ~~壓縮保全清單 81 條逐條核對~~ **當日完成**:20 條已涵蓋/已結案刪除、2 條前提消失作廢、
   其餘併入待辦總表「🟡 2026-09-12 由歷史壓縮併入」一節(分 6 群:通訊匯流排/張力平衡/手臂力控幾何/
   滑台M2機構/本體驅動流程/GUI)。順手更正總表一處自相矛盾(DSZL 那列標已修,但線性度子項其實未驗)。
-- 🟡 ONBOARDING.md 抽仍有效的踩坑 → 歸檔 archive/,更新引用它的 CLAUDE.md/.claude/*.cpp 註解。
-- 🟡 針對性瘦身第一刀:手臂 PalletizerController.h + 死常數(FINE/STIFF/THETA_MIN)、DY-500 殘留、本體 v1 死碼盤點(對照 reference/v1_v2_feature_map.md)。
+- ✅ ~~ONBOARDING.md 抽踩坑 → 歸檔、更新引用~~ **當日完成**:21 項關鍵踩坑比對後發現 **15 項別處
+  查不到** ⇒ 抽成 `reference/engineering_pitfalls.md`(驅動踩坑 6 類 + 工程方法 5 類 + 8 條方法論教訓);
+  ONBOARDING 全檔凍結為 `archive/ONBOARDING-2026-08-13.md`(🔴 **§4 v1↔v2 機械差異、§6 步態演進
+  仍無可替代** —— `motion_flow.md` 至今是 v1 快照);更新 CLAUDE.md ×2、per_program_cautions、
+  SOFTWARE.md ×3、程式碼註解 ×4(本體 1 / 吊機 3)。
+  🔴 **順帶修正今天自己的漏判**:SOFTWARE.md §2.3 原寫「15 條已掏空」,但 ONBOARDING §11 記著
+  其中**重心校正 5 條 + 窗框避障 4 條是「暫時 stub 不是廢棄決定」**,GUI 面板 per user 明確要求保留
+  ⇒ §2.3 已改成兩類表(真退役 6 條可刪 / 暫時 stub 9 條要留)。
+- ✅ ~~針對性瘦身第一刀~~ **當日完成(純刪,零行為改動)**:`PalletizerController.h`(352 行)、
+  `DIHOOL_control.{h,cpp}`(0 引用且本來就沒進 build 清單)、手臂死常數 `FINE_*`4+`STIFF_*`5、
+  本體 header 12 條死 `cmd_` 宣告(102→90,與定義完全對齊)。
+  🔴 **`THETA_MIN` 查證後不能刪** —— 它是 `DEPLOY_F [θmin]` 的預設值兼驗證下界(`main_api.cpp:3031`),
+  刪了編不過;行為用途雖已於 09-11 移除,要清得連指令簽名一起改。
+  🟡 **仍待**:`DY_500` 移除(在 body+crane 兩份 build 清單內,要改碼+改 build,**須上機驗證**);
+  本體 v1 死碼 11 條(對照 `reference/v1_v2_feature_map.md`)。
+  ✅ **本輪改動已本機驗證(兩層)**:① 7 支原始碼 `g++ -fsyntax-only` **全過零錯誤**;
+  ② **預處理輸出比對 HEAD**(harness `prove_noop.sh` 的方法論,改用 g++ `-E -P`):
+  本體差異**恰好只有那 12 行宣告**、手臂**恰好只有那 9 個常數**(外加 3 行 `__assert_fail` 的
+  `__LINE__` 引數位移,非語意)、吊機**完全相同**。⇒ **對編譯器而言沒有任何副作用**。
+  🟡 仍需上機做 aarch64 實建與部署(本機是 x86_64)。
+
+🎯 **順帶推翻一個錯誤前提:「本機不能 build」是假的。**
+  本機有 **g++ 9.4.0**,能 `-fsyntax-only`、能產 x86_64 `.o`、能做預處理等價比對 ——
+  只是產不出 aarch64 部署檔。受影響的三處記載已更正:`CLAUDE.md` harness 那列(原寫「本機缺 g++」)、
+  `harness/README.md` 開頭的 `apt install g++`、待辦總表「2026-07 那批從未編譯驗證」那列。
+  ⇒ **`harness/` 的等價比對工具其實一直可以跑**(它本來就設計成 x86_64 自己跟自己比,見 `build.sh` 抬頭),
+  之前卡著只是因為那句話沒人複驗。下次要動重構時這條路是通的。
 - 🔴 測完改回隧道 192.168.1(web WROBOT_IP、本體 FCV_EP_CRANE_HOST)——現暫全 WiFi。
 - 🟡 下次上機:先 `zdt_home feet`(09-11 最後一次 blip 後未復位);重跑 full 驗真 8 Nm。
 
@@ -34,7 +59,7 @@ refactor_plan 標 ⏸ 暫緩(jim 拍板:本體/吊機暫不完整拆解,改針�
 - 🔴 **這次 blip 後 ZDT 位置計數器可能又亂**(24V blip 慣例會打亂 slave 5-8)——下次動 ZDT/跑 full 前先 `zdt_home feet` 復位確認。
 - 🟡 重跑 full(真 8Nm):升頂→pump on→`full 1 5 40`,驗橫桿步低力刷過、不 blip、跑完整趟。
 - 🔴 測完改回隧道 192.168.1(web WROBOT_IP 5.26→1.100、本體 FCV_EP_CRANE_HOST 5.25→1.10)。現暫全 WiFi。
-- 🟡 手臂 M1 過速煞車(retract 太快觸發 BRAKE);未用常數 FINE_*/STIFF_*/THETA_MIN 可清。
+- 🟡 手臂 M1 過速煞車(retract 太快觸發 BRAKE)。~~未用常數 FINE_*/STIFF_* 可清~~ ✅ 2026-09-12 已刪(THETA_MIN 查證後保留,非死常數)。
 
 
 ## 🆕 2026-09-11(深夜③)橫桿問題最終定案:M1 判據放棄 → 降力刷過
@@ -56,7 +81,7 @@ refactor_plan 標 ⏸ 暫緩(jim 拍板:本體/吊機暫不完整拆解,改針�
 ### 待完成
 - 🔴 **測完改回隧道 192.168.1**(per user「暫時全 WiFi 測完改回」):web WROBOT_IP 5.26→1.100、本體 FCV_EP_CRANE_HOST 5.25→1.10(重啟本體)。目前全鏈路暫走 WiFi。
 - 🟡 重跑 full(降力版):驗整趟清潔在有橫桿立面低力刷過、不中斷、不 blip。
-- 🟡 未用常數(FINE_*/STIFF_*/THETA_MIN)留在 .h 但已無程式引用,可擇日清。
+- ✅ ~~未用常數 FINE_*/STIFF_* 留在 .h~~ **2026-09-12 已刪 9 個**;🔴 THETA_MIN 查證後**不是**死常數(仍為 `DEPLOY_F` θmin 預設值),保留。
 - 🟡 cup5/cup7 JC100 隨位置間歇(現場幾何,非壞);DM2J 滑台無 homing、偶發 pos 讀回失敗。
 - 🟡 AI-2 v2 GUI 危險鈕閘門(2026.09.11-1919)已上;目前只開 v2、v1 停。
 
@@ -828,7 +853,7 @@ watchdog 註解歸位／**10 處**過時註解更正／`set_water_inlet_` 宣告
 > | 來源 | 開放項目數 | 現況 |
 > |---|---|---|
 > | `.claude/archive/mailbox.md`（`### → 架構（Jim）`，2026-04-22 ~ 2026-05-14） | **16** | 已退休，檔案改為墓碑 |
-> | `ONBOARDING.md` `## ⚠️ 尚未解決 / 待處理事項` | **6** | 該節改為指標，其餘章節不動 |
+> | `ONBOARDING.md` `## ⚠️ 尚未解決 / 待處理事項` | **6** | 該節改為指標，其餘章節不動。⚰️ **2026-09-12 全檔歸檔為 `.claude/archive/ONBOARDING-2026-08-13.md`** —— 本表與下方各處的 `ONBOARDING §N` 出處標註**一律指該歸檔檔**；踩坑/工程方法已抽到 `.claude/reference/engineering_pitfalls.md` |
 > | 本檔各日期條目的「待確認 / 尚未處理 / 待完成」段（2026-04-23 ~ 2026-08-17） | **44** | 原文保留在下方各日期條目中 |
 > | **合計** | **66 筆 → 表中 60 列** | **66 筆全部入表，無遺漏** |
 >
@@ -942,7 +967,7 @@ watchdog 註解歸位／**10 處**過時註解更正／`set_water_inlet_` 宣告
 | 🟡 | 新 driver `DSZL_107` 的 review 未結案：scale factor 實機校正、byte order（BE vs word-swap）驗證 | `user_lib/DSZL_107.{h,cpp}` | 應用層串接 **已修**／校正驗證 **待查** | mailbox 2026-05-06 |
 | 🟡 | crane 端偶發 `ERR meter_left_read_fail` + TCP 每 500ms reconnect，根因未知（已排除兩個假設），workaround 是重開 crane 程式 | `Crane_control_PI/main.cpp:1367` `meter_read_robust()` | **待查** | ONBOARDING §3 |
 | 🟡 | follower 側 IMU 校平疑似被切到 `meter` 模式導致機體歪斜；`follower_use_imu_==false` 的路徑**完全靜默**，一行 log 都不印 | `app/WASH_ROBOT.cpp:6366`、`WASH_ROBOT.h:881` | **待查**（走法已全面改 sync，但後端 raw command 預設仍是 `alt`，仍走得到） | ONBOARDING §2 |
-| 🟡 | 2026-07 那整批改動**從未編譯 / 部署驗證**（本機無法 remote build）：TCP_client 殭屍連線修復要驗自癒、WASH_ROBOT 安裝幾何常數、同步步伐、partial-seal 判準、crane 端 `Crane_control_PI` 建議先單獨 build 綠燈；`1829964` 等 commit 仍在本機 main **未 push** | `transport/TCP_client.cpp`、`app/WASH_ROBOT.{h,cpp}`、`Crane_control_PI/main.cpp`、`facade_cleaning_v2/main.cpp`、`web_backend/public/*` | **待查** | work_log 2026-07-07 / 07-15 / 07-21 / 07-22 / 07-23（7 筆合併） |
+| 🟡 | 2026-07 那整批改動**從未編譯 / 部署驗證**（🔴 **2026-09-12 更正:「本機無法 build」是錯的**,本機有 g++ 9.4.0 可做語法/預處理驗證,只是產不出 aarch64 部署檔）：TCP_client 殭屍連線修復要驗自癒、WASH_ROBOT 安裝幾何常數、同步步伐、partial-seal 判準、crane 端 `Crane_control_PI` 建議先單獨 build 綠燈；`1829964` 等 commit 仍在本機 main **未 push** | `transport/TCP_client.cpp`、`app/WASH_ROBOT.{h,cpp}`、`Crane_control_PI/main.cpp`、`facade_cleaning_v2/main.cpp`、`web_backend/public/*` | **待查** | work_log 2026-07-07 / 07-15 / 07-21 / 07-22 / 07-23（7 筆合併） |
 | 🟡 | 同步步伐的 IMU 差動微調**方向**（sign convention）沒實機驗證過，第一次上機要小角度有人看著 | `app/WASH_ROBOT.cpp` `do_step_sync_` | **待查** | work_log 2026-07-22 |
 | 🟡 | 水平校正整合（IMU roll ＋ 左右繩長差 tol）在 v2 step 收尾只留 TODO | `app/WASH_ROBOT.cpp` | **待查** | work_log 2026-07-07 |
 | 🟡 | v1 舊 body 用 `#if 0` 包起來當 reference，說好 bench 驗證 v2 綠燈後再硬刪 — 還沒刪 | `app/WASH_ROBOT.cpp` | **待查** | work_log 2026-07-07 |
@@ -1013,15 +1038,17 @@ watchdog 註解歸位／**10 處**過時註解更正／`set_water_inlet_` 宣告
 | 群 | 項目(日期) |
 |---|---|
 | 🔴 **通訊/匯流排** | **隧道閒置 1.06% 丟包未查**(09-08,與上表「VFD 運轉掉 90%」是**不同現象**);**WiFi 冷路徑單向丟包,powersave 假說未證實**(09-08/09,待裝 `iw` 或關 powersave);**SE3 VFD 寫入間歇失敗**(每個動作恰一筆,09-01 重現;慢速起步只是繞過);**X518 連線數上限未量**;🔴 **`.22` 匯流排本身沒修** —— QX 移 `.21` 是繞過,現只剩 JC100×4 看獨處穩不穩,**實體層(終端電阻/線長/接地)未查**;吊機 `set_imu_roll` dispatch log 4 Hz 洗版待節流 |
-| 🔴 **張力/平衡** | DSZL 量到刻度後**值放哪(scale 無持久化)要先決定**(上表只記 placeholder,沒記這件);兩側機械耦合受控量測(串音方向不一致);`BALANCE_IMU_KP=2.0`/`deadband=0.5` 未調初值;`pay_out ≤ 30Hz` 方向上限**程式未強制**;`site_profile` 設計(待核准,新架構待辦表 ⏸ 暫緩);DSZL log 補 `@L/@R` 到 `get_tension_kg`;**hold 生效期間再啟動 motion 未擋**(`any_hold_active()`,等拍板);`pay_out_right 1` 回 `moved=2cm` 但計米器變 9 單位 —— **單位換算未驗**(兩筆證據) |
+| 🔴 **張力/平衡** | 🎯 **DSZL-107 scale 持久化(2026-09-12 per user 定調)** —— **校正已完成、現在讀值是準的**,剩下唯一的事是**校出來的 scale 要存起來**:存**吊機端 setting/config**;若吊機端暫不規劃,**本體端也會用到** ⇒ 走 **Web GUI 改數值**的那個既有功能當介面。**併入下方 🔴「吊機執行期參數不持久化」一起做**(同一件事:motion_hz / balance_source / home_ground / fine_adjust_level_diff_cm / DSZL scale 全部重啟即失);兩側機械耦合受控量測(串音方向不一致);`BALANCE_IMU_KP=2.0`/`deadband=0.5` 未調初值;`pay_out ≤ 30Hz` 方向上限**程式未強制**;`site_profile` 設計(待核准,新架構待辦表 ⏸ 暫緩);DSZL log 補 `@L/@R` 到 `get_tension_kg`;**hold 生效期間再啟動 motion 未擋**(`any_hold_active()`,等拍板);`pay_out_right 1` 回 `moved=2cm` 但計米器變 9 單位 —— **單位換算未驗**(兩筆證據) |
 | 🔴 **手臂力控/幾何** | ✅ ~~「15 Nm 對刮刀可能不是對的目標值」~~ **2026-09-12 per user 結案:「8 Nm 對刮刀可以接受」** —— 滾筒與刮刀共用同一個 target 即可,不需為刮刀另訂力道目標。**別再提議為刮刀拆獨立 target**;`DEPLOY_F` WARN 分支**從未在硬體觸發**、GUI 未收斂四態未實證;`theta_max=1.10` **無上界實測**;力控 `TOL` 1.0→0.4 待決;尋觸走到 0.7× 目標才交棒可省一輪(未做);`disable_slot(m1_)` 而 M2 無對應 disable ⇒ **M2 可能仍使能**(未證實);`M1_GRAVITY_MIN_VALID_RAD=0.20` 低角度無補償的獨立影響未驗;`TOOL_EXT_CENTER=160` **唯一未實測,且是 `wall_mm=520` 的錨點**;樞軸→玻璃**四個幾何常數未實體量測**;`PARK_STOP_MARGIN=0.05` 長行程落點失控(落 0.0170);🔴 **M1 passive 根因自 2026-08-17 起未解**(看門狗只能重試);`cmd_status_sequence` disabled slot 刷新 / `cmd_arm_status` 格式對齊;診斷記錄取樣抖動(22.2 ms、偶有 190 ms 空隙)未查;M1 起步踢擊是否因 M2 推更久而改變,未複測;M2 負向有沒有機械停點未知(2 rad 內沒有) |
 | 🔴 **滑台/M2/機構** | 🔴 **M2 掃動中被橫向摩擦帶著跑 0.39~0.49 rad(26~28°)** —— 十輪一致＝固有特性,**唯一剩下的機構問題**(09-04 `hold_kp=31` 是否部分緩解需核對);140 端玻璃比 0 端遠 6 mm,行程加長要重評;回到 09-03 量 14.31 的高度重跑三點,把「25% 偏移」與牆距畫上等號;`water_on` 把開滾筒綁著(乾式那輪不轉),per user 之後再處理;11 段移動 10~11 s 且停後 roll 偏大,「其他 3.6 s」未拆開 |
 | 🟡 **本體/驅動/流程** | Web GUI 8080/8081 **非 systemd,開機不自啟**(與控制程式同病);`cmd_vacuum(group)` 接受 left/right 但實際全域,應對非 feet/all 回錯;**5 個「設定了沒效果」的 setting**(`PUSHER_EXTEND_BODY_*`/`RETRACT_SLOW_PEEL_CM`/`STEP_CM_DEFAULT`/`STEP_MARGIN_CM`)接上或移除;`DISABLE_POS_ERROR_LIMIT_DEG` 0 處讀(09-02 已補「後果」註解,**刻意不接**);PWM 重試間隔 40 ms vs 對方 120 ms,觀察掉包率後定 `kBackoffMs`;`try_or_pause_` 靜默中止加一行診斷;`mb_scan` 回覆晚一拍(工具缺陷,使用時注意);`DY_500_weight_sensor.cpp:221` `hasError` 設了沒用(錯誤被吞)—— 併入 §瘦身的 DY-500 移除;PQW 模組需更換/檢修,**決定性測試(一支計米器＋PQW)未做**;`WR_DRIVER_DEBUG=ON` 會出 hex dump 且要關要重啟;`probe_dm2j.cpp` 未進版控;`WASH_ROBOT.h:1082` 成員註解 `.22 = arm-rail` 過期;runbook 連線資訊仍寫 `server.js CRANE_IP=.101`(過期);runbook 三條事實更正未寫回、`origin/main` 推不推等拍板;`tmp/` 未處理(per user 最後處理);兩台 Pi 的 `~/merge_check_20260828/` 拋棄式資料夾可刪;feet hook「傳了不會觸發」落差(**刻意保留**);等價比對基線需重取 |
 | 🟡 **GUI(AI-2 領域)** | 動作類按鈕未驗;Mission `bal:` roll 說明字串未在畫面出現過;版面 Mission/Manual 最下排卡片 900px 高會被切;8080 `public/index.html` 沒版號欄位;平板版**未經真人觸控實測**;8080 改動只驗到服務出去的內容對、瀏覽器未驗;`.man` 整頁鎖改用 `disabled`(擋不住鍵盤);吸盤 1~2 顆達標要不要警示是判準,**等使用者定義** |
 
-🔴 **上表一處自相矛盾,順手更正**:DSZL-107 那列整列標「已修 ✔(正負號＋量值)」,但其 ③ 子項
-「單點校正外推到 30~60 kg 的**線性度未驗**」並未結案(09-01 只校了 4.16 kg 單點)。
-⇒ **該列的線性度子項仍為 🟡 未結**,X518 裝置端標定可回答此題。
+✅ **上表 DSZL-107 那列結案確認(2026-09-12 per user)**:原先我判「③ 線性度子項未結」是**過時的**
+—— per user「**DSZL-107 這個好像校正過了,現在應該是準的**」。⇒ **量測面全部結案**(正負號＋量值＋線性度),
+不需要再補 30~60 kg 多點量測或 X518 裝置端標定。
+🔴 **唯一遺留的是工程面:校出來的 scale 沒地方存**(見上表「張力/平衡」群第一條),
+與「吊機執行期參數不持久化」同一件事。
 
 ---
 

@@ -374,7 +374,7 @@ std::string WashRobot::cmd_arm_sweep() {
     // [2026-08-31] 補上進入點的 abort 清除，與姊妹函式 cmd_arm_clean_sweep_dry 一致
     // （cmd_side_measured 的同型修正是 28dfa30，2026-08-31 實機驗證＝檢查表 ⑨a）。
     //
-    // ⚠️ **嚴重性更正（2026-08-31 實測）**：ONBOARDING §1 / runbook §A2「⑨b」宣稱
+    // ⚠️ **嚴重性更正（2026-08-31 實測）**：ONBOARDING §1 (archived: .claude/archive/ONBOARDING-2026-08-13.md) / runbook §A2「⑨b」宣稱
     //    「任何一次 stop / emergency_stop 之後 arm_sweep 會**永久**回 ERR aborted，
     //     只能重開主程式才能恢復」——**實測不成立**：
     //      · 稽核全部 4 個設 abort_flag=true 的位置：cmd_emergency_stop 與

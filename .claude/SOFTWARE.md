@@ -1,7 +1,8 @@
 # SOFTWARE.md — facade_cleaning_v2 軟體架構
 
 > 📌 **持續維護的權威軟體架構文件**,與 `HARDWARE.md`(硬體架構:機構/匯流排/裝置/電源)成對。
-> 取代 2026-08-13 快照的 `ONBOARDING.md`。
+> 取代 2026-08-13 快照的 `ONBOARDING.md`（**2026-09-12 已歸檔**為 `archive/ONBOARDING-2026-08-13.md`；
+> 其踩坑/工程方法抽到 `reference/engineering_pitfalls.md`）。
 > 程式碼與 git log 若與此不符,以程式碼為準,並回頭更新本檔。
 > 首版:2026-09-12,基線 commit `bbbc425`。日常進度在 `.claude/work_log.md`。
 > ✅ **2026-09-12 全文以腳本對原始碼驗證過**(行數/區段行號/埠/指令數/常數/引用計數共 37 項)。
@@ -85,9 +86,9 @@ repo 內 `scripts/` 只有 build/bench/`crcmd.py`/`cams.sh`/`link_probe.sh`/`cra
 | 量 | 數 | 說明 |
 |---|---|---|
 | dispatcher 指令(去重 `cmd == "…"`) | **99** | 其中 **15 條已掏空**成 `ERR removed_in_v2` 一行 → 實際有行為的 **84** |
-| `cmd_` header 宣告 | **102** | |
+| `cmd_` header 宣告 | **90** | ✅ 2026-09-12 已刪 12 條死宣告,與定義完全對齊 |
 | `cmd_` .cpp 實際定義 | **90** | 11 在 `WASH_ROBOT.cpp` + 79 在 `wash_robot_commands.cpp` |
-| 差額 = **死宣告** | **12** | header 沒跟著掏空指令一起清(清單見 §2.3) |
+| 差額 = 死宣告 | **0** | ~~12~~ 已清乾淨 |
 
 `FAST_CMDS` 9 條:`ping/status/pause/resume/continue/skip/emergency_stop/reset/zdt_release_stall`。
 
@@ -123,8 +124,19 @@ repo 內 `scripts/` 只有 build/bench/`crcmd.py`/`cams.sh`/`link_probe.sh`/`cra
 - ✅ **已掏空(15 條)** —— dispatcher 只剩 `return "ERR removed_in_v2"` 一行,**不是待砍死碼**:
   `wheels` `wheels_attached` `dm2j_group` `dm2j_zero` `tilt_mode` `confirm_balance` `move`
   `obstacle_detect` `obstacle_check` `obstacle_response` `run_avoid` `balance_calibrate_{start,record,abort,status}`。
-  🟡 **但 header 的 12 條 `cmd_` 宣告沒跟著清**(同名,少 `move`/`obstacle_check`/`obstacle_response`
-  加上 `cmd_wheels_attached`)→ 最便宜的一刀就是刪這 12 行宣告。
+  ✅ **header 的 12 條死 `cmd_` 宣告已於 2026-09-12 刪除**(宣告 102→90,與定義對齊)。
+  ⚠️ **只刪了宣告,dispatcher 的 stub 依下表分類保留** —— 重做時把宣告加回來即可。
+
+  🔴 **這 15 條不是同一種東西 —— 動刀前先分辨**(決策來源:歸檔的 ONBOARDING §11):
+
+  | 類別 | 指令 | 處置 |
+  |---|---|---|
+  | ⚰️ **真退役,不會回來** | `wheels` `wheels_attached` `dm2j_group` `dm2j_zero` `move` `tilt_mode` | 連同 header 宣告一起刪 |
+  | 🔮 **暫時 stub,不是廢棄決定** | `balance_calibrate_{start,record,abort,status}` `confirm_balance`(重心校正)、`obstacle_*` `run_avoid`(窗框避障) | **保留 stub** —— GUI 上「⚖️ 重心校正」「🎥 窗框避障」兩個面板是 **per user 明確要求保留**的,等 backend 重做才會通 |
+
+  **重做時的既定方向**:重心校正走 **IMU + 吊機差動**(與 level-match 共用感測器),**不是照抄 v1**
+  「解開 body 真空自由懸掛」那套(v2 沒有 body 吸盤分組);流程沿革見 `reference/engineering_pitfalls.md` §2.5。
+  窗框避障原主力是深度相機,但該路線 2026-09-01 已整套移除 → 目前**無方向**(橫桿低力刷過是現行解)。
 - 🔴 **仍有實作、真的可砍(v2 吊掛式用不到)**:`attach` / `detach` /
   `cross_obstacle_up` / `cross_obstacle_down` / `run_depth_avoid` / `depth_avoid_stop` /
   `depth_avoid_continue` / `step_up_sweep_ba` / `step_down_sweep_ba` / `step_up_sync` / `step_down_sync`
@@ -214,7 +226,11 @@ pivot)。已移除細掃/th_min/剛度守衛。8 Nm 雙工具 + 滑台 0–100�
 
 ### 4.3 已知問題
 
-- 死檔 `PalletizerController.h`(352 行,0 引用);死常數 `DEPLOY_F_FINE_*`/`STIFF_*`/`THETA_MIN`。
+- ✅ **2026-09-12 已清**:死檔 `PalletizerController.h`(352 行,0 引用)已刪;死常數 `DEPLOY_F_FINE_*`(4)+ `DEPLOY_F_STIFF_*`(5)共 9 個已刪。
+  🔴 **`DEPLOY_F_THETA_MIN` 不是死常數,刪了編不過** —— 它是 `DEPLOY_F <nm> <slot> [θmin] [θmax]` 的
+  **θmin 預設值**,且參與 `th_min >= th_max` 參數驗證(`main_api.cpp:3031`)。
+  ⚠️ 但它的**行為用途已於 09-11 移除**(th_min 守衛拿掉)⇒ 現在是個**收得進來、驗證得到、卻不影響行為**的
+  殘留參數。要清得連同 `DEPLOY_F` 的指令簽名一起改,不是刪常數。
 - 舊 `DEPLOY`(距離式)只剩 cycle_test 對「本體舊 binary」的 fallback。
 - `kp_eff` 快取:`iters=0` 時為舊值;M1 從遠處 retract 會觸發過速煞車(pos 仍收到 0,無害)。
 - 力控參數是 `constexpr`,現場調力要重編。
@@ -271,15 +287,15 @@ bug 風險高);改做**低風險針對性瘦身**,每刀有 baseline `bbbc425` �
 
 | 優先 | 元件 | 動作 | 效益 / 實測量 |
 |---|---|---|---|
-| ✅ 最便宜 | 本體 | 刪 header 裡 **12 條死 `cmd_` 宣告**(對應已掏空指令) | 純刪 12 行,零風險 |
-| ✅ 最便宜 | user_lib | 刪 **`DIHOOL_control.{h,cpp}`**(全樹 0 引用);`DY_500` 硬體沒用,拆 include | 刪 2 支驅動 |
-| ✅ | 手臂 | 刪 `PalletizerController.h`(352 行 0 引用)+ 死常數 `FINE_*`/`STIFF_*`/`THETA_MIN`;退役舊 DEPLOY;力控參數搬進 `damiao.cfg` | 免重編調力 |
+| ✔ 已做 | 本體 | ~~刪 header 12 條死 `cmd_` 宣告~~ **2026-09-12 完成**(102→90,與定義對齊);dispatcher stub 依 §2.3 分類保留 | — |
+| ✔ 已做 | user_lib | ~~刪 `DIHOOL_control.{h,cpp}`~~ **2026-09-12 完成**(0 引用,且**本來就不在任何 build 清單裡**)。🟡 `DY_500` **未動** —— 它在 body+crane 兩份 build 清單內且 `WASH_ROBOT.h` 有 include,要動得改碼+改 build,**需上機 build 驗證** | — |
+| ✔ 已做 | 手臂 | ~~刪 `PalletizerController.h`(352 行)+ 死常數~~ **2026-09-12 完成**(`FINE_*` 4 + `STIFF_*` 5 = 9 個;🔴 **`THETA_MIN` 不能刪,仍是 `DEPLOY_F` 的 θmin 預設值**,見 §4.3)。🟡 仍待:退役舊 `DEPLOY`、力控參數搬進 `damiao.cfg` | 免重編調力 |
 | 🔴 | 本體 | 砍**仍有實作**的 v1 走行殘留:`attach`/`detach`/`cross_obstacle_*`/`run_depth_avoid`/`depth_avoid_*`/`step_*_sweep_ba`/`step_*_sync`(對照 `.claude/reference/v1_v2_feature_map.md`) | 99 → 約 88 條;**掏空那 15 條已不必再砍** |
 | 🔴 | 吊機 | `crane_settings.json` 持久化執行期參數 | 解重啟忘設坑 |
 | 🔴 | 共通 | 集中網路設定(隧道/WiFi 一鍵切,不改腳本) | 解手改 IP |
 | 🔴 | **佈署** | **`start_*.sh` 收進 repo `scripts/run/`**,Pi 端改成 symlink/複製 | 啟動參數(HOME_GROUND、IP、web 路徑)進版控,見 §1.1 |
 | ✅ | 吊機 | 中繩驅動對齊 CLV900(23 處)→ MH300(18 處,實裝);查中繩計米 runtime ERR;退役 cli_D(殘留 3 處);`set_*`×29 收斂成 set/get_param | 噪音減、對齊實機 |
-| ✅ | 文件 | ONBOARDING 抽踩坑後歸檔、更新引用;frame_capture + FrameAnalyzer 一起定去留 | — |
+| ✅ | 文件 | ~~ONBOARDING 抽踩坑後歸檔、更新引用~~ **2026-09-12 完成**;frame_capture + FrameAnalyzer 一起定去留 | — |
 | 🟡 | web | `public_v2/index.html` 298 KB 單檔拆成 html/css/js | 可讀性;非阻塞 |
 | 🟡 | 本體 | header 3091 行瘦身;crane 三連線合併(僅在反覆出事時) | — |
 
@@ -296,7 +312,7 @@ bug 風險高);改做**低風險針對性瘦身**,每刀有 baseline `bbbc425` �
 ```
 facade_cleaning_v2/
 ├── SOFTWARE.md        ← 本檔(權威)
-├── README.md / ONBOARDING.md(過時快照,待歸檔)/ CLAUDE.md
+├── README.md / CLAUDE.md          (ONBOARDING.md 已歸檔至 .claude/archive/)
 ├── facade_cleaning_v2/main.cpp    本體進入點
 ├── app/WASH_ROBOT.{h,cpp}, wash_robot_commands.cpp   本體 class
 ├── command/dispatcher.{h,cpp}     本體指令分派

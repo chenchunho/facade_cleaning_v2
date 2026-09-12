@@ -802,6 +802,7 @@ static constexpr double BALANCE_TRIM_CAP_RATIO_DEFAULT = 0.5;
 static constexpr double BALANCE_DEADBAND_DEFAULT = 1.0;   // cm, |err| below = no trim
 
 // 🔴 [2026-08-31] 左右繩長差硬警報（ONBOARDING 安全盤點列為未修）。
+//     [2026-09-12] ONBOARDING 已歸檔 → .claude/archive/ONBOARDING-2026-08-13.md；待辦權威在 work_log 待辦總表。
 // motion_rope 每輪檢查**本次動作期間**左右的位移差
 // （|(cur_left-base_left) - (cur_right-base_right)|），超過此值即 abort 兩側。
 // 🔴 **不是兩個讀值的絕對差** —— 兩支 SD76 零點各自獨立，固定偏移屬正常
@@ -3655,7 +3656,8 @@ static std::string cmd_side_measured(const std::string& cmd, int cm) {
     //    後果：abort 被觸發過一次之後（stop / watchdog / 使用者中止），
     //    **之後每一個 pay_out_* / retract_* 都永遠回 "ERR aborted"**，
     //    只能重開吊機程式才能恢復 —— 而這四個指令正是同步步伐每一步都要用的，
-    //    等於步伐永久壞掉。（ONBOARDING §1 記過，一直沒修。）
+    //    等於步伐永久壞掉。（ONBOARDING §1 記過 —— 該檔 2026-09-12 已歸檔為
+//    .claude/archive/ONBOARDING-2026-08-13.md；現況以 work_log 待辦總表為準。）
     //    姊妹函式 cmd_roll_correct / cmd_align_lengths 本來就有這一行。
     // 📌 位置刻意放在 try_lock 之後：放在前面的話，一個被拒絕的重疊指令
     //    （ERR motion_busy）會清掉另一條執行緒正在進行的 abort。
@@ -4237,7 +4239,7 @@ static std::string cmd_hold(const std::string& dir, const std::string& onoff) {
         return "ERR expected_on_or_off\n";
     }
 
-    // 🔴 [2026-08-31] motion 互斥（ONBOARDING 安全盤點列為未修）。
+    // 🔴 [2026-08-31] motion 互斥（ONBOARDING 安全盤點列為未修 —— ONBOARDING 已歸檔，見上方說明）。
     // 稽核六支會驅動 VFD 的指令：motion_rope / cmd_roll_correct / cmd_align_lengths /
     // cmd_manual / cmd_side_measured **全部都有** try_lock(motion_mtx)，
     // **只有 cmd_hold 沒有** → GUI 的 hold 可以在 motion_rope 或 cmd_side_measured

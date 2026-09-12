@@ -337,20 +337,11 @@ public:
     static constexpr float DEPLOY_F_COARSE_STEP      = 0.030f;  // rad,~13mm/step(粗壓,舊 seek 0.010)
     static constexpr int   DEPLOY_F_COARSE_SETTLE_MS = 80;      // 80(60 會 overshoot,已退回)
     static constexpr float DEPLOY_F_COARSE_NM        = 6.0f;    // [2026-09-11 per user] 13→6:配合 TARGET 8;粗壓不再衝到 13(撞力來源)
-    // [2026-09-11 per user「限縮距離、放精細」] 細掃(fine re-seek):粗掃輕觸後退開、
-    //   用小步重逼近,把 contact θ 量到 ±2mm(粗掃 0.030rad~13mm 分不出橫桿比玻璃近的 ~4mm)。
-    static constexpr float DEPLOY_F_FINE_STEP        = 0.005f;  // rad,~2mm/step(精量接觸距離)
-    static constexpr float DEPLOY_F_FINE_BACKOFF     = 0.045f;  // rad,退開 >1.5 粗步確保脫離接觸
-    static constexpr int   DEPLOY_F_FINE_SETTLE_MS   = 120;     // 細掃每步靜置(輕觸鬆弛很小)
-    static constexpr int   DEPLOY_F_FINE_MAX         = 24;      // 細掃步數上限(0.045/0.005≈9,留裕)
-    // [2026-09-11 per user「剛度判據」] 接觸後剛度探測:橫桿(硬鋼)命令再壓 tau 暴衝(Δtau/Δcmd 大);
-    //   玻璃隔著滾筒/工具有柔度,tau 上升慢。此量與滾筒接觸點無關 ⇒ 不像 contact θ 會飄。
-    //   contact θ 已證實不可靠(橫桿 0.55–0.60 與玻璃 0.58–0.59 重疊,見 work_log 2026-09-11)。
-    static constexpr float DEPLOY_F_STIFF_STEP       = 0.010f;  // rad,剛度探測每步(~4mm)
-    static constexpr int   DEPLOY_F_STIFF_N          = 3;       // 探測步數(最多壓 0.03rad)
-    static constexpr int   DEPLOY_F_STIFF_SETTLE_MS  = 120;     // 每步靜置
-    static constexpr float DEPLOY_F_STIFF_TAU_CAP    = 8.0f;    // Nm,tau 超過即停探測(硬物,別過壓)
-    static constexpr float DEPLOY_F_STIFF_THRESHOLD  = 150.0f;  // Nm/rad,剛度超此=硬物/橫桿→obstacle(玻璃 kp_eff 47–90)
+    // ⚰️ [2026-09-12] 細掃(DEPLOY_F_FINE_*)與剛度探測(DEPLOY_F_STIFF_*)共 9 個常數已刪除
+    //   —— 2026-09-11 per user「移除偵測、低力刷過」時程式碼已拿掉,常數留著沒人用。
+    //   **不要憑「橫桿偵測」的直覺把它們加回來**:contact θ 與剛度兩個判據都已實測失敗
+    //   (θ 橫桿 0.55–0.60 與玻璃 0.58–0.59 重疊;剛度兩者皆 9.8,工具柔度主導低負載)。
+    //   沿革見 .claude/work_log.md 2026-09-11(深夜③)與 .claude/SOFTWARE.md §4.2。
     static constexpr int   DEPLOY_F_ITER_MAX    = 4;       // 壓力收斂迭代上限
     // 09-04 實測鬆弛：DEPLOY 520 t=0 讀 17.14、1 秒後 14.99（-2.15）；
     // 490 為 12.06 -> 10.60（-1.46）。**單次讀取會把值記錯**，必須等。

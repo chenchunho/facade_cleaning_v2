@@ -40,7 +40,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | 檔案 | 是什麼 | 狀態 |
 |---|---|---|
-| 🆕 `SOFTWARE.md` | **軟體架構(現況 as-is)**：程序/埠/啟動、本體/吊機/手臂職責拆解、建置部署、架構級踩坑、針對性瘦身清單。取代 ONBOARDING 快照 | 🟢 活的（2026-09-12 建） |
+| 🆕 `SOFTWARE.md` | **軟體架構(現況 as-is)**：程序/埠/啟動、本體/吊機/手臂職責拆解、建置部署、架構級踩坑、針對性瘦身清單。取代 ONBOARDING 快照 | 🟢 活的（2026-09-12 建，**全文對原始碼驗證過 37 項**） |
+| 🆕 `reference/engineering_pitfalls.md` | **驅動層踩坑 + 工程方法 + 方法論教訓**：ZDT/SD76/gateway/X518 的「手冊跟實機不一樣」、EVT 與巢狀 await 兩個必抄 guard、共用匯流排鎖、8 條吃過虧的教訓。由 ONBOARDING §2/§3 抽出 | 🟢 活的（2026-09-12 建） |
 | 🆕 `HARDWARE.md` | **硬體架構(現況)**：機構總覽、網路拓樸、6 段 RS485/裝置對照、致動器感測器總表、**電源架構(🔴 M1 供電待查=blip 根因)**、安全機制、設計 vs 現況差異 | 🟢 活的（2026-09-12 建），§5 電源待現場回填 |
 | `work_log.md` | 現況 + **唯一待辦總表** | 🟢 活的，**只讀最上面** |
 | `changelog.md` | 變更帳本（append-only，不壓縮；**2026-09-12 起按月輪替**：主檔留當月全文 + 全部條目索引，更早月份全文原封在 `archive/changelog-YYYY-MM.md`） | 🟢 活的，只在追溯時查 |
@@ -153,7 +154,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 語意 | driver | 數量 |
 |---|---|---|
 | **`false` = 成功**（Modbus 風格，`true` = error） | SE3 / MH300 / DM2J / SD76 / DSZL / DY500 / JC100 / PQW / XKC / ZDT / ZS_DIO / CLV900 | **12** |
-| **`true` = 成功**（一般 bool 風格） | **`QX_DO24`**（唯一活著的異類）、`DIHOOL_control`（全 repo 無呼叫端＝死碼） | 2 |
+| **`true` = 成功**（一般 bool 風格） | **`QX_DO24`**（唯一活著的異類。`DIHOOL_control` 原為第二個，2026-09-12 已整支刪除） | 2 |
 
 🔴 **從 `.h` 看不出來是哪一派** —— 兩者的宣告逐字相同。呼叫端寫 `if (dev.init(...))`
 在 12 支上的意思是「失敗了」，在 QX_DO24 上的意思是「成功了」。
@@ -277,11 +278,11 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 | 項目 | 是什麼 | 狀態 |
 |---|---|---|
 | `README.md` | repo 門面。🔴 **唯一記載 fork 出身**：自 `washrobot_new_PI` commit `9f174f9`（tag `v2-fork-from-v1`）於 2026-06-25 分出 | 🟡 「跟 v1 主要差別」多數仍是 TBD |
-| `ONBOARDING.md` | **52 KB、11 章的知識庫**（2026-08-13 快照，自述已過時） | 🟡 **已由 `.claude/SOFTWARE.md` + `HARDWARE.md` 取代**（2026-09-12）。待抽出仍有效的踩坑後歸檔；仍被數處引用，勿直接刪 |
+| ~~`ONBOARDING.md`~~ | ⚰️ **2026-09-12 歸檔為 `.claude/archive/ONBOARDING-2026-08-13.md`**（52 KB、11 章的 08-13 快照，已凍結） | ✅ 踩坑/工程方法抽到 `.claude/reference/engineering_pitfalls.md`；架構由 `SOFTWARE.md`+`HARDWARE.md` 取代。🔴 **§4 v1↔v2 機械差異、§6 步態演進仍無可替代，留在歸檔原檔** |
 | ~~`facade_cleaning_v2.sln`~~ | ⚰️ **2026-09-07 連同 4 個 `.vcxproj` 一併刪除**（VS 不再使用） | ⚪ 取回見 git `79a2312` |
 | `deploy_and_test.pdf` | 部署測試說明，由 `.claude/archive/gen_deploy_pdf.py` 產生 | 🟡 產生腳本只能在 Windows 跑 |
 | `dm2j_manual_utf8.txt` | DM2J 手冊的**可讀**文字擷取（簡體中文） | 🟡 已被 `.claude/summaries/DM2J_RS_MODBUS_SUMMARY.md` 濃縮，保留作原文對照 |
-| `harness/` | **重構的等價性驗證**（2026-08-29 新增）：假匯流排 + 軌跡正規化 + 兩個版本比對。不需要機器 | 🟡 工具已完成並自我測試過；**尚未端到端跑過**（本機缺 `g++`） |
+| `harness/` | **重構的等價性驗證**（2026-08-29 新增）：假匯流排 + 軌跡正規化 + 兩個版本比對。不需要機器 | 🟡 工具已完成並自我測試過；**尚未端到端跑過**。🔴 **2026-09-12 更正:「本機缺 `g++`」是錯的** —— 本機有 **g++ 9.4.0**(x86_64),`-fsyntax-only` 與 `-E` 預處理比對當日實測可用,harness 的前提早就成立 |
 | 🆕 `scripts/build/` | **建置腳本（權威版）**：本體／吊機／`Linux_test` 三支 + `README.md`。2026-09-07 由兩台 Pi 的 `~/bringup/`（2026-09-09 已搬到 `~/projects/facade_cleaning_v2/`）逐位元取回 —— 在那之前**只存在於 Pi 上、不在版控** | 🟢 活的，**VS 移除後這是唯一的建置定義**（手臂例外，見 `cleaning_arm/compile.sh`） |
 | 🆕 `scripts/bench/` | **2026-09-09 從 Pi 取回的唯一副本**：4 支搬家前的建置／啟動腳本（皆已被 `scripts/build/` 與 runbook §A0 取代）+ `README.md`。同批取回的 9 個一次性探針放在 `Linux_test/` | ⚪ 不是現行做法，留作唯一副本與歷史對照 |
 | 🆕 `web_backend/tools/` | `check_console.js`：前端靜默失敗檢查器（重複 id／寫到不存在的元素／括號／`<div>` 開合）。改前端後跑一次 | 🟢 活的。⚠️ 已知盲區：只比對字面字串，樣板字串動態組的 id 看不到（工具自己會印） |
@@ -690,7 +691,6 @@ Socket timeouts: 100-500ms per device. TCP monitor thread: 500ms reconnect polli
 
 | Class | Description |
 |---|---|
-| `DIHOOL_control` | 馬達定位控制器，已編譯未整合 |
 | `ZS_DIO_R_RLY` | 🔴 **2026-09-10 起實際在用**（原記「class 保留供未來其他用途」已作廢）：吊機 4CH 繼電器模組 @ `192.168.1.32` slave 1，CH4 = 水箱進水球閥。<br>沿革：原用作吊機左右收/放繩 → 2026-05-07 改用 SE3_inverter → 模組留在原地 → 2026-06-05 接水閥時**誤用 PQW 驅動**至 2026-09-10 改正。<br>⚠️ 驅動 4/8/16CH 通用，**通道數由上層 `init(..., total_relay)` 決定**；`readCoils()`／`readDiscreteInputs()` 的 `startCh` 是 **1 起算**（PQW 是 0 起算）。 |
 
 ### Driver Initialization Pattern

@@ -148,7 +148,6 @@ public:
     // ✅ 不會變磚：失能狀態下 Modbus 仍可通（09-02 實測 rail_pos 讀得到），
     //    真的卡住就下 Pr0.07=1 救回來。
     std::string cmd_rail_cfg_soft_enable();  // public: acquires motion_mtx_
-    std::string cmd_tilt_mode(bool on);
 
     // [2026-08-27 per user] 單獨重取 IMU 水平基準，不跑完整 init。
     // 背景：imu_take_baseline_() 原本只有 cmd_init_impl_() 一個呼叫點，想校正
@@ -230,11 +229,6 @@ public:
     std::string cmd_zdt_power(int slave, bool on); // [2026-09-11] REAL driver EN on/off (0x00F3, torque-off) — hand-push re-home after 24V blip corrupts ZDT counter
     std::string cmd_zdt_home(const std::string& group); // [2026-09-11] AUTO re-home: drive retract into hard-stop (stall) + set_zero — alt to hand-push
     std::string cmd_zdt_release_stall();     // release stall flags on all 9 ZDT slaves (operator manual intervention; safe during motion)
-    std::string cmd_move(const std::string& motor, double cm);
-    std::string cmd_wheels(const std::string& action);   // "retract" = abs 0, "lower" = abs -6
-    std::string cmd_dm2j_group(const std::string& group, double cm);   // "feet" | "wheels", abs cm
-    std::string cmd_dm2j_zero(const std::string& group);                // "feet" | "wheels" | "arm" — set current pos as new zero
-    std::string cmd_confirm_balance(const std::string& ans);
     std::string cmd_return_home(int descent_cm);
     std::string cmd_reset();
     std::string cmd_recover();   // Error → Attached after verifying all 9 cups still sealed
@@ -252,7 +246,6 @@ public:
     // toggle whether DM2J wheels (slave 2, 4) are present. OFF = init() skips
     // wheel retract + cmd_wheels / cmd_dm2j_group("wheels") become no-op (bench
     // without wheels won't trigger Modbus timeouts → PausedOnError).
-    std::string cmd_wheels_attached(bool on);
 
     // ---- cleaning arm (damiao motors via separate motor_api service, TCP 9527) ----
     std::string cmd_arm_init();                                      // INIT — enable + tool-head calibration
@@ -286,7 +279,6 @@ public:
     // ON: future FrameAnalyzer will run pre-step check, may override step_cm.
     // Reply format aligned with cmd_arm_attached / cmd_crane_attached so GUI
     // can use the same regex.
-    std::string cmd_obstacle_detect(bool on);
 
     // [2026-06-04] First-step bootstrap probe — body 2cm out + return, captures
     // before/after frames so iter 1 of run_avoid has detector input.
@@ -317,10 +309,6 @@ public:
     //
     // State transitions: Attached → Calibrating → Idle (success, cups off) or
     //                                          → PausedOnError (abort/watchdog).
-    std::string cmd_balance_calibrate_start();
-    std::string cmd_balance_calibrate_record();
-    std::string cmd_balance_calibrate_abort();
-    std::string cmd_balance_calibrate_status();   // GUI poll: phase + readings
 
     //=========== runtime settings (wall-tune) ===========
 
