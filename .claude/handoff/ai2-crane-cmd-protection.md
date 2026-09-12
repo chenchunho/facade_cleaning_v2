@@ -350,7 +350,7 @@ Crane_control_PI/main.cpp:3143   return "OK tension_reached\n";
 Crane_control_PI/main.cpp:3579   if (is_retract && this_kg >= g_retract_tension_stop_kg.load())
 ```
 
-📌 這是 `changelog.md:15147-15149` 記載的那次改動（「新增第三個門檻 `g_retract_tension_stop_kg`」）。**搬到吊機端是正確的方向**——保護不再需要一條可能斷掉的網路鏈路。本體端的 monitor 因此變成多餘，然後失去呼叫端。
+📌 這是 `archive/changelog-2026-08.md` 條目 `[2026-08-27g]`(原引 `changelog.md:15147-15149`,行號已隨插新條漂移,2026-09-12 改為條目 id) 記載的那次改動（「新增第三個門檻 `g_retract_tension_stop_kg`」）。**搬到吊機端是正確的方向**——保護不再需要一條可能斷掉的網路鏈路。本體端的 monitor 因此變成多餘，然後失去呼叫端。
 
 🔴 **真正的問題是：多餘的是「張力監控」，不是「旁路通道」。** 兩者被綁在同一個函式裡，所以**張力監控退場時，把旁路通道一起帶走了**——而旁路通道還有另一個用途（讓本體在主通道忙碌時仍能講話），那個用途沒有替代品。
 

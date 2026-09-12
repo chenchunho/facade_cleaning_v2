@@ -40,22 +40,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | 檔案 | 是什麼 | 狀態 |
 |---|---|---|
+| 🆕 `SOFTWARE.md` | **軟體架構(現況 as-is)**：程序/埠/啟動、本體/吊機/手臂職責拆解、建置部署、架構級踩坑、針對性瘦身清單。取代 ONBOARDING 快照 | 🟢 活的（2026-09-12 建） |
+| 🆕 `HARDWARE.md` | **硬體架構(現況)**：機構總覽、網路拓樸、6 段 RS485/裝置對照、致動器感測器總表、**電源架構(🔴 M1 供電待查=blip 根因)**、安全機制、設計 vs 現況差異 | 🟢 活的（2026-09-12 建），§5 電源待現場回填 |
 | `work_log.md` | 現況 + **唯一待辦總表** | 🟢 活的，**只讀最上面** |
-| `changelog.md` | 變更帳本（append-only，不壓縮） | 🟢 活的，只在追溯時查 |
+| `changelog.md` | 變更帳本（append-only，不壓縮；**2026-09-12 起按月輪替**：主檔留當月全文 + 全部條目索引，更早月份全文原封在 `archive/changelog-YYYY-MM.md`） | 🟢 活的，只在追溯時查 |
 | `runbook.md` | 操作手冊：啟動順序、按鈕、raw command、緊急處置 | 🟢 活的 |
 | `per_program_cautions.md` | 各程式「最容易踩、後果最嚴重」的交接摘要（2026-08-28 由 main 帶入） | 🟢 活的，但 §0.2 的 bus 表已隨同批程式改動過期，見檔內 2026-08-28 更正 |
 | `summaries/` | **15 份**硬體手冊摘要（原始 PDF 在 `doc/`，不進版控） | 🟢 活的，見上一節 |
 | 🆕 `handoff/` | **AI-2 的交接文件 5 份**（吊機 watchdog 診斷／`crane_cmd_` 保護分析＋水閥修法／Phase 2.3 可行性／PCB 架構 v0.6 HTML／🆕 2026-09-10 `ai2-watchdog-restore-patch.md`＝watchdog 補回的預寫 patch，**刻意未套用**，等 per user 拍板 (b)/(c)）。🔴 **2026-09-09 由 `tmp/` 搬來** —— `tmp/` 同時被 `.gitignore` 與 `mirror-backup.sh` EXCLUDES 排除 ⇒ **零備份**，三份 `.md` 原本只有一份 | 🟢 活的，待辦已併入 `work_log.md` |
-| 🆕 `comms_interface_for_pcb.md` | **通訊介面規格（PCB 設計用）**：6 段 RS485 的裝置/slave/串口參數（**2026-09-09 六台網關全部實查**）、非 RS485 介面（X518 原生 TCP／IMU TTL／手臂 USB-CAN）、網關三個結構性問題、分段不可合併的實測理由、7 項待確認 | 🟢 活的。2026-09-09 建立，per user 要做 PCB |
+| `reference/comms_interface_for_pcb.md` | **通訊介面規格（PCB 設計用）**：6 段 RS485 的裝置/slave/串口參數（2026-09-09 六台網關全部實查）、非 RS485 介面、網關三個結構性問題、分段不可合併的實測理由。⚠️ §2 水閥格（`.34` PQW）已過時，現況 `.32` ZS-DIO 見 `HARDWARE.md` | 🟢 活的（2026-09-12 搬入 `reference/`） |
 | `motion_flow.md` | **v1 規格**（已凍結） | 🟡 §2 硬體表已過期，保留作狀態機與指令協定的原始推導。📌 **2026-08-28 破例加過一次註記**（非規格變更）：§8 失效模式表說「張力過高→立即 crane stop」，同章「緊急收繩」段說「不會停」，**兩段互相矛盾**；逐行驗過程式碼後在表上加了除外註。凍結的意思是不再演進，不是「明知有誤導也不標」 |
-| `v2_app_redesign_plan.md` | **v2 規格 = 現行程式碼的權威** | 🟢 活的 |
-| `洗窗機器人設計彙整.md` | **v3 新架構設計**（沿用舊硬體改寫） | 🟢 活的，27 項待辦在 `work_log.md` |
-| `refactor_plan.md` | **程式架構重構計畫**：目標 6 層 + 安全橫切、等價性怎麼證明（黃金軌跡）、階段與完成判準 | 🟡 **進行中**（2026-08-29 建立）。🔴 成功判準是「與 `main-final` 功能效果相同」，而基準是 **main-final ＋ `runbook.md` §A2 塊三那 9 條預期差異** |
-| `mh300_migration_plan.md` | SE3 → Delta MH300 變頻器遷移 | 🟡 **進行中且未完成**。🔴 Phase 0 的 keypad 參數表是**唯一副本** |
-| `crane_balance_hold_plan.md` | 吊機平衡保持 | 🟡 **暫緩，但 2026-08-27 前提已反轉**（同步步伐放繩期間四顆吸盤全放、無錨定）→ 需重新評估 |
-| `step_speedup_phase1_plan.md` | 單 step 25-30s → 12-15s 加速 | 🟡 標「進行中」，含瓶頸量測表 |
-| `mailbox.md` | ⚰️ **墓碑檔**：多人協作信箱，2026-08-27 退休 | ⚪ 16 條未結案項已全數併入 `work_log.md` 待辦總表 |
-| `gen_deploy_pdf.py` | 產生 `deploy_and_test.pdf` 的腳本 | ⚪ **只能在 Windows 跑**（寫死 `C:\Windows\Fonts\msjh.ttc`），需 `fpdf` |
+| `reference/v2_app_redesign_plan.md` | **v2 規格 = 現行程式碼的權威**（07-07 決定紀錄） | 🟢 活的（2026-09-12 搬入 `reference/`，它是決定紀錄不是 plan） |
+| `reference/洗窗機器人設計彙整.md` | **v3 新架構設計**（沿用舊硬體改寫）；§3 硬體規格為設計期，與建成機差異見 `HARDWARE.md` §7 | 🟢 活的（2026-09-12 搬入 `reference/`），27 項待辦在 `work_log.md` |
+| 🆕 `reference/v1_v2_feature_map.md` | v1/v2 功能對照（AI-2 建）。抬頭：jim 09-11 拍板「不看 v1、v2 自己定義」，§3 待移植表**降級為參考不是待辦** | 🟢 參考（2026-09-12 納入） |
+| 🆕 `plans/cycle_test_with_fan_plan.md` | cycle_test 加風扇(螺旋槳)測試計畫（09-09） | 🟡 **尚未執行，等拍板** |
+| 🆕 `plans/wired_switch_and_loop_test_plan.md` | 切回有線 + 迴路測試計畫（09-09）；與「測完改回隧道 192.168.1」待辦直接相關 | 🟡 **尚未執行，等拍板** |
+| 🆕 `archive/leveling_two_stage_plan.md` | 兩段式水平修正（先計米器後 IMU） | ⚰️ 2026-09-12 歸檔：自述「IMU 連不上就放棄」已是既有行為，不需新增 |
+| 🆕 `archive/changelog-2026-04.md` / `archive/changelog-2026-08.md` | `changelog.md` 按月輪替搬出的**全文**（8 條 / 40 條，原封） | ⚪ 追溯用；索引在 `changelog.md` 頂端 |
+| `plans/refactor_plan.md` | **程式架構重構計畫**：目標 6 層 + 安全橫切、黃金軌跡等價證明、階段與完成判準 | ⏸ **暫緩**（2026-09-12 jim 拍板：本體/吊機暫不做完整拆解，改針對性瘦身；已部分落地——dispatcher.h/rope_axis.h/profile.h/endpoints.h 為樁；重啟條件與 as-is/to-be 對應見檔頭）。基準仍是 `main-final` + runbook §A2 那 9 條預期差異 |
+| `archive/mh300_migration_plan.md` | SE3 → Delta MH300 變頻器遷移 | ⚰️ **2026-09-12 歸檔**：Phase 1/2/4 已完成（09-08 複驗）、Phase 3 邏輯差異（process-local base-block 旗標）未完成且**內容仍有效**。🔴 Phase 0 的 keypad 參數表是**唯一副本**。📌 現況 MH300 驅動**中央捲盤**（HARDWARE.md §1），左右鋼索仍 SE3 |
+| `archive/crane_balance_hold_plan.md` | 吊機平衡保持 | ⚰️ 2026-09-12 歸檔：前提已反轉（IMU 驅動平衡自 09-07 成為編譯預設） |
+| `archive/step_speedup_phase1_plan.md` | 單 step 25-30s → 12-15s 加速 | ⚰️ 2026-09-12 歸檔（6 月計畫，已過時；瓶頸量測表仍可參考） |
+| `archive/mailbox.md` | ⚰️ **墓碑檔**：多人協作信箱，2026-08-27 退休 | ⚪ 16 條未結案項已全數併入 `work_log.md` 待辦總表（2026-09-12 搬入 `archive/`） |
+| `archive/gen_deploy_pdf.py` | 產生 `deploy_and_test.pdf` 的腳本（**v1 時期**） | ⚪ 2026-09-12 歸檔；**只能在 Windows 跑**（寫死 `C:\Windows\Fonts\msjh.ttc`），需 `fpdf` |
 | `archive/camera_obstacle_plan.md` | ⚰️ 已作廢：相機路線整條移除 | ⚪ Phase 3~6 一項未做 |
 | `archive/scripted_run_plan.md` | ⚰️ 已完成（實作超出原規劃） | ⚠️ **計畫裡兩處決策已被推翻，照著做會做錯**（見墓碑抬頭） |
 | `archive/se3_mode6_migration_plan.md` | ⚰️ 已作廢（從未開工，被 MH300 取代） | 🔴 **但內容仍然有效**——bench 現在跑的還是 SE3。§1.1 是唯一一張「SE3 故障 ↔ workaround」對照表；§7 記著四個已被否決的方向 |
@@ -118,7 +125,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 #### `work_log.md` 的壓縮規則
 
-`work_log` 會持續長大，需定期壓縮；**`changelog` 不壓**（append-only，價值就在完整，平常也沒人需要讀它）。
+`work_log` 會持續長大，需定期壓縮；**`changelog` 不壓**（append-only，價值就在完整，平常也沒人需要讀它），
+但 **2026-09-12 起按月輪替**（主檔留當月全文 + 索引，舊月全文原封搬 `archive/`，內容一字不少）。
+🔴 **2026-09-12 per user 改規則——往後每條瘦身**：「改了什麼」3–5 行 + commit hash（diff 在 git，不重抄）；
+保留「原因／決策（尤其被否決的）／驗證結論」。**原則 ≤40 行，驗證表可超**（別寫死成硬上限）。
+理由：2026-08 的 40 條佔 1.6MB（平均 40KB/條），把 diff 抄進散文沒人讀得動。
 
 判準：**「裝了、沒問題，就不用再保留紀錄。」** 例行維護與流水帳做完即丟，只留四種：
 **待辦／決策（尤其被否決的）／伏筆／踩坑**。🔴 **待辦項目絕不可壓掉。**
@@ -266,7 +277,7 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 | 項目 | 是什麼 | 狀態 |
 |---|---|---|
 | `README.md` | repo 門面。🔴 **唯一記載 fork 出身**：自 `washrobot_new_PI` commit `9f174f9`（tag `v2-fork-from-v1`）於 2026-06-25 分出 | 🟡 「跟 v1 主要差別」多數仍是 TBD |
-| `ONBOARDING.md` | **52 KB、11 章的知識庫**：硬體驅動踩坑、工程心法、v2 步態引擎詳解、crane 通訊 hardening 三疊 bug、已退役子系統 | 🟢 活的。⚠️ 第 2 章「尚未解決」已改為指標，**待辦只在 `work_log.md`** |
+| `ONBOARDING.md` | **52 KB、11 章的知識庫**（2026-08-13 快照，自述已過時） | 🟡 **已由 `.claude/SOFTWARE.md` + `HARDWARE.md` 取代**（2026-09-12）。待抽出仍有效的踩坑後歸檔；仍被數處引用，勿直接刪 |
 | ~~`facade_cleaning_v2.sln`~~ | ⚰️ **2026-09-07 連同 4 個 `.vcxproj` 一併刪除**（VS 不再使用） | ⚪ 取回見 git `79a2312` |
 | `deploy_and_test.pdf` | 部署測試說明，由 `.claude/archive/gen_deploy_pdf.py` 產生 | 🟡 產生腳本只能在 Windows 跑 |
 | `dm2j_manual_utf8.txt` | DM2J 手冊的**可讀**文字擷取（簡體中文） | 🟡 已被 `.claude/summaries/DM2J_RS_MODBUS_SUMMARY.md` 濃縮，保留作原文對照 |

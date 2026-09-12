@@ -1,6 +1,7 @@
-# ARCHITECTURE.md — facade_cleaning_v2 軟體架構
+# SOFTWARE.md — facade_cleaning_v2 軟體架構
 
-> 📌 **這是持續維護的權威架構文件**(取代 2026-08-13 快照的 `ONBOARDING.md`)。
+> 📌 **持續維護的權威軟體架構文件**,與 `HARDWARE.md`(硬體架構:機構/匯流排/裝置/電源)成對。
+> 取代 2026-08-13 快照的 `ONBOARDING.md`。
 > 程式碼與 git log 若與此不符,以程式碼為準,並回頭更新本檔。
 > 首版:2026-09-12,基線 commit `bbbc425`。日常進度在 `.claude/work_log.md`。
 
@@ -27,9 +28,7 @@
    └──────────┬────────────┘                │               └──────────────────────┘
               │ Modbus-TCP / serial(user_lib/ 驅動,經 transport/)
    ┌──────────▼────────────────────────────▼─────────────────────────────────────┐
-   │ 本體側 USR 閘道:.20(ZDT 推桿/PQW 繼電/DM2J 滑台) .21(PWM) .22(JC100 壓力/XKC/DM2J:14)│
-   │ 吊機側 USR 閘道:.30(SE3 左變頻) .31(SE3 右) .34(SD76 計米) .32(ZS-DIO 水閥/X518 張力) │
-   │ 序列:WT901 IMU(本體 /dev/ttyUSB0)、Damiao 馬達(手臂 /dev/ttyACM0)                 │
+   │ 硬體層(USR 閘道 6 + 水閥 .32、X518、IMU、Damiao、電源)→ 見 **HARDWARE.md** §2–§5      │
    └───────────────────────────────────────────────────────────────────────────────┘
 
    編排/上機測試:Linux_test/cycle_test.py(full / arm / mission 模式,走 TCP 打三程序)
@@ -113,10 +112,10 @@ tmux 未安裝,`wr.sh` 不可用,用 `scripts/bench/launch.sh` 或 start_*.sh。
 
 | 連線 | 裝置 |
 |---|---|
-| cli_A (.30) | SE3 左變頻 slave1(+ 中繩 CLV900 slave3 **未裝**) |
+| cli_A (.30) | SE3 左變頻 slave1;**中繩絞盤 MH300**(已裝,捲水管+隧道電纜;程式碼仍為 CLV900 `inverter` slave3,**驅動/命名待對齊**,實際匯流排/slave 待確認) |
 | cli_B (.31) | SE3 右變頻 slave2 |
-| cli_M (.34) | SD76 計米 左1 / 右2(+ 中4 **未裝**) |
-| cli_C (.32) | X518 DSZL 張力 左CH2 / 右CH1(直連 :502) |
+| cli_M (.34) | SD76 計米 左1 / 右2 / **中4**(實體已裝,per user;但 runtime `dev_meter_middle=0`/`length_middle=ERR` **讀不到**,待對) |
+| cli_C (.33) | X518 DSZL 張力 左CH2 / 右CH1(直連 `:502`,原生 Modbus-TCP;程式碼註解舊寫 `.32`,runtime 為 `.33`) |
 | cli_W (.32) | ZS-DIO 進水閥(獨佔) |
 | cli_D | **已退役**(2026-09-01) |
 
@@ -147,7 +146,7 @@ tmux 未安裝,`wr.sh` 不可用,用 `scripts/bench/launch.sh` 或 start_*.sh。
 ### 3.4 已知問題
 
 - 🔴 執行期參數(home_ground / motion_hz / balance_source…)**不持久**。
-- 未裝硬體(中繩 CLV900、meter_middle)與退役 cli_D 的碼仍在;`set_*` 調參指令 ~30 條。
+- **中繩絞盤實裝 MH300,程式碼仍用 CLV900 驅動/命名(`inverter`)** —— 需對齊;**中繩計米器實體已裝但 runtime 讀不到**(`dev_meter_middle=0`,查接線/slave/bus);退役 cli_D 的碼仍在;`set_*` 調參指令 ~30 條。
 
 ---
 
@@ -223,7 +222,7 @@ pivot)。已移除細掃/th_min/剛度守衛。8 Nm 雙工具 + 滑台 0–100�
 
 | 坑 | 說明 |
 |---|---|
-| **24V blip** | 繼電器/幫浦/ZDT/手臂馬達同一 24V bus;高力堵轉過流即 blip → 關繼電器、亂 ZDT 計數器。已用降力(8 Nm)避開;根因(PSU 邊際?)未查 |
+| **24V blip** | 全系統**唯一一顆 150 W 24V**(LRS-150-24)供繼電器/幫浦/ZDT/抱閘/滾筒**及手臂 M1/M2**(per user 2026-09-12 確認);M1 堵轉峰值把 24V 拉垮 → 關繼電器、亂 ZDT 計數器。**根因已確認**(見 `HARDWARE.md` §5);軟體降力 8 Nm 是緩解,治本要分離供電/加大 PSU |
 | `pgrep -f` 自我匹配 | 監看指令含程式名會匹配到自己 shell,誤判「還在跑」。用 `ps -eo args | grep "[x]name"` 或精確 pid |
 | crane ssh 輸出截斷 | `user@.25` 的複合指令偶發回空,要拆開驗證 |
 | `ARM_TARGET_NM` override | 降力只改手臂 default 無效,cycle_test 顯式傳值才算 |
@@ -244,7 +243,7 @@ bug 風險高);改做**低風險針對性瘦身**,每刀有 baseline `bbbc425` �
 | 🔴 | 吊機 | `crane_settings.json` 持久化執行期參數 | 解重啟忘設坑 |
 | 🔴 | 共通 | 集中網路設定(隧道/WiFi 一鍵切,不改腳本) | 解手改 IP |
 | ✅ | 手臂 | 刪 `PalletizerController.h` + 死常數;退役舊 DEPLOY;力控參數搬進 `damiao.cfg` | 免重編調力 |
-| ✅ | 吊機 | gate/移除未裝中繩 + 退役 cli_D;`set_*`×30 收斂成 set/get_param | 噪音減 |
+| ✅ | 吊機 | 中繩驅動對齊 CLV900→MH300(實裝);查中繩計米 runtime ERR(實體已裝);退役 cli_D;`set_*`×30 收斂成 set/get_param | 噪音減、對齊實機 |
 | ✅ | 文件 | ONBOARDING 抽踩坑後歸檔、更新引用;frame_capture + FrameAnalyzer 一起定去留 | — |
 | 🟡 | 本體 | header 3091 行瘦身;crane 三連線合併(僅在反覆出事時) | — |
 
@@ -260,7 +259,7 @@ bug 風險高);改做**低風險針對性瘦身**,每刀有 baseline `bbbc425` �
 
 ```
 facade_cleaning_v2/
-├── ARCHITECTURE.md        ← 本檔(權威)
+├── SOFTWARE.md        ← 本檔(權威)
 ├── README.md / ONBOARDING.md(過時快照,待歸檔)/ CLAUDE.md
 ├── facade_cleaning_v2/main.cpp    本體進入點
 ├── app/WASH_ROBOT.{h,cpp}, wash_robot_commands.cpp   本體 class
@@ -273,7 +272,7 @@ facade_cleaning_v2/
 ├── transport/ common/ config/ mechanism/
 ├── harness/ frame_capture/ doc/ scripts/
 └── .claude/                        Claude 工作區 / 專案權威文件(2026-09-12 整理)
-    ├── ARCHITECTURE.md  motion_flow.md  runbook.md  per_program_cautions.md  (權威)
+    ├── SOFTWARE.md  motion_flow.md  runbook.md  per_program_cautions.md  (權威)
     ├── work_log.md(進度+待辦總表)  changelog.md(變更日誌)
     ├── reference/   設計/決策/參考(洗窗機器人設計彙整、comms_interface_for_pcb、
     │                v1_v2_feature_map、v2_app_redesign_plan=07-07 決定紀錄)

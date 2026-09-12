@@ -5,11 +5,11 @@
 > 📌 **2026-09-12 暫緩決定**：本體/吊機**暫不做完整分層拆解**——單人開發、機器仍在上機
 > bring-up（橫桿等硬體問題）、大重構在真實時序/匯流排下引入 bug 的風險高於收益。
 > 改做**低風險針對性瘦身**（砍 v1 死碼、crane_settings 持久化、集中網路設定、清死檔/死常數），
-> 清單見 `.claude/ARCHITECTURE.md` §8。**本計畫不是作廢**：它是將來真要拆時的藍圖，
+> 清單見 `.claude/SOFTWARE.md` §8。**本計畫不是作廢**：它是將來真要拆時的藍圖，
 > 且**已部分落地**（階段 2 指令層 `command/dispatcher.h`、階段 3 機構層 `mechanism/rope_axis.h`、
 > 階段 4 `common/profile.h`、端點 `common/endpoints.h` 都已抽出樁）。
 > **重啟條件**（任一）：機器能穩定清潔後 / 多人開發 / 某模組成為反覆 bug 來源。
-> 現況 as-is 架構見 `.claude/ARCHITECTURE.md`；本檔是 to-be。
+> 現況 as-is 架構見 `.claude/SOFTWARE.md`；本檔是 to-be。
 > **規範權威：** 本檔。分層的最終樣貌一旦定案，會併進 `CLAUDE.md` `## Architecture`；
 > 本檔只在「進行中」存在，完成或作廢就移進 `.claude/archive/`。
 > **待辦不寫在這裡** —— 唯一待辦總表在 `work_log.md` 最上方。
