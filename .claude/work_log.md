@@ -1,5 +1,41 @@
 # Work Log
 
+## 🆕 2026-09-13 文書日②:電控箱改線路圖、供電來源填齊、§0 總綱、**GUI 離線推導工具**
+
+### 已完成
+- **電控箱接線圖改為單線圖**(per user「要的是線路圖」):`reference/wiring/` 兩張 SVG + 產生器
+  `gen_wiring_svg.py`(座標程式算、零誤接、改接線改產生器)。commit `f7dbf5f`。
+- **供電來源 per user 全數填齊**:本體 24V 上還有 QX-DO24/JC-100×4/XKC/**Fathom-X 載波**(⇒ blip 時機身端
+  隧道跟著斷);WT901 走 Pi5 USB;SD76×3 直接吃 220V;吊機**另有獨立 MW 150W 24V**(X518/ZS-DIO/載波);
+  吊機 Pi 獨立 5V 變壓器;交換器 吊機 8-port PoE / 本體 5-port hub;**機身沒有相機**;MH300 段位先留問號。
+- 🎯 **§0 系統邊界總綱(per user)**:兩箱只共用 220V 進線與隧道通訊,其餘各自負責,**與軟體邊界對齊**。
+  判斷波及:箱內不跨箱 / 220V 側同時打兩箱 / 隧道側只斷通訊。SOFTWARE.md §1 互指。
+- 缺資料 10→13 項(新增 #12 實體急停有無、#13 24V 幹線拓樸與線徑);已答 4 項。
+- 🆕 **`harness/gui_offline.sh` + `fake_robot.py`**(per user「假的資料伺服器讓 GUI 啟動」):三個假端點
+  (5001/5002/9527)回**真格式**(照 C++ `cmd_status`/`relay_status`/吊機 status/手臂 `[M1]`)、狀態會動、
+  會推 EVT;**每條收到的指令寫 `gui_cmd_log.txt` 標 KNOWN/UNKNOWN**,`report` 列出 GUI 需要但沒模擬的 ⇒
+  **從 GUI 推導程式面功能**。本機 node 20 + `npm install` 已裝;端到端(HTTP 200、WS 三目標、EVT)驗證通過。
+  🔴 第一次跑就抓到:**web_backend 每 BRIDGE_PING_MS 對手臂送 `ping`,手臂只有 7 條指令,回
+  `ERR unknown command: ping`**(`main_api.cpp:3890`)—— 保活達到目的但手臂 log 被洗。
+
+### 📌 決策(2026-09-13 per user,詳 `reference/field_procedure_v2.md` §6)
+1. **週期編排搬回 C++**:cycle_test 的 full 迴圈 → 本體 `mission` 指令族(含前置檢查與 roll 監看執行緒);
+   cycle_test 降級為對照/耐久工具。**理由:姿態保護跟著腳本走 = 正式作業反而沒有保護。**
+2. **安全模式狀態機做最小版**:跨兩箱 `SAFE`(吊機停鎖 + 本體維持吸盤/停手臂/關水/槳保壓),
+   觸發接現有三源(張力 / watchdog / roll),通報 EVT + GUI banner。環境感測不在本期。
+3. **開機自檢 = GUI 軟閘門(B)**:§3 七步 + 現有前置檢查合成一條有順序的「作業流程」checklist,
+   全綠才開放升頂 / Mission;**吊機 raw hold 不鎖**(救援)。否決 C++ 硬閘門(會擋救援)。
+   🔴 **這三條是 GUI 改版的前提**,GUI 設計以此為準。
+
+### 待完成
+- ✅ ~~計畫書~~ **已寫** `plans/orchestration_to_cpp_plan.md`(mission 指令族 + EVT / SAFE 三源接線與解除 / 自檢欄位 /
+  GUI 作業流程頁 / fake_robot 先行 / **指令序列等價驗證** / 6 階段)。✅ **09-13 per user 核准**;SAFE 進入時風扇**直接關**(拍板);前置(行緩衝、watchdog)確認為階段 3 前必修。
+  前置待辦被拉高:`crane_cmd_` 無行緩衝(EVT 半行)、本體 watchdog 死碼 —— 都是階段 3 前必修。
+- 🟡 **使用者點一輪 v2 GUI 後跑 `./harness/gui_offline.sh report`** → 得到「GUI 需要的功能清單」,
+  再對照 SOFTWARE.md §2/§3 指令面決定哪些是缺口、哪些是 GUI 該拿掉。
+- 🟡 手臂 `ping`:決定手臂加 `PING`,或 web_backend 對 arm 改用 `STATUS` 保活(二選一,別兩邊都改)。
+- (承前)24V 治本三選項 / LRS-150-24 OLP 手冊核對 / 急停切 57.6V / 開箱拍照補 §3.2C。
+
 ## 🆕 2026-09-12 文書日:軟/硬架構文件成對、.claude 整理、巨檔壓縮、**24V blip 根因確認**、ONBOARDING 歸檔、瘦身第一刀
 
 ### 已完成

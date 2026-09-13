@@ -23,3 +23,7 @@ tmp/
 # （例如 -1125135748），所以不同 bench 的 VS 會互相覆蓋、Connection Manager 變空白。
 # 檔案留在本機、不進版控。哪個專案建置到哪台 Pi 記在 .claude/runbook.md §建置 與 CLAUDE.md。
 *.vcxproj.user
+
+# web_backend deps (npm install) / gui_offline runtime log
+web_backend/node_modules/
+harness/gui_cmd_log.txt

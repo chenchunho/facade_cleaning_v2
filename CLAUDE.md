@@ -43,6 +43,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 🆕 `SOFTWARE.md` | **軟體架構(現況 as-is)**：程序/埠/啟動、本體/吊機/手臂職責拆解、建置部署、架構級踩坑、針對性瘦身清單。取代 ONBOARDING 快照 | 🟢 活的（2026-09-12 建，**全文對原始碼驗證過 37 項**） |
 | 🆕 `reference/engineering_pitfalls.md` | **驅動層踩坑 + 工程方法 + 方法論教訓**：ZDT/SD76/gateway/X518 的「手冊跟實機不一樣」、EVT 與巢狀 await 兩個必抄 guard、共用匯流排鎖、8 條吃過虧的教訓。由 ONBOARDING §2/§3 抽出 | 🟢 活的（2026-09-12 建） |
 | 🆕 `HARDWARE.md` | **硬體架構(現況)**：§0 **系統邊界總綱（兩箱只共用 220V 與隧道）**、機構總覽、網路拓樸、6 段 RS485/裝置對照、**§3.2 電控箱單線接線圖**、致動器感測器總表、**§5 電源架構（blip 根因＋§5.1 無過流保護）**、安全機制、設計 vs 現況差異 | 🟢 活的（2026-09-12 建；09-13 供電來源 per user 全數填齊） |
+| 🆕 `reference/field_procedure_v2.md` | **現場操作流程(v2 as-run 權威)**:設計六步驟骨架 × 實跑內容,每步標誰做(人/GUI/腳本/程式)與「設計 vs 實跑」落差類型;§4.3 硬性守則、§5 安全監看現況(散在四處、Dashboard 只顯示)、§6 六個未拍板、§7 已成規範的偏離(別照 PDF 修回去) | 🟢 活的(2026-09-13 建);`motion_flow.md` §4 為 v1 已凍結 |
 | 🆕 `reference/wiring/` | **電控箱單線接線圖**：`body_cabinet.svg` / `crane_cabinet.svg` + **產生器 `gen_wiring_svg.py`**（座標用程式算，改接線改產生器重跑，不手改 SVG）+ README。檢視版 https://claude.ai/code/artifact/ff3cf70a-add5-4fec-9118-74066159a8d1 | 🟢 活的（2026-09-13 建） |
 | `work_log.md` | 現況 + **唯一待辦總表** | 🟢 活的，**只讀最上面** |
 | `changelog.md` | 變更帳本（append-only，不壓縮；**2026-09-12 起按月輪替**：主檔留當月全文 + 全部條目索引，更早月份全文原封在 `archive/changelog-YYYY-MM.md`） | 🟢 活的，只在追溯時查 |
@@ -53,8 +54,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `reference/comms_interface_for_pcb.md` | **通訊介面規格（PCB 設計用）**：6 段 RS485 的裝置/slave/串口參數（2026-09-09 六台網關全部實查）、非 RS485 介面、網關三個結構性問題、分段不可合併的實測理由。⚠️ §2 水閥格（`.34` PQW）已過時，現況 `.32` ZS-DIO 見 `HARDWARE.md` | 🟢 活的（2026-09-12 搬入 `reference/`） |
 | `motion_flow.md` | **v1 規格**（已凍結） | 🟡 §2 硬體表已過期，保留作狀態機與指令協定的原始推導。📌 **2026-08-28 破例加過一次註記**（非規格變更）：§8 失效模式表說「張力過高→立即 crane stop」，同章「緊急收繩」段說「不會停」，**兩段互相矛盾**；逐行驗過程式碼後在表上加了除外註。凍結的意思是不再演進，不是「明知有誤導也不標」 |
 | `reference/v2_app_redesign_plan.md` | **v2 規格 = 現行程式碼的權威**（07-07 決定紀錄） | 🟢 活的（2026-09-12 搬入 `reference/`，它是決定紀錄不是 plan） |
-| `reference/洗窗機器人設計彙整.md` | **v3 新架構設計**（沿用舊硬體改寫）；§3 硬體規格為設計期，與建成機差異見 `HARDWARE.md` §7 | 🟢 活的（2026-09-12 搬入 `reference/`），27 項待辦在 `work_log.md` |
+| `reference/洗窗機器人設計彙整.md` | **v3 新架構設計**（沿用舊硬體改寫）；來源 `doc/設計/washing_robot_full.pdf`(15 頁,09-13 搬入);§3 硬體規格為設計期，與建成機差異見 `HARDWARE.md` §7;§2 流程與實跑差異見 `field_procedure_v2.md` | 🟢 活的（2026-09-12 搬入 `reference/`），27 項待辦在 `work_log.md` |
 | 🆕 `reference/v1_v2_feature_map.md` | v1/v2 功能對照（AI-2 建）。抬頭：jim 09-11 拍板「不看 v1、v2 自己定義」，§3 待移植表**降級為參考不是待辦** | 🟢 參考（2026-09-12 納入） |
+| 🆕 `plans/orchestration_to_cpp_plan.md` | **編排搬回 C++ + SAFE 狀態機 + 自檢欄位**(2026-09-13 三條拍板的計畫書):`mission` 指令族與 EVT 格式、SAFE 進入/解除/三源接線、自檢欄位、GUI 作業流程頁規格、fake_robot 先行、指令序列等價驗證、6 階段 | 🟡 **等核准再動碼**;前置:`crane_cmd_` 行緩衝、本體 watchdog |
 | 🆕 `plans/cycle_test_with_fan_plan.md` | cycle_test 加風扇(螺旋槳)測試計畫（09-09） | 🟡 **尚未執行，等拍板** |
 | 🆕 `plans/wired_switch_and_loop_test_plan.md` | 切回有線 + 迴路測試計畫（09-09）；與「測完改回隧道 192.168.1」待辦直接相關 | 🟡 **尚未執行，等拍板** |
 | 🆕 `archive/leveling_two_stage_plan.md` | 兩段式水平修正（先計米器後 IMU） | ⚰️ 2026-09-12 歸檔：自述「IMU 連不上就放棄」已是既有行為，不需新增 |
@@ -283,7 +285,7 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 | ~~`facade_cleaning_v2.sln`~~ | ⚰️ **2026-09-07 連同 4 個 `.vcxproj` 一併刪除**（VS 不再使用） | ⚪ 取回見 git `79a2312` |
 | `deploy_and_test.pdf` | 部署測試說明，由 `.claude/archive/gen_deploy_pdf.py` 產生 | 🟡 產生腳本只能在 Windows 跑 |
 | `dm2j_manual_utf8.txt` | DM2J 手冊的**可讀**文字擷取（簡體中文） | 🟡 已被 `.claude/summaries/DM2J_RS_MODBUS_SUMMARY.md` 濃縮，保留作原文對照 |
-| `harness/` | **重構的等價性驗證**（2026-08-29 新增）：假匯流排 + 軌跡正規化 + 兩個版本比對。不需要機器 | 🟡 工具已完成並自我測試過；**尚未端到端跑過**。🔴 **2026-09-12 更正:「本機缺 `g++`」是錯的** —— 本機有 **g++ 9.4.0**(x86_64),`-fsyntax-only` 與 `-E` 預處理比對當日實測可用,harness 的前提早就成立 |
+| `harness/` | **重構的等價性驗證**（2026-08-29 新增）：假匯流排 + 軌跡正規化 + 兩個版本比對。不需要機器 | 🟡 工具已完成並自我測試過；**尚未端到端跑過**。🔴 **2026-09-12 更正:「本機缺 `g++`」是錯的** —— 本機有 **g++ 9.4.0**(x86_64),`-fsyntax-only` 與 `-E` 預處理比對當日實測可用,harness 的前提早就成立。🆕 **09-13 加 `gui_offline.sh` + `fake_robot.py`**:三個假端點回真格式、狀態會動,**把 GUI 送的每條指令記成 KNOWN/UNKNOWN 清單**(從 GUI 推導程式面功能);見 `harness/README_gui_offline.md` |
 | 🆕 `scripts/build/` | **建置腳本（權威版）**：本體／吊機／`Linux_test` 三支 + `README.md`。2026-09-07 由兩台 Pi 的 `~/bringup/`（2026-09-09 已搬到 `~/projects/facade_cleaning_v2/`）逐位元取回 —— 在那之前**只存在於 Pi 上、不在版控** | 🟢 活的，**VS 移除後這是唯一的建置定義**（手臂例外，見 `cleaning_arm/compile.sh`） |
 | 🆕 `scripts/bench/` | **2026-09-09 從 Pi 取回的唯一副本**：4 支搬家前的建置／啟動腳本（皆已被 `scripts/build/` 與 runbook §A0 取代）+ `README.md`。同批取回的 9 個一次性探針放在 `Linux_test/` | ⚪ 不是現行做法，留作唯一副本與歷史對照 |
 | 🆕 `web_backend/tools/` | `check_console.js`：前端靜默失敗檢查器（重複 id／寫到不存在的元素／括號／`<div>` 開合）。改前端後跑一次 | 🟢 活的。⚠️ 已知盲區：只比對字面字串，樣板字串動態組的 id 看不到（工具自己會印） |

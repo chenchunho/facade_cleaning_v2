@@ -1,5 +1,8 @@
 # harness — 重構的等價性驗證（不需要機器）
 
+> 🆕 **2026-09-13 另有 `gui_offline.sh` + `fake_robot.py`**:沒有機器也能開 v2 GUI,並記錄 GUI 送了哪些指令
+> → 從 GUI 推導程式面需要的功能。說明見 `README_gui_offline.md`。
+
 > 建於 2026-08-29，服務 `.claude/plans/refactor_plan.md` 階段 0。
 > **目的只有一個**：證明重構之後，程式對外的行為沒有變。
 
