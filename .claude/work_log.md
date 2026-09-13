@@ -1,6 +1,29 @@
 # Work Log
 
-## 🆕 2026-09-13 文書日②:電控箱改線路圖、供電來源填齊、§0 總綱、**GUI 離線推導工具**
+## 🆕 2026-09-13 文書日②:電控箱線路圖、供電填齊、§0 總綱、假機器、現場流程 v2、**三條拍板 + 計畫書**、AI-2 做 v3
+
+**commit**:`f7dbf5f`(硬體)、`feebc03`(假機器 + 流程 + 計畫 + 交接)。工作樹乾淨,AI-2 在此基線上做 v3。
+
+### 下半天(流程 → 拍板 → 計畫 → 交接)
+- **流程對照三方**:`motion_flow.md` §4(v1 凍結)/ 設計 PDF(`doc/設計/washing_robot_full.pdf`,15 頁)/ 09-11 實跑
+  → `reference/field_procedure_v2.md`。關鍵發現:**v2 的現場流程沒有任何規格在描述**,只存在於 cycle_test + runbook + 日誌;
+  **真步態在 Python**(C++ `step_*`/`run` 被繞過),**姿態監看也在 Python** ⇒ 不跑測試腳本正式作業反而沒保護。
+- **安全監看 ≠ v2 Dashboard**:Dashboard 是顯示 + 人工閘門(前置檢查守起跑、危險操作 60 s);設計 p14 的安全監控是
+  會動手的迴路,不該在瀏覽器裡。現況會動手的散在四處(吊機 hold_loop / 吊機 watchdog / 本體急停 / Python)。
+- **三條拍板(per user)**:① 編排搬回 C++ ② SAFE 最小版(風扇直接關)③ 自檢 = GUI 軟閘門 checklist(否決硬閘門,擋救援)。
+  → `plans/orchestration_to_cpp_plan.md` **已核准**;前置(`crane_cmd_` 行緩衝、本體 watchdog)確認為階段 3 前必修。
+- **fake_robot 補完凍結介面**(= 計畫階段 0):mission/EVT、SAFE 三源、自檢欄位、sim 測試鉤;實測全通。
+  順修兩處不忠實(`init` 沒開幫浦、`t_vac` 算錯)。
+- **交接 AI-2**:`handoff/ai2-v3-gui-brief.md`,基於 v2 做 v3(`public_v3/` :8082,對假機器);契約要改先問、
+  驗收 `report` 不得有 not modelled。**AI-2 進行中,完成會 SendMessage 回 agent-ai-da。**
+
+### 下次回來先看
+- 🔍 **AI-2 的 v3**(`web_backend/public_v3/`):對照計畫 §5 五項;跑 `./harness/gui_offline.sh` + v3 :8082 實際點;
+  `report` 有沒有契約外指令;SAFE 三條路徑 banner/上鎖/解除。
+- 然後決定我這邊開階段 1(自檢欄位 C++,低風險、本機可驗)還是先修前置(`crane_cmd_` 行緩衝)。
+
+---
+#### (上半天原記錄)
 
 ### 已完成
 - **電控箱接線圖改為單線圖**(per user「要的是線路圖」):`reference/wiring/` 兩張 SVG + 產生器
