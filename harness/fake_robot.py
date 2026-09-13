@@ -92,6 +92,7 @@ class Sim:
         self.tension_valid = 1
         self.top_cm = -120.0            # 'wall top' the mission precheck compares against
         self.mission = None             # Mission instance while running
+        self.noseal = False             # `sim noseal`: cups never seal, even after mission extend
         threading.Thread(target=self._tick, daemon=True).start()
 
     def _tick(self):
@@ -116,7 +117,7 @@ class Sim:
                         self.moving = None
                 # vacuum: sealed cups pull toward -66 kPa when valve (ch1) on
                 for k in self.pres:
-                    tgt = -66.0 if (self.relay[0] and self.zdt[k]['pos'] > 0) else -2.0
+                    tgt = -66.0 if (self.relay[0] and self.zdt[k]['pos'] > 0 and not self.noseal) else -2.0
                     self.pres[k] += (tgt - self.pres[k]) * 0.25
                 # arm force control converges to target
                 if self.deploy_target is not None:
@@ -396,19 +397,21 @@ def wr_dispatch(line, bcast):
             if s.tension_valid == 0: return 'ERR safe_clear_refused item=tension_valid\n', True
             if abs(s.imu_roll) > 5.0: return f'ERR safe_clear_refused item=roll detail={s.imu_roll:.1f}\n', True
             s.safe = 0; src = s.safe_src; s.safe_src = ''; s.crane_safe_locked = 0
-            s.state = 'paused'
+            # plan §3.4 (待拍板 09-13): with a mission → paused; without → ready (pump on) / idle
+            s.state = 'paused' if s.mission else ('ready' if (s.relay[1] or s.relay[2]) else 'idle')
         reason = ' '.join(a) or '-'
         _bcast('washrobot', f'EVT safe_clear by=gui reason={reason} was={src}')
         _bcast('crane', 'EVT safe_clear by=body')
-        return 'OK safe_cleared state=paused\n', True
+        with s.lock: st = s.state
+        return f'OK safe_cleared state={st}\n', True
     if c == 'sim':   # test hooks for GUI development (not part of the real protocol)
         with s.lock:
             if a[:1] == ['roll'] and len(a) > 1: s.imu_roll = float(a[1]); return f'OK sim roll={s.imu_roll}\n', True
             if a[:1] == ['tension_valid'] and len(a) > 1: s.tension_valid = int(a[1]); return f'OK sim tension_valid={s.tension_valid}\n', True
             if a[:1] == ['top'] and len(a) > 1: s.top_cm = float(a[1]); return f'OK sim top={s.top_cm}\n', True
-            if a[:1] == ['noseal']: 
-                for k in s.zdt: s.zdt[k]['pos'] = 0
-                return 'OK sim noseal (pushers reported at 0 -> cups never seal)\n', True
+            if a[:1] == ['noseal']:
+                s.noseal = (a[1] != 'off') if len(a) > 1 else True
+                return f'OK sim noseal={int(s.noseal)} (cups never seal while on; `sim noseal off` to clear)\n', True
         if a[:1] == ['safe']: enter_safe(a[1] if len(a) > 1 else 'sim', 'test-hook'); return 'OK sim safe\n', True
         return 'ERR usage: sim roll <deg>|tension_valid 0|1|top <cm>|noseal|safe [src]\n', True
     with s.lock:
@@ -423,7 +426,9 @@ def wr_dispatch(line, bcast):
             if 1 <= ch <= 8: s.relay[ch - 1] = 1 if on else 0
             return f'OK ch{ch}={1 if on else 0}\n', True
         if c == 'pump':
-            if a[:1] == ['status']: return f'OK ch2={s.relay[1]} ch3={s.relay[2]} active={s.pump_active}\n', True
+            if a[:1] == ['status']:   # format copied from cmd_pump status (wash_robot_commands.cpp:4192-4197)
+                return (f'OK active={s.pump_active} accum_min=12 rotate_min=30 auto_rotate=1 counting=1 swapping=0'
+                        f' chA={s.relay[1]} chB={s.relay[2]}\n'), True
             if a[:1] == ['swap']:
                 s.pump_active = 'B' if s.pump_active == 'A' else 'A'
                 s.relay[1], s.relay[2] = (1, 0) if s.pump_active == 'A' else (0, 1)

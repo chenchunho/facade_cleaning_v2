@@ -17,6 +17,15 @@
 - **交接 AI-2**:`handoff/ai2-v3-gui-brief.md`,基於 v2 做 v3(`public_v3/` :8082,對假機器);契約要改先問、
   驗收 `report` 不得有 not modelled。**AI-2 進行中,完成會 SendMessage 回 agent-ai-da。**
 
+### AI-2 v3 完成回報(當日晚,**未 commit**,停在可檢視狀態)
+- 只動 `web_backend/public_v3/index.html`(+672/−280)+ changelog `[2026-09-13v3]` + work_log 一列;server.js/v2/C++/fake 未碰。
+  **:8082 在跑**。五項全做(作業流程頁兩道閘門 / Mission 純按鈕 + 十種 EVT / SAFE 橫幅與解除 / Manual `inert` 上鎖 /
+  前置改讀 C++ 回覆);jsdom + 真 WS 端對端驗過,**`report` 0 條 not modelled**。
+- 它抓到三件,我處理:① `sim noseal` 在 mission 內無效 → **已修**(改旗標);② fake `pump status` 格式與真韌體不同 →
+  **已對齊**(`active= accum_min= rotate_min= auto_rotate= counting= swapping= chA= chB=`);
+  ③ 🟡 **契約:無任務時 `safe_clear` 回 paused 會卡 `mission start`** → 計畫 §3.4 記為待拍板,建議無任務回 ready/idle,fake 先照建議。
+- 🟡 待拍板:AI-2 的 jsdom 驗證腳本要不要收進 `harness/gui_v3_check.js`(需 `npm install` 一個 dev 依賴)。
+
 ### 下次回來先看
 - 🔍 **AI-2 的 v3**(`web_backend/public_v3/`):對照計畫 §5 五項;跑 `./harness/gui_offline.sh` + v3 :8082 實際點;
   `report` 有沒有契約外指令;SAFE 三條路徑 banner/上鎖/解除。
@@ -57,6 +66,7 @@
 - 🟡 **使用者點一輪 v2 GUI 後跑 `./harness/gui_offline.sh report`** → 得到「GUI 需要的功能清單」,
   再對照 SOFTWARE.md §2/§3 指令面決定哪些是缺口、哪些是 GUI 該拿掉。
 - 🟡 手臂 `ping`:決定手臂加 `PING`,或 web_backend 對 arm 改用 `STATUS` 保活(二選一,別兩邊都改)。
+- 🟡 **AI-2 v3** 契約缺口（09-13 v3 離線驗收時發現，詳 changelog `[2026-09-13v3]`）：① fake `sim noseal` 在 mission 內無效 ② fake `pump status` 格式與真韌體不同 ③ `safe_clear` 無任務時停在 `paused`、`mission start` 拒 `state=paused` —— 要 `continue` 才回 idle，契約該不該讓 `safe_clear` 直接回 idle？
 - (承前)24V 治本三選項 / LRS-150-24 OLP 手冊核對 / 急停切 57.6V / 開箱拍照補 §3.2C。
 
 ## 🆕 2026-09-12 文書日:軟/硬架構文件成對、.claude 整理、巨檔壓縮、**24V blip 根因確認**、ONBOARDING 歸檔、瘦身第一刀

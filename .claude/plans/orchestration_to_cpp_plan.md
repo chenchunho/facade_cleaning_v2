@@ -118,6 +118,9 @@ EVT mission stop reason=<user|precheck|bail:…|safe> summary="no_seal=1 warn=0 
 
 `safe_clear <reason>`(**只從 GUI,且在危險操作 60 s 解鎖窗內**)→ 本體驗證:`tension_valid=1`、\|roll\| < 門檻、吊機/手臂連線 fresh → 送吊機 `safe_clear` → 轉 **`Paused`**(不是 Running;mission 可 `continue` 或 `mission stop`)→ `EVT safe_clear by=gui reason=…`。
 驗證不過 → `ERR safe_clear_refused item=…`。
+🟡 **待拍板(AI-2 做 v3 時發現,2026-09-13)**:**無任務時 `safe_clear` 回哪個狀態?** 上一段「轉 Paused」是以有 mission 為前提;
+無任務時回 `paused` 會讓 `mission start` 被前置檢查(state 需 idle/ready)擋住,得先 `continue` 才能起。
+**建議**:有 mission → `paused`;無 mission → **`ready`**(SAFE 前若已 init)或 `idle`。fake_robot 先照建議實作,待拍板後對齊。
 
 ### 3.5 通報
 
