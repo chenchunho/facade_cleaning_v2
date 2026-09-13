@@ -42,7 +42,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 |---|---|---|
 | 🆕 `SOFTWARE.md` | **軟體架構(現況 as-is)**：程序/埠/啟動、本體/吊機/手臂職責拆解、建置部署、架構級踩坑、針對性瘦身清單。取代 ONBOARDING 快照 | 🟢 活的（2026-09-12 建，**全文對原始碼驗證過 37 項**） |
 | 🆕 `reference/engineering_pitfalls.md` | **驅動層踩坑 + 工程方法 + 方法論教訓**：ZDT/SD76/gateway/X518 的「手冊跟實機不一樣」、EVT 與巢狀 await 兩個必抄 guard、共用匯流排鎖、8 條吃過虧的教訓。由 ONBOARDING §2/§3 抽出 | 🟢 活的（2026-09-12 建） |
-| 🆕 `HARDWARE.md` | **硬體架構(現況)**：機構總覽、網路拓樸、6 段 RS485/裝置對照、致動器感測器總表、**電源架構(🔴 M1 供電待查=blip 根因)**、安全機制、設計 vs 現況差異 | 🟢 活的（2026-09-12 建），§5 電源待現場回填 |
+| 🆕 `HARDWARE.md` | **硬體架構(現況)**：§0 **系統邊界總綱（兩箱只共用 220V 與隧道）**、機構總覽、網路拓樸、6 段 RS485/裝置對照、**§3.2 電控箱單線接線圖**、致動器感測器總表、**§5 電源架構（blip 根因＋§5.1 無過流保護）**、安全機制、設計 vs 現況差異 | 🟢 活的（2026-09-12 建；09-13 供電來源 per user 全數填齊） |
+| 🆕 `reference/wiring/` | **電控箱單線接線圖**：`body_cabinet.svg` / `crane_cabinet.svg` + **產生器 `gen_wiring_svg.py`**（座標用程式算，改接線改產生器重跑，不手改 SVG）+ README。檢視版 https://claude.ai/code/artifact/ff3cf70a-add5-4fec-9118-74066159a8d1 | 🟢 活的（2026-09-13 建） |
 | `work_log.md` | 現況 + **唯一待辦總表** | 🟢 活的，**只讀最上面** |
 | `changelog.md` | 變更帳本（append-only，不壓縮；**2026-09-12 起按月輪替**：主檔留當月全文 + 全部條目索引，更早月份全文原封在 `archive/changelog-YYYY-MM.md`） | 🟢 活的，只在追溯時查 |
 | `runbook.md` | 操作手冊：啟動順序、按鈕、raw command、緊急處置 | 🟢 活的 |
@@ -645,8 +646,8 @@ Idle → Ready → Attached → Running ⇄ Paused
 
 ### 電源架構（參考，v1 時期記錄，未隨 v2 更新）
 
-⚠️ 下表是 v1 的配置，`DM2J×5` 那條已不存在。保留是因為**這是電源分組的唯一記載**，
-但**不要拿它推論現行硬體**。
+✅ **2026-09-13 起現行電源架構的權威在 `.claude/HARDWARE.md` §5**（per user 逐項確認：本體 LRS-150-24 唯一一顆 24V 餵含手臂/載波在內的全部負載、吊機另有獨立 MW 150 W 24V、SD76 直接吃 220V、兩箱同一組單相 220V、無斷路器/保險絲）。
+⚠️ 下表是 v1 的配置，`DM2J×5` 那條已不存在，**只留作歷史對照，不要拿它推論現行硬體**。
 
 ```
 [總電源] AC 220V
