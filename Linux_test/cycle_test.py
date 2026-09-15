@@ -4,9 +4,10 @@
 # 一個週期 = 由頂端向下 5 步 × 40cm（走滿 200cm）+ 50Hz 一口氣拉回頂端。
 #
 # 每一步（使用者口述順序）：
-#   ① 風扇 5%（關）        —— 伸/收推桿期間必須關（關風扇才可抽真空+伸腳，順序本身是安全需求）
 #   ② vacuum feet on       —— 開真空閥
 #   ③ pusher all extend_raw—— 推出 10cm，**不驗真空度**
+#   ①' 風扇降回 FAN_OFF     —— 🔴 [2026-09-15 per user] 由「伸腳前關」改成「**吸附建立後才關**」：
+#                              伸腳的那幾秒機體本來沒有貼牆推力，風扇留到 ③a 判定完才降。
 #      🔴 為什麼不驗：有些玻璃面有縫隙，吸盤落在縫上本來就吸不住，那是現場條件不是故障。
 #         smart_extend_subset_ 會為了找封一路補伸到 ~16cm 並重試 —— 在有縫的面上是徒勞。
 #   ③b 清潔動作      —— [2026-09-03 per user] 壓上(滾筒) → 滑台 0→100→0 → 收手臂。
@@ -19,8 +20,9 @@
 #         （暖啟動 15s vs 8s），10 週期 50 步再多約 6 分鐘。
 #      🔴 若 ③a 判定「一顆都沒吸到」，本步**跳過**（無附著時掃動只會讓機體擺盪），
 #         且整輪不中止 —— 改為計數並在總結報出。理由見 ③a 處的註解。
+#   ⑤' 風扇升到 FAN_ON      —— 🔴 [2026-09-15 per user] 由「收腳後開」改成「**收腳前先開**」：
+#                              推桿離開玻璃到風扇起轉之間原本沒有推力。
 #   ④ pusher all retract   —— 已內建「關閥→洩壓→CH6 正壓 500ms→兩段收回」
-#   ⑤ 風扇 7%（開）
 #   ⑥ delay 1000ms
 #   ⑦ crane pay_out 40（30Hz）—— 並行監看
 #   ⑧ 靜置 300ms（imu_level 已移除，見下方步驟 ⑧ 的說明）
@@ -37,7 +39,7 @@
 #
 # usage: cycle_test.py [cycles] [steps_per_cycle] [step_cm] [roll_trip] [diff_trip]
 
-import os, re, socket, sys, threading, time
+import os, re, signal, socket, sys, threading, time
 
 # 🔴 [2026-09-02] stdout 導向檔案時是**全緩衝**，整輪產出才約 4.7KB
 # → 一個 4KB 緩衝區都填不滿，log 會從頭到尾停在 0 bytes，看起來像腳本沒跑。
@@ -85,7 +87,10 @@ WROBOT = (WROBOT_HOST, WROBOT_PORT)
 #   「座標過期、讀 roll 非 raw_x」bug 在 crane 模式從結構上不存在。
 # ============================================================================
 _MODES = {
-    "full":  "完整清潔週期:頂端下行 N 步×step_cm + 拉回。參數 [cycles] [steps] [step_cm] [roll_trip] [diff_trip]",
+    "full":  "完整清潔週期:頂端下行 N 步×step_cm + 拉回。參數 [cycles] [steps] [step_cm] [roll_trip] [diff_trip]"
+             " [fan=move[:pct]|all[:pct]](位置不限;move=只在下行移動時開 預設7,all=全程同值 預設6、all:5=不開)"
+             " [rail=<起>-<迄>|off](滾筒 起→迄、刮刀 迄→起,開跑前先到起點;例 0-100、20-100、100-20;舊 0|100 仍收)"
+             " [final_clean=0|1](預設 1:最後一次放繩後在最低點再清一次)",
     "crane": "純吊機頂↔底來回 + 每趟姿態統計(讀 raw_x)。參數 [trips]",
     "arm":   "手臂清潔動作耐久(壓上→滑台掃→收)。參數 [cycles] [rail_cm(0=不加滑台)] [slot=RIGHT|LEFT|CENTER]",
 }
@@ -95,6 +100,12 @@ def _print_modes():
         print("  %-6s %s" % (m, d))
     print("用法: cycle_test.py <模式> <次數> [...]   例: cycle_test.py crane 10")
     print("      不帶模式而給數字 = full(向後相容): cycle_test.py 1 5 40")
+# [2026-09-15 per user] key=value 參數:位置不限,先抽掉再解析位置參數(GUI 只要在尾巴追加即可)。
+#   目前只有 fan=,見 FAN_ON/FAN_OFF 那段。
+KV = {}
+for _tok in list(sys.argv[1:]):
+    if "=" in _tok and not _tok.startswith("-"):
+        _k, _v = _tok.split("=", 1); KV[_k] = _v; sys.argv.remove(_tok)
 if len(sys.argv) > 1 and sys.argv[1] in ("modes", "list", "help", "--help", "-h"):
     _print_modes(); sys.exit(0)
 if len(sys.argv) > 1 and sys.argv[1] in _MODES:
@@ -134,7 +145,11 @@ ARM_WALL_MM = 520       # DEPLOY 的假設牆距（僅在退回舊路徑時使�
 # [2026-09-11 per user] 15→8:降力刷過(偵測不可靠,改低力,刷到橫桿也無傷)。
 #   env FCV_ARM_NM 可覆蓋。⚠️ 手臂 DEFAULT(main_api.h DEPLOY_F_TARGET_NM)也已 8,
 #   但 cycle_test 是**顯式傳值**,故必須在這裡也降,否則 full 仍用 15。
-ARM_TARGET_NM = float(os.environ.get("FCV_ARM_NM", "8"))
+# [2026-09-14 per user] 8→3:現場三種力度(8/6/3)各跑一趟,3 Nm 清潔效果好,定為工作力度。
+ARM_TARGET_NM = float(os.environ.get("FCV_ARM_NM", "3"))
+# [2026-09-14 per user] 乾掃:FCV_DRY=1 時滾筒段也 wet=False(不噴水、不開滾刷),只驗步態與力控。
+#   預設 0 = 原本行為(滾筒噴水+滾刷)。
+DRY_RUN = os.environ.get("FCV_DRY", "0").strip() == "1"
 # 自動偵測：本體若還是舊 binary（沒有 arm_deploy_f 代轉）會回 `ERR unknown_cmd`，
 # 第一次遇到就整輪退回 arm_deploy 舊路徑並大聲說一次。不必手動切旗標。
 ARM_FORCE_MODE = [True]
@@ -284,7 +299,45 @@ TOL = 5
 # —— 把腳本門檻放寬沒有意義，韌體會先擋。30Hz 今天多次驗證瞬態差最大 7cm。
 # 使用者原本的規格是「上行最多 50Hz」，那是上限不是必須值。
 DOWN_HZ, UP_HZ = 30, 30
-FAN_ON, FAN_OFF = 7, 5
+# [2026-09-15 per user] 風扇兩種模式,full 參數 `fan=`(或環境 FCV_FAN_MODE 給 GUI 過渡用):
+#   fan=move[:pct]  只在**向下移動時**開(放繩前設 FAN_ON、下一步伸腳前關;吸附/清潔/回程都停)。預設,pct 預設 7。
+#   fan=all[:pct]   全程同一個值(對照組)。pct 預設 6;all:5 = 全程不開。
+#   09-15 三趟全程對照(停/6/7%)顯示吸附不靠風扇、而風扇一轉 JC-100 RS-485 錯誤就冒出來 ⇒ 預設只在下行段開。
+#   🔴 風扇是 ESC 螺旋槳:50 Hz 下 **5% = 1 ms 脈衝 = 馬達停**,driver 把 <5% 當非法脈衝擋掉
+#   (`pwm_duty_rejected_must_be_5_to_10_pct`)⇒ 「停」= 5,不是 0;這裡一律 max(5, …)。
+FAN_MODE, _, _fan_pct = KV.get("fan", os.environ.get("FCV_FAN_MODE", "move")).partition(":")
+if FAN_MODE == "move":
+    FAN_ON, FAN_OFF = max(5, int(_fan_pct or 7)), 5
+elif FAN_MODE == "all":
+    FAN_ON = FAN_OFF = max(5, int(_fan_pct or 6))
+else:
+    print("🔴 fan= 只認 move[:pct] / all[:pct],收到:%r" % KV.get("fan")); sys.exit(2)
+# [2026-09-15 per user] 最後一次放繩之後,**在最低點再清一次**(final_clean=1,預設開)。
+#   為什麼需要:每一步的順序是「清潔 → 往下移動」,所以 N 步清的是 N 個位置,
+#   **最後一次移動到的那個位置從來沒被清過**(5 步 40cm 從 243 起跑 → 清 243/203/163/123/83,
+#   底部 43 直接回程)。開著就補那一次,約多 50 s。`full … final_clean=0` 可關。
+FINAL_CLEAN = KV.get("final_clean", os.environ.get("FCV_FINAL_CLEAN", "1")).strip() not in ("0", "off", "no")
+final_clean_done = [0]
+
+# [2026-09-15 per user] 滑台起點(full 參數 rail=0|100,細節見 rail_pos 那段)。提早驗,壞參數不要等到起跑才炸。
+#   [2026-09-15 per user] 升級成 `rail=<起>-<迄>`(任意 cm,0..RAIL_MAX_CM):滾筒 起→迄、刮刀 迄→起,開跑前先到起點。
+#   舊寫法 `rail=0` = `0-RAIL_CM`、`rail=100` = `RAIL_CM-0` 仍收。`rail=off` = 不動滑台。
+RAIL_MAX_CM = 130                                   # DM2J 行程上限(本體 driver travel<=130 cm)
+def _parse_rail(v):
+    if v in (None, "", "off", "0-0"): return (0, 0) if v in ("off", "0-0") else (0, RAIL_CM)
+    if "-" in v:
+        a, b = v.split("-", 1); a, b = int(a), int(b)
+    else:
+        n = int(v); a, b = (0, RAIL_CM) if n == 0 else (n, 0)   # 舊寫法
+    if not (0 <= a <= RAIL_MAX_CM and 0 <= b <= RAIL_MAX_CM):
+        print("🔴 rail= 範圍 0..%d cm,收到:%r" % (RAIL_MAX_CM, v)); sys.exit(2)
+    if a == b: print("🔴 rail= 起迄相同(%s)= 不掃;要不掃請寫 rail=off" % v); sys.exit(2)
+    return (a, b)
+try:
+    RAIL_START, RAIL_END = _parse_rail(KV.get("rail", os.environ.get("FCV_RAIL_START")))
+except ValueError:
+    print("🔴 rail= 格式:<起>-<迄>(例 0-100、20-100、100-20)或 off,收到:%r" % KV.get("rail")); sys.exit(2)
+RAIL_SWEEP = (RAIL_START != RAIL_END)               # False = rail=off,清潔段不動滑台
 
 abort_reason = []
 
@@ -304,6 +357,7 @@ no_seal_steps = [0]
 #   warn     = 有壓上但沒收斂到目標壓力 —— 掃動照做，只是資料品質要標記
 no_wall_steps = [0]
 press_warn_steps = [0]
+refill_count = [0]        # [2026-09-15] 途中補水次數(ensure_water_full)
 # [2026-09-04] 橫桿步數。與 no_wall 分開記：兩者都是現場條件，但成因不同
 #   （no_wall=牆太遠/沒玻璃；obstacle=有東西比玻璃更近），混在一起會看不出牆的形狀。
 obstacle_steps = [0]
@@ -658,6 +712,10 @@ def _diff_summary():
         print("\n🔴 找不到牆的步數：%d / %d（%.0f%%）—— 手臂伸到上限仍未接觸，"
               "該步的清潔動作被跳過。這是**現場幾何**（牆比預期遠／沒玻璃／出邊界），不是故障。"
               % (no_wall_steps[0], tot, 100.0 * no_wall_steps[0] / tot))
+    if FINAL_CLEAN:
+        print("🧽 最低點補清:%d 次完成(每個週期的最後一次放繩之後各補一次;final_clean=0 可關)" % final_clean_done[0])
+    if refill_count[0]:
+        print("💧 途中補水次數：%d（滾筒段前水位不滿 → 開進水閥等到滿；時間計在該步「清潔s」裡）" % refill_count[0])
     if press_warn_steps[0]:
         print("🟡 壓力未收斂到目標的步數：%d —— 有壓上、掃動照做，但沒到 %.1f N·m，"
               "這些步的清潔力道與其他步不可比。" % (press_warn_steps[0], ARM_TARGET_NM))
@@ -704,6 +762,30 @@ def _rate_summary():
           % (STEPS, STEP_CM))
 
 
+# [2026-09-15 per user] 暫停 = 維持現狀(腳吸著、吊機不動),但手臂收回、水泵/滾刷關。
+#   GUI(server.js)送 SIGUSR1 = 暫停、SIGUSR2 = 續跑;這裡只在**檢查點**看旗標(伸腳前 / 每把工具前 /
+#   放繩前 / 回程前),所以最多延遲一段滑台或一次壓牆。檢查點上手臂本來就已收、水已關,
+#   pause_point 再送一次是保險(冪等)。急停是另一件事(本體 emergency_stop = 全部收回脫離玻璃)。
+#   印出的 `[PAUSE] paused …` / `[PAUSE] resumed` 是 server.js 判斷 paused 狀態的權威行。
+PAUSE_REQ = [False]
+PAUSE_MAX_S = int(os.environ.get("FCV_PAUSE_MAX_S", "1800"))   # 暫停最久 30 分,超過就中止(吸著不能無限等)
+def _sig_pause(signum, frame):  PAUSE_REQ[0] = True;  print("[PAUSE] requested (到下一個檢查點停)")
+def _sig_resume(signum, frame): PAUSE_REQ[0] = False
+signal.signal(signal.SIGUSR1, _sig_pause)
+signal.signal(signal.SIGUSR2, _sig_resume)
+
+def pause_point(where):
+    if not PAUSE_REQ[0]: return
+    print("[PAUSE] paused where=%s —— 收臂、關水泵/滾刷、風扇停;腳維持吸附、吊機不動" % where)
+    ask(WROBOT, "water_pump off", 10); ask(WROBOT, "brush off", 10)
+    ask(WROBOT, "arm_retract", 30); fan(FAN_OFF)
+    t0 = time.time()
+    while PAUSE_REQ[0]:
+        if time.time() - t0 > PAUSE_MAX_S:
+            bail("暫停超過 %d s 未續跑" % PAUSE_MAX_S)
+        time.sleep(0.5)
+    print("[PAUSE] resumed after %.0f s (where=%s)" % (time.time() - t0, where))
+
 def bail(msg):
     print("\n🔴 中止：%s" % msg)
     print("   現場保留，未自動復位。")
@@ -735,6 +817,9 @@ def cleanup():
     print("   [收尾] 手臂 arm_retract : %s" % ask(WROBOT, "arm_retract", 90)[:50])
     print("   [收尾] 風扇 %d%% / motion_hz→%d : %s / %s"
           % (FAN_OFF, DOWN_HZ, fan(FAN_OFF), ask(CRANE, "set_motion_hz %d" % DOWN_HZ, 15)))
+    # [2026-09-15 per user] 收尾一律關幫浦(中止時也是:現場保留指的是位置與姿態,不是讓真空一直抽)。
+    print("   [收尾] 幫浦關閉: %s" % ask(WROBOT, "pump off", 20)[:50])
+    pump_started_by_script[0] = False
 
 
 # ============================================================================
@@ -878,6 +963,9 @@ if MODE == "arm":
     run_arm();   sys.exit(0)
 # MODE == "full":落到下方既有的完整清潔週期程式碼(未改動)
 
+if DRY_RUN:
+    print("⚠️ FCV_DRY=1 乾掃:滾筒段不噴水、不開滾刷(只驗步態與力控)")
+print("風扇模式 fan=%s:下行移動 %d%% / 其他 %d%%(5 = 馬達停)" % (FAN_MODE, FAN_ON, FAN_OFF))
 print("週期測試：%d 週期 × (下行 %d 步 × %dcm = %dcm @%dHz) + 拉回 @%dHz"
       % (CYCLES, STEPS, STEP_CM, STEPS * STEP_CM, DOWN_HZ, UP_HZ))
 print("中止門檻：|roll|>%.1f°（連續 %d 筆，可自動修正） / 左右差>%.0fcm 連續 %d 筆 / tension_valid=0 / 任一指令非 OK\n"
@@ -968,6 +1056,9 @@ print("")
 # 📌 通道編號**從 relay_status 自己的 names 欄推導**，不寫死 2 —— CH3 那次的教訓就是
 #    通道對應會變，而寫死的數字不會跟著變。
 ALLOW_NO_PUMP = os.environ.get("ALLOW_NO_PUMP") == "1"
+# [2026-09-15 per user] 幫浦由腳本自己開/自己關時記一筆:只有「腳本開的」才由腳本關,
+#   人自己先開好的(或別的流程在用的)不要被收尾關掉。
+pump_started_by_script = [False]
 rs = ask(WROBOT, "relay_status", 15)
 if not rs.startswith("OK"):
     print("🔴 讀不到繼電器狀態：%s" % rs[:90]); sys.exit(1)
@@ -985,25 +1076,97 @@ _onB = (_chB is not None) and (re.search(r"\bch%s=1\b" % _chB, _st_part) is not 
 _pump_on = _onA or _onB
 _which = ("A" if _onA else "") + ("B" if _onB else "")   # 併聯窗可能兩顆都亮
 if not _pump_on:
-    if not ALLOW_NO_PUMP:
-        print("🔴 真空幫浦 A(ch%s)/B(%s) 皆 OFF —— 沒有真空源，吸盤全程不會吸住。"
-              % (_chA, _chB if _chB else "?"))
-        print("   先送 `init` 給本體（它會開幫浦並印 [init] PQW relays → pump ON），或")
-        print("   確定要跑無真空的對照組就用 ALLOW_NO_PUMP=1 重跑（這會記進標題列）。")
-        sys.exit(1)
-    print("⚠️ 【無真空對照組】幫浦 A/B 皆 OFF，經 ALLOW_NO_PUMP=1 明示放行。")
-    print("   本輪的壓力欄與吸附行為不可與有真空的輪次比較。\n")
+    if ALLOW_NO_PUMP:
+        print("⚠️ 【無真空對照組】幫浦 A/B 皆 OFF，經 ALLOW_NO_PUMP=1 明示放行。")
+        print("   本輪的壓力欄與吸附行為不可與有真空的輪次比較。\n")
+    else:
+        # 🔴 [2026-09-15 per user] 幫浦沒開就**自己送 `init`**,不要再把人擋在門外。
+        #   原本這裡只印「先送 init 給本體」然後 sys.exit(1) —— 那是把一個腳本做得到的動作
+        #   變成人的檢查項(GUI 前置 ④)。腳本自己開,跑完(或中止)再自己關,少一步要檢查。
+        #   ⚠️ `init` 會動手臂:所以先 `arm_attached off` 讓 cmd_init 跳過 damiao INIT,
+        #      再切回 on(同 GUI 一鍵前置的做法);手臂自己的 INIT 仍由 ⑤ 或使用者負責。
+        print("真空幫浦 A/B 皆 OFF → 自動送 init(會開幫浦;arm_attached 先關再開,不動手臂)…")
+        ask(WROBOT, "arm_attached off", 10)
+        r_init = ask(WROBOT, "init", 90)
+        ask(WROBOT, "arm_attached on", 10)
+        if not r_init.startswith("OK"):
+            print("🔴 init 失敗:%s —— 沒有真空源,不跑。" % r_init[:100]); sys.exit(1)
+        rs2 = ask(WROBOT, "relay_status", 15)
+        _st2, _, _ = rs2.partition("|")
+        _onA = re.search(r"\bch%s=1\b" % _chA, _st2) is not None
+        _onB = (_chB is not None) and (re.search(r"\bch%s=1\b" % _chB, _st2) is not None)
+        if not (_onA or _onB):
+            print("🔴 init 回 OK 但幫浦仍是 OFF(%s)—— 不跑。" % rs2[:90]); sys.exit(1)
+        _which = ("A" if _onA else "") + ("B" if _onB else "")
+        pump_started_by_script[0] = True
+        print("真空幫浦 %s ON ✅(本腳本開的,跑完會關)\n" % _which)
 else:
     print("真空幫浦 %s ON ✅（A=ch%s B=ch%s）\n" % (_which, _chA, _chB if _chB else "?"))
 
 ask(CRANE, "set_motion_hz %d" % DOWN_HZ, 15)
 
-def arm_clean_combo(slot, wet):
+# [2026-09-15 per user] 滑台不再每把工具來回一趟:滾筒 起點→對面、刮刀 對面→起點(單程接力),
+#   每步省兩段橫走。rail_pos 記目前滑台位置,每把工具都掃到「對面那端」;某把跳過時(no_wall/obstacle)
+#   下一把從原地出發,步末若不在起點再補回起點。
+#   full 參數 `rail=0`(預設:滾筒 0→RAIL、刮刀 RAIL→0)/ `rail=100`(滾筒 RAIL→0、刮刀 0→RAIL);
+#   開跑前先把滑台移到起點。兩種都保留(per user 09-15)。
+rail_pos = [RAIL_START]
+
+# [2026-09-15 per user] 沒水就補水,不再直接中止。
+#   時序:滾筒那把 **deploy 之前**先確認水位(手臂別壓在牆上等 3 分鐘)。不滿 → 本體 `water_inlet on`
+#   (代轉吊機 ZS-DIO 進水閥) → 每 2 s 讀 XKC → 滿了再等 5 s 關閥(管路餘水,同 C++ arm_clean_sweep)。
+#   上限 WATER_FILL_S=180 s(同 C++ WATER_FILL_TIMEOUT_MS);逾時關閥、照舊中止。
+#   閥另有 300 s deadman(本體 + 吊機各一顆)——那是安全上限,不是這裡的等待時間。
+WATER_FILL_S  = int(os.environ.get("FCV_WATER_FILL_S", "180"))
+# [2026-09-15] XKC 是單點門檻,水位剛過門檻時會 0/1 跳(實測 rssi 1135–3463 在跳、4272+ 穩定 1)。
+#   滿了以後再多灌 WATER_TOPUP_S 才關閥,給水位一個餘量,不然下一步噴 30 s 又掉回門檻。
+WATER_TOPUP_S = int(os.environ.get("FCV_WATER_TOPUP_S", "20"))
+
+def ensure_water_full(force=False):
+    """回 True=有水可噴;False=補水逾時(閥已關,呼叫端決定要不要中止)。
+       force=True:不看第一筆讀值直接灌(剛才才讀到 0,再讀一次很可能又跳回 1 卻沒餘量)。"""
+    wl = ask(WROBOT, "water_level", 8)
+    if not force:
+        if "water_full=1" in wl: return True
+        if "water_full=0" not in wl:
+            print("   🔴 水位讀不到:%s" % wl[:60]); return False
+    r = ask(WROBOT, "water_inlet on", 15)
+    if not r.startswith("OK"):
+        print("   🔴 進水閥打不開:%s" % r[:60]); return False
+    refill_count[0] += 1
+    t0 = time.time(); full = False; last = 0
+    print("   💧 水箱不滿 → 開進水閥補水(上限 %d s)" % WATER_FILL_S)
+    while time.time() - t0 < WATER_FILL_S:
+        time.sleep(2)
+        wl = ask(WROBOT, "water_level", 8)
+        if "water_full=1" in wl: full = True; break
+        el = int(time.time() - t0)
+        if el - last >= 30: print("   💧 補水中 %d s … %s" % (el, wl[:40])); last = el
+    if full:
+        print("   💧 水滿(%.0f s),再灌 %d s 給餘量後關閥" % (time.time() - t0, WATER_TOPUP_S)); time.sleep(WATER_TOPUP_S)
+    else:
+        print("   🔴 補水 %d s 仍不滿" % WATER_FILL_S)
+    r = ask(WROBOT, "water_inlet off", 15)
+    if not r.startswith("OK"): print("   🔴 進水閥關不掉:%s(deadman 300 s 會強制關)" % r[:60])
+    return full
+if RAIL_SWEEP:
+    # 開跑前先把滑台移到起點,讓 rail_pos 的起點假設成立(已在該端時瞬回)。
+    _r = ask(WROBOT, "rail %d" % RAIL_START, 60)
+    if not _r.startswith("OK"): print("🔴 開跑前 rail %d 失敗:%s" % (RAIL_START, _r[:100])); sys.exit(1)
+    print("滑台 rail=%d-%d:滾筒 %d→%d、刮刀 %d→%d" % (RAIL_START, RAIL_END, RAIL_START, RAIL_END, RAIL_END, RAIL_START))
+else:
+    print("滑台 rail=off:清潔段不動滑台")
+
+def arm_clean_combo(slot, wet, _water_retry=True):
     """[2026-09-11 per user] full 每步的單一工具清潔動作:
-       deploy → (wet 才:開水+滾刷) → 滑台 0-RAIL-0 → (wet 才:關水) → arm_retract(收 M1、**不失能**)。
+       deploy → (wet 才:開水+滾刷) → 滑台單程掃到對面那端 → (wet 才:關水) → arm_retract(收 M1、**不失能**)。
        走本體 arm_deploy_f/arm_retract 代轉(維持 full 的 via-body 慣例,不直連 9527)。
        回 True=有掃到;False=no_wall/obstacle 已跳過並收手臂。
-       🔴 用水/收放守則:M1 下才開水、滑台回0後才收手臂、收手臂前先關水、收手臂不失能。"""
+       🔴 用水/收放守則:M1 下才開水、滑台停定後才收手臂、收手臂前先關水、收手臂不失能。
+       📌 [09-15] 原「滑台回0後才收手臂」改為「滑台停定後」:換工具(M2 轉槽)前 M1 必須先收,
+          而刮刀要從滾筒停下的那一端(RAIL)出發,所以滾筒那把是在 RAIL 端收手臂。"""
+    if wet and not ensure_water_full():                # 🔴 補水在壓牆之前,手臂不吊在牆上等水
+        bail("水箱空且補水失敗,無法噴水")
     if ARM_FORCE_MODE[0]:
         r = ask(WROBOT, "arm_deploy_f %.1f %s" % (ARM_TARGET_NM, slot), 150,
                 prefixes=("OK", "ERR", "WARN"))
@@ -1043,16 +1206,22 @@ def arm_clean_combo(slot, wet):
     # ---- deployed:清潔動作 ----
     if wet:
         wl = ask(WROBOT, "water_level", 8)
-        if "water_full=1" not in wl:                   # M1 已下但沒水,不可乾抽
+        if "water_full=1" not in wl:
+            # 壓牆前才確認過還是讀到 0:水位剛好在 XKC 門檻邊緣晃(09-15 實例:rssi 4272 → 1135)。
+            # 收臂 → 補水 → 重壓一次;第二次還不行才中止(手臂不吊在牆上等水)。
             ask(WROBOT, "water_pump off", 10); ask(WROBOT, "arm_retract", 30)
+            if _water_retry:
+                print("   💧 壓牆後水位變 0(%s)→ 收臂補水後重壓" % wl[:40])
+                if ensure_water_full(force=True):
+                    return arm_clean_combo(slot, wet, _water_retry=False)
             bail("水箱空/水位讀不到,無法噴水:%s" % wl[:50])
         ask(WROBOT, "water_pump on", 20)               # 🔴 M1 下才開水
         ask(WROBOT, "brush on", 20)
-    if RAIL_CM > 0:
-        r = ask(WROBOT, "rail %d" % RAIL_CM, 60)
-        if not r.startswith("OK"): bail("%s rail %d 失敗:%s" % (slot, RAIL_CM, r))
-        r = ask(WROBOT, "rail 0", 60)
-        if not r.startswith("OK"): bail("%s rail 0 復位失敗:%s" % (slot, r))
+    if RAIL_SWEEP:
+        dest = RAIL_END if rail_pos[0] == RAIL_START else RAIL_START   # 單程:掃到對面那端
+        r = ask(WROBOT, "rail %d" % dest, 60)
+        if not r.startswith("OK"): bail("%s rail %d 失敗:%s" % (slot, dest, r))
+        rail_pos[0] = dest
     if wet:
         ask(WROBOT, "brush off", 20)
         ask(WROBOT, "water_pump off", 20)              # 🔴 收手臂前先關水
@@ -1074,8 +1243,11 @@ try:
             if end < BOTTOM - TOL:
                 bail("預期終點 %d cm 低於底端，超出區間 [%d, %d]" % (end, BOTTOM, TOP))
 
-            r = fan(FAN_OFF)                                   # ①
-            if not r.startswith("OK"): bail("風扇關閉失敗：%s" % r)
+            pause_point("step%d_before_extend" % i)
+            # 🔴 [2026-09-15 per user] 順序改成「**先吸附、再關風扇**」。
+            #    原本是 ① 關風扇 → ② 開閥 → ③ 伸腳,機體在推桿還沒碰到玻璃的那幾秒**已經沒有貼牆推力**;
+            #    改成風扇維持 FAN_ON 直到四顆吸盤實際建立真空之後才降回 FAN_OFF,伸腳全程都有推力壓著。
+            #    ⇒ ① 不再關風扇(移到 ③a 之後),②③ 順序不變。
             r = ask(WROBOT, "vacuum feet on", 20)              # ②
             if not r.startswith("OK"): bail("開真空閥失敗：%s" % r)
 
@@ -1110,6 +1282,11 @@ try:
             #    一次那種假象（讀太早，四顆全 0 卻照跑）。所以：逐步印、計數、總結再報一次。
             # 🔴 跳過 ③b 滑台掃動的理由：沒有附著時機體只掛在繩上，橫向移動滑台會讓它擺盪，
             #    而那個擺盪不屬於被測項目，只會污染 roll 統計。
+            # [2026-09-15 per user] 吸附判定完成後才關風扇(見 ① 的說明)。吸不到也要關 ——
+            # 沒附著時繼續吹只會讓機體貼牆擺盪,而下面本來就會跳過滑台掃動。
+            r = fan(FAN_OFF)                                   # ①(移到這裡)
+            if not r.startswith("OK"): bail("風扇關閉失敗：%s" % r)
+
             skip_rail = (n_seal == 0)
             if skip_rail:
                 no_seal_steps[0] += 1
@@ -1164,17 +1341,28 @@ try:
                 print("   ⚠ 高度 %d cm 落在橫桿跳過帶 %d-%d cm —— 跳過手臂 deploy(不壓橫桿)、續到下一位置"
                       % (int(cur), skip_bar[0], skip_bar[1]))
             if not skip_rail and skip_bar is None:
-                arm_clean_combo("RIGHT", wet=True)    # 滾筒:噴水 + 滾刷 + 滑台掃
-                arm_clean_combo("LEFT",  wet=False)   # 刮刀:乾掃(不噴不刷)
+                pause_point("step%d_before_roller" % i)
+                arm_clean_combo("RIGHT", wet=not DRY_RUN)   # 滾筒:噴水 + 滾刷 + 滑台 起點→對面(FCV_DRY=1 → 乾掃)
+                pause_point("step%d_before_squeegee" % i)
+                arm_clean_combo("LEFT",  wet=False)   # 刮刀:乾掃(不噴不刷),滑台 對面→起點
+                if rail_pos[0] != RAIL_START:         # 某把被跳過 → 滑台留在對面,步末補回起點
+                    r = ask(WROBOT, "rail %d" % RAIL_START, 60)
+                    if not r.startswith("OK"): bail("rail %d 復位失敗:%s" % (RAIL_START, r))
+                    rail_pos[0] = RAIL_START
             t_rail = time.time() - t
+
+            # 🔴 [2026-09-15 per user] 順序改成「**先開風扇、再收腳**」。
+            #    原本是 ④ 收腳 → ⑤ 開風扇,推桿一離開玻璃到風扇起轉之間機體沒有貼牆推力。
+            #    改成收腳前先把風扇帶到 FAN_ON,整個脫離過程都有推力壓著。
+            r = fan(FAN_ON)                                     # ⑤(移到收腳之前)
+            if not r.startswith("OK"): bail("風扇開啟失敗：%s" % r)
 
             t = time.time()                                     # ④
             r = ask(WROBOT, "pusher all retract", 90)
             t_ret = time.time() - t
             if not r.startswith("OK"): bail("retract 失敗：%s" % r)
 
-            r = fan(FAN_ON)                                     # ⑤
-            if not r.startswith("OK"): bail("風扇開啟失敗：%s" % r)
+            pause_point("step%d_before_pay_out" % i)
             time.sleep(1.0)                                     # ⑥
 
             res, stt, dur = monitored_crane_move("pay_out", STEP_CM,        # ⑦
@@ -1248,10 +1436,70 @@ try:
                      stt["mdiff"] if stt else -1,
                      ("%+.2f" % ra) if ra is not None else "-"))
 
+        # ⑧b [2026-09-15 per user] 最低點補清一次(見 FINAL_CLEAN 說明)。
+        #     與步內清潔同一套動作,但不再放繩;吸不到就跳過(同 ③a 判準),不中止。
+        if FINAL_CLEAN and RAIL_SWEEP:
+            t_fc = time.time()
+            cur_b = height(field(ask(CRANE, "status", 10), "length_left"))
+            print("   ── 最低點補清(高度 %s cm)" % ("?" if cur_b is None else "%.0f" % cur_b))
+            pause_point("final_clean_before_extend")
+            r = ask(WROBOT, "vacuum feet on", 20)
+            if not r.startswith("OK"): bail("補清:開真空閥失敗:%s" % r)
+            r = ask(WROBOT, "pusher all extend_raw", 90)
+            if not r.startswith("OK"): bail("補清:extend_raw 失敗:%s" % r)
+            t = time.time(); pr_b = None
+            while time.time() - t < VAC_WAIT_S:
+                ps = ask(WROBOT, "status", 15)
+                pr_b = [field(ps, "p%d" % n) for n in (5, 6, 7, 8)]
+                if any(p is not None and p <= VAC_OK_KPA for p in pr_b): break
+                time.sleep(0.3)
+            r = fan(FAN_OFF)
+            if not r.startswith("OK"): bail("補清:風扇關閉失敗:%s" % r)
+            n_seal_b = sum(1 for p in (pr_b or []) if p is not None and p <= VAC_OK_KPA)
+            print("      四顆壓力 %s(吸到 %d 顆)" % ("/".join("%s" % p for p in (pr_b or [])), n_seal_b))
+            if n_seal_b == 0:
+                no_seal_steps[0] += 1
+                print("      ⚠ 真空未建立 —— 補清跳過清潔,直接收腳")
+            elif in_skip_band(cur_b) is not None:
+                crossbar_skip_steps[0] += 1
+                print("      ⚠ 落在橫桿跳過帶 —— 補清跳過清潔")
+            else:
+                arm_clean_combo("RIGHT", wet=not DRY_RUN)
+                pause_point("final_clean_before_squeegee")
+                arm_clean_combo("LEFT",  wet=False)
+                if rail_pos[0] != RAIL_START:
+                    r = ask(WROBOT, "rail %d" % RAIL_START, 60)
+                    if not r.startswith("OK"): bail("補清:rail %d 復位失敗:%s" % (RAIL_START, r))
+                    rail_pos[0] = RAIL_START
+                final_clean_done[0] += 1
+            r = fan(FAN_ON)
+            if not r.startswith("OK"): bail("補清:風扇開啟失敗:%s" % r)
+            r = ask(WROBOT, "pusher all retract", 90)
+            if not r.startswith("OK"): bail("補清:retract 失敗:%s" % r)
+            print("   ── 補清完成 %.1fs" % (time.time() - t_fc))
+
         # ⑨ 拉回頂端
+        # 🔴 [2026-09-15] 回程前滑台一律歸 0 —— **不是整理現場,是回程能不能成立**。
+        #    rail=130-0 那趟:步末滑台停在起點 130,手臂那坨質量偏一邊 → 右繩靜態 62 kg(平常 45);
+        #    `retract 207` 一送出右繩立刻到 75.16 ≥ `retract_tension_stop_kg`(75)⇒ 吊機判定
+        #    「繩已收緊、收繩完成」**0.4 s 就回 OK**,腳本以為回程做完,機器其實還吊在 41 cm。
+        #    偏心也讓步 1 的左右差衝到 7(其餘 ≤4)。⇒ 回程必須從置中姿態開始。
+        if RAIL_SWEEP and rail_pos[0] != 0:
+            _rr = ask(WROBOT, "rail 0", 60)
+            if not _rr.startswith("OK"): bail("回程前 rail 0 失敗:%s" % _rr[:100])
+            rail_pos[0] = 0
+            time.sleep(1.0)                      # 讓張力讀值跟上新姿態,再判斷回程距離
         cur = height(field(ask(CRANE, "status", 10), "length_left"))
         if cur is None: bail("讀不到吊機位置（回程前）")
         if TOP - cur < 1: bail("回程距離異常：高度=%.0f cm（已在頂端附近）" % cur)
+        pause_point("before_return")
+        # [2026-09-15 per user] 往上拉之前**一律**關幫浦 —— 回程整段不需要真空,少一路噪音與 24V 負載。
+        #   🔴 第一版寫成「只關本腳本開的那顆」,而實際上幫浦幾乎都是前置(GUI/人)先開好的
+        #      ⇒ 條件永遠不成立、跑完幫浦還開著(09-15 實測)。作業期間這支腳本就是幫浦的擁有者,
+        #      不需要區分誰開的。
+        _rp = ask(WROBOT, "pump off", 20)
+        print("   回程前關幫浦:%s" % _rp.strip()[:60])
+        pump_started_by_script[0] = False
         r = fan(FAN_OFF)
         if not r.startswith("OK"): bail("回程前關風扇失敗：%s" % r)
         r = ask(CRANE, "set_motion_hz %d" % UP_HZ, 15)
@@ -1261,6 +1509,12 @@ try:
         ask(CRANE, "set_motion_hz %d" % DOWN_HZ, 15)   # 立刻寫回，不等收尾
         if abort_reason: bail(abort_reason[0])
         if not res.startswith("OK"): bail("回程 retract 失敗：%s" % res)
+        # [2026-09-15] 回程「回 OK 但沒動」要看得見:軟停(張力達 retract_tension_stop_kg)會讓吊機
+        # 立刻回 OK。距離不足就明講,不要讓摘要印出一個 0.4 s 的假回程。
+        _after = height(field(ask(CRANE, "status", 10), "length_left"))
+        if _after is not None and (TOP - _after) > 5:
+            print("   🔴 回程未到頂:高度 %.0f cm(目標 %d)——吊機可能在張力軟停處提早結束(retract_tension_stop_kg)"
+                  % (_after, TOP))
         timing["up_cm"] += int(TOP - cur)
         timing["up_s"]  += dur
         timing["up_runs"] += 1

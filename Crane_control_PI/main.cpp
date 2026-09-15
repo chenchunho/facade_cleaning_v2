@@ -63,16 +63,21 @@
 //   up_left|up_right on|off           # hold 個別
 //   down_left|down_right on|off
 //   set_up_stop_total_kg <kg>         # hold-mode 收繩 L+R 總和門檻
+//   set_hold_guard on|off             # hold-mode 張力保護總開關（off = 只警示不停，同緊急收繩；2026-09-15 per user）
 //   set_tension_max_kg <kg>           # motion_rope 單側過載硬警報
 //   set_tension_diff_max_kg <kg>      # motion_rope 左右張力差硬警報
 //   set_length_diff_max_cm <cm>       # motion_rope 左右繩長差硬警報（2026-08-31 新增）
 //   set_retract_tension_stop_kg <kg>  # retract 收繩軟停張力（到了當完成、非錯誤）
-//   set_fine_adjust_level_diff <cm>   # fine_adjust 的「水平參考偏移」＝roll≈0 時的 L-R
+//   set_fine_adjust_level_diff <cm>   # fine_adjust 的「水平參考偏移」＝roll≈0 時的 L-R（level_auto=on 時會被學習值蓋掉）
+//   set_level_auto on|off             # 🆕 2026-09-15 水平基準自動學習（靜止 + IMU 新鮮時由 (L-R)+roll/k 推算並寫入上值）
+//   set_level_deg_per_cm <deg>        # 學習用斜率 k（預設 0.85 °/cm，2026-09-01 實測）
 //                                     # （2026-09-01 新增；預設 0 ＝ 舊行為。重心偏左 →
 //                                     #  水平時兩繩不等長，見該常數說明。計米器歸零後要重量）
 //   middle_set <rpm> <pay|retract|stop>
 //   zero_meters <ground|top>
 //   set_home_ground <cm>              # 直接設 home_ground_cm（重啟後復原用；zero_meters top 之外唯一的寫入點）
+//   set_wall_height <cm>              # 跨距（地面→頂端）；goto 的上限（2026-09-15 新增，不持久化，start_crane.sh 復原）
+//   goto <height_cm>                  # 🆕 絕對高度（離地 cm）：自己算差值轉 pay_out/retract，超範圍拒絕
 //   home_status
 //   roll_correct <delta_cm>           # + = 左放右收（粗調，計米器可驗，最小步階 3~4°）
 //   roll_trim_ms <+-ms>              # 脈衝式細調（|ms|<=500）；~0.3~0.45°/100ms
@@ -94,6 +99,7 @@
 #include <atomic>
 #include <mutex>
 #include <chrono>
+#include <ctime>
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
@@ -443,6 +449,35 @@ static std::atomic<int> g_fine_adjust_diff_tol_cm {1};   // 左右差容許（cm
 // ⚠️ 這是**症狀層**的處置。重心偏左的根因處置（配重／改吊點／接受並補償）
 //    是另一件事，見 work_log 待辦表。
 static std::atomic<int> g_fine_adjust_level_diff_cm {0};
+
+// [2026-09-15 per user] Auto-learn the level reference from the IMU.
+//
+// Why: the value above has to be re-measured after every meter zero and after
+// anything that moves the centre of mass (rail parked at 100 instead of 0
+// tilted the body +4° with L == R; each fine_adjust then forced the ropes back
+// to "equal" = tilted, the in-motion IMU balance fought it, and the per-move
+// diff guard aborted at 11 cm). The meters are exact right after zeroing but a
+// pulley can slip; the IMU is what "level" means. So whenever the machine is
+// stationary and the IMU is fresh, estimate the L-R that WOULD be level and
+// keep g_fine_adjust_level_diff_cm equal to it:
+//
+//     level_diff = (L - R) + roll / k          k = LEVEL_DEG_PER_CM (°/cm)
+//
+//   sign: roll > 0 ⟺ L < R (left rope shorter, 2026-09-01), lengthening the
+//   left rope by roll/k brings roll to 0 ⇒ add roll/k to L-R.
+//
+// Guards: not while any motion/hold/manual is active (readings lag), IMU must
+// be fresh, |roll| ≤ LEVEL_LEARN_MAX_ROLL_DEG (bigger = something else is
+// wrong, do not learn it), result clamped to ±20 cm like the setter. EMA over
+// the idle meter poll (~1 s) and ±0.75 cm hysteresis so the integer value
+// does not flap. Every change is logged + EVT level_diff_learned so the GUI
+// and cycle logs can see the reference move. Not persisted — it re-learns
+// within a second of the IMU coming up.
+static std::atomic<bool>   g_level_auto        {true};
+static std::atomic<double> g_level_deg_per_cm  {0.85};
+static constexpr double    LEVEL_LEARN_MAX_ROLL_DEG = 8.0;
+static constexpr int       LEVEL_DIFF_CLAMP_CM      = 20;
+static std::atomic<int64_t> g_level_learned_ms {0};   // steady ms of last write, 0 = never
 static constexpr double FINE_ADJUST_HZ_DEFAULT   = 10.0;  // 10→15→10 (2026-07-14: 15Hz 尾段雖快，但過衝大→IMU 微調 pass 變多、net 沒賺，改回 10。set_fine_adjust_hz 仍可 live 調)
 static constexpr int    FINE_ADJUST_TIMEOUT_MS   = 30000;
 static std::atomic<double> g_fine_adjust_hz {FINE_ADJUST_HZ_DEFAULT};
@@ -623,6 +658,32 @@ static std::mutex        motion_mtx;
 // Phase 1 top-zero snapshot: rope length from top to ground.
 // Set by `zero_meters top` (= |SD76 left| just before reset).
 static std::atomic<int32_t> home_ground_cm(0);
+// [2026-09-14 plan §4] `zeroed=` / `zeroed_at=` in status: epoch seconds of the
+// last successful zero_meters in THIS process (0 = none since start).
+// ⚠️ Process memory only. SD76 counts survive a crane restart (09-11: height
+//    102 still valid after reboot) and start_crane.sh restores home_ground_cm,
+//    so zeroed=0 after a restart does NOT mean the meters need re-zeroing —
+//    the GUI shows it as "not zeroed since start" and the operator decides.
+static std::atomic<int64_t> g_zeroed_at_s(0);
+
+// [2026-09-15 per user] Absolute-height motion. Every rope command so far is
+// a relative "pay_out/retract <cm>"; the caller has to compute the delta from
+// its own idea of where the machine is, and a stale or mis-added number can
+// retract past the top or pay out past the ground without anything on the
+// crane side noticing. `goto <height_cm>` moves the crane to an absolute
+// height above ground and refuses anything outside [0, span], so the guard
+// lives where the meters are.
+//
+//   height_cm = home_ground_cm - length_left
+//     ground-zero convention (home_ground_cm=0): height = -length_left
+//     top-zero convention   (home_ground_cm=span): height = span - length_left
+//
+// Upper bound = g_wall_height_cm (set_wall_height, from ~/run/wall_height.json
+// via start_crane.sh) or, when unset, home_ground_cm under top-zero. With
+// neither known the command is refused — unbounded "absolute" is no safer
+// than relative. Not persisted (same lifetime as home_ground_cm).
+static std::atomic<int32_t> g_wall_height_cm(0);
+static constexpr int WALL_HEIGHT_MAX_CM = 2000;   // typo guard only, not a mechanical limit
 
 // Watchdog state
 static std::atomic<uint64_t> last_ping_ms(0);     // 0 = no activity yet
@@ -758,6 +819,14 @@ static constexpr int        METER_POLL_MS_MOTION = 100;   // 150→100 (2026-05-
 
 // Total UP threshold (atomic for runtime adjustment via set_up_stop_total_kg)
 static std::atomic<double> g_up_stop_total_kg {UP_STOP_TOTAL_KG_DEFAULT};
+// [2026-09-15 per user] Master switch for the hold-mode (up/down on|off) tension
+// protection in hold_loop. ON (default): total-UP threshold + per-side
+// low/high/diff stop the hold (hold_all_off + EVT). OFF: the same checks only
+// broadcast `EVT manual_tension_warn` and never intervene — identical to the
+// emergency-retract path, so the operator can drive through a stuck machine
+// from the GUI without switching to the raw manual commands. Not persisted;
+// every restart comes back ON (protection is the default, not the exception).
+static std::atomic<bool> g_hold_guard_enabled {true};
 // motion_rope tension thresholds (atomic for runtime adjustment via web —
 // set_tension_max_kg / set_tension_diff_max_kg / set_retract_tension_stop_kg)
 static std::atomic<double> g_tension_max_kg          {TENSION_MAX_KG_DEFAULT};
@@ -2056,6 +2125,46 @@ static MeterReadResult meter_read_robust(
     return {false, 0, false};
 }
 
+// [2026-09-15] See g_level_auto. Runs from meter_loop after each cache refresh.
+static void level_learn_tick() {
+    static double est = NAN;                       // EMA state (meter_loop thread only)
+    static int64_t last_reject_log_ms = 0;
+    if (!g_level_auto.load()) { est = NAN; return; }
+    if (motion_active.load() || any_hold_active() || any_manual_motion()) { est = NAN; return; }
+    if (!g_length_left_valid.load() || !g_length_right_valid.load()) return;
+    if (!g_tension_valid.load()) return;           // rope slack / sensor off → readings meaningless
+    int64_t age = -1;
+    if (!imu_roll_fresh(&age)) return;
+    const double roll = g_imu_roll_deg.load();
+    if (std::fabs(roll) > LEVEL_LEARN_MAX_ROLL_DEG) return;
+    const double k = g_level_deg_per_cm.load();
+    if (!(k > 0.05)) return;
+    const int32_t L = g_length_left.load(), R = g_length_right.load();
+    const double sample = (double)(L - R) + roll / k;
+    if (std::fabs(sample) > LEVEL_DIFF_CLAMP_CM) {
+        const int64_t now = steady_now_ms();
+        if (now - last_reject_log_ms > 5000) {
+            last_reject_log_ms = now;
+            std::cerr << "[level_auto] sample " << sample << " cm out of ±" << LEVEL_DIFF_CLAMP_CM
+                      << " (L=" << L << " R=" << R << " roll=" << roll << ") — not learned\n";
+        }
+        return;
+    }
+    est = std::isnan(est) ? sample : (0.8 * est + 0.2 * sample);
+    const int cur = g_fine_adjust_level_diff_cm.load();
+    if (std::fabs(est - (double)cur) < 0.75) return;   // hysteresis
+    const int nv = (int)std::lround(est);
+    if (nv == cur) return;
+    g_fine_adjust_level_diff_cm.store(nv);
+    g_level_learned_ms.store(steady_now_ms());
+    std::ostringstream oss;
+    oss << "EVT level_diff_learned cm=" << nv << " was=" << cur
+        << " L=" << L << " R=" << R << " roll=" << roll << " k=" << k << "\n";
+    broadcast_evt(oss.str());
+    std::cout << "[level_auto] level_diff " << cur << " → " << nv
+              << " cm (L-R=" << (L - R) << " roll=" << roll << "° k=" << k << ")\n";
+}
+
 static void meter_loop() {
     // [2026-08-30 重構階段 3] 左右兩塊原本是逐字重複的程式碼，收斂成對 RopeAxis
     // 的迴圈。🔴 **順序必須維持左 → 右** —— 匯流排上的位元組序列是等價比對的
@@ -2084,6 +2193,7 @@ static void meter_loop() {
         }
         // Motion-aware poll rate: when motors are running, slow down to avoid
         // contending with SE3 / CLV900 writes on the same TCP_client mutex.
+        level_learn_tick();                        // [2026-09-15] auto level reference (no-op while busy)
         const bool motion_busy = motion_active.load() || any_hold_active();
         std::this_thread::sleep_for(std::chrono::milliseconds(
             motion_busy ? METER_POLL_MS_MOTION : METER_POLL_MS_IDLE));
@@ -2339,7 +2449,7 @@ static void hold_loop() {
             g_tension_right.store(r);
             g_tension_valid.store(true);
 
-            if (active) {
+            if (active && g_hold_guard_enabled.load()) {
                 // Total threshold (only when UP active — DOWN releases tension)
                 const bool up_active = hold_up_left.load() || hold_up_right.load();
                 if (up_active) {
@@ -2369,7 +2479,9 @@ static void hold_loop() {
             // 🔴 刻意**不呼叫 hold_all_off()** —— motion_flow.md §8 明訂
             //    「緊急模式下不信任自動邏輯，完全由操作員眼睛判定何時放開」，
             //    機器卡住時自動停止會擋住救援。這裡只補上「眼睛需要的數字」。
-            else if (any_manual_motion()) {
+            // [2026-09-15] `active && !guard` lands here too: hold with the guard
+            // switched off is warn-only, exactly like emergency retract.
+            else if (any_manual_motion() || active) {
                 // ✅ [2026-09-01 更新] 這段警示的兩個前提限制**都已解除**：
                 //    ① 刻度已用已知重量（4.16kg）在兩側各校正一次，左右分開
                 //       （DSZL_SCALE_LEFT / DSZL_SCALE_RIGHT，見該常數的說明）；
@@ -3813,6 +3925,70 @@ static std::string cmd_set_home_ground(int cm) {
     return oss.str();
 }
 
+static std::string cmd_set_wall_height(int cm) {
+    if (cm < 0 || cm > WALL_HEIGHT_MAX_CM) {
+        std::ostringstream e;
+        e << "ERR out_of_range (0.." << WALL_HEIGHT_MAX_CM << ")\n";
+        return e.str();
+    }
+    const int32_t prev = g_wall_height_cm.load();
+    g_wall_height_cm.store(cm);
+    std::ostringstream oss;
+    oss << "OK wall_height_cm=" << cm << " (was " << prev << ")\n";
+    return oss.str();
+}
+
+// Span used as goto's ceiling: explicit wall height wins; otherwise the
+// top-zero convention's home_ground_cm already IS the span. 0 = unknown.
+static int32_t goto_span_cm_() {
+    const int32_t w = g_wall_height_cm.load();
+    if (w > 0) return w;
+    return home_ground_cm.load();
+}
+
+static std::string cmd_goto(int target_cm) {
+    const int32_t span = goto_span_cm_();
+    if (span <= 0) return "ERR wall_height_unset (set_wall_height <cm> or zero_meters top)\n";
+    if (target_cm < 0 || target_cm > span) {
+        std::ostringstream e;
+        e << "ERR out_of_range target=" << target_cm << " span=0.." << span << "\n";
+        return e.str();
+    }
+    if (!g_length_left_valid.load())  return "ERR meter_left_read_fail\n";
+    if (!g_length_right_valid.load()) return "ERR meter_right_read_fail\n";
+    // [2026-09-15 per user] A slipping meter only ever UNDER-counts, so the two
+    // readings bracket the truth: going up the machine is at least as high as
+    // the higher reading says, going down at least as low as the lower one.
+    // Take the pessimistic side for the direction of travel so a slipped meter
+    // can never make goto overshoot the top or the ground. (level_auto keeps
+    // L-R itself honest; this is about the absolute height.)
+    const int32_t hL = home_ground_cm.load() - g_length_left.load();
+    const int32_t hR = home_ground_cm.load() - g_length_right.load();
+    const int32_t h_hi = std::max(hL, hR), h_lo = std::min(hL, hR);
+    std::ostringstream oss;
+    if (target_cm >= h_lo && target_cm <= h_hi) {   // inside the bracket: nothing safe to do
+        oss << "OK goto already_there target=" << target_cm << " from=" << hL << "/" << hR << "\n";
+        return oss.str();
+    }
+    const bool    up    = target_cm > h_hi;
+    const int32_t here  = up ? h_hi : h_lo;
+    const int32_t delta = target_cm - here;         // + = go up = retract
+    if (delta == 0) {
+        oss << "OK goto already_there target=" << target_cm << " from=" << here << "\n";
+        return oss.str();
+    }
+    const int cm = up ? delta : -delta;
+    const std::string r = motion_rope(cm, /*is_retract=*/up);
+    if (r.rfind("OK", 0) != 0) return r;            // ERR passes through unchanged
+    const int32_t nL = home_ground_cm.load() - g_length_left.load();
+    const int32_t nR = home_ground_cm.load() - g_length_right.load();
+    const int32_t now = up ? std::max(nL, nR) : std::min(nL, nR);
+    oss << "OK goto target=" << target_cm << " from=" << here << " (L=" << hL << " R=" << hR << ")"
+        << " " << (up ? "retract" : "pay_out") << "=" << cm
+        << " now=" << now << " err=" << (now - target_cm) << "\n";
+    return oss.str();
+}
+
 static std::string cmd_zero_meters(const std::string& mode) {
     if (mode != "ground" && mode != "top") return "ERR expected_ground_or_top\n";
 
@@ -3843,6 +4019,7 @@ static std::string cmd_zero_meters(const std::string& mode) {
     meter_left  .resumeMeter();
     meter_right .resumeMeter();
     if (reset_middle) meter_middle.resumeMeter();
+    g_zeroed_at_s.store((int64_t)std::time(nullptr));   // [2026-09-14] both mandatory resets succeeded
 
     // Verify reset actually applied — bench 2026-05-14 observed cases where the
     // resetAll Modbus write returns success (no protocol error) but SD76
@@ -4015,6 +4192,7 @@ static std::string cmd_status() {
     oss << " down_left="       << (hold_down_left.load()  ? 1 : 0);
     oss << " down_right="      << (hold_down_right.load() ? 1 : 0);
     oss << " up_stop_total_kg="<< g_up_stop_total_kg.load();
+    oss << " hold_guard="       << (g_hold_guard_enabled.load() ? 1 : 0);   // [2026-09-15] set_hold_guard
     oss << " tension_max_kg="  << g_tension_max_kg.load();
     oss << " tension_diff_max_kg=" << g_tension_diff_max_kg.load();
     oss << " length_diff_max_cm=" << g_length_diff_max_cm.load();
@@ -4027,6 +4205,7 @@ static std::string cmd_status() {
     oss << " meter_right_scale="  << (g_meter_right_scale_valid .load() ? std::to_string(g_meter_right_device_scale .load()) : std::string("ERR"));
     oss << " meter_middle_scale=" << (g_meter_middle_scale_valid.load() ? std::to_string(g_meter_middle_device_scale.load()) : std::string("ERR"));
     oss << " home_ground_cm="  << home_ground_cm.load();
+    oss << " wall_height_cm="  << g_wall_height_cm.load();   // [2026-09-15] goto ceiling (0 = unset)
     oss << " hold_hz="         << g_vfd_hold_hz.load();
     oss << " motion_hz="       << g_vfd_motion_hz.load();
     oss << " middle_hz="       << g_middle_winch_hz.load();
@@ -4043,6 +4222,12 @@ static std::string cmd_status() {
     oss << " roll_finish_hz="   << g_roll_finish_hz.load();
     oss << " fine_adjust_diff_tol_cm=" << g_fine_adjust_diff_tol_cm.load();
     oss << " fine_adjust_level_diff_cm=" << g_fine_adjust_level_diff_cm.load();
+    {   // [2026-09-15] auto level reference
+        const int64_t lm = g_level_learned_ms.load();
+        oss << " level_auto=" << (g_level_auto.load() ? 1 : 0)
+            << " level_deg_per_cm=" << g_level_deg_per_cm.load()
+            << " level_learned_age_s=" << (lm ? (steady_now_ms() - lm) / 1000 : -1);
+    }
     // [2026-09-01] IMU 平衡的可觀測性：來源、最後收到的 roll、資料年齡。
     // 🔴 age 一定要出現在 status —— 只看 balance_source=imu 會誤以為它在運作，
     //    實際上資料過期時走的是計米器路徑（見 apply_balance_trim）。
@@ -4076,6 +4261,12 @@ static std::string cmd_status() {
     // `dev_pqw_water=` deliberately mirrors the EVT spelling (see below).
     oss << " dev_gw_w="        << (g_gw_w_ok.load()         ? 1 : 0);
     oss << " dev_pqw_water="   << (g_dev_zs_water.load()    ? 1 : 0);
+    // [2026-09-14 plan §4] see g_zeroed_at_s for the restart caveat.
+    {
+        const int64_t z = g_zeroed_at_s.load();
+        oss << " zeroed="    << (z ? 1 : 0);
+        oss << " zeroed_at=" << z;
+    }
     // [2026-09-10] 進水閥 deadman 的可見度。-1 = 閥是關的（未武裝）。
     {
         const int64_t ts = g_water_open_ts_ms.load();
@@ -4438,6 +4629,17 @@ static std::string cmd_hold(const std::string& dir, const std::string& onoff) {
     return err ? "ERR vfd_cmd_fail\n" : "OK\n";
 }
 
+static std::string cmd_set_hold_guard(const std::string& mode) {
+    if (mode != "on" && mode != "off") return "ERR expected_on_or_off\n";
+    const bool on = (mode == "on");
+    const bool prev = g_hold_guard_enabled.exchange(on);
+    if (prev != on) {
+        std::cout << "[crane] hold_guard " << (on ? "ON" : "OFF — hold 張力保護只警示不停") << "\n";
+        broadcast_evt(std::string("EVT hold_guard ") + (on ? "on" : "off") + "\n");
+    }
+    return std::string("OK hold_guard=") + (on ? "1" : "0") + "\n";
+}
+
 static std::string cmd_set_up_stop_total_kg(double kg) {
     if (kg <= 0 || kg > 500) return "ERR threshold_out_of_range\n";
     g_up_stop_total_kg.store(kg);
@@ -4781,7 +4983,27 @@ static std::string cmd_set_fine_adjust_level_diff(int cm) {
     if (cm < -20 || cm > 20) return "ERR out_of_range\n";
     g_fine_adjust_level_diff_cm.store(cm);
     std::cout << "[crane] fine_adjust_level_diff_cm = " << cm
-              << " cm（fine_adjust 的收斂目標改為 L-R=" << cm << "）\n";
+              << " cm（fine_adjust 的收斂目標改為 L-R=" << cm << "）"
+              << (g_level_auto.load() ? "⚠ level_auto=on，靜止時會被學習值蓋掉" : "") << "\n";
+    return g_level_auto.load() ? "OK note=level_auto_on_will_override\n" : "OK\n";
+}
+
+static std::string cmd_set_level_auto(const std::string& mode) {
+    if (mode != "on" && mode != "off") return "ERR expected_on_or_off\n";
+    const bool on = (mode == "on");
+    const bool prev = g_level_auto.exchange(on);
+    if (prev != on) {
+        std::cout << "[crane] level_auto " << (on ? "ON" : "OFF（水平基準凍結在 "
+                     + std::to_string(g_fine_adjust_level_diff_cm.load()) + " cm）") << "\n";
+        broadcast_evt(std::string("EVT level_auto ") + (on ? "on" : "off") + "\n");
+    }
+    return std::string("OK level_auto=") + (on ? "1" : "0") + "\n";
+}
+
+static std::string cmd_set_level_deg_per_cm(double k) {
+    if (!(k >= 0.2 && k <= 5.0)) return "ERR out_of_range (0.2..5.0)\n";
+    g_level_deg_per_cm.store(k);
+    std::cout << "[crane] level_deg_per_cm = " << k << "\n";
     return "OK\n";
 }
 static std::string cmd_set_roll_finish_hz(double hz) {
@@ -5045,6 +5267,11 @@ static std::string dispatch(const std::string& line) {
         if (iss.fail()) return "ERR usage:roll_trim_ms_<+-ms>\n";
         return cmd_roll_trim_ms(ms);
     }
+    if (cmd == "set_hold_guard") {
+        std::string m; iss >> m;
+        if (iss.fail()) return "ERR usage:set_hold_guard_<on|off>\n";
+        return cmd_set_hold_guard(m);
+    }
     if (cmd == "set_up_stop_total_kg") {
         double kg = 0; iss >> kg;
         if (iss.fail()) return "ERR usage:set_up_stop_total_kg_<kg>\n";
@@ -5191,6 +5418,16 @@ static std::string dispatch(const std::string& line) {
         if (iss.fail()) return "ERR usage:set_fine_adjust_diff_tol_<cm>\n";
         return cmd_set_fine_adjust_diff_tol(v);
     }
+    if (cmd == "set_level_auto") {
+        std::string m; iss >> m;
+        if (iss.fail()) return "ERR usage:set_level_auto_<on|off>\n";
+        return cmd_set_level_auto(m);
+    }
+    if (cmd == "set_level_deg_per_cm") {
+        double k = 0; iss >> k;
+        if (iss.fail()) return "ERR usage:set_level_deg_per_cm_<deg>\n";
+        return cmd_set_level_deg_per_cm(k);
+    }
     if (cmd == "set_fine_adjust_level_diff") {
         int v = 0; iss >> v;
         if (iss.fail()) return "ERR usage:set_fine_adjust_level_diff_<cm>\n";
@@ -5200,6 +5437,16 @@ static std::string dispatch(const std::string& line) {
         int v = 0; iss >> v;
         if (iss.fail()) return "ERR usage:set_home_ground_<cm>\n";
         return cmd_set_home_ground(v);
+    }
+    if (cmd == "set_wall_height") {
+        int v = 0; iss >> v;
+        if (iss.fail()) return "ERR usage:set_wall_height_<cm>\n";
+        return cmd_set_wall_height(v);
+    }
+    if (cmd == "goto") {
+        int v = 0; iss >> v;
+        if (iss.fail()) return "ERR usage:goto_<height_cm>\n";
+        return cmd_goto(v);
     }
     if (cmd == "set_roll_finish_hz") {
         double v = 0; iss >> v;

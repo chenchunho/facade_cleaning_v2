@@ -112,13 +112,18 @@ EVT mission stop reason=<user|precheck|bail:…|safe> summary="no_seal=1 warn=0 
        ⑦ EVT safe_enter src=<tension|watchdog|roll|user|di> detail=…
 吊機:  safe_enter → stop + hold_all_off + safe_locked=1;拒絕 pay_out/retract/hold(回 ERR safe_locked);status 加 safe=1
 ```
+✅ **2026-09-14 per user 拍板:① 是「暫停可續」,不是終止** —— mission worker 停在下一個 `try_or_pause_` 檢查點、任務物件保留;
+SAFE 期間 `continue`/`skip` 一律回 `ERR safe_locked`;只有 `safe_clear` 通過後才能 `continue`(或 `mission stop` 放棄)。
+理由:重用 `PausedOnError` 現成路徑、SAFE 多半在步進中途、昨天「有 mission → paused」本來就預設任務還活著。fake 已同步(不再 `request_stop('safe')`)。
 ✅ ⑥ **2026-09-13 per user 拍板:直接關**。理由與「吸附時關槳」一致 —— SAFE 下靠吸盤/鋼索撐,不靠推力;槳轉著是額外風險(單路 PWM、斷線維持輸出)。設計「槳降至保壓」不採用。
 
 ### 3.4 解除
 
 `safe_clear <reason>`(**只從 GUI,且在危險操作 60 s 解鎖窗內**)→ 本體驗證:`tension_valid=1`、\|roll\| < 門檻、吊機/手臂連線 fresh → 送吊機 `safe_clear` → 轉 **`Paused`**(不是 Running;mission 可 `continue` 或 `mission stop`)→ `EVT safe_clear by=gui reason=…`。
 驗證不過 → `ERR safe_clear_refused item=…`。
-🟡 **待拍板(AI-2 做 v3 時發現,2026-09-13)**:**無任務時 `safe_clear` 回哪個狀態?** 上一段「轉 Paused」是以有 mission 為前提;
+✅ **2026-09-14 per user 拍板(依建議)**:**有 mission → `paused`;無 mission → `ready`(幫浦開)或 `idle`。** fake_robot 已如此。
+✅ **2026-09-14 per user 拍板②**:自檢頁 ③ `zeroed=0` 是**軟提示不硬擋**(重啟 ≠ 計米器讀值失效;真要擋的是讀值不合理,之後用 length 與 home_ground 的關係判)。
+~~🟡 待拍板(AI-2 做 v3 時發現,2026-09-13)~~:無任務時 `safe_clear` 回哪個狀態? 上一段「轉 Paused」是以有 mission 為前提;
 無任務時回 `paused` 會讓 `mission start` 被前置檢查(state 需 idle/ready)擋住,得先 `continue` 才能起。
 **建議**:有 mission → `paused`;無 mission → **`ready`**(SAFE 前若已 init)或 `idle`。fake_robot 先照建議實作,待拍板後對齊。
 
@@ -132,12 +137,12 @@ EVT `safe_enter/safe_clear` + `status safe=1 safe_src=`;GUI 全頁 banner(現有
 
 | 程式 | 新欄位 / 指令 | 來源 |
 |---|---|---|
-| 本體 `status` | `dev_zdt=<n_ok>/4 dev_pqw= dev_dm2j= dev_jc100=<n_ok>/4 dev_xkc= dev_qx= dev_imu= dev_arm=` | `init()` 各驅動結果旗標(現在只印 log) |
+| 本體 `status` | `dev_gw20= dev_gw21= dev_gw22= dev_zdt=<n_ok>/4 dev_pqw= dev_dm2j= dev_jc100=<n_ok>/4 dev_xkc= dev_qx= dev_imu= dev_arm= selfcheck_age_s=<s|-1>` | ~~`init()` 各驅動結果旗標~~ 🔴 **09-14 實作時推翻**:本體 `init()` 對 ZDT/DM2J/JC-100/XKC/QX 是 Mode B(只綁 client,**不發包**),init 旗標永遠是 1、證明不了裝置在線。改為 **`selfcheck` 指令做真探測**(每裝置一筆讀、不動作;`zdt_bus_mtx_` try-lock,忙碌回 `ERR busy`),`status` 只回快取 + `selfcheck_age_s`;`init()` 結尾自動跑一次。`dev_gw2x`/`dev_jc100`/`dev_imu`(2 s 內有 0x53 封包)/`dev_arm` 是即時的。**GUI「重讀」要先送 `selfcheck` 再 poll。** |
 | 本體 `status` | `zdt_homed_at=<epoch|0>` | `zdt_home` 成功時記;**blip 無法自動偵測**,GUI 顯示「距上次 X 分鐘」由人判斷 |
 | 本體 `status` | `arm_ready=0|1` | 最近一次 `arm_status` 的 `en=1` 且手臂 `init_done=1` |
 | 手臂 `STATUS` | `init_done=0|1` 加在 `[M1]` 行尾 | `INIT` 成功置 1 |
-| 手臂 | `PING` → `OK pong` | 順手解掉 web_backend 保活被 `ERR unknown command` 洗版 |
-| 吊機 `status` | `zeroed=0|1`(`zero_meters` 做過)、`safe=0|1 safe_src=` | 已有 `dev_gw_*/dev_meter_*/dev_dsz_*` |
+| 手臂 | `PING` → `OK pong` | ✅ 09-14 per user 拍板:**手臂加 PING**(不改 web_backend 保活);解掉 `ERR unknown command` 洗版 |
+| 吊機 `status` | `zeroed=0|1 zeroed_at=<epoch|0>`(本行程內 `zero_meters` 成功過)、`safe=0|1 safe_src=` | 已有 `dev_gw_*/dev_meter_*/dev_dsz_*`。⚠️ **行程記憶**:SD76 計數跨重啟保留、`start_crane.sh` 會補 `set_home_ground`,所以重啟後 `zeroed=0` ≠ 要重新歸零 —— GUI 顯示「本次啟動未歸零」由人判斷(09-14) |
 | 吊機 | `safe_enter` / `safe_clear`(§3) | 新 |
 | 點動 | 不需 C++:GUI 送 `pay_out_left 2` → 看 `length_left` 變 2 → 再 `retract_left 2` | GUI 驗 |
 
@@ -186,7 +191,7 @@ Manual:SAFE 時上鎖(只留 status/stop/safe_clear;吊機 raw hold 仍可 —�
 |---|---|---|---|
 | 0 | 介面凍結(本檔 §2–§4)+ fake_robot 實作 + GUI 開始 | 無 | fake 自測 |
 | **前置** | **`crane_cmd_` 行緩衝**(EVT 半行誤當回覆)+ **本體 watchdog 復活**(AI-2 patch)—— ✅ 09-13 per user 確認為階段 3 前必修 | 中 | 拔線 / 注入半行 EVT 測 |
-| 1 | **自檢欄位**(§4):本體 dev_* / zdt_homed_at / arm_ready;手臂 init_done + PING;吊機 zeroed | 低(只加欄位) | 語法 + 上機讀 status |
+| 1 | ✅ **09-14 完成、上機驗過**:自檢欄位(§4):本體 dev_* / `selfcheck` / zdt_homed_at / arm_ready;手臂 init_done + PING;吊機 zeroed/zeroed_at | 低(只加欄位) | 真機 `selfcheck all_ok=1 zdt=4/4 pqw=1 dm2j=1 xkc=1 qx=1`、`PING`→`OK pong`、`init_done=0`(只 STARTUP 未 INIT,正確) |
 | 2 | **前置修 watchdog**(本體端監看吊機,AI-2 patch)| 中 | 拔線測 |
 | 3 | **mission 引擎**(§2)+ `mission_monitor_`(§3.2) | 中高 | §7-1 序列等價 + 上機一步 |
 | 4 | **SAFE**(§3):State::Safe、吊機 safe_locked、三源接線、解除 | 中高 | 人為觸發三源各一次 |
@@ -198,8 +203,9 @@ Manual:SAFE 時上鎖(只留 status/stop/safe_clear;吊機 raw hold 仍可 —�
 
 ## 9. 前置與風險
 
-- 🔴 **`crane_cmd_` 收包無行緩衝**(待辦 🔴🔴):會把 EVT 半行當回覆。mission 引擎重度依賴吊機 EVT ⇒ **階段 3 前必修**。
-- 🔴 本體 watchdog 死碼(階段 2)。
+- ✅ **09-14 修畢、真機部署**:`crane_cmd_` 收包緩衝改成員 + 送前整行消化(真因含 `TCP_client::sendData()` 的 4 KB 靜默排空);
+  回歸測試 `harness/crane_linebuf_test.sh`(修前 2/6 → 修後 6/6)。
+- 🟡 本體 watchdog:09-10 已補回為**觀測模式**(`crane_wd_abort_ms=0`)。運動中峰值尚無實測 ⇒ ④ full 跑完讀 `crane_idle_ms_max_motion` 訂門檻;abort → SAFE 在階段 4 接。
 - `motion_mtx_` 非重入:mission worker 持鎖,內部呼叫 `do_feet_realign_` 類函式要走 `unique_lock` 手動放(`engineering_pitfalls.md` §2.4)。
 - `arm_cmd_` INIT 逾時真因未明(待辦);mission 不在步內送 INIT,只在 checklist ⑦。
 - `emergency_stop` 語意改變(Idle → Safe)要同步 GUI 與 runbook。

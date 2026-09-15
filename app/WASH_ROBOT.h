@@ -163,6 +163,11 @@ public:
     std::string cmd_emergency_stop();
     std::string cmd_shutdown();
     std::string cmd_status();
+    // [2026-09-14 plan §4 階段 1] On-demand device probe. `status` only reports
+    // the cached result of the last probe (+ selfcheck_age_s) because a real
+    // probe costs ~7 bus transactions and must not ride the 2 Hz status poll.
+    // init() runs it once at the end; the GUI self-check page re-runs it.
+    std::string cmd_selfcheck();
     std::string cmd_vacuum(const std::string& group, bool on);
     std::string cmd_pump(bool on);                       // dp0105 vacuum pump — 作用在目前輪替中那顆 (2026-09-10)
     std::string cmd_pump_status_();                      // [2026-09-10] A/B 輪替狀態 (active/累計/門檻)
@@ -239,6 +244,7 @@ public:
     std::string cmd_continue();   // resume from PausedOnError = retry the failed op
     std::string cmd_skip();       // resume from PausedOnError = skip (assume manual fix)
     std::string cmd_crane_attached(bool on);   // toggle whether washrobot drives the crane
+    std::string cmd_crane_goto(int height_cm); // [2026-09-15] absolute height → crane `goto` (range guard lives on the crane)
     // [2026-09-10] crane watchdog 門檻（執行期可調，見成員宣告處的三步落地說明）
     std::string cmd_set_crane_wd_warn_ms(int ms);
     std::string cmd_set_crane_wd_abort_ms(int ms);
@@ -343,7 +349,9 @@ public:
         Balancing,       // Phase 5 roll correction running
         ReturningHome,   // Phase 6 return_home running
         Calibrating,     // [2026-06-02] balance calibration (Phase 1-4) running; ends Idle (cups off) on success
-        Error            // hard fault — only status / ping / reset / return_home allowed
+        Error            // hard fault / 急停收回中 —— 自動流程一律擋下；人工單一動作放行
+                         // （2026-09-15：Manual 在 Error 可用，見 state_violation_ 上方）。
+                         // 急停的收回全部成功後會自動回到 Idle，不需要人按 reset。
     };
 
     enum class PauseAction { None = 0, Retry = 1, Skip = 2, Abort = 3 };
@@ -380,6 +388,14 @@ public:
     // 🔴 這個常數是唯一真實來源：`cm_to_pulses_for_slave_` 與
     //    `do_feet_realign_` 都吃它，不要再各自寫死。
     static constexpr double CUP_PULSE_PER_CM = 3000.0;
+    // [2026-09-15] ZDT 回報的位置單位是**度**(status.real_pos),下命令的單位是**脈衝**。
+    // 換算係數不從手冊推(手冊寫 1.8°+16 細分 ⇒ 3200 脈衝/圈 = 8.889 脈衝/度),而是用實機兩個
+    // 獨立工作點量:收腳目標 300 脈衝 → 實測 29.83~29.99°(10.03);伸出目標 30000 脈衝 →
+    // 實測 2998.7~3018.9°(10.00)。兩點一致 ⇒ **10 脈衝/度**(＝3600 脈衝/圈,細分設定與手冊
+    // 範例不同)。🔴 改過驅動器細分設定就要重量這個數。
+    static constexpr double PUSHER_PULSE_PER_DEG = 10.0;
+    // 「已經在目標」的容差:0.1 cm。小於它就不下命令 —— 見 pusher_move_many_ 的說明。
+    static constexpr double PUSHER_AT_TARGET_TOL_PULSE = 300.0;
 
     static constexpr int CUP_SLAVE_FIRST = 5;
     static constexpr int CUP_SLAVE_LAST  = 8;
@@ -768,17 +784,27 @@ private:
     static constexpr int PUSHER_EXTEND_BODY_PULSE       = 34000;  // body upper (slave 5,6) ~11.3 cm (2026-05-28: 30000→36000 +6000=+2cm; 2026-05-28i: 36000→33000 -3000=-1cm，bench 顯示 36000+over 害 Phase 1 fast 700rpm 撞 wall peakI 1500mA+；2026-05-29: 33000→34000 +1000=+0.8cm，邊際提速 iter loop 收斂)
     static constexpr int PUSHER_EXTEND_BODY_PULSE_SHORT = 35400;  // body lower (slave 7,8) ~11.8 cm (2026-05-28: 29400→32400 +3000=+1cm；2026-05-28h: 32400→35400 +3000=+1cm，bench log body lower wall at 42798、SHORT 仍不夠導致 iter 0 plateau,加深一輪)
     static constexpr int PUSHER_RETRACT_PULSE      = 300;   // 收腳目標 (2026-07-14: 0→300 ≈0.1cm)。高速收到 0=機械原點會撞 hardstop「叩」一聲；停在原點前 0.1cm 避免撞擊。<FAKE-DONE 容差 50°(500pulse)、300pulse=30° 仍算收好
-    static constexpr int PUSHER_RPM           = 600;     // extend 用（feet）(2026-07-14: 700→1200 激進提速；2026-07-23 per user: 1200→900 調降；2026-09-09 per user: 900→600 ＝ 2/3 速)
+    static constexpr int PUSHER_RPM           = 400;     // extend 用（feet）(2026-07-14: 700→1200 激進提速；2026-07-23 per user: 1200→900 調降；2026-09-09 per user: 900→600 ＝ 2/3 速；2026-09-15 per user: 600→400 再減 1/3)
     // [2026-07-31 per user] pusher_two_stage_retract_ 改成比照 Linux_test 功能31
     // 的破真空輔助單段直收（CH_BREAK_VACUUM 主動破壞真空 + 直接快收，不再需要
     // 慢慢剝離）。原兩段式的常數鏈已於 2026-09-09 刪除（見下方說明）；RETRACT_SLOW_PEEL_CM 保留
     // 這三個「第一段慢脫壁」專用的常數不再被 retract 邏輯使用（保留常數定義本身，
     // 因為 RETRACT_SLOW_PEEL_CM 還有 runtime settings_ 可調路徑，懶得順便拆）。
-    static constexpr int PUSHER_RPM_RETRACT_FULL = 500;     // 破真空輔助單段直收速度 (2026-07-31 per user: 900→1000 比照 bench 初版 → bench 上又測過 900→700→500，同步拉回正式程式)
+    static constexpr int PUSHER_RPM_RETRACT_FULL = 400;     // 破真空輔助單段直收速度 (2026-07-31 per user: 900→1000 比照 bench 初版 → bench 上又測過 900→700→500，同步拉回正式程式；2026-09-15 per user: 500→330 再減 1/3 → 同日 330→400→600→500→600→400(per user 定案。舊正壓時序下 600rpm 峰值 2.1A;改成「正壓包住整個收」後 500/600 都只有 0.4~0.6A,速度不再受電流限制,回到 400 取餘裕))
     static constexpr double RETRACT_SLOW_PEEL_CM = 1.0;     // [已不用於 retract] 原兩段式第一段慢脫壁距離
     // [2026-07-31 per user] 破真空閥時序，比照 Linux_test 功能31 bench 驗證值。
-    static constexpr int BREAK_VACUUM_PRE_RETRACT_MS = 80;   // CH_BREAK_VACUUM ON -> 收腳指令送出
-    static constexpr int BREAK_VACUUM_TOTAL_ON_MS    = 500;  // CH_BREAK_VACUUM ON -> OFF（收腳指令在這段時間內送出）
+    // 🔴 [2026-09-15 per user, 當日三修] 收腳時序 = **開閥同時就收,正壓包住整個收的動作**:
+    //    關真空閥 → 靜置 PRE_ON_REST(100) → CH6 ON → (PRE_MOVE=0,不等)送四顆同步收
+    //    → HOLD_MOVE(300) → CH6 OFF。**收腳指令送出後不等到位就往下走**(到位由後面的輪詢等)。
+    //    沿革:① ON → 80ms → 收 → 閥開到累計 500ms;② 灌完關閥靜置 100ms 才收;
+    //          ③ 開閥 500ms 後收、收完再灌 500ms;④ 本版(開閥即收)。
+    //    ②③④ 的實測:峰值電流由舊時序的 1.1~2.1A 降到 0.37~0.56A,600rpm 也不再是問題。
+    static constexpr int BREAK_VACUUM_PRE_MOVE_MS    = 0;    // CH6 ON → 送收腳指令(0 = 開閥後立刻收,2026-09-15③ per user)
+    static constexpr int BREAK_VACUUM_HOLD_MOVE_MS   = 300;  // 送收腳指令 → CH6 OFF(收的過程繼續灌;2026-09-15 per user: 500→300)
+    static constexpr int BREAK_VACUUM_ON_MS          = 500;  // [已不用,2026-09-15②] 舊:ON 持續時間(到時關閥)
+    static constexpr int BREAK_VACUUM_POST_OFF_MS    = 100;  // [已不用,2026-09-15②] 舊:關閥後靜置才送收腳
+    static constexpr int BREAK_VACUUM_PRE_RETRACT_MS = 80;   // [已不用,2026-09-15] 舊:ON -> 收腳指令送出
+    static constexpr int BREAK_VACUUM_TOTAL_ON_MS    = 500;  // [已不用,2026-09-15] 舊:ON -> OFF(收腳在這段期間送出)
 
     // [2026-08-28] 真空閥 OFF -> 破真空閥 ON 之間的強制靜置。
     //
@@ -795,8 +821,14 @@ private:
     //     第一次  STALL at 900ms  peakI=3061mA   ← 破真空沒 fire，硬撕到卡死
     //     RETRY   done  at 450ms  peakI=3mA      ← PAUSE 等按鍵 = 超大 gap，正常
     //   差三個數量級，兩次唯一的差別就是中間隔了多久。
-    static constexpr int BREAK_VACUUM_PRE_ON_REST_MS = 300;
-    static constexpr int PUSHER_RPM_BODY_EXTEND = 700;   // body 組 extend 速度（與其他組同速）
+    // 🔴 2026-09-15 per user 六修:300→500→300→100→0→**100**(定案)。
+    //    🔬 **0 ms 實測會讓破真空閥靜默不動作**(三輪重現):收腳峰值電流由 100ms 版的
+    //       0.36~0.52 A 跳到 **2.09~2.28 A**(四支全部)、收腳變慢 2.8→3.4s、一輪收完 p8 還殘留
+    //       −3 kPa。log 照印 `CH6 ON`(Modbus 回成功)但繼電器沒動 —— 正是下方記載的 PQW 行為。
+    //    ⇒ **100 ms 是實測下限,不要再往下調**;它沒有時間成本(收腳 2.8 s 已是今天最快)。
+    //    🔴 檢驗方法就是收腳峰值電流:>1.5 A = 閥沒 fire,第一個懷疑這個值。
+    static constexpr int BREAK_VACUUM_PRE_ON_REST_MS = 100;
+    static constexpr int PUSHER_RPM_BODY_EXTEND = 470;   // body 組 extend 速度（v2 沒有 body 組，留著保持一致；2026-09-15 per user: 700→470 同步減 1/3）
     static constexpr int PUSHER_ACC           = 255;     // acc 用（feet / center extend，max）
     static constexpr int PUSHER_ACC_RETRACT   = 255;     // retract 用（所有組，高 acc 快速收回）
     static constexpr int PUSHER_ACC_BODY_EXTEND = 255;   // body 組 extend acc（與其他組同步）
@@ -808,7 +840,7 @@ private:
     //         PUSHER_RETRACT_CM_PER_SEC / PUSHER_STAGE1_SAFETY_FACTOR /
     //         PUSHER_STAGE1_DELAY_MS
     //
-    // 為什麼刪：現行 retract 是**單段直收**（PUSHER_RPM_RETRACT_FULL = 500），
+    // 為什麼刪：現行 retract 是**單段直收**（PUSHER_RPM_RETRACT_FULL，2026-09-15 起 330），
     // 兩段式早已退場。留下的那條鏈**沒有任何程式碼讀它** —— 逐一查證：
     //   PUSHER_STAGE1_DELAY_MS ← 只有自己的定義 + 一行註解提到，**零使用點**
     //   PUSHER_RETRACT_CM_PER_SEC / SAFETY_FACTOR ← 只被上面那個死常數用
@@ -1548,6 +1580,18 @@ private:
     std::mutex           zdt_bus_mtx_;
 
     std::mutex           crane_mtx_;
+    // [2026-09-14 plan §9 前置] Receive line buffer for crane_cmd_, PERSISTENT
+    // across calls (guarded by crane_mtx_). Before this the buffer was a local:
+    // whatever followed the reply in the same recv (typically the head of the
+    // next EVT broadcast) was thrown away, and the next call then read the
+    // TAIL of that EVT as its "reply" — 2026-09-09 `water_inlet off` ×3
+    // "failed" with replies like `_cm=220 r_cm=219…`. Also lets a reply that
+    // arrives after its call timed out be recognised and dropped as stale
+    // instead of being consumed by the next command.
+    std::string          crane_rx_buf_;
+    // Consume every complete line already in crane_rx_buf_: EVT → handler,
+    // anything else is a stale reply (logged, dropped). Partial tail stays.
+    void                 crane_rx_consume_pending_(const std::string& ctx);
     std::atomic<bool>    crane_wd_running_;
     std::atomic<int64_t> crane_last_ok_ms_;
     std::thread          crane_wd_thread_;
@@ -1674,6 +1718,33 @@ private:
     // (PQW, XKC, DM2J:14 also on it) → JC100 TIMEOUT flood during attach idle
     // gaps. Cap to 1 fresh-read/sec; GUI still gets cache updates at poll rate.
     std::atomic<int64_t> last_status_fresh_read_ms_{0};
+    // [2026-09-14 plan §4 階段 1] Self-check cache (see cmd_selfcheck).
+    // 🔴 init() does NOT probe presence for ZDT/DM2J/JC-100/XKC/QX (Mode B init
+    //    only binds client + slave id), so "init succeeded" says nothing about
+    //    the device — the plan's original idea of reusing init flags was wrong.
+    //    dev_* therefore come from run_selfcheck_() (real bus reads), cached:
+    //    -1 = never probed, else 0/1 (or n_ok for the ×4 groups).
+    std::atomic<int>     dev_zdt_ok_{-1};      // 0..4
+    std::atomic<int>     dev_pqw_{-1};
+    std::atomic<int>     dev_dm2j_{-1};
+    std::atomic<int>     dev_xkc_{-1};
+    std::atomic<int>     dev_qx_{-1};
+    std::atomic<int64_t> selfcheck_ms_{0};     // 0 = never
+    bool                 run_selfcheck_(std::string& detail);   // true = all probed OK
+    // dev_imu: "a 0x53 angle packet arrived within the last 2 s". n_angle_pkt
+    // only counts, so cmd_status remembers when it last saw the counter move.
+    std::atomic<uint32_t> imu_seen_n_{0};
+    std::atomic<int64_t>  imu_seen_ms_{0};
+    // zdt_homed_at: epoch seconds of the last successful `zdt_home` on the feet
+    // group (0 = not since this process started). A 24 V blip cannot be detected
+    // here — the GUI shows "X min ago" and the operator decides.
+    std::atomic<int64_t> zdt_homed_at_{0};
+    // arm_ready = arm_attached && last arm STATUS had M1 en=1 && init_done=1.
+    // Parsed from every STATUS reply passing through arm_cmd_() so status never
+    // has to round-trip to :9527 itself. -1 = no STATUS reply seen yet.
+    std::atomic<int>     arm_last_en_{-1};
+    std::atomic<int>     arm_last_init_done_{-1};
+    void                 note_arm_status_(const std::string& reply);
     std::atomic<bool>    pressure_poll_running_;  // kept for backward compat (always false)
     std::thread          pressure_poll_thread_;   // kept for backward compat (never started)
     void                 pressure_poll_loop_();   // kept (no longer called); body becomes no-op
@@ -1900,6 +1971,14 @@ private:
     // each polling XKC every 200ms → 2+ thread × 200ms = 8+ reads/s on XKC,
     // races on water_inlet open/close (one closes while another still waiting).
     std::atomic<bool>    end_refill_active_{false};
+    // [2026-09-15 per user] emergency_stop now also detaches everything (arm,
+    // feet, vacuum, brush, water, fan) in a background thread — see
+    // emergency_detach_(). One at a time; a second emergency_stop while it
+    // runs only re-does the immediate stops.
+    std::atomic<bool>    emergency_detach_active_{false};
+    // 0=沒跑過 1=收回中 2=收回完成(已回 Idle) 3=部分失敗(留在 Error)。status 的 `estop=` 欄位。
+    std::atomic<int>     estop_detach_state_{0};
+    void emergency_detach_();
 
     // [2026-05-29] Gate for arm_monitor_during_sweep_: when feet rail / pushers
     // are actively moving, the mechanical coupling shifts arm tau baselines
@@ -2083,6 +2162,21 @@ private:
 
     void        set_state_(State s);   // atomic + EVT state_changed
     std::string state_violation_(State cur) const;
+    // [2026-09-15 per user] 急停後 Manual 仍要能操作。
+    //
+    // Error 原本的規則是「只剩 status / ping / reset / return_home」,但急停之後現場要做的
+    // 正好是人工收拾:滑台歸位、推桿收回、手臂收、關刷關水、吊機移動。全部擋掉的結果是
+    // 操作員在半空中只剩一顆 reset(而 reset 會把狀態退回 Idle,等於宣稱「沒事了」)。
+    //
+    // 判準:**Error 擋的是「自動流程」,不是「人的手」**。因此
+    //   - 人工單一動作(pusher / vacuum / rail / pwm / relay / brush / water / arm_retract /
+    //     zdt_home / crane_goto …)在 Error 中放行,呼叫端改用本函式判斷;
+    //   - 自動流程(step_down/up、run、attach、mission、sweep、balance …)維持擋下,
+    //     它們的前提是狀態機是乾淨的。
+    // ⚠️ 放行不等於安全保證:急停後機器吊在繩上,人工動作的後果由操作員負責——這與
+    //    「緊急收繩不自動停」同一條原則(motion_flow §8)。
+    // 📌 實作方式是把那些函式裡的 `if (cur == State::Error) return state_violation_(cur);`
+    //    直接拿掉(該行原本是唯一的狀態閘門),每一處都留下 `[2026-09-15] Error 放行` 註記。
     // internal: no state guard, caller handles transition; skip_cleaning_sweep=true 給 cmd_step_down_with_sweep 用。
     // after_feet_rail_hook：非空時，在 Phase B feet rail 回到 0 那刻呼叫一次
     // （給 cmd_step_down_sweep_after_feet 用來 launch 背景 sweep）。
@@ -2401,6 +2495,9 @@ private:
     //   cm=5  → 6s, cm=10 → 6s, cm=20 → 7s, cm=41 → 10s, cm=80 → 13s
     // Tighter than default 60s → real hangs detected faster. If a slow case
     // hits (rope swaying delays fine_adjust), user RETRY usually resolves it.
+    // [2026-09-15] cmd_crane_goto does not know the delta before the crane
+    // replies; size its timeout for one full span. 1000 cm → 105 s.
+    static constexpr int CRANE_GOTO_SPAN_MAX_CM = 1000;
     static int crane_motion_timeout_sec_(int cm) {
         if (cm <= 0) return 5;
         return (cm + 9) / 10 + 5;   // ceil(cm/10) + 5

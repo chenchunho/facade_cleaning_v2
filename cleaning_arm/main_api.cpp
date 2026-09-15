@@ -2507,6 +2507,12 @@ std::string DamiaoAPI::dispatch(const std::string& line)
 	if (prefix == "STATUS") {
 		return cmd_status_sequence();
 	}
+	// [2026-09-14 per user] Keepalive. web_backend sends `ping` to all three
+	// bridges; before this every one of them logged `ERR usage: M1 <cmd> or
+	// M2 <cmd>` here. No motor access, no lock.
+	if (prefix == "PING") {
+		return "OK pong";
+	}
 
 	MotorSlot* slot = nullptr;
 	if (prefix == "M1") slot = &m1_;
@@ -2541,6 +2547,7 @@ bool DamiaoAPI::wait_for_move(MotorSlot& s, int timeout_ms)
 // ============================================================
 std::string DamiaoAPI::cmd_init_sequence()
 {
+	init_done_.store(false);   // [2026-09-14] a re-INIT that fails must not keep the old 1
 	if (!m1_.enabled) enable_slot(m1_);
 
 	// Safety guard: M1 encoder offset may survive a crash and come back out of physical range.
@@ -2676,6 +2683,7 @@ std::string DamiaoAPI::cmd_init_sequence()
 	if (!m2_calib_ok)
 		return "ERR INIT: M2 calibrate failed (stop not found / did not converge — see log)";
 
+	init_done_.store(true);
 	return "OK";
 }
 
@@ -3143,8 +3151,12 @@ std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 	// 即時設 hold_pos、只等 settle，非 ramp），Step6 只需從 ~COARSE_NM 細收到 target
 	// （割線 ~1 步），省掉舊版「從 2Nm 割線收到 15」的 2~3 個 RELAX_MS(1500) 週期。
 	{
+		// [2026-09-14 per user] 目標可低到 3 Nm:粗壓門檻不能高過 target−TOL,否則粗壓本身
+		//   就把力衝過目標、Step6 只能往回退。門檻取 min(COARSE_NM, target−TOL);
+		//   target=3 時 = 2 = TOUCH,粗壓段自然變成 0 步、直接割線細收。
+		const float coarse_nm = std::min(DEPLOY_F_COARSE_NM, target_nm - DEPLOY_F_TOL_NM);
 		int coarse_steps = 0;
-		while (tau < DEPLOY_F_COARSE_NM && coarse_steps < DEPLOY_F_SEEK_MAX) {
+		while (tau < coarse_nm && coarse_steps < DEPLOY_F_SEEK_MAX) {
 			float nxt = theta_cmd + DEPLOY_F_COARSE_STEP;
 			if (nxt > th_max) break;   // 壓不到紮實接觸就交給 Step6 的 cannot-reach 判定
 			if (!press_hold_step_(nxt, DEPLOY_F_COARSE_SETTLE_MS, pos, tau))
@@ -3164,6 +3176,19 @@ std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 	// 依工具取起手值（執行期快取，初值為實測的編譯預設）。
 	const int kp_idx = (m2_slot_idx < 0) ? 0 : (m2_slot_idx > 0 ? 2 : 1);
 	float kp_eff     = deploy_f_kp_eff_cache_[kp_idx];
+	// [2026-09-14 per user 定 3 Nm 為工作力度] 進割線前先鬆弛一次再讀 tau。
+	//   尋觸/粗壓的最後一步只等了 150/80 ms,hold 控制器還沒把臂推到位,此時的 tau 是
+	//   偏低的瞬時值;拿它判「已在容差內」會 iters=0 收工,200 ms 後定案時 tau 已爬到
+	//   目標的 1.5~1.7 倍(3 Nm 實測 2.4~3.8 → 4~5;8 Nm 的 9.82 同病)。多花 RELAX_MS,
+	//   換來每個目標值都用鬆弛後的真值進迴圈。
+	std::this_thread::sleep_for(std::chrono::milliseconds(DEPLOY_F_RELAX_MS));
+	{
+		std::lock_guard<std::mutex> lk(motor_mutex_);
+		pos = m1_.motor->Get_Position();
+		tau = m1_.motor->Get_tau();
+	}
+	std::cout << std::fixed << std::setprecision(2)
+	          << "[DEPLOY_F] relaxed tau=" << tau << " (before secant)\n";
 	float last_cmd   = theta_cmd;
 	float last_tau   = tau;
 	bool  converged  = false;
@@ -3445,7 +3470,9 @@ std::string DamiaoAPI::cmd_status_sequence()
 		//   結論），09-04 又撞一次（PARK 後連讀三次逐字元完全相同）。
 		//   ⚠️ **en=0 時上面所有欄位都是快取，不是現況。** err 也是——PARK 後 M2 常見的
 		//   `err=0x1`（依協定＝使能）正是凍結值，不代表它現在還使能。
-		<< " en=" << (m1_.enabled.load() ? 1 : 0) << " | "
+		<< " en=" << (m1_.enabled.load() ? 1 : 0)
+		<< " init_done=" << (init_done_.load() ? 1 : 0)   // [2026-09-14] plan §4
+		<< " | "
 		<< "[M2] pos=" << pos_2 << " vel=" << vel_2 << " tau=" << tau_2
 		<< " hold=" << (m2_.hold_en.load() ? 1 : 0)
 		<< " moving=" << (m2_.move_act.load() ? 1 : 0)

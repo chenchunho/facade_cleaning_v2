@@ -448,6 +448,16 @@ bool WashRobot::init() {
     // lowered at boot, use the `wheels lower` TCP command after init, or restore
     // this block.
 
+    // [2026-09-14 plan §4 階段 1] First real presence probe. Every [OK] line above
+    // that says "presence not probed" is honest: nothing before this point has
+    // exchanged a byte with ZDT/DM2J/JC-100/XKC/QX. A failure here is NOT fatal
+    // (the operator sees dev_*=0 in status and decides) — see run_selfcheck_().
+    {
+        std::string detail;
+        const bool all_ok = run_selfcheck_(detail);
+        std::cout << (all_ok ? "[OK] selfcheck" : "[WARN] selfcheck") << detail << "\n";
+    }
+
     return false;
 }
 
@@ -822,6 +832,7 @@ std::string WashRobot::crane_cmd_(const std::string& line, int timeout_sec) {
             // Force fresh socket: close current then reconnect.
             std::cout << "[crane_cmd] '" << line << "' attempt 1 failed — force reconnect\n";
             crane_cli_.close();
+            crane_rx_buf_.clear();   // bytes from the dead socket mean nothing on the new one
         }
         if (crane_connect_if_needed_()) {
             if (attempt == 1) {
@@ -829,6 +840,29 @@ std::string WashRobot::crane_cmd_(const std::string& line, int timeout_sec) {
                 return "";
             }
             continue;   // try fresh reconnect on next attempt
+        }
+
+        // [2026-09-14] Anything queued on the socket BEFORE we send belongs to
+        // the past: EVT broadcasts (dispatch them) or a late reply to a call
+        // that already timed out (drop it — it must not become THIS reply).
+        // Gate on available() (MSG_PEEK|MSG_DONTWAIT) so an idle socket costs
+        // nothing; 🔴 receiveData(…, 0) is NOT non-blocking — SO_RCVTIMEO=0
+        // means "wait forever" — hence the peek first and a 10 ms read after.
+        // 🔴 This must run BEFORE sendData(): TCP_client::sendData() silently
+        //    discards up to 4096 queued bytes (a Modbus-gateway habit). On this
+        //    line-oriented channel that (a) throws away EVT broadcasts — a
+        //    queued `EVT tension_alarm` would vanish — and (b) when more than
+        //    4096 bytes are queued (motion_progress flood) the cut lands
+        //    mid-line and the TAIL becomes the next "reply". Reading everything
+        //    into the line buffer first leaves sendData() nothing to cut.
+        {
+            char pre[512];
+            for (int guard = 0; guard < 2048 && crane_cli_.available() > 0; ++guard) {
+                const int n = crane_cli_.receiveData(pre, sizeof(pre), 10);
+                if (n <= 0) break;
+                crane_rx_buf_.append(pre, n);
+            }
+            crane_rx_consume_pending_(line);
         }
 
         std::string tx = line;
@@ -841,7 +875,9 @@ std::string WashRobot::crane_cmd_(const std::string& line, int timeout_sec) {
         // by crane to all connected clients (including this RPC channel) and can
         // arrive interleaved with replies. Filter them, dispatch to alarm handler
         // for safety-critical kinds, then continue waiting for the actual reply.
-        std::string rx;
+        // [2026-09-14] `rx` is now the persistent crane_rx_buf_ (see header):
+        // a partial line left after the reply is kept for the next call.
+        std::string& rx = crane_rx_buf_;
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_sec);
         char buf[512];
         bool got_reply = false;
@@ -886,6 +922,24 @@ std::string WashRobot::crane_cmd_(const std::string& line, int timeout_sec) {
     }
     std::cout << "[crane_cmd] '" << line << "' FAILED after 2 attempts (no reply)\n";
     return "";   // both attempts failed
+}
+
+// [2026-09-14] See crane_rx_buf_ in the header. Caller holds crane_mtx_.
+void WashRobot::crane_rx_consume_pending_(const std::string& ctx) {
+    size_t pos;
+    while ((pos = crane_rx_buf_.find('\n')) != std::string::npos) {
+        std::string one = crane_rx_buf_.substr(0, pos);
+        crane_rx_buf_.erase(0, pos + 1);
+        if (!one.empty() && one.back() == '\r') one.pop_back();
+        if (one.empty()) continue;
+        if (one.rfind("EVT ", 0) == 0) { handle_crane_evt_(one); continue; }
+        // A reply nobody is waiting for = the answer to an earlier call that
+        // gave up. Refresh the link timestamp (the crane clearly answered) but
+        // never hand it to the command about to be sent.
+        if (one.rfind("OK", 0) == 0) crane_last_ok_ms_ = now_ms_();
+        std::cout << "[crane_cmd] stale reply dropped before '" << ctx << "': "
+                  << one.substr(0, 80) << "\n";
+    }
 }
 
 //=========== cleaning arm ===========
@@ -957,6 +1011,7 @@ std::string WashRobot::arm_cmd_(const std::string& line, int timeout_sec) {
                 if (pos != std::string::npos) {
                     std::string one = rx.substr(0, pos);
                     if (!one.empty() && one.back() == '\r') one.pop_back();
+                    if (line == "STATUS") note_arm_status_(one);   // [2026-09-14] feeds arm_ready
                     return one;
                 }
             } else {
@@ -986,6 +1041,11 @@ std::string WashRobot::cmd_arm_init() {
         // requiring a full cmd_init. Useful for re-calibrating arm only (e.g.
         // after recovering from an arm error) without re-running full system init.
         arm_calibrated_.store(true);
+        // [2026-09-15] INIT 成功後立刻刷新 arm_ready 的來源。
+        // 🔴 `arm_ready` 只由 `arm_cmd_("STATUS")` 的回覆餵(note_arm_status_),而 INIT 自己
+        //    不送 STATUS ⇒ 按完 INIT 後 status 仍是 `arm_ready=0`,要等下一次有人送 arm_status
+        //    才翻成 1。GUI 前置 ⑤ 讀的正是這個欄位,症狀就是「按了 INIT 沒反應」。
+        arm_cmd_("STATUS", 3);
         std::cout << "[arm] INIT OK → arm_calibrated_=true\n";
     } else {
         arm_calibrated_.store(false);
@@ -3667,9 +3727,36 @@ bool WashRobot::pusher_move_many_(const std::vector<int>& slaves, int pulse, int
     // (false success). Clearing here prevents that phantom success.
     for (int s : slaves) Z_(s).release_stall_flag();
 
+    // 🔴 [2026-09-15 per user] **已經在目標位置的從站不下命令。**
+    //
+    // 目標是絕對位置(mode=1,手冊 3.2.11 Reg 0x00FD 的 mode 欄,已對照確認),照理說
+    // 「命令到你已經在的地方」應該完全不動;實機不是這樣:09-15 吸附狀態下重按
+    // 「伸 raw 10cm」,三支實時位置 2998.7/3018.9/3088°(目標 30000 脈衝 ≈ 3000°),
+    // 殘差只有 10~90 脈衝,但吸盤吸在玻璃上、機體被真空拉住 ⇒ 連這點殘差都走不掉,
+    // 韌體 150 ms 判堵轉、峰值 3.0~3.2 A,整組回失敗 → PAUSE-ON-ERROR。
+    // ⇒ 殘差在容差內就當作已到位,連命令都不送(不送就不會有堵轉)。
+    // ⚠️ 讀不到位置時**照送**:維持既有行為,寧可多送一次也不要因為讀取失敗就不動作。
+    std::vector<int> todo;
+    todo.reserve(slaves.size());
+    for (int s : slaves) {
+        if (Z_(s).get_system_status()) { todo.push_back(s); continue; }   // 讀失敗 → 照送
+        const double cur_pulse = Z_(s).status.real_pos * PUSHER_PULSE_PER_DEG;
+        if (std::fabs(cur_pulse - (double)pulse) <= PUSHER_AT_TARGET_TOL_PULSE) {
+            std::cout << "[pusher_move_many ZDT:" << s << "] 已在目標 ("
+                      << (long)std::lround(cur_pulse) << " vs " << pulse
+                      << " 脈衝, 容差 " << (int)PUSHER_AT_TARGET_TOL_PULSE << ") — 不下命令\n";
+            continue;
+        }
+        todo.push_back(s);
+    }
+    if (todo.empty()) {
+        std::cout << "[pusher_move_many] 全部已在目標 — 整組不動作\n";
+        return false;
+    }
+
     // sync=1 pattern requires the _nowait variant: enqueue each slave's PR block
     // without internal wait, then broadcast trigger_sync_move, then poll per slave.
-    for (int s : slaves) {
+    for (int s : todo) {
         if (Z_(s).motion_control_pos_mode_nowait(0, acc, rpm, pulse, 1, 1, 1)) {
             std::cout << "[pusher_move_many ZDT:" << s << "] pos_mode_nowait FAIL"
                       << " (pulse=" << pulse << " rpm=" << rpm << " acc=" << acc
@@ -3683,7 +3770,7 @@ bool WashRobot::pusher_move_many_(const std::vector<int>& slaves, int pulse, int
     // the send succeeds, so the return value is finally meaningful. Still not
     // checked here on purpose: a broadcast cannot confirm the slaves acted on it,
     // so real error detection stays with the poll loop below.
-    if (!slaves.empty()) Z_(slaves.front()).trigger_sync_move();
+    Z_(todo.front()).trigger_sync_move();   // [2026-09-15] todo 非空(上面已 return)
 
     // Parallel poll all slaves in a single loop: one iteration polls every
     // not-yet-done slave, marks the ones that have finished, exits when all
@@ -3696,24 +3783,24 @@ bool WashRobot::pusher_move_many_(const std::vector<int>& slaves, int pulse, int
     const double POS_DELTA_DEG       = 0.15;
     const int    PRINT_EVERY_N_POLLS = 2000 / poll_ms;   // [2026-07-15 per user] ~2s move ticker (was 300ms)
 
-    std::vector<int>      stable(slaves.size(), 0);
-    std::vector<double>   prev_pos(slaves.size(), 1e9);
-    std::vector<bool>     done(slaves.size(), false);
-    std::vector<uint16_t> peak_I(slaves.size(), 0);   // peak phase_current per slave
+    std::vector<int>      stable(todo.size(), 0);
+    std::vector<double>   prev_pos(todo.size(), 1e9);
+    std::vector<bool>     done(todo.size(), false);
+    std::vector<uint16_t> peak_I(todo.size(), 0);   // peak phase_current per slave
     int n_done  = 0;
     int elapsed = 0;
     int poll_count = 0;
 
-    if (driver_dbg_) for (int s : slaves) Z_(s).set_debug(false);
+    if (driver_dbg_) for (int s : todo) Z_(s).set_debug(false);
 
-    while (n_done < (int)slaves.size() && elapsed < timeout_ms) {
+    while (n_done < (int)todo.size() && elapsed < timeout_ms) {
         sleep_ms_(poll_ms);
         elapsed += poll_ms;
         poll_count++;
 
-        for (size_t i = 0; i < slaves.size(); ++i) {
+        for (size_t i = 0; i < todo.size(); ++i) {
             if (done[i]) continue;
-            const int s = slaves[i];
+            const int s = todo[i];
 
             if (Z_(s).get_system_status()) continue;   // comm fail, retry within timeout
             const auto& st = Z_(s).status;
@@ -3757,11 +3844,11 @@ bool WashRobot::pusher_move_many_(const std::vector<int>& slaves, int pulse, int
         }
     }
 
-    if (driver_dbg_) for (int s : slaves) Z_(s).set_debug(true);
+    if (driver_dbg_) for (int s : todo) Z_(s).set_debug(true);
 
-    if (n_done < (int)slaves.size()) {
+    if (n_done < (int)todo.size()) {
         std::cout << "[wait_many] TIMEOUT after " << timeout_ms << "ms, "
-                  << n_done << "/" << slaves.size() << " resolved\n";
+                  << n_done << "/" << todo.size() << " resolved\n";
         return true;
     }
     sleep_ms_(PUSHER_SETTLE_MS);
@@ -3782,13 +3869,12 @@ bool WashRobot::pusher_move_many_(const std::vector<int>& slaves, int pulse, int
 // CH_BREAK_VACUUM actively
 // charges air into the cups to force the seal open, so the old two-stage
 // slow-peel-then-fast retract is no longer needed — every slave now goes
-// straight to PUSHER_RETRACT_PULSE at PUSHER_RPM_RETRACT_FULL, with the valve
-// open through BREAK_VACUUM_PRE_RETRACT_MS before the move fires and staying
-// open until BREAK_VACUUM_TOTAL_ON_MS total has elapsed since it turned on
-// (the pull itself helps peel the seal while air is still charging in — same
-// bench-proven timing, not gated on pressure). RAII guard closes the valve on
-// every exit path (bench lesson: an early-return without closing it left the
-// valve charging indefinitely — "very dangerous").
+// straight to PUSHER_RETRACT_PULSE at PUSHER_RPM_RETRACT_FULL.
+// 🔴 [2026-09-15 per user, 當日定案] 時序:關真空閥 → 靜置 PRE_ON_REST(100) → CH6 ON →
+//    立刻送四顆同步收(PRE_MOVE=0,不等到位)→ HOLD_MOVE(300) → CH6 OFF。
+//    **正壓包住整個收的動作。** 沿革見 WASH_ROBOT.h 該常數區;舊常數保留定義但不再使用。
+// RAII guard closes the valve on every exit path (bench lesson: an early-return
+// without closing it left the valve charging indefinitely — "very dangerous").
 // [pre-2026-07-31 history, kept for context]
 // [2026-05-29 rewrite]
 //   Old behavior: polled each slave's status @150ms, fired stage 2 individually
@@ -3853,7 +3939,7 @@ bool WashRobot::pusher_two_stage_retract_(const std::vector<int>& slaves, int rp
     // WASH_ROBOT.h 的 BREAK_VACUUM_PRE_ON_REST_MS。
     // 放在這裡而不是各呼叫端：pusher_two_stage_retract_ 有 16 個呼叫點，全都是
     // 「關閥 -> 收腳」的序列，逐一補會漏。代價是每次收腳固定 +300ms。
-    sleep_ms_(BREAK_VACUUM_PRE_ON_REST_MS);
+    if (BREAK_VACUUM_PRE_ON_REST_MS > 0) sleep_ms_(BREAK_VACUUM_PRE_ON_REST_MS);
 
     // ⚠ 一定要檢查回傳值。原本這行是裸寫 + 丟掉回傳值（註解寫 log-only on failure，
     // 但根本沒有 log failure 的碼），於是上面那行 "CH ON" 在寫入之前就印了 ——
@@ -3873,10 +3959,10 @@ bool WashRobot::pusher_two_stage_retract_(const std::vector<int>& slaves, int rp
                      "預期電流偏高甚至 STALL\n";
         evt_("break_vacuum_on_fail ch=" + std::to_string(CH_BREAK_VACUUM));
     }
-    const auto bv_on_at = std::chrono::steady_clock::now();
-
-    sleep_ms_(BREAK_VACUUM_PRE_RETRACT_MS);
-
+    // [2026-09-15 per user, 當日三修] CH6 ON → (PRE_MOVE=0 → 不等)立刻送四顆同步收
+    //   → HOLD_MOVE(500) → CH6 OFF。收腳**送出後不等到位**就往下走(到位交給後面的輪詢),
+    //   所以正壓從頭到尾包住整個收的動作。
+    if (BREAK_VACUUM_PRE_MOVE_MS > 0) sleep_ms_(BREAK_VACUUM_PRE_MOVE_MS);
     // Direct retract to PUSHER_RETRACT_PULSE for every slave (no slow-peel stage —
     // the break-vacuum charge does that job now). Single sync-trigger fires all.
     for (int s : slaves) {
@@ -3884,34 +3970,23 @@ bool WashRobot::pusher_two_stage_retract_(const std::vector<int>& slaves, int rp
                 rpm, PUSHER_RETRACT_PULSE,
                 /*abs*/1, /*sync*/1, /*retry*/1)) {
             std::cout << "[2stage_retract ZDT:" << s << "] pos_mode_nowait FAIL\n";
-            return true;
+            return true;   // RAII guard 會關 CH6
         }
     }
     Z_(slaves.front()).trigger_sync_move();
-
-    // CH_BREAK_VACUUM stays on until BREAK_VACUUM_TOTAL_ON_MS has elapsed since
-    // it turned on (retract is already running concurrently by now — this wait
-    // just times how much longer the valve itself needs to stay open).
-    {
-        const auto held_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - bv_on_at).count();
-        if (held_ms < BREAK_VACUUM_TOTAL_ON_MS)
-            sleep_ms_((int)(BREAK_VACUUM_TOTAL_ON_MS - held_ms));
-    }
-    // [2026-08-28] 同樣要檢查回傳值，而且這邊比 ON 更關鍵：關不掉代表破真空閥
-    // 一直在充氣，之後伸腳要吸附時吸不住（正壓灌進吸盤）。
-    // ⚠ 失敗時「不」解除 bv_guard.armed —— 讓 RAII guard 在函式結束時再關一次，
-    //   多關一次是無害的冪等操作，漏關則是實質危險。
-    std::cout << "[2stage_retract] CH" << CH_BREAK_VACUUM << " OFF\n";
+    // 收腳已經在跑,閥再開 HOLD_MOVE 才關。
+    sleep_ms_(BREAK_VACUUM_HOLD_MOVE_MS);
+    std::cout << "[2stage_retract] CH" << CH_BREAK_VACUUM << " OFF (charge "
+              << (BREAK_VACUUM_PRE_MOVE_MS + BREAK_VACUUM_HOLD_MOVE_MS) << "ms total)\n";
+    // ⚠ 關不掉比開不起來更危險:閥持續充氣 → 下次伸腳吸不住。失敗時**不**解除 armed,
+    //   讓 RAII guard 在函式結束時再關一次(冪等,多關無害)。
     if (pqw_.controlRelay(CH_BREAK_VACUUM, false)) {
         std::cerr << "[2stage_retract] CH" << CH_BREAK_VACUUM
-                  << " OFF FAILED (TCP-level) — 閥可能仍在充氣，交給 RAII guard 再關一次\n";
+                  << " OFF FAILED (TCP-level) — 閥可能仍在充氣,交給 RAII guard 再關一次\n";
         evt_("break_vacuum_off_fail ch=" + std::to_string(CH_BREAK_VACUUM));
-        // armed 維持 true，guard 的解構子會再送一次 OFF
     } else {
-        bv_guard.armed = false;   // closed deliberately above — guard is now a harmless no-op
+        bv_guard.armed = false;
     }
-
     // ---- Wait for all slaves to reach 0 (single batch wait) ----
     // Uses existing zdt_wait_motion_done_many_ helper. Stall during stage 2 → fail.
     int stalled_id = -1;

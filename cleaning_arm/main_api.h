@@ -301,7 +301,7 @@ public:
     //    theta_contact < THETA_MIN  => 有東西擋著（09-03「吸不到」查明是橫桿）
     //  這兩個限是**手臂幾何**、不隨高度變，這正是它取代 wall_mm 的原因。
     // ============================================================
-    static constexpr float DEPLOY_F_TARGET_NM   = 8.0f;    // [2026-09-11 per user] 15→8:降力道,刷到橫桿也無傷(偵測不可靠,改低力刷過)
+    static constexpr float DEPLOY_F_TARGET_NM   = 3.0f;    // [2026-09-11 per user] 15→8 → [2026-09-14 per user] 8→3:現場看 3 Nm 清潔效果好,定為工作力度
     static constexpr float DEPLOY_F_TOUCH_NM    = 2.0f;    // 輕觸判定：超過此值視為接觸
     static constexpr float DEPLOY_F_TOL_NM      = 1.0f;    // 收斂容差
     // 09-04 三點實測的等效剛度：Dtau/Dtheta_target = 2.54/0.0343 = 74、2.15/0.0338 = 64。
@@ -336,7 +336,10 @@ public:
     //   收斂只剩 9→15 一步 ⇒ 省掉約 2 個 RELAX 週期(~3s)。
     static constexpr float DEPLOY_F_COARSE_STEP      = 0.030f;  // rad,~13mm/step(粗壓,舊 seek 0.010)
     static constexpr int   DEPLOY_F_COARSE_SETTLE_MS = 80;      // 80(60 會 overshoot,已退回)
-    static constexpr float DEPLOY_F_COARSE_NM        = 6.0f;    // [2026-09-11 per user] 13→6:配合 TARGET 8;粗壓不再衝到 13(撞力來源)
+    // [2026-09-14 per user] 6→4:目標 8 時粗壓一步 ≈2.5 Nm(0.03 rad × kp 82),門檻 6 會落在
+    //   6~8.5,Step6 看到 |need|≤TOL 就直接收工(iters=0),而 80 ms settle 後 tau 還在爬 ⇒
+    //   實測 9.82(+23%)。降到 4 讓割線細收至少跑一步(帶 900 ms relax)再定案。
+    static constexpr float DEPLOY_F_COARSE_NM        = 4.0f;    // [2026-09-11 per user] 13→6 → [09-14] 6→4(見上)
     // ⚰️ [2026-09-12] 細掃(DEPLOY_F_FINE_*)與剛度探測(DEPLOY_F_STIFF_*)共 9 個常數已刪除
     //   —— 2026-09-11 per user「移除偵測、低力刷過」時程式碼已拿掉,常數留著沒人用。
     //   **不要憑「橫桿偵測」的直覺把它們加回來**:contact θ 與剛度兩個判據都已實測失敗
@@ -720,6 +723,12 @@ private:
     // ---- motor slots --------------------------------------------------------
     MotorSlot m1_;
     MotorSlot m2_;
+    // [2026-09-14 plan §4] Set only by a fully successful INIT (both stops
+    // calibrated). The boot-time STARTUP path does NOT set it — that one only
+    // parks M1 at zero, it does not calibrate. Reported as `init_done=` on the
+    // [M1] segment of STATUS so the body / GUI can tell "arm process alive"
+    // from "arm calibrated" without a body-side memory that a restart wipes.
+    std::atomic<bool> init_done_{false};
 
     // ---- TCP ----------------------------------------------------------------
     int               tcp_port_    = 9527;

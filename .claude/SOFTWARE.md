@@ -19,7 +19,7 @@
 
 ```
                  ┌──────── Web GUI  web_backend/server.js (Node) ────────┐
-                 │  :8080 v1(public/,停機)   :8081 v2(public_v2/,含安全閘門)   │
+                 │  :8080 v1(public/,停機)   :8081 console v3(public_v3/,唯一主控台)│
                  │  純 TCP↔WebSocket 橋接,不含業務邏輯                            │
                  └──────┬───────────────────┬───────────────────┬─────────┘
                         │                   │                   │
@@ -245,7 +245,7 @@ pivot)。已移除細掃/th_min/剛度守衛。8 Nm 雙工具 + 滑台 0–100�
 
 | 目錄 | 角色 |
 |---|---|
-| `web_backend/` | GUI 橋接(`server.js` 544 行)。**v2 (public_v2) 有安全閘門**(手臂武裝互鎖 + 頁面級「危險操作」閘門,不靠 window.confirm;PARK/STOP/急停/收回/繼電器/按住式不鎖)。⚠️ v2 是**單檔 `index.html` 298 KB**(HTML+CSS+JS 全塞一起);v1 反而有拆(`app.js` 95 K / `index.html` 51 K / `style.css` 27 K)但已停機。⚠️ 本機目錄 `web_backend/`,**Pi 上佈署為 `.../web/`**(start_web.sh 寫死) |
+| `web_backend/` | GUI 橋接(`server.js` 544 行)。🆕 **2026-09-14:v2 與 v3 整合成一個 —— `public_v3/` 是唯一主控台**(v2 退役,git 歷史 `feebc03`)。v3 = v2 全部功能 + 作業流程頁(兩道閘門)+ Mission 純按鈕吃 `EVT mission` + SAFE 橫幅/解除 + Manual 在 SAFE 上鎖;刻意拿掉跑腳本看 stdout 那條路。仍是**單檔 `index.html`(~320 KB)**;安全閘門(手臂武裝互鎖、危險操作 60 s)沿用。v1 `public/` 已停機。⚠️ 本機目錄 `web_backend/`,**Pi 上佈署為 `.../web/`**(start_web.sh 寫死,`PUBLIC_DIR` 要改指 `public_v3`) |
 | `Linux_test/` | `cycle_test.py`(full/arm/mission;`FCV_WROBOT_HOST`/`FCV_CRANE_HOST`/`FCV_TOP_CM`/`FCV_ARM_NM`;高度帶 `FCV_SKIP_BANDS` opt-in 已放棄)+ 各上機腳本 |
 | `user_lib/` | **16 支成對驅動**(.cpp+.h)+ 2 個純 header(`SerialPort.h`、`damiao.h`)。清單:ZDT、JC100、SD76、SE3、MH300、CLV900、DSZL_107、PQW、ZS-DIO、QX_DO24、DM2J、WT901、XKC、DY_500、FrameAnalyzer、**DIHOOL_control**。🔴 `DIHOOL_control` **全樹 0 引用 = 死驅動**;`DY_500` 只被 `WASH_ROBOT.h` include(使用者確認硬體沒用)→ 兩者都進 §8 |
 | `transport/` | TCP_client / TCP_server / Serial_port |
@@ -322,7 +322,7 @@ facade_cleaning_v2/
 ├── command/dispatcher.{h,cpp}     本體指令分派
 ├── Crane_control_PI/main.cpp      吊機(單體)
 ├── cleaning_arm/{main.cpp,main_api.{h,cpp},damiao.cfg,damiao_config.h,compile.sh}
-├── web_backend/{server.js,public/,public_v2/}
+├── web_backend/{server.js,public/(v1 停機),public_v3/}
 ├── Linux_test/cycle_test.py …     編排/上機測試
 ├── user_lib/                       裝置驅動
 ├── transport/ common/ config/ mechanism/

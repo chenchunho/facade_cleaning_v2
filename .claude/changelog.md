@@ -6,8 +6,11 @@
 > 保留「原因 / 決策(尤其被否決的)/ 驗證結論」。原則 ≤40 行,驗證表可超。
 > (原 2026-04 的「# 修改日誌」格式範本已由本說明取代。)
 
-## 索引(全部 128 條,新的在上)
+## 索引(全部 131 條,新的在上)
 
+- `[2026-09-15v3b]` v3：01 作業流程併入 Mission、啟動改走 server.js 起 cycle_test、危險閘門取消、通訊紀錄移除 → (本檔)
+- `[2026-09-15v3]` v3：Manual 張力保護 啟用/關閉鈕（吊機 `set_hold_guard`）+ Mission `fan=`/`rail=` 起跑參數 → (本檔)
+- `[2026-09-13v3]` console v3（`public_v3/`）：作業流程頁 + `mission` 指令族（EVT 驅動）+ SAFE + 假機器離線驗收 → (本檔)
 - `[2026-09-10a6]` per user：吊機水閥**拿掉確認視窗**，按了就執行 → (本檔)
 - `[2026-09-10a5]` `paintRelay` 同型修正 + 確認彈窗不再預支未部署的行為 + 10 處過時註解 → (本檔)
 - `[2026-09-10a4]` 上一條的三個修正 —— 降級狀態要有回頭路，而「最顯眼的元件」也會說謊 → (本檔)
@@ -139,7 +142,112 @@
 
 ---
 
-## 當月全文(2026-09,80 條)
+## 當月全文(2026-09,83 條)
+
+## [2026-09-15v3b] v3：01 作業流程併入 Mission、啟動改走 server.js 起 cycle_test、危險閘門取消、通訊紀錄移除
+
+**改了什麼**（`public_v3/index.html`、`harness/gui_v3_check.js`、`harness/fake_robot.py` 兩處；未 commit，`v3-2026.09.15-1409` 已部署吊機 Pi）
+
+- **頁面**：tab 剩 `Mission(01) / Dashboard / Manual / Setting`，Mission 為預設。Mission = ①前置（可摺疊，全綠自動收起）②參數 ③執行 三塊。
+- **前置七項**（`PRE_ITEMS`，判準一處一項，全部由 status／wall 推播自動判）：① 地面歸零（server `wall.ground_at` + 吊機 `zeroed_at` 當提示）② 牆高（`wallReady()`，並自動 `set_wall_height` 同步到吊機——⑦ 的 `crane_goto` 天花板在吊機那份、重啟歸 0）③ `zdt_homed_at` ④ init（`arm_attached off → init → arm_attached on`，看 `vacSource()`＋state）⑤ `arm_ready`（`arm_init`）⑥ `water_full`（補水＝`water_inlet on` → 每 2 s 讀 → 滿再 +20 s → off，上限 180 s，同腳本 `ensure_water_full`）⑦ 起點（|L| 與牆高差 ≤5，`crane_goto <牆高>`）。「一鍵前置」= ③→④→⑤，已綠的跳過。
+- **參數與腳本同名**：`step_cm/steps/cycles/fan=move|all[:pct]/rail=<起>-<迄>|off/arm_nm/dry/roll_trip/diff_trip`；`rail_cm` 固定 100 不露出；頂端高度不填（server 由 wall 帶 `FCV_TOP_CM`）。多一行「等效指令」。
+- **啟動改走腳本**：`MISSION_BACKEND='script'`（常數切換，`'body'` 留著不接）→ v2 的 `{mission:'start'|'stop'|'pause'|'continue'}` WS 路徑，狀態＝stdout ring；週期／每步時間由 `═══ 週期 n/N ═══` 與每步列解析。控制列 `[開始] [暫停⇄繼續] [中止] │ [🔴 急停]`，暫停鍵文字依 `mission state.paused`（以腳本 `[PAUSE] paused/resumed` 為準）。
+- **§6 危險閘門整套取消**（per user）：tier①②、60 s 解鎖窗、手臂 60 s 互鎖全部改成 no-op（`dangerGate`/`motionGate`/`armGate` 留成永遠通過，呼叫點不動 ⇒ 要還原只改那一段）。**只留 4 個單次確認**：`zero_meters ground`、`② 最高點設定`、張力保護關閉、Mission 開始。其餘原本的 `confirm()` 一律改走 `NO_CONFIRM()`（文字留著當文件）。`safe_clear` 由 `prompt` 改單次確認、理由固定 `operator`。
+- **急停搬進 Mission 控制列**（頂欄全域紅鈕與「🔒 危險操作」都拿掉），並顯示本體新語意的結果：`EVT emergency_detach done|partial failed=…` 一格。
+- **Manual 互斥鎖**：`mission.running`（server 的 state）→ Manual 整頁灰掉 + 橫幅，**不隱藏**；STOP／PARK 例外；SAFE 鎖更嚴時以 SAFE 為準。
+- **其他 per user**：Manual「水平基準 L−R」輸入格拿掉（吊機 `level_auto=1` 自動學）→ Setting 改唯讀顯示「值 + 自動/手動 + 幾秒前學到」；吊機卡片那列不再叫「緊急停止」；**通訊紀錄整塊移除**（markup/CSS/`log-clear`），`log()` 改寫 300 行記憶體環 + console，呼叫點一個都不改。
+- `fake_robot.py` 兩處（給 agent-ai-db 收）：本體 `arm_init` 連動 `arm_ready=1`；本體 `water_inlet on` 3 s 後 `water_full=1`、status 多 `water_inlet=`。
+
+**驗證**：`gui_v3_check.js` 改寫成 `boot/evt/pre/script/mission/safe/hold/report`，冷跑 **89/89**、`report` 0 條 not modelled。新增的關鍵幾條：七項燈號全部由 status 推、一鍵前置跑完 ③④⑤ 且**零確認窗**、`confirm` 呼叫次數逐項計數（只有 4 處會問）、`{mission:'start'}` payload 欄位逐一比對、`pause→state.paused→continue` 切換、Manual 互斥鎖開關、`emergency_detach done/partial` 顯示、通訊紀錄面板不存在但 `logs()` 有內容。
+
+**踩到的三個坑**（都寫進 check 了）：① 滑台快選原本用 `data-railq`，與 Manual 上滑台快捷鈕同名 → 被 `paintRailGuard()` 依守衛 `disabled` 掉、點了沒反應；改 `data-mrail`。② 驗收腳本把 `ws.send` 整個換掉來攔 `{mission:…}`，連輪詢也吞了 → 序列佇列卡到逾時；改成只攔 mission、其餘照送。③ server 的 wall 記憶（`~/run/wall_height.json`）跨 run 留著 → 「乾淨假機器」不乾淨，①②⑦ 一開始就綠；harness 起動前先刪。
+
+⚠️ Pi 上的 `server.js` 由 agent-ai-db 維護（0915g 已含 pause/continue），本次未動 server.js。
+
+**09-15 下午⑥ 追加（真機 bug ×2 + Mission 一屏化，`v3-2026.09.15-1441` 已部署）**
+
+🔴 **橫幅永遠看得到（jim 現場：Manual 同時顯示「任務執行中」與「SAFE 中」，兩者都不成立）**：原因不是狀態判斷，是 **`.ebanner{display:flex}` 蓋掉 `hidden` 屬性的 UA `display:none`** ⇒ `#estop-banner`／`#manbar`／`#safebar` 從來沒被藏起來。JS 裡 `el.hidden === true` 讀起來完全正常，**所以我的 jsdom check 也是綠的** —— 那是「綠的沒被證明能變紅」的一個實例。改法：`.ebanner.off` class + 單一 `ebShow(el,on)`，且該規則**排在 `.ebanner` 之後**（`[hidden]` 屬性選擇器與 `!important` 在 jsdom 不參與 computed style，只有「同權重、後面贏」兩邊都成立）；驗收改為讀 **computed display**，不讀 `.hidden`。
+📌 通則：凡「用 `el.hidden` 開關、但 class 又設了 `display`」的元素都會這樣；同族檢查已用 `shown()` 收斂。
+
+🔴 **前置 ⑥ 水位永遠灰**：真機本體 `status` **沒有** `water_full` 欄位（只有 `water_level` 這道指令會回）。改讀指令結果（15 s 輪詢 + 開頁 1.2 s 補一次 + 補水結束補一次）；`fake_robot` 的 status 也把 `water_full` 拿掉，讓「讀 status 就會綠」在假機器上同樣走不通。
+
+**Mission 一屏化**（per user「太長、一眼看不到跑到哪」）：頂部 **sticky 控制列**＝狀態 chip｜前置摘要｜參數摘要｜開始／暫停⇄繼續／中止｜🔴 急停，第二行 STOP／PARK；前置全綠自動收成「前置 7/7 ✅ ▾」、有缺列缺項，參數收成一行摘要且開跑後自動收起；「執行中」橫跨整列緊接控制列，歷史/統計沉到最底。⚠️ sticky 不能放進 `.grp`（`overflow:hidden` 會讓它失效）。
+
+**驗收**：93/93、report 0。新增 idle 時三條橫幅 computed display 全 none、sticky 控制列含三顆鍵且 `position:sticky`、參數開跑後收起、前置摘要文字、⑥ 來源不是 status。
+
+**09-15 晚 追加（收合打不開 + 拉到指定位置，`v3-2026.09.15-1533` 已部署）**
+
+🔴 **前置卡收起後展不回來**（jim 現場）—— **同一個坑的第二次**：`.grp > div{display:flex}` 蓋掉 `hidden`，收合的內容根本沒藏住；而我當時是把**整張卡** `hidden` 掉（那條沒有 display 規則、真的會消失）⇒ 畫面上「卡不見了」，唯一入口只剩 sticky 摘要。三處一起修：① 收合改用 `.grp.collapsed > div{display:none!important}`（規則排在 `.grp > div` 之後）② **收起只藏內容、保留卡片標題列** ⇒ 卡上與摘要兩個入口，任一個壞了都打得開 ③ 自動收合改成「人點過就永久退場」（`pre.manual` / `mis.paramsManual`）——原本 ⑥ 水位與 ⑦ 高度在真機會來回跳，人點開後下一個 tick 又被收起，症狀同樣是「按了沒反應」。
+📌 **全頁同型掃描**：可收合的只有 `#pre-body`／`#mp-body`（class）、三條 `.ebanner`（`.off`）、`.why` 系（刻意 visibility 佔位）、Setting 兩個原生 `<details>`。規則寫在 CSS 註解裡：**不要再用裸 `el.hidden` 去藏有 display 的元素**。
+
+🔴 **腳本模式被本體 status 蓋掉**：`misFromStatus()` 無條件吃本體的 `mission=`，而腳本在跑時本體是 idle ⇒ 執行中畫面跳回「閒置」、中止鈕失能。改成只有 `MISSION_BACKEND==='body'` 才吃。
+
+**拉到指定位置**（per user）：Manual 吊機卡三顆（拉到頂端＝`crane_goto <牆高>`／放到地面＝`crane_goto 0`／拉到指定＝輸入 cm）＋ Mission 控制列「⤒ 拉到頂端」（不展開前置也按得到，任務執行中失能）。共用 `craneGotoAction()`：確認窗 + motionGate + 單一在途守衛 + 每 0.5 s 顯示「移動中… 目前 N cm → 目標」，回覆解析 `already_there` 與 `now=／err=`（`from=` 可能是 `L/R` 兩個值，不解析它）。範圍守衛留在吊機端，GUI 只擋明顯越界。
+
+**驗收**：107/107、report 0。新增：收→展→收三態全用真 click + computed display、跨一個重繪 tick 不會被自動收回、開機時「任何帶 hidden 的元素 computed display 必須真的是 none」全頁掃描、Manual 三顆與控制列那顆存在且越界被擋、`拉到指定 100` 真的移動並顯示結果字串。
+⚠️ 驗收腳本自己踩到兩個：結果字串沒清就 waitFor → 命中舊字串、下一顆撞「已經有一次 crane_goto 在進行中」；`flow-top-rd` 一秒後會被 paintFlow 寫回狀態字 ⇒ 結果字串要看 Manual 那格。
+
+**09-15 晚② 追加（急停先停腳本、estop 狀態文案、參數記憶，`v3-2026.09.15-1637` 已部署）**
+
+🔴 **急停沒有停腳本**（jim 真機兩次）：`#wr-estop` 只送本體 `emergency_stop`，`cycle_test` 還在跑 —— 要等它下一道指令收到 `ERR state_violation`／`ERR aborted` 才自己 bail，中間那幾秒仍在對機器下指令、與急停的收回動作交錯。改成**先停腳本再急停**：script 模式送 `{mission:'stop'}`、body 模式送 `mission stop estop`，**不 await**（急停不能等任何東西），同一 tick 再 `emergency_stop`（冪等）。
+
+**急停文案依真機新語意**：本體 status 多 `estop=none|detaching|done|partial`，且**全部收回成功會自動從 Error 回 Idle**（不必按 reset）。原文案「進入 SAFE，用橫幅解除」在 script 模式是錯的 ⇒ 改成收回中…／已收回（已自動回 Idle）／部分失敗（留在 Error，要按 RESET）。status 是權威，`EVT emergency_detach`（帶 `failed=`）更詳細且不被 status 蓋回去（`dataset.evt` 閂），按下急停時清閂。
+
+**Mission 參數記憶**（per user「設定過的存起來變成下次預設」）：server.js 的 `mission state` 帶 `defaults`（上次**成功起跑**那組，存 `~/run/mission_params.json`）⇒ **只在開頁第一筆套用**（之後再套會蓋掉人正在打的字），摘要旁顯示「上次起跑 <時間>」。
+
+**驗收**：115/115、report 0。新增：急停在腳本執行中先送 `{mission:'stop'}` 再 `emergency_stop`（比對兩者在紀錄裡的先後）、`estop=` 三態文案、`defaults` 帶入九個欄位且第二筆不覆蓋。⚠️ 驗收腳本踩到：那一按是真的送進假機器 ⇒ 它進了 SAFE，不收拾乾淨後面每一節都紅。
+
+**09-15 晚③（前置 ④ init 移除，`v3-2026.09.15-1650` 已部署）**：腳本自己處理幫浦 —— 起跑時 A/B 皆 OFF 就自己 `arm_attached off → init → arm_attached on`（不動手臂）並驗繼電器，回程前與收尾自動 `pump off`（只關它自己開的那顆）⇒ 前置由七項變**六項**（① 地面歸零 ② 牆高 ③ 推桿歸零 ④ 手臂 ⑤ 水位 ⑥ 起點），一鍵前置改 ③→④、不再送 `init`。`flowInit()` 保留（Manual／手動需要時仍可用）。驗收改為：init 不再是前置一項（`flow-lamp-init` 不存在）、一鍵前置**紀錄裡不出現 `init`**、**關掉幫浦不再擋開始**（這是移除後最容易回歸的那一條）。115/115、report 0。
+
+**09-15 晚④（吸盤推桿 RPM 預設值可見）**：欄位原本 `value="0"`，畫面上只看得到 0，沒人知道預設是多少（當天改過 600→400→330→400 三次）。本體 status 新增 `pusher_rpm`（伸／尋封）與 `pusher_rpm_retract`（收）⇒ 欄位改 `value=""` + **placeholder「預設 N」由 status 填**，卡片多一列唯讀「伸／尋封 N rpm ／ 收 N rpm」。🔴 **只填 placeholder 不填 value** —— 填進 value 會把「空白＝用預設」變成「明確指定」，而那個預設會變；把當下的值寫進指令等於把它凍在送出的那一刻。行為不變（空白／0 都不帶第三參數）。驗收：顯示值與 status 逐字相符（不是寫死）、每個欄 placeholder 都標預設且 value 仍為空。117/117、report 0。
+
+**09-15 晚⑤（前置 ③ 推桿歸零改資訊列）**：硬體事實（per user）——ZDT 是**磁編碼器＋電池，零點跨斷電保留**，不需要每次開機重歸；而 `zdt_homed_at` 只記「這個行程有沒有做過」、重啟歸 0 ⇒ 拿它當紅燈會逼人每次重做一件不必做的事。改法：`PRE_ITEMS` 加 `info:true` 一類 —— 燈恆灰、標籤「參考」、**不計入 n/N、不列缺項、不擋開始**；文字 `zdt_homed_at>0` → 「上次歸零 <時間>」，=0 → 「本次程式啟動後未歸零（磁編碼器保留零點，通常不需要）」；按鈕保留。門檻分母改成 `preRequired().length`（前置 **5 項必要 + 1 項資訊**）。一鍵前置同時只剩「④ 手臂 INIT」（③ 不需要每次做、init 由腳本自理）。驗收：③ 標「參考」且不進缺項、一鍵前置**紀錄裡不出現 `init` 也不出現 `zdt_home`**、③ 按鈕仍可按並顯示「上次歸零 N 秒前」、分母是 5。119/119、report 0。
+
+## [2026-09-15v3] v3：Manual 張力保護 啟用/關閉鈕 + fan/rail 起跑參數（`v3-2026.09.15-1152` 已部署）
+
+**改了什麼**（`web_backend/public_v3/index.html`、`server.js` 6 行、`harness/gui_v3_check.js`；未 commit）
+- 收放繩卡片 ▲▼ 六顆下方加「張力保護：啟用 / 關閉」分段鈕（吊機 `set_hold_guard on|off`）＋狀態字。**只信 status 的 `hold_guard=`**（吊機重啟回 on，自己記的會說謊）；`EVT hold_guard on|off` 只讓畫面早一拍翻，下一筆 status 仍是權威。
+- 關閉＝危險操作 tier ①（`hg-off` 進 `DANGER_BTNS`）＋確認窗；啟用不需閘。關閉時整張卡紅框、六顆按鈕轉紅、卡內常駐「⚠ 張力保護已關閉：▲▼ 超標不會自動停」；`EVT manual_tension_warn kind= left= right=` 進來時改顯示 kind/左/右 kg（紅），`manual_tension_clear` 回常駐文案；兩者都進通訊紀錄。
+- Mission 頁起跑參數加「風扇 / 滑台起點」：`fan=move[:pct]|all[:pct]`、`rail=0|100`，`misParams()` 回 `fan`/`rail`，`mission start …` **尾巴追加 `fan=… rail=…`**（cycle_test key=value 慣例、位置不限）並在紀錄印整行。`server.js` `missionStart` 對 `{mission:'start'}` 的 `p.fan`/`p.rail` 驗格式後 append 到 spawn 陣列（v3 不走這條，留給腳本路徑）。
+- 🔴 契約備註：本體 C++ `mission start` 解析器要**容忍尾巴的 key=value token**（fake 只讀位置參數、多的忽略，所以 report 仍 0 條）；階段 2 實作時要照這個。
+
+**驗證**：`gui_v3_check.js` 新增 `[hold]` 段 13 條（狀態由 status 來、關閉需解鎖、關閉後 status `hold_guard=0`、warn/clear 顯示、`set_hold_guard x` → `ERR expected_on_or_off`、EVT off 後下一筆 status 贏回 on、misParams、起跑行含尾巴），冷跑 **67/67**、report 0 條。突變測試：把 EVT 解析改成永遠 on → 該條紅（綠能變紅）。真機吊機 `status` 已有 `hold_guard=1`（唯讀查過）。
+⚠️ Pi 上的 `server.js` 未更新（部署腳本只送 index.html；那 6 行只影響 v3 不用的 spawn 路徑，要生效需重啟 node）。
+
+**09-15 下午 追加（per user，`v3-2026.09.15-1323` 已部署）**：① 🆘 救援收繩（raw `retract_left/right on|off`，繞過張力保護）**整組拿掉**——markup、按住/放開/blur 邏輯、CSS 全刪；救援＝「關保護 → 用一般 ▲▼」。`manual_tension_warn/clear` 顯示保留（hold_guard=off 時就靠它）。② 啟用/關閉開關從 ▲▼ 下方**移到「張力保護」卡最上面**；紅框與「超標不會自動停」文案仍打在收放繩卡（`paintHoldGuard` 改抓 `.ropegrid` 所在的卡）。③ 張力保護卡加 `data-safe-keep`：它取代了救援收繩，SAFE 中也要按得到（連帶門檻輸入在 SAFE 中也可動，jim 若不要再收）。`gui_v3_check.js` +2 條（救援鈕不存在／開關在張力保護卡、警示在 ▲▼ 卡、兩卡 safe-keep），冷跑 **69/69**、report 0。
+
+## [2026-09-13v3] console v3：作業流程頁 + `mission` 指令族（EVT 驅動）+ SAFE + 假機器離線驗收
+
+> AI-2 線。**只動 `web_backend/public_v3/index.html`**（由 v2 複製起手）；`server.js`、v2、C++、`fake_robot.py` 未動。
+> 依據 `plans/orchestration_to_cpp_plan.md` §2–§5、`reference/field_procedure_v2.md` §3/§4.3、`handoff/ai2-v3-gui-brief.md`。
+
+### 改了什麼（5 項，依 brief §3 優先序）
+
+1. **作業流程頁**（新分頁 01）：①連線 ②裝置（`dev_*`/吊機 `dev_gw_* meter dsz`/手臂 `en`）③歸零（`zeroed`）④點動（`pay_out_left 2` → 回讀 +2 → `retract_left 2` → 回原值）‖ 閘門 A ‖ ⑤牆高 ⑥`zdt_home feet`（`zdt_homed_at` 距今）⑦`init`（pumpA/B 回讀）+ 手臂 `INIT`（`init_done`）⑧起跑前置 ‖ 閘門 B。燈全從回讀推。
+2. **Mission 改按鈕**：`mission start <steps> <cm> [cycles] [nm] [rail]` / `mission stop` / `pause` / `continue` / `skip`；步內顯示全靠 `EVT mission …`（step_begin / vac_wait p5–p8 / vac_result / clean / move / roll_recover / step_done 表格 / cycle_done / stop 摘要）。**不 spawn cycle_test、忽略 server.js 的 `{mission:}` 推播。**
+3. **SAFE**：`EVT safe_enter src= detail=` 與 `status safe=1` → 全頁橫幅（擴充 `estop-banner`）；「解除」送 `safe_clear <reason>`，**只在危險操作 60s 解鎖窗內**；`ERR safe_clear_refused item=` 顯示原因；解除後 paused。
+4. **Manual 在 SAFE 上鎖**：除 `data-safe-keep`（收放繩含 STOP、救援收繩）外的卡片加 `inert`；PARK 在保留卡內。
+5. **起跑前置改讀 C++**：`ERR precheck_failed item=` 標紅那一項；`EVT mission start` 視為六項全過。GUI 不再自己算（`paintPreflight` 改 no-op）。
+
+另：`fields()` 多收 `n/m`（`dev_zdt=4/4`、`cyc=1/2`）與 `-`；`paintPump` 在回覆沒有 chA/chB 時不再把 `vac` 清成 null；Setting 加「模擬（假機器專用）」折疊區；≤520px 手機版面；`window.__v3` 無頭測試鉤。
+
+**09-14 追加**：① `safe_clear` 拍板（有任務 paused／無任務 ready|idle）⇒ 拿掉 GUI 端「paused 鎖啟動」的閘與提示；② 驗證腳本收進 repo：**`harness/gui_v3_check.js`**（自起乾淨 fake_robot + v3 server、50 項、退出碼；`--only`／`--attach`）+ `web_backend/package.json` devDependency `jsdom ^25` 與 `npm run check:v3`；README_gui_offline 加一節。**假機器埠固定，腳本拒絕疊在別人的 fake 上跑**（要先 `gui_offline.sh stop`）——第一次疊著跑 12 項紅，全是髒狀態，不是 GUI。
+**09-14 追加 2（階段 1 自檢 as-built 對齊，`v3-2026.09.14-1519`，已部署吊機 Pi）**：① 流程頁 ②「重讀」改為**先送本體 `selfcheck`（真探測：每裝置一筆讀、不動作）OK 才 `pollFast`**——`dev_zdt/pqw/dm2j/xkc/qx` 是快取（init 對它們 Mode B 不發包），直接 pollFast 只讀到舊值；忙碌時本體回 `ERR busy …`，畫面標明顯示的是舊快取；讀值旁顯示 `selfcheck_age_s`（-1＝從未 → 灰「本體快取未探測」）。② 裝置清單加 `dev_gw20/21/22`（三個 USR 網關 TCP，即時）與 `dev_arm`。③ 歸零項改**軟提示**：`zeroed=0` 顯示灰「本次啟動未歸零（計米器讀值仍可能有效，由人判斷）」不再紅叉，`flowStage('A')` 對 `soft` 項不擋——SD76 計數跨重啟保留、start_crane.sh 補 set_home_ground，重啟後 `zeroed=0` ≠ 要重歸零；`zeroed=1` 附 `zeroed_at` 幾秒前。要不要硬擋等 jim 拍。④ `gui_v3_check.js` 對應改：③ 灰不紅、gate A 在 ③ 仍未知時可開、重讀後讀到 `selfcheck N 秒前`、歸零後讀到 `zeroed_at`；server 起動等待 10 s → 30 s（drvfs 上 node 冷啟動偶爾 >10 s，先前紅的是 harness 不是 GUI）。冷跑 **51/51**、report 0 條。
+**09-14 追加 3（jim「暫時先這樣」後三件交辦，`v3-2026.09.14-1605` 已部署）**：① 頂欄大標收成一行 13 px「洗窗機主控台」，拿掉 kick 行與「離線／假機器開發中」小字；② 版號固定放頂欄最右（連線燈之後）`#ver-tag`，HTML 內**唯一來源**是 `var CONSOLE_VER = '…'` 那一行（JS 填顯示位）；③ 新增 **`scripts/deploy_web.sh`**：台灣時間蓋版號 sed 進那一行 → 語法閘（每段 script 能 parse）→ scp 暫存名 + mv → **本機/Pi/HTTP 三方 md5** 不等即退出 1；來源行不是剛好一行或蓋章沒落地也擋。負向測試：多塞一行 CONSOLE_VER → 擋；HTML 註解裡寫字面 `<script>` 騙過切段正則 → 語法閘紅（已改措辭）。用法寫在 `harness/README_gui_offline.md`。`gui_v3_check.js` 51/51 仍綠。
+**09-14 追加 4（SAFE 後任務＝暫停可續 拍板，`v3-2026.09.14-1629` 已部署）**：本體在 SAFE 期間對 pause/continue/skip 回 `ERR safe_locked`、`safe_clear` 有任務 → `state=paused` 停在檢查點、`continue` 續跑。GUI：① SAFE 中 暫停/繼續/跳過 三顆失能，只留「中止」與橫幅「解除 SAFE」，控制列多一句紅字「SAFE 鎖定：先解除 SAFE，任務停在檢查點可續」；② 三顆的回覆進通訊紀錄（`misCtlResult`），`ERR safe_locked` 標「SAFE 中，先解除 SAFE」——之前 ERR 只在 console 靜靜消失。`gui_v3_check.js` 收緊：解除後只接受 `paused`＋GUI「暫停中」＋繼續可按；新增 SAFE 中三顆失能、強制觸發 continue 要在紀錄看到 safe_locked、繼續後本體回 OK（1 步任務可能一 tick 內跑完，所以證據是本體 OK 不是抓到「執行中」）。冷跑 **54/54**。③ 歸零軟提示為拍定版。
+
+### 驗證（jsdom + fake_robot 端對端，不是抄函式）
+
+`gui_offline.sh` 起假機器，v3 另起 :8082；jsdom 載入整頁、真 WebSocket 打 server.js → fake。全部按**按鈕**走：
+①–⑦ 全綠 → 閘門開 → `mission start` 前置全過 → 放繩中 `sim roll 6` 一次 roll_recover、第二次 **SAFE src=roll** → Manual inert、解除需先解鎖危險操作、`tension_valid=0` 時解除被拒 → 恢復後解除回 paused → `emergency_stop` **SAFE src=user** → `sim safe` → 各解除。EVT 十種逐一餵過（含 noseal→skip）。
+**`./harness/gui_offline.sh report`：0 條 not modelled。**
+
+### 🔴 對假機器／契約的發現（回報 agent-ai-da，未改 fake_robot）
+
+- `sim noseal` 在 mission 內無效：mission 自己 extend 把 pos 設回 30000，吸盤照封（n_seal=4）。
+- fake 的 `pump status` 回 `ch2/ch3/active`，真韌體是 `active accum_min … chA chB`（v2 卡片靠後者）。
+- `safe_clear` 後若無任務，本體停在 `paused`，而 `mission start` 前置拒 `state=paused` ⇒ 要先 `continue` 回 idle。GUI 已提示，但契約上該不該由 `safe_clear` 直接回 idle，請計畫書定。
+- 吊機 EVT 在 web 端會收到兩份（主線＋intr 線各一），純顯示重複，v2 已如此。
 
 ## [2026-09-10a6] per user：吊機水閥**拿掉確認視窗**，按了就執行
 

@@ -74,7 +74,7 @@ CRANE_SRCS=(
   "$SRC/$TRANSPORT_DIR/TCP_client.cpp"
   "$SRC/$TRANSPORT_DIR/TCP_server.cpp"
 )
-for d in CLV900_inverter DSZL_107 DY_500_weight_sensor PQW_IO_16O_RLY \
+for d in CLV900_inverter DSZL_107 DY_500_weight_sensor PQW_IO_16O_RLY ZS_DIO_R_RLY \
          MH300_inverter SD76_length_meters SE3_inverter; do
   CRANE_SRCS+=("$SRC/user_lib/$d.cpp")
 done

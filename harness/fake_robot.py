@@ -60,6 +60,11 @@ class Sim:
         self.ten_l = 46.0
         self.ten_r = 47.5
         self.home_ground = 0
+        self.wall_height = 0          # [2026-09-15] goto ceiling (set_wall_height); 0 = unset
+        self.estop = 'none'           # [2026-09-15] none|detaching|done|partial (body emergency_detach)
+        self.hold_guard = 1           # [2026-09-15] set_hold_guard on|off (hold-mode tension protection)
+        self.level_auto = 1           # [2026-09-15] set_level_auto on|off (auto level reference from IMU)
+        self.level_diff = 0
         self.motion_hz = 30
         self.balance_source = 'imu'
         self.imu_roll = 0.3
@@ -87,7 +92,9 @@ class Sim:
         self.safe = 0; self.safe_src = ''
         self.crane_safe_locked = 0
         self.crane_zeroed = 0
+        self.crane_zeroed_at = 0
         self.zdt_homed_at = 0
+        self.selfcheck_at = time.time()   # real body probes once at the end of init()
         self.arm_init_done = 0
         self.tension_valid = 1
         self.top_cm = -120.0            # 'wall top' the mission precheck compares against
@@ -137,19 +144,21 @@ class Sim:
         return (f'OK length_left={s.len_l:.1f} length_right={s.len_r:.1f} length_middle=ERR'
                 f' tension_left={s.ten_l:.1f} tension_right={s.ten_r:.1f} tension_valid=1'
                 f' up_left=0 up_right=0 down_left=0 down_right=0'
-                f' up_stop_total_kg=130 tension_max_kg=80 tension_diff_max_kg=25 length_diff_max_cm=10'
+                f' up_stop_total_kg=130 hold_guard={s.hold_guard} tension_max_kg=80 tension_diff_max_kg=25 length_diff_max_cm=10'
                 f' retract_tension_stop_kg=50 dsz_left_scale=-0.0205816 dsz_right_scale=-0.0236364'
                 f' meter_left_scale=1 meter_right_scale=1 meter_middle_scale=1'
-                f' home_ground_cm={s.home_ground} hold_hz=20 motion_hz={s.motion_hz} middle_hz=30'
+                f' home_ground_cm={s.home_ground} wall_height_cm={s.wall_height} hold_hz=20 motion_hz={s.motion_hz} middle_hz=30'
                 f' balance_enabled=1 balance_kp=2.0 balance_cap_ratio=0.5 balance_deadband=0.5'
                 f' balance_hz_min=5 balance_hz_max_offset=10 fine_adjust_hz=10 freeze_hz=0 kick_hz=0'
-                f' roll_correct_hz=5 roll_finish_hz=3 fine_adjust_diff_tol_cm=2 fine_adjust_level_diff_cm=6'
+                f' roll_correct_hz=5 roll_finish_hz=3 fine_adjust_diff_tol_cm=2 fine_adjust_level_diff_cm={s.level_diff}'
+                f' level_auto={s.level_auto} level_deg_per_cm=0.85 level_learned_age_s=-1'
                 f' balance_source={s.balance_source} balance_imu_kp_ratio=1.0 balance_imu_deadband=0.5'
                 f' imu_roll={s.imu_roll:.2f} imu_roll_age_ms=120 imu_roll_fresh=1'
                 f' dev_vfd_left=1 dev_vfd_right=1 dev_meter_left=1 dev_meter_right=1 dev_meter_middle=0'
                 f' dev_clv900=0 dev_dsz_left=1 dev_dsz_right=1 dev_gw_a=1 dev_gw_b=1 dev_gw_m=1 dev_gw_c=1 dev_gw_d=0'
                 f' dev_gw_w=1 dev_pqw_water=1 water_inlet={s.water_inlet}'
-                f' zeroed={s.crane_zeroed} safe={s.crane_safe_locked} safe_src={s.safe_src or "-"}\n')
+                f' zeroed={s.crane_zeroed} zeroed_at={s.crane_zeroed_at}'
+                f' safe={s.crane_safe_locked} safe_src={s.safe_src or "-"}\n')
 
     def body_status(self):
         s = self
@@ -164,8 +173,16 @@ class Sim:
                 f' roll={s.imu_roll:.2f} pitch=0.10 ax=0.01 ay=0.00 az=0.99 raw_x=0 raw_y=0 raw_z=0'
                 f' n_accel=100 n_angle=100 imu_guard=on'
                 f' active={s.pump_active} pump=on base=A accum_min=12 auto_rotate=30'
-                f' rail_cm={s.rail_cm:.1f} water_full={s.water_full}'
+                f' rail_cm={s.rail_cm:.1f} water_inlet={s.water_inlet} estop={s.estop}'
+                # [2026-09-15 AI-2] water_full is NOT in the real body status (only the `water_level`
+                # command answers it) — deliberately absent so the GUI cannot pass by reading status.
+                f' pusher_rpm=400 pusher_rpm_retract=400'   # [2026-09-15] 編譯期預設,GUI 的 RPM 欄位提示用
+                # [2026-09-14 階段 1 as built] dev_gw2x live; dev_zdt/pqw/dm2j/xkc/qx are the
+                # cached result of the last `selfcheck` (real probe, not on the 2 Hz path);
+                # dev_jc100/dev_imu/dev_arm live. selfcheck_age_s=-1 means never probed.
+                f' dev_gw20=1 dev_gw21=1 dev_gw22=1'
                 f' dev_zdt=4/4 dev_pqw=1 dev_dm2j=1 dev_jc100=4/4 dev_xkc=1 dev_qx=1 dev_imu=1 dev_arm={1 if s.m1["en"] else 0}'
+                f' selfcheck_age_s={int(time.time() - s.selfcheck_at)}'
                 f' zdt_homed_at={s.zdt_homed_at} arm_ready={1 if (s.m1["en"] and s.arm_init_done) else 0}'
                 f' safe={s.safe} safe_src={s.safe_src or "-"}'
                 f' {s.mission.status_kv() if s.mission else "mission=idle"}\n')
@@ -199,7 +216,9 @@ def enter_safe(src, detail=''):
     s = SIM
     with s.lock:
         if s.safe: return
-        if s.mission: s.mission.request_stop('safe')
+        # [2026-09-14 per user] SAFE pauses the mission at its next checkpoint —
+        # it does NOT terminate it (plan §3.3 ①). safe_clear → paused → continue.
+        if s.mission: s.mission.paused.clear()
         s.crane_safe_locked = 1; s.moving = None              # ② crane safe_enter: stop + lock
         # ③ vacuum valve kept as-is (no pusher motion, no vacuum break)
         s.deploy_target = None; s.m1['tau'] = 0.0; s.m1['pos'] = 0.40  # ④ arm_retract (stays enabled)
@@ -225,7 +244,9 @@ class Mission(threading.Thread):
         self.paused = threading.Event(); self.paused.set()   # set == running
 
     def status_kv(self):
-        return (f'mission={self.phase} mission_id={self.id} cyc={self.cyc}/{self.cycles} step={self.step}/{self.steps}'
+        # [2026-09-14] a worker parked at a checkpoint (pause / SAFE) reports mission=paused
+        phase = 'paused' if (not self.paused.is_set() and self.phase == 'running') else self.phase
+        return (f'mission={phase} mission_id={self.id} cyc={self.cyc}/{self.cycles} step={self.step}/{self.steps}'
                 f' sub={self.sub} n_seal={self.n_seal} skipped={self.skipped} no_seal={self.no_seal}')
 
     def request_stop(self, reason): self.stop_reason = reason; self.paused.set()
@@ -390,6 +411,11 @@ def wr_dispatch(line, bcast):
             return 'OK VAC_OK_KPA=-50 VAC_WAIT_S=10 FAN_ON=7 FAN_OFF=5 DOWN_HZ=30 UP_HZ=40 TOL=5 BOTTOM=-20\n', True
         return 'ERR usage: mission start|stop|status|params\n', True
     if c == 'emergency_stop':
+        # 🔴 [2026-09-15] **假機器與真機在這裡是分岔的,而且是刻意的**:
+        #   假機器走計畫書的 SAFE(階段 3,C++ mission 引擎上線後才會有);
+        #   真機今天走的是 `Error` + 背景 `emergency_detach`(收臂/關刷水/風扇停/收腳/關幫浦),
+        #   全部收回成功後 **自動回 Idle**、部分失敗留在 Error,並在 status 用 `estop=` 回報。
+        # ⇒ GUI 兩種都要能顯示(script 模式看真機、body 模式看 SAFE)。不要把其中一邊改成另一邊。
         enter_safe('user', 'emergency_stop'); return 'OK safe_entered src=user\n', True
     if c == 'safe_clear':
         with s.lock:
@@ -420,6 +446,16 @@ def wr_dispatch(line, bcast):
             return 'ERR safe_locked\n', True
         if c == 'ping': return 'OK pong\n', True
         if c == 'status': return s.body_status(), True
+        if c == 'crane_goto':   # [2026-09-15] body passthrough → crane goto; state gate mirrors cmd_crane_goto
+            if s.state not in ('idle', 'ready'): return f'ERR state_violation current={s.state}\n', True
+            if s.crane_attached != 'on': return 'OK skipped crane_attached=off\n', True
+    if c == 'crane_goto':
+        return cr_dispatch('goto ' + ' '.join(a), lambda l: _bcast('crane', l))[0], True
+    with s.lock:
+        if c == 'selfcheck':   # [2026-09-14 階段 1] real body: ERR busy motion / ERR busy busy=zdt_bus
+            if s.moving or s.mission: return 'ERR busy motion\n', True
+            s.selfcheck_at = time.time()
+            return 'OK selfcheck all_ok=1 zdt=4/4 pqw=1 dm2j=1 xkc=1 qx=1\n', True
         if c == 'relay_status': return s.relay_status(), True
         if c == 'relay' and len(a) >= 2 and a[0].isdigit():
             ch = int(a[0]); on = a[1] == 'on'
@@ -440,6 +476,10 @@ def wr_dispatch(line, bcast):
             return f'OK ch1={s.relay[0]}\n', True
         if c == 'brush': s.relay[4] = 1 if a[:1] != ['off'] else 0; return f'OK ch5={s.relay[4]}\n', True
         if c == 'water_pump': s.relay[3] = 1 if a[:1] != ['off'] else 0; return f'OK ch4={s.relay[3]}\n', True
+        if c == 'water_inlet':   # [2026-09-15 AI-2, for agent-ai-db] body relays crane inlet; tank fills ~3 s after on (Mission 前置 ⑥ 補水)
+            s.water_inlet = 1 if a[:1] == ['on'] else 0
+            if s.water_inlet: threading.Timer(3.0, lambda: setattr(s, 'water_full', 1)).start()
+            return f'OK water_inlet={s.water_inlet}\n', True
         if c == 'water_level': return f'OK water_full={s.water_full} rssi=4000\n', True
         if c == 'pwm':
             if a[:1] == ['status']: return s.pwm_status(), True
@@ -472,6 +512,9 @@ def wr_dispatch(line, bcast):
             return 'OK init started\n', True
         if c in ('pause', 'resume', 'continue', 'skip', 'reset', 'shutdown', 'recover', 'realign'):
             m = s.mission
+            # [2026-09-14 per user] while SAFE the mission stays paused: only safe_clear releases it.
+            if s.safe and c in ('resume', 'continue', 'skip'):
+                return 'ERR safe_locked\n', True
             if c == 'pause':
                 s.state = 'paused'
                 if m: m.paused.clear()
@@ -491,6 +534,8 @@ def wr_dispatch(line, bcast):
             return 'OK\n', True
         if c == 'arm_status': return 'OK ' + s.arm_status().replace('\n', ' ').strip() + '\n', True
         if c in ('arm_init', 'arm_deploy', 'arm_sweep', 'arm_clean_sweep', 'arm_clean_sweep_dry', 'arm_attached', 'crane_attached'):
+            # [2026-09-15 AI-2, for agent-ai-db to accept/revert] body arm_init relays arm INIT → arm_ready=1 (Mission 前置 ⑤)
+            if c == 'arm_init': s.m1['en'] = s.m2['en'] = 1; s.m1['pos'] = 0.40; s.arm_init_done = 1
             if c == 'arm_attached' and a: s.arm_attached = a[0]
             if c == 'crane_attached' and a: s.crane_attached = a[0]
             return 'OK\n', True
@@ -544,12 +589,48 @@ def cr_dispatch(line, bcast):
         if c in ('hold', 'hold_all_off'):
             return 'OK\n', True
         if c == 'zero_meters':
-            s.len_l = s.len_r = 0.0; s.home_ground = 0; s.crane_zeroed = 1; s.top_cm = 0.0
+            s.len_l = s.len_r = 0.0; s.home_ground = 0; s.crane_zeroed = 1; s.crane_zeroed_at = int(time.time()); s.top_cm = 0.0
             return 'OK zeroed\n', True
         if c == 'set_home_ground' and a:
             try: s.home_ground = int(float(a[0]))
             except ValueError: pass
             return f'OK home_ground_cm={s.home_ground}\n', True
+        if c == 'set_level_auto':
+            if not a or a[0] not in ('on', 'off'): return 'ERR expected_on_or_off\n', True
+            new = 1 if a[0] == 'on' else 0
+            if new != s.level_auto: threading.Timer(0.05, lambda: bcast(f'EVT level_auto {a[0]}\n')).start()
+            s.level_auto = new
+            return f'OK level_auto={s.level_auto}\n', True
+        if c == 'set_fine_adjust_level_diff' and a:
+            try: s.level_diff = int(float(a[0]))
+            except ValueError: return 'ERR usage\n', True
+            return ('OK note=level_auto_on_will_override\n' if s.level_auto else 'OK\n'), True
+        if c == 'set_hold_guard':
+            if not a or a[0] not in ('on', 'off'): return 'ERR expected_on_or_off\n', True
+            new = 1 if a[0] == 'on' else 0
+            if new != s.hold_guard: threading.Timer(0.05, lambda: bcast(f'EVT hold_guard {a[0]}\n')).start()
+            s.hold_guard = new
+            return f'OK hold_guard={s.hold_guard}\n', True
+        if c == 'set_wall_height' and a:
+            try: s.wall_height = int(float(a[0]))
+            except ValueError: return 'ERR usage:set_wall_height_<cm>\n', True
+            return f'OK wall_height_cm={s.wall_height}\n', True
+        if c == 'goto':
+            # [2026-09-15] absolute height (cm above ground); same guard order as C++ cmd_goto.
+            if s.crane_safe_locked: return 'ERR safe_locked\n', True
+            if not a: return 'ERR usage:goto_<height_cm>\n', True
+            try: tgt = int(float(a[0]))
+            except ValueError: return 'ERR usage:goto_<height_cm>\n', True
+            span = s.wall_height if s.wall_height > 0 else s.home_ground
+            if span <= 0: return 'ERR wall_height_unset (set_wall_height <cm> or zero_meters top)\n', True
+            if tgt < 0 or tgt > span: return f'ERR out_of_range target={tgt} span=0..{span}\n', True
+            hL = int(round(s.home_ground - s.len_l)); hR = int(round(s.home_ground - s.len_r))
+            if min(hL, hR) <= tgt <= max(hL, hR): return f'OK goto already_there target={tgt} from={hL}/{hR}\n', True
+            here = max(hL, hR) if tgt > max(hL, hR) else min(hL, hR); delta = tgt - here   # pessimistic side per direction
+            verb = 'retract' if delta > 0 else 'pay_out'
+            s.moving = ('both', s.len_l - delta, time.time())   # up = length more negative
+            threading.Timer(0.3, lambda: bcast(f'EVT motion_progress cmd={verb} cm={abs(delta)}\n')).start()
+            return f'OK goto target={tgt} from={here} (L={hL} R={hR}) {verb}={abs(delta)} now={tgt} err=0\n', True
         if c == 'set_imu_roll' and a:
             try: s.imu_roll = float(a[0])
             except ValueError: pass

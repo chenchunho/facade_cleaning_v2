@@ -112,6 +112,19 @@ function wallSave() {
 }
 function wallMsg() { return { src: 'wall', cm: wall.cm, at: wall.at, left_raw: wall.left_raw, ground_at: wall.ground_at }; }
 
+// [2026-09-15 per user] Mission 參數記憶:**上一次成功起跑的那組**就是下一次的預設值。
+// 放 server 不放瀏覽器,理由同牆高:平板與筆電要看到同一組;node 重啟也不掉
+// (~/run/mission_params.json)。只在 spawn 成功後寫,失敗的組合不會變成預設。
+// 🔴 只存「人設定的參數」,不存 FCV_TOP_CM(那是牆高,另有來源)與 running 狀態。
+const MPARAM_FILE = path.join(process.env.HOME || '/home/user', 'run', 'mission_params.json');
+let missionDefaults = null;
+try { missionDefaults = JSON.parse(fs.readFileSync(MPARAM_FILE, 'utf8')) || null; } catch (_) { /* 沒檔＝用內建預設 */ }
+function missionDefaultsSave(p) {
+    missionDefaults = p;
+    try { fs.mkdirSync(path.dirname(MPARAM_FILE), { recursive: true }); fs.writeFileSync(MPARAM_FILE, JSON.stringify(p)); }
+    catch (e) { console.error('[mission] defaults save failed', e && e.message); }
+}
+
 //=========== ws ===========
 
 const wss = new WebSocketServer({ server });
@@ -262,6 +275,8 @@ const mission = {
 function missionSnapshot() {
     return {
         running:   !!mission.proc,
+        paused:    !!mission.paused,     // [2026-09-15] script-mode pause (SIGUSR1/SIGUSR2, see missionPause)
+        defaults:  missionDefaults,      // [2026-09-15] 上次成功起跑的參數 = 下次預設(GUI 開頁帶入)
         args:      mission.args,
         env:       mission.env,
         startedAt: mission.startedAt,
@@ -273,6 +288,9 @@ function missionSnapshot() {
 function missionSend(obj) { broadcast(Object.assign({ src: 'mission' }, obj)); }
 
 function missionPush(line) {
+    // [2026-09-15] 也寫進 node 的 stdout(→ ~/run/logs/web_*.log)。在此之前任務輸出**只存在於
+    // WS ring 與瀏覽器**：從 GUI 起跑的那一趟,事後在 Pi 上完全查不到,而現場正是從 GUI 起跑的。
+    console.log('[mission] ' + new Date().toISOString().slice(11, 19) + ' ' + line);
     mission.ring.push(line);
     if (mission.ring.length > MISSION_RING) mission.ring.shift();
     missionSend({ line });
@@ -314,6 +332,21 @@ function missionStart(p, reply) {
     if (topCm === null) return reply({ ok: false, err: 'wall_height_unset', detail: (wall.ground_at ? '' : '① 地面歸零未做；') + (wall.cm > 0 ? '' : '② 最高點未量') });
 
     const args = ['-u', MISSION_PY, cycles, steps, stepCm, roll, diff];
+    // [2026-09-15 per user] cycle_test full 的 key=value 參數（位置不限）：fan=move[:pct]|all[:pct]、
+    // rail=<起>-<迄>|off（同日由 0|100 升級；舊 0|100 腳本仍收）。只在帶了才 append；格式不對就拒絕，不讓腳本起跑後才炸。
+    const kv = [];
+    if (p.fan  !== undefined && p.fan  !== '') { if (/^(move|all)(:(5|6|7|8|9|10))?$/.test(String(p.fan)))  kv.push('fan='  + p.fan);  else bad.push('fan(move[:5-10]|all[:5-10])'); }
+    if (p.rail !== undefined && p.rail !== '') {
+        const r = String(p.rail);
+        const m = /^(\d{1,3})-(\d{1,3})$/.exec(r);
+        const okRail = r === 'off' || /^(0|100)$/.test(r) || (m && +m[1] <= 130 && +m[2] <= 130 && m[1] !== m[2]);
+        if (okRail) kv.push('rail=' + r); else bad.push('rail(<起>-<迄> 0..130, 起≠迄 | off)');
+    }
+    // 壓力 / 乾掃走環境變數（腳本既有介面）：arm_nm 1~15、dry=1。
+    const armNm = (p.arm_nm !== undefined && p.arm_nm !== '') ? numArg(p.arm_nm, 1, 15, false) : undefined;
+    if (armNm === null) bad.push('arm_nm(1~15)');
+    if (bad.length) return reply({ ok: false, err: 'bad_params', detail: bad });
+    args.push(...kv);
     // ⚠️ `cycle_test.py:63` 的預設 host 是 **192.168.5.26**（本體 WiFi，2026-09-10 起已不通）
     //    ⇒ `FCV_WROBOT_HOST` 不是可選的，不帶就會連到一個不存在的位址。
     const env = Object.assign({}, process.env, {
@@ -321,6 +354,8 @@ function missionStart(p, reply) {
         FCV_TOP_CM:      topCm,       // = 牆高（② 最高點設定量到的 |length_left|）
         FCV_RAIL_CM:     railCm
     });
+    if (armNm !== undefined) env.FCV_ARM_NM = armNm;
+    if (p.dry === 1 || p.dry === '1' || p.dry === true) env.FCV_DRY = '1';
 
     let proc;
     try {
@@ -330,15 +365,27 @@ function missionStart(p, reply) {
     }
 
     mission.proc      = proc;
+    mission.paused    = false;
+    // 存成下次的預設(只有 spawn 成功才走到這裡)
+    missionDefaultsSave({
+        cycles: Number(cycles), steps: Number(steps), step_cm: Number(stepCm),
+        roll_trip: Number(roll), diff_trip: Number(diff), rail_cm: Number(railCm),
+        fan: (p.fan === undefined || p.fan === '') ? null : String(p.fan),
+        rail: (p.rail === undefined || p.rail === '') ? null : String(p.rail),
+        arm_nm: (armNm === undefined) ? null : Number(armNm),
+        dry: (p.dry === 1 || p.dry === '1' || p.dry === true) ? 1 : 0,
+        at: new Date().toISOString()
+    });
     mission.args      = { cycles, steps, step_cm: stepCm, roll_trip: roll, diff_trip: diff,
-                          top_cm: topCm, rail_cm: railCm };
-    mission.env       = { FCV_WROBOT_HOST: WASHROBOT_IP, FCV_TOP_CM: topCm, FCV_RAIL_CM: railCm };
+                          top_cm: topCm, rail_cm: railCm, kv };
+    mission.env       = { FCV_WROBOT_HOST: WASHROBOT_IP, FCV_TOP_CM: topCm, FCV_RAIL_CM: railCm,
+                          FCV_ARM_NM: env.FCV_ARM_NM, FCV_DRY: env.FCV_DRY };
     mission.startedAt = Date.now();
     mission.ring      = [];
     mission.exit      = null;
     mission.stopping  = false;
 
-    missionPush(`[web] spawn: python3 -u cycle_test.py ${cycles} ${steps} ${stepCm} ${roll} ${diff}`);
+    missionPush(`[web] spawn: python3 -u cycle_test.py ${cycles} ${steps} ${stepCm} ${roll} ${diff}${kv.length ? ' ' + kv.join(' ') : ''}`);
     missionPush(`[web] env: FCV_WROBOT_HOST=${WASHROBOT_IP} FCV_TOP_CM=${topCm}（牆高，server 儲存） FCV_RAIL_CM=${railCm}`);
 
     // stdout/stderr 合成同一條串流：進度印在 stdout、例外與 traceback 在 stderr，
@@ -350,6 +397,9 @@ function missionStart(p, reply) {
         while ((i = buf.indexOf('\n')) >= 0) {
             const line = buf.slice(0, i).replace(/\r$/, '');
             buf = buf.slice(i + 1);
+            // [2026-09-15] 腳本在 pause_point 印 `[PAUSE] paused …` / `[PAUSE] resumed`，以它為權威
+            if (/^\[PAUSE\] paused/.test(line))  { mission.paused = true;  missionSend({ state: missionSnapshot() }); }
+            if (/^\[PAUSE\] resumed/.test(line)) { mission.paused = false; missionSend({ state: missionSnapshot() }); }
             missionPush(line);
         }
     };
@@ -359,6 +409,7 @@ function missionStart(p, reply) {
     proc.on('close', (code, signal) => {
         if (buf.length) missionPush(buf);           // 最後一行沒有換行時不要吞掉
         mission.proc     = null;
+        mission.paused   = false;
         mission.stopping = false;
         mission.exit     = { code, signal, at: Date.now() };
         missionPush(`[web] 行程結束 code=${code}${signal ? ' signal=' + signal : ''}`);
@@ -388,6 +439,23 @@ function missionStart(p, reply) {
 //        ③ SIGINT（觸發腳本自己的 cleanup）④ 寬限後仍在 → SIGKILL
 const MISSION_SIGINT_GRACE_MS = 12000;   // cleanup 裡 arm_park 的 ask timeout 是 90s，
                                          // 但第 ② 步已經直接送過，不必等那麼久。
+
+// [2026-09-15 per user] 暫停 = 維持現狀(腳吸著、位置不動),但手臂收回、水泵/滾刷關。
+// 腳本自己在檢查點(伸腳前 / 每把工具前 / 放繩前 / 回程前)收到 SIGUSR1 才停,所以最多延遲一段
+// 滑台或一次壓牆;SIGUSR2 續跑。`mission.paused` 以腳本印出的 `[PAUSE]` 行為準,這裡只記「已要求」。
+function missionPause(reply) {
+    if (!mission.proc)    return reply({ ok: false, err: 'not_running' });
+    if (mission.stopping) return reply({ ok: false, err: 'stopping' });
+    try { mission.proc.kill('SIGUSR1'); } catch (e) { return reply({ ok: false, err: 'signal_failed', detail: String(e && e.message) }); }
+    missionPush('[web] PAUSE 要求已送出（腳本到下一個檢查點才停：收臂、關水泵/滾刷、腳維持吸附）');
+    reply({ ok: true });
+}
+function missionContinue(reply) {
+    if (!mission.proc)    return reply({ ok: false, err: 'not_running' });
+    try { mission.proc.kill('SIGUSR2'); } catch (e) { return reply({ ok: false, err: 'signal_failed', detail: String(e && e.message) }); }
+    missionPush('[web] CONTINUE 已送出');
+    reply({ ok: true });
+}
 
 function missionStop(reply) {
     if (!mission.proc)     return reply({ ok: false, err: 'not_running' });
@@ -496,6 +564,8 @@ wss.on('connection', (ws) => {
             const reply = (o) => ws.send(JSON.stringify(Object.assign({ src: 'mission', ack: msg.mission }, o)));
             if (msg.mission === 'start')  return missionStart(msg.params || {}, reply);
             if (msg.mission === 'stop')   return missionStop(reply);
+            if (msg.mission === 'pause')    return missionPause(reply);      // [2026-09-15]
+            if (msg.mission === 'continue') return missionContinue(reply);   // [2026-09-15]
             if (msg.mission === 'state')  return reply({ ok: true, state: missionSnapshot() });
             return reply({ ok: false, err: 'unknown_mission_action' });
         }

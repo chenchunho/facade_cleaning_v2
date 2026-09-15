@@ -146,6 +146,7 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
     }
     if (cmd == "shutdown")       return robot.cmd_shutdown();
     if (cmd == "status")         return robot.cmd_status();
+    if (cmd == "selfcheck")      return robot.cmd_selfcheck();   // [2026-09-14] plan §4 device probe
     if (cmd == "emergency_stop") return robot.cmd_emergency_stop();
     if (cmd == "reset")          return robot.cmd_reset();
     if (cmd == "recover")        return robot.cmd_recover();
@@ -169,6 +170,11 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
     if (cmd == "continue")       return robot.cmd_continue();
     if (cmd == "skip")           return robot.cmd_skip();
 
+    if (cmd == "crane_goto") {             // [2026-09-15] absolute height (cm above ground) → crane goto
+        int v = 0; iss >> v;
+        if (iss.fail()) return "ERR usage:crane_goto_<height_cm>\n";
+        return robot.cmd_crane_goto(v);
+    }
     if (cmd == "crane_attached") {
         std::string s; iss >> s;
         if (iss.fail()) return "ERR usage:crane_attached_<on|off>\n";
