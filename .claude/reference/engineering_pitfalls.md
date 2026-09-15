@@ -160,6 +160,7 @@ release_feet_center → free_hang_settle(3 s)→ balancing(IMU 閉環,連續 mot
 | **靜默失敗要變成看得到的 ERR** | `cmd_deploy_sequence()` Step 3 的 `wait_for_move(m1_)` 回傳值被丟掉("best-effort"),不管有沒有到位都回 OK ⇒ 解釋了「距離越跑越遠」。同模式在 `lr_calibrate_slot()` 也發生過(`void` 回傳、三種失敗都靜默 return) |
 | **先猜新參數不如換用已驗證可靠的路徑** | M2 PARK 卡 18 秒,第一版假說猜 CAN passive latch,port 偵測邏輯**沒用**;真因是 `go_home_slot()` 的 kp(≈2.5)比 `lr_move_to_slot_impl()`(`MIT_KP=28` + 摩擦前饋)**差 10 倍以上**。修法是讓 PARK 也走已驗證的那條,不是繼續猜 kp/kd |
 | 🔴 **移除看似獨立的功能前,一定要全 repo 搜一次相關字串** | 拔 Easy Crane 時才發現牽連到核心的張力 fallback(`read_rope_weight_max_kg_()` 的第三層),**事前沒有任何紀錄提過這個關聯** |
+| 🔴 **斷言的對象要是「使用者看到的東西」,不是「我設了什麼」** —— 綠燈證明的是屬性寫進去了,不是它真的生效 | 2026-09-15 v3 GUI 中了兩次:`el.hidden = true` 明明成立,但 CSS 的 `.ebanner{display:flex}` / `.grp > div{display:flex}` 把它蓋掉 ⇒ 元素照樣看得見(症狀:兩條鎖定橫幅在沒鎖時恆亮、前置卡收起後打不開),而驗收只讀 `.hidden` 所以**一路綠燈**。改法:斷言 computed display,並加一條全頁掃描「任何帶 hidden 的元素 computed display 必須真的是 none」。**同族**:`el.disabled` vs `pointer-events:none`、`textContent` 有值 vs 元素在畫面外、Modbus 寫入回成功 vs 繼電器真的動作(見 1.3 與破真空閥 0ms 那條) |
 | **機構層級的硬性要求不能為實作方便讓步** | sync 步伐曾想「一側伸完再伸另一側」以套用早停邏輯,被否決 ——「兩邊腳組一定要一起放」。正解是回頭改底層共用函式(`stop_group_ids` 每組獨立早停),而非犧牲同時性 |
 
 ---
