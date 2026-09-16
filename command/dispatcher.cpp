@@ -173,7 +173,10 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
     if (cmd == "crane_goto") {             // [2026-09-15] absolute height (cm above ground) → crane goto
         int v = 0; iss >> v;
         if (iss.fail()) return "ERR usage:crane_goto_<height_cm>\n";
-        return robot.cmd_crane_goto(v);
+        // [2026-09-16] 可選第二個 token `force` = 明知還吸著也要移動(救援用,會發 EVT)。
+        std::string f; iss >> f;
+        if (!f.empty() && f != "force") return "ERR usage:crane_goto_<height_cm>_[force]\n";
+        return robot.cmd_crane_goto(v, f == "force");
     }
     if (cmd == "crane_attached") {
         std::string s; iss >> s;

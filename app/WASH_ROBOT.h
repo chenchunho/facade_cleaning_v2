@@ -244,7 +244,13 @@ public:
     std::string cmd_continue();   // resume from PausedOnError = retry the failed op
     std::string cmd_skip();       // resume from PausedOnError = skip (assume manual fix)
     std::string cmd_crane_attached(bool on);   // toggle whether washrobot drives the crane
-    std::string cmd_crane_goto(int height_cm); // [2026-09-15] absolute height → crane `goto` (range guard lives on the crane)
+    // [2026-09-15] absolute height → crane `goto` (range guard lives on the crane).
+    // [2026-09-16 per user] `force` bypasses the cups-attached guard added below.
+    //   「中止跟急停容易被誤解,而且中止還吸附在牆上容易被誤操作」—— 中止之後本體停在
+    //   ready、腳還吸在牆上,而這支原本只擋 Idle/Ready 以外的狀態 ⇒ GUI 的三顆「拉到…」
+    //   按鈕會被接受,吊機就把還吸著的機器往上扯。守衛在**本體**不在 GUI:所有「拉到」
+    //   路徑(Manual 三顆 / Mission ⤒ / 前置 ⑦)都走這支,擋這裡才擋得到全部。
+    std::string cmd_crane_goto(int height_cm, bool force = false);
     // [2026-09-10] crane watchdog 門檻（執行期可調，見成員宣告處的三步落地說明）
     std::string cmd_set_crane_wd_warn_ms(int ms);
     std::string cmd_set_crane_wd_abort_ms(int ms);
@@ -338,21 +344,26 @@ public:
 
     //=========== state ===========
 
+    // 🔴 [2026-09-16 per user] **11 個狀態收斂成 6 個。**
+    //   合併/刪除的四個(及理由):
+    //     · PausedOnError → **Paused + pause_reason=error**   (3 進入點/13 判斷點,活的)
+    //     · WaitingConfirm → **Paused + pause_reason=balance_ask**
+    //         ⚠️ 它沒有使用者出口:`confirm_balance` 在 v2 已移除(dispatcher 回 `ERR removed_in_v2`),
+    //           實際是 IMU 監看自己在 roll 回穩後把狀態還原。合併後語意不變。
+    //     · ReturningHome → **Running**(它就是一段自動流程)。⚠️ 原本 rope 重量上限把它歸在
+    //           「吊著」那組,合併後靠 `returning_home_` 旗標維持,不是靠 state。
+    //     · Balancing / Calibrating → **刪除**:`set_state_` **0 個進入點**(平衡迴路 09-07 起在吊機端跑;
+    //           balance_calibrate_* 只寫了指令沒接狀態)⇒ 那 7 個判斷永遠不成立,是死碼。
     enum class State {
-        Idle,            // post-init, awaiting cmd_init (Phase 2)
-        Ready,           // Phase 2 done, awaiting attach
-        Attached,        // Phase 3 done, 9 cups holding
-        Running,         // Phase 4 step_down / run in progress
-        WaitingConfirm,  // balance_ask fired, awaiting confirm_balance
-        Paused,          // user-paused during Running / Balancing
-        PausedOnError,   // auto-flow op failed; awaiting cmd_continue (retry) / cmd_skip / cmd_emergency_stop
-        Balancing,       // Phase 5 roll correction running
-        ReturningHome,   // Phase 6 return_home running
-        Calibrating,     // [2026-06-02] balance calibration (Phase 1-4) running; ends Idle (cups off) on success
-        Error            // hard fault / 急停收回中 —— 自動流程一律擋下；人工單一動作放行
-                         // （2026-09-15：Manual 在 Error 可用，見 state_violation_ 上方）。
-                         // 急停的收回全部成功後會自動回到 Idle，不需要人按 reset。
+        Idle,            // 程式起來/未 init;開機盤點確認「沒吸附且繼電器已清」才會是這個
+        Ready,           // init 完成(幫浦開),未吸附
+        Attached,        // 四顆吸盤吸著
+        Running,         // 任何自動流程進行中(步態 / run / return_home)
+        Paused,          // 停下來等人——**等什麼看 pause_reason_**(user / error / balance_ask)
+        Error            // 硬故障 / 急停 / 開機盤點發現異常;自動流程擋下,人工動作放行
     };
+    // Paused 的三種原因。出口指令不同:user→resume、error→continue|skip、balance_ask→IMU 自己還原。
+    enum class PauseReason { None = 0, User = 1, Error = 2, BalanceAsk = 3 };
 
     enum class PauseAction { None = 0, Retry = 1, Skip = 2, Abort = 3 };
 
@@ -1803,6 +1814,16 @@ private:
 
     std::atomic<State>   state_;
     State                state_before_pause_;  // remembered on cmd_pause, restored on cmd_resume
+    std::atomic<int>     pause_reason_{(int)PauseReason::None};   // [2026-09-16] Paused 的原因,見 enum
+    std::atomic<bool>    returning_home_{false};                  // [2026-09-16] return_home 進行中(取代 State::ReturningHome)
+    static const char*   pause_reason_name(PauseReason r) {
+        switch (r) {
+            case PauseReason::User:       return "user";
+            case PauseReason::Error:      return "error";
+            case PauseReason::BalanceAsk: return "balance_ask";
+            default:                      return "none";
+        }
+    }
     State                state_before_wait_;   // remembered on balance_ask, restored on confirm_balance / hysteresis clear
     std::mutex           state_mtx_;           // serializes non-atomic prev-state fields
 
@@ -2744,6 +2765,12 @@ private:
     int              extend_raw_pulse_(double cm, std::string& err) const;
 
     bool             set_water_inlet_(bool on);
+
+    // [2026-09-16] 「現在有幾顆還吸著」—— cmd_crane_goto 的守衛用。
+    // 🔴 **一律 fresh read**(走 read_pressure_,不看 cached_pressure_):快取可能是幾分鐘前
+    //    某次運動順手留下的,而這裡的錯判會直接讓吊機拉一台還吸在牆上的機器。
+    // out_unreadable 收「讀不到的顆數」——**讀不到 ≠ 沒吸住**,呼叫端要把它當成也要擋。
+    int              cups_sealed_now_(int* out_unreadable = nullptr);
 
     std::vector<int> vacuum_check_(const std::string& group);
     // [2026-07-08 per user] Per-side "sealed enough" test used by step_down/up.

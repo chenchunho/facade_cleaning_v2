@@ -817,6 +817,9 @@ def cleanup():
     print("   [收尾] 手臂 arm_retract : %s" % ask(WROBOT, "arm_retract", 90)[:50])
     print("   [收尾] 風扇 %d%% / motion_hz→%d : %s / %s"
           % (FAN_OFF, DOWN_HZ, fan(FAN_OFF), ask(CRANE, "set_motion_hz %d" % DOWN_HZ, 15)))
+    # [2026-09-16] 背景關閥計時器可能還沒到 —— 收尾一律關閥(冪等),否則腳本結束後閥還開著,
+    #   只剩 300 s deadman 兜底。
+    close_inlet_now("(收尾)")
     # [2026-09-15 per user] 收尾一律關幫浦(中止時也是:現場保留指的是位置與姿態,不是讓真空一直抽)。
     print("   [收尾] 幫浦關閉: %s" % ask(WROBOT, "pump off", 20)[:50])
     pump_started_by_script[0] = False
@@ -1119,8 +1122,27 @@ rail_pos = [RAIL_START]
 #   閥另有 300 s deadman(本體 + 吊機各一顆)——那是安全上限,不是這裡的等待時間。
 WATER_FILL_S  = int(os.environ.get("FCV_WATER_FILL_S", "180"))
 # [2026-09-15] XKC 是單點門檻,水位剛過門檻時會 0/1 跳(實測 rssi 1135–3463 在跳、4272+ 穩定 1)。
-#   滿了以後再多灌 WATER_TOPUP_S 才關閥,給水位一個餘量,不然下一步噴 30 s 又掉回門檻。
-WATER_TOPUP_S = int(os.environ.get("FCV_WATER_TOPUP_S", "20"))
+#   🔴 [2026-09-16 per user] 補水不再擋著流程等餘量:
+#     偵測到水 → 等 WATER_PRE_CLEAN_S(20 s)就**開始清洗**,進水閥**留著繼續灌**,
+#     由背景計時器在偵測到水後 WATER_TOPUP_S(180 s)關閥。
+#     起因:同日實測水箱本來就快滿(2 s 就到門檻)卻照樣整段等 180 s,單步 30 s → 214 s。
+#     ⚠️ 兩件事要記得:
+#       ① 閥的 300 s deadman(本體+吊機各一顆)仍在:等滿時間 + 180 s 超過 300 s 時
+#          deadman 會先關,那是保護不是故障。
+#       ② 關閥是**背景**動作 ⇒ 腳本中止/結束時 cleanup() 一定要把它關掉(見 close_inlet_now)。
+WATER_PRE_CLEAN_S = int(os.environ.get("FCV_WATER_PRE_CLEAN_S", "20"))
+WATER_TOPUP_S     = int(os.environ.get("FCV_WATER_TOPUP_S", "180"))
+_inlet_timer = [None]          # 背景關閥計時器(threading.Timer);同時只會有一個
+
+def close_inlet_now(tag=""):
+    """立刻關進水閥並取消背景計時器。cleanup()/bail() 與下一次補水前都會呼叫 —— 冪等。"""
+    t = _inlet_timer[0]
+    if t is not None:
+        t.cancel(); _inlet_timer[0] = None
+    r = ask(WROBOT, "water_inlet off", 15)
+    if not r.startswith("OK"):
+        print("   🔴 進水閥關不掉%s:%s(deadman 300 s 會強制關)" % (tag, r[:60]))
+    return r.startswith("OK")
 
 def ensure_water_full(force=False):
     """回 True=有水可噴;False=補水逾時(閥已關,呼叫端決定要不要中止)。
@@ -1130,6 +1152,8 @@ def ensure_water_full(force=False):
         if "water_full=1" in wl: return True
         if "water_full=0" not in wl:
             print("   🔴 水位讀不到:%s" % wl[:60]); return False
+    if _inlet_timer[0] is not None:          # 上一輪的背景關閥還沒到 → 先取消,這輪重新計時
+        _inlet_timer[0].cancel(); _inlet_timer[0] = None
     r = ask(WROBOT, "water_inlet on", 15)
     if not r.startswith("OK"):
         print("   🔴 進水閥打不開:%s" % r[:60]); return False
@@ -1142,13 +1166,25 @@ def ensure_water_full(force=False):
         if "water_full=1" in wl: full = True; break
         el = int(time.time() - t0)
         if el - last >= 30: print("   💧 補水中 %d s … %s" % (el, wl[:40])); last = el
-    if full:
-        print("   💧 水滿(%.0f s),再灌 %d s 給餘量後關閥" % (time.time() - t0, WATER_TOPUP_S)); time.sleep(WATER_TOPUP_S)
-    else:
+    if not full:
         print("   🔴 補水 %d s 仍不滿" % WATER_FILL_S)
-    r = ask(WROBOT, "water_inlet off", 15)
-    if not r.startswith("OK"): print("   🔴 進水閥關不掉:%s(deadman 300 s 會強制關)" % r[:60])
-    return full
+        close_inlet_now("(補水逾時)")
+        return False
+    # 偵測到水:等 PRE_CLEAN 就放行清洗,閥留著由背景計時器在 TOPUP 時關。
+    print("   💧 偵測到水(%.0f s)→ 等 %d s 開始清洗;進水閥繼續灌,%d s 後自動關"
+          % (time.time() - t0, WATER_PRE_CLEAN_S, WATER_TOPUP_S))
+    time.sleep(WATER_PRE_CLEAN_S)
+    rest = max(0, WATER_TOPUP_S - WATER_PRE_CLEAN_S)
+    def _bg_close():
+        _inlet_timer[0] = None
+        r = ask(WROBOT, "water_inlet off", 15)
+        print("   💧 背景關進水閥(偵測到水後 %d s):%s" % (WATER_TOPUP_S, r.strip()[:60]))
+    if rest > 0:
+        tm = threading.Timer(rest, _bg_close); tm.daemon = True   # daemon:主程式結束不被它拖住
+        _inlet_timer[0] = tm; tm.start()
+    else:
+        _bg_close()
+    return True
 if RAIL_SWEEP:
     # 開跑前先把滑台移到起點,讓 rail_pos 的起點假設成立(已在該端時瞬回)。
     _r = ask(WROBOT, "rail %d" % RAIL_START, 60)

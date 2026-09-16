@@ -1,0 +1,23 @@
+[Unit]
+Description=FCV crane (Crane_control_PI, TCP :5002)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=user
+WorkingDirectory=/home/user/run
+# stdin 開著但永遠沒資料(console 讀 stdin,EOF 會讓程式退出);外部仍可 echo exit > ~/run/crane.in
+ExecStart=/bin/sh -c "mkfifo -m 600 /home/user/run/crane.in 2>/dev/null; exec 3<> /home/user/run/crane.in; exec stdbuf -oL -eL ./crane_control_PI.out <&3"
+# 🔴 這三個執行期參數**不持久化**,重啟一定要補送,否則:home_ground_cm 回 0(cycle_test 會誤判慣例)、
+#    wall_height_cm 回 0(goto 直接拒絕)、motion_hz 回編譯預設。牆高從 web 存的 wall_height.json 讀。
+ExecStartPost=/bin/sh -c "sleep 20; cd /home/user/run; W=$(python3 -c 'import json;print(int(json.load(open(\"/home/user/run/wall_height.json\"))[\"cm\"]))' 2>/dev/null || echo 0); python3 crcmd.py 'set_home_ground 0' 'set_motion_hz 30' 'set_roll_correct_hz 30' \"set_wall_height $W\""
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=3
+StandardOutput=append:/home/user/run/logs/crane_service.log
+StandardError=append:/home/user/run/logs/crane_service.log
+
+[Install]
+WantedBy=multi-user.target

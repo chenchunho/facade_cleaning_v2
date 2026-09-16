@@ -3440,6 +3440,33 @@ static std::string err_name(uint8_t e)
 	}
 }
 
+// [2026-09-16 per user] M2 的實際角度 → 工具名。容差取兩槽間距的一半再留一點餘裕:
+//   刮刀 0.1913 / CENTER 0(或停點座標系換算後) / 滾筒 0.8558 rad，相鄰間距最小 0.19,
+//   所以 ±0.09 不會把兩個槽混在一起;都不在就回 between(轉到一半/手轉/沒校正)。
+const char* DamiaoAPI::m2_tool_name(float pos)
+{
+	const float tol = 0.09f;
+	if (std::fabs(pos - M2_SLOT_RIGHT_RAD) <= tol) return "roller";    // 滾筒
+	if (std::fabs(pos - M2_SLOT_LEFT_RAD)  <= tol) return "squeegee";  // 刮刀
+	if (std::fabs(pos - 0.0f)              <= tol) return "center";
+	return "between";
+}
+
+// [2026-09-16 per user] 見標頭的說明:STARTUP → (成功才) INIT。
+std::string DamiaoAPI::startup_then_init()
+{
+	const std::string st = cmd_startup_sequence();
+	std::cout << st << "\n";
+	if (st.rfind("ERR", 0) == 0) {
+		std::cerr << "[STARTUP] 失敗 → 跳過自動 INIT,請人工確認後自行送 INIT\n";
+		return st;
+	}
+	std::cout << "[STARTUP] → 自動 INIT(開機即待命)…\n";
+	const std::string in = cmd_init_sequence();
+	std::cout << "[STARTUP] INIT: " << in << "\n";
+	return st + " | INIT:" + in;
+}
+
 std::string DamiaoAPI::cmd_status_sequence()
 {
 	float pos_1, vel_1, tau_1;
@@ -3477,7 +3504,11 @@ std::string DamiaoAPI::cmd_status_sequence()
 		<< " hold=" << (m2_.hold_en.load() ? 1 : 0)
 		<< " moving=" << (m2_.move_act.load() ? 1 : 0)
 		<< " err=" << err_name(err_2)
-		<< " en=" << (m2_.enabled.load() ? 1 : 0);
+		<< " en=" << (m2_.enabled.load() ? 1 : 0)
+		// 🔴 [2026-09-16 per user] 目前工具:GUI 要看得到「現在是滾筒還是刮刀」。
+		//   由 M2 實際位置反推,不是記一個「上次叫它去哪」的變數 —— 後者在手轉、
+		//   失能漂移、校正清零之後會說謊(en=0 時位置本來就是快取,見上方 M1 的警告)。
+		<< " tool=" << m2_tool_name(pos_2);
 
 	return oss.str();
 }

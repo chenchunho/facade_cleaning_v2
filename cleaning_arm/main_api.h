@@ -114,6 +114,12 @@ public:
     // ⚠️ **這會讓手臂在行程啟動時自己移動。** 若重啟當下手臂正壓在玻璃上，它會收回。
     //    設 ARM_NO_AUTOSTART=1 可停用（bench/除錯、或在手臂位置不明時）。
     std::string cmd_startup_sequence();
+    // [2026-09-16 per user] 開機即待命:STARTUP(M1 回零 + M2 滾筒)成功後直接接 INIT
+    //   (M1 撞停點校零 + M2 左右校正),讓 `init_done=1` 在服務起來時就成立。
+    //   包成 public 一支是刻意的:`cmd_init_sequence()` 維持 private —— 呼叫端不該自己
+    //   決定「STARTUP 失敗了還要不要 INIT」,那個判斷屬於這裡(失敗就不做,位置不明時
+    //   撞停點更危險)。
+    std::string startup_then_init();
     void stop();
 
     void registerCommand(const std::string& key, CommandHandler handler);
@@ -301,7 +307,7 @@ public:
     //    theta_contact < THETA_MIN  => 有東西擋著（09-03「吸不到」查明是橫桿）
     //  這兩個限是**手臂幾何**、不隨高度變，這正是它取代 wall_mm 的原因。
     // ============================================================
-    static constexpr float DEPLOY_F_TARGET_NM   = 3.0f;    // [2026-09-11 per user] 15→8 → [2026-09-14 per user] 8→3:現場看 3 Nm 清潔效果好,定為工作力度
+    static constexpr float DEPLOY_F_TARGET_NM   = 5.0f;    // [2026-09-15 per user] 3→5(10 趟滾筒實測:3 N·m 時掃動中 tau 由 3.86 掉到 1.2~1.9 ⇒ 壓不住)。舊註:[2026-09-11] 15→8 → [2026-09-14] 8→3:現場看 3 Nm 清潔效果好,定為工作力度
     static constexpr float DEPLOY_F_TOUCH_NM    = 2.0f;    // 輕觸判定：超過此值視為接觸
     static constexpr float DEPLOY_F_TOL_NM      = 1.0f;    // 收斂容差
     // 09-04 三點實測的等效剛度：Dtau/Dtheta_target = 2.54/0.0343 = 74、2.15/0.0338 = 64。
@@ -340,6 +346,8 @@ public:
     //   6~8.5,Step6 看到 |need|≤TOL 就直接收工(iters=0),而 80 ms settle 後 tau 還在爬 ⇒
     //   實測 9.82(+23%)。降到 4 讓割線細收至少跑一步(帶 900 ms relax)再定案。
     static constexpr float DEPLOY_F_COARSE_NM        = 4.0f;    // [2026-09-11 per user] 13→6 → [09-14] 6→4(見上)
+    //   📌 [2026-09-15] TARGET 提到 5 之後,Step5 的粗壓門檻是 min(COARSE, target−TOL)=min(4,4)=4 ⇒
+    //      粗壓到 4 就交給割線,與 3 N·m 時(門檻 2=TOUCH,粗壓 0 步)不同:現在割線一定會跑到。
     // ⚰️ [2026-09-12] 細掃(DEPLOY_F_FINE_*)與剛度探測(DEPLOY_F_STIFF_*)共 9 個常數已刪除
     //   —— 2026-09-11 per user「移除偵測、低力刷過」時程式碼已拿掉,常數留著沒人用。
     //   **不要憑「橫桿偵測」的直覺把它們加回來**:contact θ 與剛度兩個判據都已實測失敗
@@ -704,6 +712,8 @@ private:
     bool        press_hold_step_(float theta_cmd, int settle_ms,
                                 float& pos_out, float& tau_out);
     std::string cmd_park_sequence();
+    // [2026-09-16] M2 角度 → 工具名(roller|squeegee|center|between);STATUS 的 tool= 欄位
+    static const char* m2_tool_name(float pos);
     std::string cmd_status_sequence();
 
     // ---- move-completion poll helper (true=done; false=timeout) -------------

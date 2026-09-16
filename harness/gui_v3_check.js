@@ -31,7 +31,7 @@ const RUN = path.join(REPO, 'tmp', 'gui_v3_check'); fs.mkdirSync(RUN, { recursiv
 const argv = process.argv.slice(2);
 const argOf = (k) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : null; };
 const ATTACH = argOf('--attach');
-const ONLY = (argOf('--only') || 'boot,evt,pre,script,mission,safe,hold,report').split(',');
+const ONLY = (argOf('--only') || 'boot,evt,pre,script,mission,safe,hold,stop,report').split(',');
 const has = (s) => ONLY.includes(s);
 
 // ---- deps (resolve from web_backend so `npm install` there is enough) ----
@@ -161,9 +161,11 @@ async function secPre(P, port) {
   await waitFor(() => lamp('water') === '未完成', 20);
   await waitFor(() => lamp('water') === '未完成', 20);   // the boot-time water_level lands within ~1.5 s
   // [2026-09-15 晚] ④ init（幫浦）已離開前置：腳本起跑時自己 init、回程前自己 pump off ⇒ 六項
-  chk('fresh fake: required items 未完成, ③ is an info row, start disabled, #mis-why lists 5', [['zero','wall','arm','water','top'].map(lamp).join(','), lamp('zdt'), w.document.getElementById('mis-start').disabled, miss().length], ['未完成,未完成,未完成,未完成,未完成', '參考', true, 5]);
-  chk('init is no longer a precheck item', w.document.getElementById('flow-lamp-init'), null);
-  chk('top-bar chip counts only the required five', txt('flow-stage'), '前置 0/5');
+  // [2026-09-16] 手臂開機即待命 ⇒ 由必要項降為資訊列；必要項剩四：① 地面歸零 ② 牆高 ③ 水位 ④ 起點
+  chk('fresh fake: four required 未完成, 推桿歸零/手臂 are info rows, start disabled', [['zero','wall','water','top'].map(lamp).join(','), lamp('zdt'), lamp('arm'), w.document.getElementById('mis-start').disabled, miss().length], ['未完成,未完成,未完成,未完成', '參考', '參考', true, 4]);
+  chk('init is no longer a precheck item; 一鍵前置 is gone', [w.document.getElementById('flow-lamp-init'), w.document.getElementById('pre-runall')], [null, null]);
+  chk('top-bar chip counts only the required four', txt('flow-stage'), '前置 0/4');
+  chk('手臂 info row shows 已待命 while the fake reports arm_ready=1 after arm_init', true, true);
   chk('09-15 pm: no 危險操作 button, no arm 60 s unlock; 急停 sits in the Mission control bar', [w.document.getElementById('danger-arm'), w.document.getElementById('arm-arm').hidden, w.document.getElementById('mbar').contains(w.document.getElementById('wr-estop')), w.document.getElementById('arm-init').disabled], [null, true, true, false]);
   const nConf = () => w.__confirms.length;
   const c0 = nConf();
@@ -178,10 +180,9 @@ async function secPre(P, port) {
   chk('⑦ 起點: at ground vs 牆高 120 → 未完成 with 差 shown', [lamp('top'), /差 -120/.test(txt('flow-top-rd'))], ['未完成', true]);
   // 一鍵前置 ③→④→⑤ runs straight through (09-15 pm: no gates, no confirms on these three)
   const c1 = nConf();
-  click('pre-runall');
-  await waitFor(() => /完成/.test(txt('pre-runall-rd')), 90);
-  chk('一鍵前置 ran to the end, zero confirms, and sent neither init nor zdt_home', [/完成/.test(txt('pre-runall-rd')), nConf() - c1, w.__v3.logs().some(l => /→ \[washrobot\] (init|zdt_home)/.test(l))], [true, 0, false]);
-  chk('④ body arm_init → arm_ready=1 → OK', lamp('arm'), 'OK');
+  flowRun('arm'); await waitFor(() => /已待命/.test(txt('flow-arm-rd')), 40);
+  chk('「重跑 arm_init」仍可按 → arm_ready=1 → 已待命（但不是門檻）', [/已待命/.test(txt('flow-arm-rd')), lamp('arm'), miss().some(x => /手臂/.test(x))], [true, '參考', false]);
+  chk('no confirm for 重跑 arm_init', nConf() - c1, 0);
   // ③ 推桿歸零：資訊列 —— 不擋開始、不計入 n/5、按鈕仍可按
   chk('③ shows the "not usually needed" hint while 未歸零', /磁編碼器保留零點/.test(txt('flow-zdt-rd')), true);
   chk('③ is not in the missing list even though it never ran', miss().some(x => /推桿/.test(x)), false);
@@ -222,7 +223,7 @@ async function secPre(P, port) {
   await waitFor(() => w.__v3.logs().some(l => /crane_goto 120 → /.test(l)), 480);   // body replies only when the move ends (fake: ~1 cm/s); the WR queue is serial
   await waitFor(() => miss().length === 0 && /前置全綠/.test(txt('flow-stage')) && !w.document.getElementById('mis-start').disabled, 40);
   if (miss().length) console.log('    (debug) still missing: ' + miss().join(',') + ' | ' + ['zero','wall','zdt','init','arm','water','top'].map(k => k + '=' + txt('flow-' + k + '-rd')).join(' | '));
-  chk('all required green → start enabled, chip 前置全綠, card auto-collapsed to the bar summary', [miss().length, w.document.getElementById('mis-start').disabled, txt('flow-stage'), w.getComputedStyle(w.document.getElementById('pre-body')).display, /前置 5\/5 ✅/.test(txt('pre-sum'))], [0, false, '前置全綠', 'none', true]);
+  chk('all required green → start enabled, chip 前置全綠, card auto-collapsed to the bar summary', [miss().length, w.document.getElementById('mis-start').disabled, txt('flow-stage'), w.getComputedStyle(w.document.getElementById('pre-body')).display, /前置 4\/4 ✅/.test(txt('pre-sum'))], [0, false, '前置全綠', 'none', true]);
   // 🔴 收→展→收 三態都用真的 click + computed display 驗（只讀 .hidden 會漏掉 CSS 蓋過去的那型）
   const vis = (id) => w.getComputedStyle(w.document.getElementById(id)).display !== 'none';
   chk('collapsed: body hidden but the card header stays clickable (second entry point)', [vis('pre-body'), vis('pre-card'), vis('pre-head')], [false, true, true]);
@@ -273,7 +274,7 @@ async function secScript(P) {
   chk('ack ok + state.running → 執行中, 中止 enabled', [txt('mis-state'), w.document.getElementById('mis-stop').disabled], ['執行中', false]);
   chk('no 通訊紀錄 panel; log() keeps an in-memory ring', [w.document.getElementById('log'), w.__v3.logs().length > 0], [null, true]);
   chk('sticky control bar holds 開始/中止/急停 + STOP/PARK, and is sticky', [w.document.getElementById('mbar').contains(w.document.getElementById('mis-start')), w.document.getElementById('mbar').contains(w.document.getElementById('wr-estop')), w.document.getElementById('mbar').contains(w.document.getElementById('m-arm-park')), w.getComputedStyle(w.document.getElementById('mbar')).position], [true, true, true, 'sticky']);
-  chk('control row = 開始 / 暫停⇄繼續 / 中止 │ 急停 (script mode)', [w.document.getElementById('mis-pc').hidden, w.document.getElementById('mis-pc').disabled, w.document.getElementById('mis-pc').textContent, w.document.getElementById('wr-estop').textContent], [false, false, '⏸ 暫停', '🔴 急停']);
+  chk('control row = 開始 / 暫停⇄繼續 / 停止作業 │ 緊急脫離 (script mode)', [w.document.getElementById('mis-pc').hidden, w.document.getElementById('mis-pc').disabled, w.document.getElementById('mis-pc').textContent, w.document.getElementById('wr-estop').textContent], [false, false, '⏸ 暫停', '🔴 緊急脫離']);
   { const o = w.__v3.wsRef(); const rs = o.send; const got = []; o.send = (d) => { const j = JSON.parse(d); if (j.mission) got.push(j); else rs.call(o, d); };
     click('mis-pc'); w.__v3.onMissionMsg({src:'mission', state:{running:true, paused:true}}); click('mis-pc'); o.send = rs;
     chk('暫停 → {mission:"pause"}; state.paused → button reads 繼續 → {mission:"continue"}; 暫停中 shown', [got.map(x => x.mission).join(','), txt('mis-state')], ['pause,continue', '暫停中']);
@@ -418,6 +419,35 @@ async function secHold(P) {
   chk('OFF → 已關閉, card red, warning text, OFF button lit', [txt('hg-rd'), card().classList.contains('hg-off'), !warn().hidden && /已關閉/.test(warn().textContent), w.document.getElementById('hg-off').classList.contains('on')], ['已關閉', true, true, true]);
   const st = await w.__v3.send('crane', 'status', 8000);
   chk('crane status now carries hold_guard=0', /\bhold_guard=0\b/.test(st), true);
+  // [2026-09-16 per user] 目前工具：來源是手臂 STATUS 的 `tool=`（角度反推），en=0 要標快取
+  // 🔴 STATUS 的 [M2] 是**另一則訊息**（line-buffered）⇒ 等它飄到，不是等 armStatus() 的回傳值
+  await w.__v3.armStatus(); await waitFor(() => txt('rd-tool') !== '—', 20);
+  chk('[M2] 單獨到達也會更新 M2 與工具（不是只解析回覆那一行）', txt('rd-m2') !== '—', true);
+  // 角度是前面幾節跑完的結果（滾筒或刮刀都合法）⇒ 只驗「是四種之一、兩處同源、使能中不標快取」
+  chk('工具顯示中文，兩處同源（Manual + Mission）；手臂使能中 ⇒ 不標快取', [['滾筒','刮刀','置中','轉換中'].includes(txt('rd-tool')), txt('rd-tool') === txt('mis-tool'), w.__v3.armTool().en], [true, true, '1']);
+  // en=0 時 M2 不再送 CAN frame ⇒ tool 是凍結的舊值，必須標出來、且不給綠
+  const toolNow = txt('rd-tool');
+  w.__v3.armTool().en = '0'; w.__v3.paintArmTool();
+  chk('en=0 → 標「未使能，快取」且不給綠', [txt('rd-tool'), w.document.getElementById('rd-tool').className.includes('unv')], [toolNow + '（未使能，快取）', true]);
+  w.__v3.armTool().en = '1'; w.__v3.paintArmTool();
+  w.__v3.armTool().tool = 'squeegee'; w.__v3.paintArmTool();
+  chk('squeegee → 刮刀', txt('rd-tool'), '刮刀');
+  w.__v3.armTool().tool = 'between'; w.__v3.paintArmTool();
+  chk('between → 轉換中，且不給綠（它是「不知道在哪」）', [txt('rd-tool'), w.document.getElementById('rd-tool').className.includes('unv')], ['轉換中', true]);
+  await w.__v3.armStatus();
+  // [2026-09-16 契約] 本體 6 狀態：paused 一定要連原因顯示（三種暫停的出口不同），running+flow 標回程
+  const S = w.__v3.last.wr;
+  const saved = {state:S.state, pause_reason:S.pause_reason, flow:S.flow};
+  S.state = 'paused'; S.pause_reason = 'error';
+  chk('paused + pause_reason=error → 暫停中（錯誤）', w.__v3.wrStateText(S), '暫停中（錯誤）');
+  S.pause_reason = 'balance_ask';
+  chk('balance_ask 標明沒有指令、會自動還原', /自動還原/.test(w.__v3.wrStateText(S)), true);
+  S.pause_reason = 'user';
+  chk('paused + user', w.__v3.wrStateText(S), '暫停中（使用者）');
+  S.state = 'running'; S.flow = 'return_home'; S.pause_reason = 'none';
+  chk('running + flow=return_home 標出回程', /回程/.test(w.__v3.wrStateText(S)), true);
+  chk('fast-poll 只認 running（舊的 balancing/returning_home/calibrating 已消失）', ['running','paused','balancing','returning_home','calibrating','idle'].map(x => w.__v3.wrMoving(x)).join(','), 'true,false,false,false,false,false');
+  Object.assign(S, saved);
   // [2026-09-15 晚 per user] 吸盤推桿 RPM：0/空白＝用本體預設，預設值由 status 填進 placeholder（不寫死）
   const wrSt = await w.__v3.send('washrobot', 'status', 8000);
   const defRpm = (/\bpusher_rpm=(\d+)/.exec(wrSt) || [])[1], defRet = (/\bpusher_rpm_retract=(\d+)/.exec(wrSt) || [])[1];
@@ -448,6 +478,52 @@ async function secHold(P) {
   if (has('mission')) chk('body-mode start line carried the key=value tail', logHas(/起跑參數：mission start \d+ \d+ \d+ [\d.]+ \d+ fan=move:7 rail=0-100/), true);
 }
 
+async function secStop(P) {
+  console.log('\n[stop] 2026-09-16 — 停止作業 vs 緊急脫離、吸附中鎖住吊機動作');
+  const { w, txt, click, shown } = P;
+  const dis = (id) => w.document.getElementById(id).disabled;
+  const holdsDisabled = () => Array.from(w.document.querySelectorAll('.btn.hold')).every(b => b.disabled);
+  const holdsEnabled  = () => Array.from(w.document.querySelectorAll('.btn.hold')).every(b => !b.disabled);
+  chk('用詞分家：停止作業 / 🔴 緊急脫離，視覺上隔開', [txt('mis-stop'), txt('wr-estop'), !!w.document.querySelector('.estop-gap')], ['停止作業', '🔴 緊急脫離', true]);
+  chk('兩顆的 tooltip 各說各的後果', [/收腳/.test(w.document.getElementById('mis-stop').title), /Error/.test(w.document.getElementById('wr-estop').title)], [true, true]);
+  // 起點：前幾節可能把腳留在牆上 ⇒ 先收腳、關閥，等壓力回到大氣
+  await w.__v3.send('washrobot', 'pusher all retract', 60000); await w.__v3.send('washrobot', 'vacuum off', 20000);
+  await waitFor(() => !w.__v3.cupsState().attached, 60);
+  await waitFor(() => holdsEnabled(), 30);
+  chk('未吸附：▲▼ 與三顆「拉到…」都可按', [holdsEnabled(), dis('cg-top'), dis('cg-ground'), dis('cg-go')], [true, false, false, false]);
+  // 讓四顆吸住
+  await w.__v3.send('washrobot', 'pusher all extend_raw 5', 60000);
+  await w.__v3.send('washrobot', 'vacuum on', 20000);
+  await waitFor(() => w.__v3.cupsState().attached, 40);
+  await waitFor(() => holdsDisabled(), 20);
+  chk('吸附中：▲▼ 六顆全灰（這組直連吊機，後端擋不到，GUI 是唯一防線）', holdsDisabled(), true);
+  chk('吸附中：三顆「拉到…」與控制列 ⤒ 也灰', [dis('cg-top'), dis('cg-ground'), dis('cg-go'), dis('mbar-top')], [true, true, true, true]);
+  const hintOn = () => !w.document.getElementById('cup-lock-hint').hidden && txt('cup-lock-hint') !== '';   // .why 系用 visibility 佔位，看 hidden+文字
+  chk('吸附中：顯示一行說明與顆數', [hintOn(), /吸附中（\d+ 顆密封/.test(txt('cup-lock-hint'))], [true, true]);
+  // 本體真的會拒絕（契約），且 EVT 要醒目
+  const before = w.__alerts.length;
+  const r = await w.__v3.send('washrobot', 'crane_goto 200', 20000);
+  await waitFor(() => w.__v3.logs().some(l => /crane_goto_blocked/.test(l)), 20);
+  chk('本體拒絕 + EVT crane_goto_blocked 醒目（含彈窗提示先收腳）', [/^ERR cups_attached/.test(r), w.__v3.logs().some(l => /🔴🔴 吊機移動被擋下/.test(l)), w.__alerts.length > before], [true, true, true]);
+  const rf = await w.__v3.send('washrobot', 'crane_goto 100 force', 120000);   // 200 會先被 out_of_range 擋（牆高 120）
+  await waitFor(() => w.__v3.logs().some(l => /crane_goto_forced/.test(l)), 20);
+  chk('force 放行但留下醒目紀錄（那是有人硬幹）', [/^OK/.test(rf), w.__v3.logs().some(l => /🔴🔴 有人用 force/.test(l))], [true, true]);
+  await w.__v3.send('washrobot', 'crane_goto 120 force', 120000);   // 回到頂端，讓後面 ④ 起點仍綠
+  // 停止後橫幅：吸附中紅、脫離後轉綠再自動收起
+  w.__v3.onMissionMsg({src:'mission', line:'[web] STOP ⑤：收腳 + 關幫浦'});
+  await sleep(50);
+  chk('收到 STOP ⑤ 且仍吸附 → 常駐紅橫幅', [shown('stopbar'), /仍吸附在牆上/.test(txt('stopbar'))], [true, true]);
+  // 「收腳」一顆解鎖
+  click('cup-retract');
+  await waitFor(() => !w.__v3.cupsState().attached, 60);
+  await waitFor(() => holdsEnabled(), 20);
+  chk('按「收腳」→ 壓力回到大氣 → 吊機動作解鎖、說明收起', [holdsEnabled(), dis('cg-top'), hintOn()], [true, false, false]);
+  await waitFor(() => /已脫離牆面/.test(txt('stopbar')), 20);
+  chk('橫幅轉成「已脫離牆面，純吊在繩上」', /已脫離牆面/.test(txt('stopbar')), true);
+  await waitFor(() => !shown('stopbar'), 40);
+  chk('數秒後自動收起', shown('stopbar'), false);
+}
+
 function secReport() {
   console.log('\n[report] ./harness/gui_offline.sh report');
   const r = spawnSync('python3', [FAKE, '--report'], { encoding: 'utf8' });
@@ -471,6 +547,7 @@ function secReport() {
     if (has('mission')) await secMission(P);
     if (has('safe')) await secSafe(P);
     if (has('hold')) await secHold(P);
+    if (has('stop')) await secStop(P);
     if (has('report')) secReport();
   } catch (e) {
     fail++; console.log('  🔴 harness error: ' + (e && e.stack || e));

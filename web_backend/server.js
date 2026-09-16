@@ -269,7 +269,10 @@ const MISSION_RING = 3000;          // 保留最後 N 行，供重新連上的�
 
 const mission = {
     proc: null, args: null, env: null, startedAt: 0,
-    ring: [], exit: null, stopping: false
+    // [2026-09-16] detachAfterExit：STOP 的第 ⑤ 步（收腳）要等 python 真的結束才能送，
+    // 不然會跟腳本自己的 cleanup 在同一條 Modbus 匯流排上打架。旗標在 missionStop 設、
+    // 在 proc close 消費。
+    ring: [], exit: null, stopping: false, detachAfterExit: false
 };
 
 function missionSnapshot() {
@@ -408,12 +411,15 @@ function missionStart(p, reply) {
 
     proc.on('close', (code, signal) => {
         if (buf.length) missionPush(buf);           // 最後一行沒有換行時不要吞掉
-        mission.proc     = null;
-        mission.paused   = false;
-        mission.stopping = false;
-        mission.exit     = { code, signal, at: Date.now() };
+        const wasStopping = mission.detachAfterExit;
+        mission.proc      = null;
+        mission.paused    = false;
+        mission.stopping  = false;
+        mission.detachAfterExit = false;
+        mission.exit      = { code, signal, at: Date.now() };
         missionPush(`[web] 行程結束 code=${code}${signal ? ' signal=' + signal : ''}`);
         missionSend({ state: missionSnapshot() });
+        if (wasStopping) missionDetachFeet();
     });
     proc.on('error', (e) => { missionPush(`[web] 🔴 spawn error: ${e && e.message}`); });
 
@@ -435,8 +441,9 @@ function missionStart(p, reply) {
 //   📌 而且**安全動作由後端透過已開的 bridge 直接做，不賭 python 收得到訊號** ——
 //      python 可能正卡在某個 socket recv 上。前兩步不依賴它。
 //
-//   四步：① 吊機 `stop`（立刻停鋼索）② 本體 `arm_park`（卸力的 backstop）
+//   五步：① 吊機 `stop`（立刻停鋼索）② 本體 `arm_park`（卸力的 backstop）
 //        ③ SIGINT（觸發腳本自己的 cleanup）④ 寬限後仍在 → SIGKILL
+//        ⑤ **proc 結束後**本體 `pusher all retract` + `pump off`（收腳脫離牆面，2026-09-16 加）
 const MISSION_SIGINT_GRACE_MS = 12000;   // cleanup 裡 arm_park 的 ask timeout 是 90s，
                                          // 但第 ② 步已經直接送過，不必等那麼久。
 
@@ -457,10 +464,29 @@ function missionContinue(reply) {
     reply({ ok: true });
 }
 
+// [2026-09-16 per user] STOP 的第 ⑤ 步：**收腳**。
+//   「中止跟急停容易被誤解,而且中止還吸附在牆上容易被誤操作」——
+//   在此之前「中止」停完是「腳還吸在牆上、推桿伸著」，畫面上卻只寫著「已停止」。
+//   那個狀態下任何一個移動吊機的動作都是拿鋼索扯機器（本體 `crane_goto` 已加硬守衛擋掉，
+//   但擋掉不等於安全，安全是**根本不要停在那個狀態**）。所以停止＝離開牆面：純吊在繩上。
+//   要「停下來看一眼、原位續跑」請用**暫停**（那條路徑刻意保留吸附）。
+// 🔴 一定要等 python 結束才送：`pusher all retract` 與腳本 cleanup 會搶同一條 Modbus 匯流排。
+// 📌 `pusher all retract` 內建「關閥 → 洩壓 → CH6 正壓 → 兩段收回」，不必也不可以自己拆步驟。
+function missionDetachFeet() {
+    const ok1 = washrobot.send('pusher all retract');
+    missionPush(`[web] STOP ⑤：本體 pusher all retract（收腳、脫離牆面）` +
+                (ok1 ? ' 已送出（約 4 s，回覆看 washrobot 那行）' : ' —— 🔴 送不出去，本體橋接未連線'));
+    // 幫浦：腳本 cleanup 會關，但 SIGKILL 收場時不會 —— 補一次（冪等）。
+    // 排在 retract 之後送，本體單連線序列處理，順序即是收腳完才關幫浦。
+    const ok2 = washrobot.send('pump off');
+    if (!ok2) missionPush('[web] STOP ⑤b：pump off 送不出去，本體橋接未連線');
+}
+
 function missionStop(reply) {
     if (!mission.proc)     return reply({ ok: false, err: 'not_running' });
     if (mission.stopping)  return reply({ ok: false, err: 'already_stopping' });
     mission.stopping = true;
+    mission.detachAfterExit = true;   // ⑤：等 proc close 再收腳（見 missionDetachFeet）
     missionSend({ state: missionSnapshot() });
 
     // 步驟 ①：立刻對吊機送 stop（走 intr 連線，繞開可能塞住的主連線）。不等 python。

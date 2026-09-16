@@ -1,0 +1,23 @@
+[Unit]
+Description=FCV body (facade_cleaning_v2, TCP :5001)
+After=network-online.target fcv-arm.service
+Wants=network-online.target fcv-arm.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nexuni/run
+Environment=WR_DRIVER_DEBUG=0
+Environment=FCV_EP_CRANE_HOST=192.168.5.25
+ExecStart=/bin/sh -c "mkfifo -m 600 /home/nexuni/run/body.in 2>/dev/null; exec 3<> /home/nexuni/run/body.in; exec stdbuf -oL -eL ./facade_cleaning_v2.out <&3"
+# 🔴 停止走 SIGTERM,**不送 console 的 exit**:exit 會跑 cmd_shutdown 關掉所有繼電器,
+#    腳吸著時等於當場失去真空。要那種乾淨關機請自己 `echo exit > ~/run/body.in`。
+KillSignal=SIGTERM
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=3
+StandardOutput=append:/home/nexuni/run/logs/body_service.log
+StandardError=append:/home/nexuni/run/logs/body_service.log
+
+[Install]
+WantedBy=default.target

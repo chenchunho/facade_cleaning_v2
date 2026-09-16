@@ -81,14 +81,20 @@ int main(int argc, char* argv[])
 	api.start();
 
 	// [2026-09-04 per user] 開機自動就緒：上電 → M1 回機械零點 → M2 滾筒(RIGHT)。
-	// ⚠️ 這會讓手臂在行程啟動時自己移動；ARM_NO_AUTOSTART=1 可停用。
+	// 🔴 [2026-09-16 per user] **再往前走一步：STARTUP 之後直接跑 INIT，開機即待命。**
+	//    理由：INIT（M1 撞停點校零 + M2 左右校正）本來就是每次開工必做的第一件事，
+	//    而它只動手臂自己、不碰吸盤/吊機 ⇒ 沒有理由讓人在 GUI 上多按一次。
+	//    做完之後 `init_done=1`，本體的 `arm_ready` 直接就是 1，GUI 的前置「手臂」那項可以拿掉。
+	//    ⚠️ 代價：服務啟動會多花約 10~20 秒，而且手臂會多動一輪（M1 撞停點、M2 找左右極限）。
+	//       壓牆時重啟服務仍然要先確認沒壓著 —— 這點與 STARTUP 相同，deploy.sh 會問。
+	//    ARM_NO_AUTOSTART=1 兩段都跳過（維持失能，需自行 ENABLE/INIT）。
 	{
 		const char* off = std::getenv("ARM_NO_AUTOSTART");
 		if (off && off[0] == '1') {
 			std::cout << "[STARTUP] ARM_NO_AUTOSTART=1 — 跳過自動就緒，"
 			             "兩顆維持失能（需自行送 ENABLE 或 INIT）\n";
 		} else {
-			std::cout << api.cmd_startup_sequence() << "\n";
+			std::cout << api.startup_then_init() << "\n";
 		}
 	}
 

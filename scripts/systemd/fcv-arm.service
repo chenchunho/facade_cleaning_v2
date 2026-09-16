@@ -1,0 +1,21 @@
+[Unit]
+Description=FCV cleaning arm (motor_api, TCP :9527)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nexuni/projects/facade_cleaning_v2/cleaning_arm
+# stdin 必須是「開著但永遠沒資料」的 fd:程式的 console 讀 stdin,拿到 EOF 會退出。
+# `exec 3<> fifo` 同時開讀寫端 ⇒ 沒有 EOF,而且外部仍可 `echo ... > fifo` 下 console 指令。
+ExecStart=/bin/sh -c "mkfifo -m 600 /home/nexuni/run/arm.in 2>/dev/null; exec 3<> /home/nexuni/run/arm.in; exec stdbuf -oL -eL ./motor_api <&3"
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=3
+StandardOutput=append:/home/nexuni/run/logs/arm_service.log
+StandardError=append:/home/nexuni/run/logs/arm_service.log
+# 🔴 啟動就會動手臂(STARTUP:M1 回機械零點、M2 轉滾筒槽)——2026-09-16 per user 確認這是正確行為。
+
+[Install]
+WantedBy=default.target

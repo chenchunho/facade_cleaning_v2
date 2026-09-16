@@ -1,4 +1,130 @@
+## 2026-09-16 中止/急停分家:本體 crane_goto 加吸附守衛 + 中止收尾自動收腳
+
+> user:「中止跟急停容易被誤解,而且中止還吸附在牆上容易被誤操作」→ 三件一起做(user 核可「照這樣動手 三要」)。
+
+### 已完成
+- 🔴 **本體 `crane_goto` 加吸附硬守衛**(`app/wash_robot_commands.cpp`)。
+  查證的洞:這支原本只擋 `Idle/Ready` 以外的狀態 + `step_in_progress_`,**完全沒有查吸盤**,
+  而「中止」之後本體正好停在 `ready`、腳還吸在牆上 ⇒ GUI 的三顆「拉到…」/ Mission ⤒ / 前置 ⑦
+  (全部都走本體 `crane_goto`)會被接受,吊機就把還吸著的機器往上扯。
+  - 新 helper `cups_sealed_now_(int* out_unreadable)` —— **fresh read,不吃 `cached_pressure_`**
+    (快取可能是幾分鐘前某次運動順手留下的,這裡誤判的代價是扯機器)。
+  - `sealed > 0 || unreadable > 0` ⇒ `ERR cups_attached sealed=N unreadable=M …` + `EVT crane_goto_blocked`。
+    **讀不到也擋** —— 讀不到 ≠ 沒吸住。
+  - 救援旁路 `crane_goto <cm> force`,放行但一定留 `EVT crane_goto_forced`。dispatcher 解析第二個 token,
+    壞參數回 `ERR usage:crane_goto_<height_cm>_[force]`。
+  - ⚠️ **沒有涵蓋** Manual 的 ▲▼ 拉繩/放繩與緊急收繩 —— 那組直連吊機 :5002,吊機不知道吸盤狀態。
+    這一層交給 GUI(見交接單),屬於已知缺口。
+- 🔴 **`server.js` missionStop 由四步變五步**:④ SIGKILL 之後、**python 行程真的 close 時**
+  再送 `pusher all retract` + `pump off`(`missionDetachFeet()`,旗標 `mission.detachAfterExit`)。
+  - 為什麼等 proc close:`pusher all retract` 會跟腳本自己的 cleanup 搶同一條 Modbus 匯流排。
+  - 為什麼補 `pump off`:SIGKILL 收場時腳本的 cleanup 沒跑到。
+  - **語意變更**:中止完成後機器**純吊在繩上,不再吸附**。要「停下來看一眼、原位續跑」請用**暫停**
+    (那條路徑刻意保留吸附,不受本次影響)。
+- `harness/fake_robot.py` 鏡像新契約,並實測三條路徑:吸附中拒絕(`sealed=4`)/ `force` 放行 / 收腳後放行。
+- 交接單 `.claude/handoff/ai2-stop-vs-estop.md`(已 SendMessage 通知 AI-2):用詞改
+  **「停止作業」/「緊急脫離」**(後者紅色、隔開、二次確認)、停止後常駐橫幅、吸附中把會動吊機的按鈕變灰
+  (含後端擋不到的 ▲▼)、旁邊放一顆「收腳」。
+- 已部署真機:`deploy.sh body` + `deploy.sh server`(md5 f5345319 / 1371def2),五支服務 active。
+  實機驗過放行路徑(`crane_goto 242` → `OK goto already_there`)與壞參數;**拒絕路徑只在 fake_robot 驗過**
+  (真機要驗得先吸附一次)。
+
+### 待完成
+- 🟡 真機驗證拒絕路徑:先吸附 → `crane_goto` 應回 `ERR cups_attached`(要 user 同意才動硬體)
+- 🟡 真機驗證中止五步:GUI 起跑 → 中止 → 看 `[web] STOP ⑤` 與四顆壓力回大氣
+- 🟡 AI-2 的 GUI 用詞/灰化/橫幅
+- 🔴 自 `e7a05ba` 之後全部未 commit(等 user 說)
+
+## 🆕 2026-09-16（GUI 線／AI-2）：6 狀態對齊、手臂降資訊列、tool= 顯示、「停止作業／緊急脫離」分家、吸附中鎖吊機
+
+**未 commit**（agent-ai-db 統一收）。逐版明細在 `changelog.md` `[2026-09-16v3]` 與其後兩段追加；這裡只留決策／踩坑／伏筆。
+最後一版 **`v3-2026.09.16-1610`** 已部署吊機 Pi，`gui_v3_check.js` **142/142**、report 0。
+
+### 拍板（per user，都已落地）
+- **前置只剩四項必要**（① 地面歸零 ② 牆高 ③ 水位 ④ 起點）+ 兩條資訊列（推桿歸零、手臂）。手臂服務改成開機即待命
+  （STARTUP → 自動 INIT）⇒ 由必要項降級；「一鍵前置」**整列拿掉**——沒有必做且可自動跑的項目還留按鈕，只會讓人以為還有事沒做。
+- **「中止／急停」分家**：停止作業（一般色；正常結束，留在原高度純吊）vs 🔴 緊急脫離（紅、隔開、二次確認；全關全收進 Error）。
+- **吸附中不可動吊機**：本體對 `crane_goto` 有硬守衛，但 Manual 的 ▲▼ 拉繩/放繩**直連吊機、吊機不知道吸盤狀態** ⇒
+  GUI 是那六顆的唯一防線，判據與本體同一條（`p5..p8` 任一 ≤ −40 或讀不到），旁邊放「收腳」一步解鎖。
+
+### 🔴 踩坑
+1. **手臂 STATUS 的 `[M1]`／`[M2]` 是兩則訊息**（motor_api 逐段印，橋接 line-buffered），而 `armStatus()` 只解析回覆那一行
+   ⇒ **Manual「M2 工具頭」那一列從有它以來就一直是「—」，真機假機器都一樣，沒人發現**——沒人盯的欄位就沒人發現。
+   修法：繪圖抽成 `armPaintSeg()`，onmessage 接住單獨飄來的 `[M2]`。📌 同族教訓：**一個從沒顯示過值的欄位，先懷疑解析、不是硬體**。
+2. **驗收腳本的狀態殘留**：每一節都以「乾淨假機器」為前提，但前幾節會留下腳伸著、M2 在刮刀槽、進過 SAFE 等狀態，
+   後面的節就紅得莫名其妙（今天三次）。對策：每節開頭先把自己需要的狀態**明確重設**，不假設上一節收乾淨。
+3. fake 的 `retract` 把 pos 設 300 而壓力跟著 `pos > 0` ⇒ 收腳永遠不放（真機不是這樣）。假機器的「鏡像」也要驗它自己能變回來。
+
+### 📌 伏筆／刻意保留
+- `en=0` 時手臂 pos/tool 都是**凍結快取**：兩處顯示都標「（未使能，快取）」且不給綠；`between` 也不給綠——它是「不知道在哪」。
+- `paused` **一律連 `pause_reason` 顯示**：三種暫停的出口不同（user→resume／error→continue|skip／balance_ask→**沒有指令**，自動還原）。
+- `WR_MOVING` 只剩 `running`；驗收裡有六字串真值表，舊的 `balancing/returning_home/calibrating` 必須是 false。
+- 緊急脫離的 `confirmOnce` 在 kiosk 可能被自動接受 ⇒ 它是提示不是閘門；真正的分隔是名字、顏色、間隔。
+- `public/app.js` 的 `paused_on_error` 是 v2 殘留，**刻意不改**（v2 已退役、`public_v2/` 已刪）。
+
+### 🟡 待辦（GUI 線，延續 09-15）
+- 🟡 Mission「開始」的確認窗要不要拿掉，等 jim。
+- 🟡 腳本模式沒有「跳過」通道（`mis-skip` 只在 body 模式顯示）。
+- 🟡 張力保護卡整張 `data-safe-keep`，jim 若不要再收窄。
+
 # Work Log
+
+## 2026-09-16 五支程式改 systemd 開機自動啟動、本體狀態機 11→6、開機盤點、水閥時序、手臂自動 INIT
+
+### 已完成
+- 🔴 **五支程式改成開機自動啟動**(user:「四支一起上」,加上 v2 web 共五支)。unit 檔副本已收進
+  `scripts/systemd/`(含 README 與重灌安裝步驟)—— 在此之前它們**只存在兩台 Pi 的檔案系統裡**,
+  Pi 重灌就沒了而且沒有任何地方記得它長什麼樣。
+  - 吊機 .25 用 **system unit**(該機有 sudo):`fcv-crane` / `fcv-web`(:8080)/ `fcv-web-v3`(:8081)
+  - 本體 .26 用 **user unit + `loginctl enable-linger nexuni`**:`fcv-arm` / `fcv-body`
+    (本體 sudo 密碼不在 Claude 的密碼簿裡,在使用者那本)
+  - 🔴 **`exec 3<> fifo` 的理由**:三支 C++ 都有 console,console 讀到 **EOF 會讓程式退出**,
+    而 systemd 預設把 stdin 接 `/dev/null` ⇒ 開機起來立刻 EOF ⇒ 當場結束。開一個 fifo 並**自己同時
+    持有讀端與寫端**就得到「開著但不會 EOF」的 stdin。副作用是好的:外部仍可 `echo <指令> > ~/run/body.in`。
+  - 🔴 **`fcv-crane` 的 `ExecStartPost` 是必要的**:吊機三個執行期參數不落地,重啟一律回預設
+    (`home_ground_cm`→0 會讓 cycle_test 誤判座標慣例、`wall_height_cm`→0 會讓 `goto` 直接拒絕、
+    `motion_hz`→編譯預設),所以等 20 s 後補送一次,牆高從 `~/run/wall_height.json` 讀。
+  - 🔴 `fcv-body` 刻意 **`KillSignal=SIGTERM`、不送 console 的 `exit`**:`exit` 會跑 `cmd_shutdown`
+    關掉所有繼電器,腳吸著時等於當場失去真空。
+- **`scripts/deploy.sh`**(新,開發期更新流程,user 核可):`body|arm|crane|server|script|web|status`,
+  每個目標一律五步:同步原始碼 → Pi 上編譯 → **備份現役 binary**(`.prev-MMDD-HHMM`)→ rm+cp 換檔 →
+  重啟服務 → 驗證啟動訊息。**先 rm 再 cp** 是因為覆蓋執行中的執行檔會 `Text file busy`。
+  - 這支腳本自己踩了四個坑,都已修並就地寫註解:
+    · `awk -F= '$2 <= -40'` —— 尾端空白產生空欄,`"" <= "-40"` 是**字串**比較為真 ⇒ 四顆都沒吸也算出 1 顆。
+      改 `NF==2 && $2+0 <= -40`。
+    · echo 字串裡的反引號**被 shell 執行**了。
+    · 只看 md5 判斷編譯成功 ⇒ **編譯失敗照樣印 ✅**(g++ 失敗會留下舊 binary)。改成抓編譯輸出裡的 `error:`。
+    · arm 只同步 `main_api.{h,cpp}` ⇒ Pi 上 `main.cpp` 停在舊版,症狀是「本機改好了、Pi 上編不過」。
+      改成整個目錄的 `*.cpp *.h` 一起送。
+- 🔴 **本體狀態機 11 → 6**(user:「一次收斂到位」)。
+  `Idle / Ready / Attached / Running / Paused / Error`,另加 `pause_reason`(none|user|error|balance_ask)
+  與 `flow` 兩個正交欄位。被吸收掉的:`PausedOnError`→`Paused+reason=error`、`WaitingConfirm`→同上、
+  `Balancing`→`Paused+reason=balance_ask`、`ReturningHome`→旗標 `returning_home_`(繩重上限吃它)、
+  `Calibrating`→沒有實際使用。status 新增 `pause_reason=` 與 `flow=`。
+  - ⚠️ `returning_home_` 用 **RAII 清除**:`cmd_return_home` 有 20+ 個 return 點,漏清一個會讓「吊著」的
+    重量上限在回到 Idle 之後還留著,而那是看不出來的錯。
+- 🔴 **開機盤點**(user:「開機進 IDLE 應該是要把全部的東西關掉跟收回,如果沒有就表示東西收不回要進 ERROR」)。
+  `init()` 讀四顆壓力:**吸附中或全部讀不到** ⇒ 直接跑 `emergency_detach_()`(與急停同一支,九步,約 10 s)。
+  九步全成功 → `Idle`(那時 Idle 名副其實);任一步失敗 → **留在 `Error`**,`estop=partial` 指出卡在哪。
+  - ⚠️ 這是**有代價的選擇**:開機與「機器正吊在牆上」會同時發生(停電復電、跳電、重啟服務),
+    本案等於把上電定義成「鬆手」。user 明示採用。
+  - 同步執行不開背景緒:此時 TCP server 還沒起來,沒有指令會跟它搶,而「收完才開始接指令」正是要的順序。
+- **水閥時序改成兩段**(user:「沒水開閥,偵測到水再等 20 S 就開始清洗,等 180 S 完成後關水閥」):
+  `WATER_PRE_CLEAN_S=20`(偵測到水 → 等 20 s 就開始清洗,閥留著繼續灌)、
+  `WATER_TOPUP_S=180`(偵測到水後 180 s 由**背景計時器**關閥)。`close_inlet_now()` 冪等,收尾一律再關一次
+  —— 否則腳本結束後閥還開著,只剩 300 s deadman 兜底。
+- **手臂程式一開就自動進 INIT**(user 指示,這樣 GUI Mission 前置的「手臂」項可以拿掉)。
+  新公開 `startup_then_init()`(STARTUP 成功才接 INIT;`cmd_init_sequence` 是 private,加 wrapper 而不是放寬存取)。
+- **手臂 STATUS `[M2]` 加 `tool=`**(`roller|squeegee|center|between`),GUI 才能顯示「現在是滾筒還是刮刀」。
+- 急停已在 GUI 上實測過一次完整流程(任務執行中按下 → 腳本先停 → 九步脫離 → 自動 Error→Idle)。
+
+### 待完成 / 未拍板
+- 🟡 手臂 INIT 結束位置要不要改成滾筒(現在是 center)—— 未拍板
+- 🟡 `DEPLOY_F_TARGET_NM` 目前檔案上是 **5.0**,但腳本跑 FULL 時明確傳 `arm_deploy_f 3`,
+  所以實跑都是 3 N·m。要不要把 header 改回 3.0 —— 未拍板
+- 🔴 JC-100 slave 8 一天 67 次讀取錯誤 → 換頭候選
+- 🟡 24 V 掉電的根因(換電源模組後症狀消失,根因未查)
+- 🟡 `work_log.md` 已約 2000 行,該壓縮了
 
 ## 🆕 2026-09-15（GUI 線／AI-2）：Mission 合併、危險閘門取消、五個真機 bug
 

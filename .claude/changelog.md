@@ -6,8 +6,9 @@
 > 保留「原因 / 決策(尤其被否決的)/ 驗證結論」。原則 ≤40 行,驗證表可超。
 > (原 2026-04 的「# 修改日誌」格式範本已由本說明取代。)
 
-## 索引(全部 131 條,新的在上)
+## 索引(全部 132 條,新的在上)
 
+- `[2026-09-16v3]` v3：本體狀態機收斂成 6 個 —— `WR_MOVING` 與暫停原因顯示對齊 → (本檔)
 - `[2026-09-15v3b]` v3：01 作業流程併入 Mission、啟動改走 server.js 起 cycle_test、危險閘門取消、通訊紀錄移除 → (本檔)
 - `[2026-09-15v3]` v3：Manual 張力保護 啟用/關閉鈕（吊機 `set_hold_guard`）+ Mission `fan=`/`rail=` 起跑參數 → (本檔)
 - `[2026-09-13v3]` console v3（`public_v3/`）：作業流程頁 + `mission` 指令族（EVT 驅動）+ SAFE + 假機器離線驗收 → (本檔)
@@ -142,7 +143,54 @@
 
 ---
 
-## 當月全文(2026-09,83 條)
+## 當月全文(2026-09,84 條)
+
+## [2026-09-16v3] v3：本體狀態機收斂成 6 個 —— GUI 的 `WR_MOVING` 與暫停顯示對齊
+
+**改了什麼**（`public_v3/index.html`、`harness/gui_v3_check.js`；`v3-2026.09.16-1418` 已部署，未 commit）
+- 契約（agent-ai-db，已上真機）：`state=` 只剩 `idle|ready|attached|running|paused|error`；新增
+  `pause_reason=none|user|error|balance_ask`、`flow=none|return_home`。`paused_on_error`／`waiting_confirm` 併進 `paused`、
+  `returning_home` 併進 `running`、`balancing`／`calibrating` 刪除（0 個進入點的死碼）。
+- `WR_MOVING` 由 `/^(running|balancing|returning_home|calibrating)$/` 改成 `/^running$/`（回程也是 running，本來就會快取樣）。
+- 新增 `wrStateText()`：`paused` **一定連原因一起顯示**（使用者／錯誤／等平衡回穩）、`running+flow=return_home` 標「回程」。
+  🔴 原因不是裝飾：三種暫停的出口不同 —— `user`→`resume`、`error`→`continue`/`skip`、
+  **`balance_ask` 沒有任何指令**（IMU roll 回穩自己還原），只寫「暫停中」會讓人去找一顆不存在的按鈕。
+
+**驗收**：124/124、report 0。新增 5 條：三種 `pause_reason` 的文案、`running+flow` 標回程、
+`WR_MOVING` 對六個狀態字串的真值表（**舊的三個必須是 false**——這是這次最容易留殘影的地方）。
+📌 `public/app.js:715` 的 `paused_on_error` 是 v2 的，v2 已退役（`public_v2/` 於 `1267751` 刪除），不動。
+
+**09-16 追加（手臂開機即待命 → 前置剩四項；`tool=` 顯示，`v3-2026.09.16-1522` 已部署）**
+- 手臂服務改成開機即待命（`fcv-arm` 啟動 → STARTUP → 自動接 INIT）⇒ 前置的「手臂」由必要項降為**資訊列**
+  （顯示 `arm_ready`；STARTUP 失敗時不會接 INIT，那時 `arm_ready=0` 是唯一徵兆，所以這一行留著），按鈕改「重跑 arm_init」。
+  **必要項剩四：① 地面歸零 ② 牆高 ③ 水位 ④ 起點**；資訊列兩條（推桿歸零、手臂）。「一鍵前置」整列移除 —— 已經沒有
+  「必做且可自動跑」的項目，留一顆只會讓人以為還有事要做。
+- **目前工具**：手臂 `STATUS` 的 `[M2] tool=`（roller/squeegee/center/between，由實際角度反推）顯示在 Manual 手臂卡與
+  Mission 執行區兩處（滾筒／刮刀／置中／轉換中）。`en=0` 時 M2 不再送 CAN frame ⇒ 標「（未使能，快取）」且不給綠；
+  `between` 同樣不給綠（它是「不知道在哪」）。任務執行中每 5 s 讀一次，閒置維持「按讀取才更新」。
+- 🔴 **順手修掉一個一直存在的洞**：STATUS 的 `[M1]`／`[M2]` **不一定在同一行到達**（橋接 line-buffered），
+  而 `armStatus()` 只解析回覆那一行 ⇒ **M2 那一列在假機器上從來沒有值**（`rd-m2` 一直是「—」，沒人發現）。
+  繪圖抽成 `armPaintSeg()`，並在 onmessage 接 `[M2]` 單獨飄來的那一則。
+
+**驗收**：130/130、report 0。新增：四項必要 + 兩條資訊的燈號盤、`pre-runall` 元素不存在、重跑 arm_init 不擋也不問、
+`[M2]` 單獨到達也會更新、四種 tool 中文對照、`en=0` 標快取且不給綠、兩處同源。
+
+**09-16 追加②（「中止／急停」分家 + 吸附中鎖住吊機動作，`v3-2026.09.16-1610` 已部署；交接單 `handoff/ai2-stop-vs-estop.md`）**
+- **用詞**：中止 → **「停止作業」**（一般色），急停 → **「🔴 緊急脫離」**（紅、`.estop-gap` 隔開、`confirmOnce` 二次確認）。
+  兩顆 tooltip 各說後果：停止作業＝停腳本→收臂→**收腳**→關幫浦、留在原高度純吊；緊急脫離＝九步全關全收並進 Error。
+  ⚠️ 二次確認在 kiosk 可能被自動接受 ⇒ 它是提示不是閘門；真正的分隔是**名字不同 + 紅色 + 隔開**。
+- **吸附中鎖吊機動作**（`cupsState()`：`p5..p8` 任一 ≤ −40 或讀不到／`p_err≠0`）：三顆「拉到…」、控制列 ⤒、前置 ④ 起點鈕、
+  **以及 ▲▼ 拉繩/放繩六顆**全部 `disabled` + 一行說明（顆數）+ 旁邊一顆**「收腳」**（`pusher all retract`）一步解鎖。
+  🔴 ▲▼ 那組**直連吊機 :5002，本體與後端都擋不到 ⇒ GUI 是它唯一的防線**。
+- **停止後常駐橫幅**：腳本輸出 `[web] STOP ⑤` 之後開始看，吸附中紅「機器仍吸附在牆上、腳伸出 —— 吊機移動已被本體鎖住」，
+  四顆都回大氣後轉「已脫離牆面，純吊在繩上」，8 s 後自動收起。
+- `EVT crane_goto_blocked` → 醒目紅 + `alert` 提示先收腳；`EVT crane_goto_forced` → 醒目紅（有人硬幹）。
+- `fake_robot.py` 一處（給 agent-ai-db 收）：`pusher … retract` 原本把 pos 設成 300，而壓力跟著 `pos > 0` 走 ⇒
+  **收腳後吸盤永遠不放**；改成 `extend*` → 伸、`retract` → 0。這正是 GUI 那顆「收腳」在假機器上要能解鎖的前提。
+
+**驗收**：142/142、report 0。新增 `[stop]` 節 12 條：用詞與 tooltip、未吸附六顆可按 → `extend_raw 5 + vacuum on` 後六顆全灰
++ 三顆「拉到…」灰 + 說明含顆數、本體真的回 `ERR cups_attached` 且 `crane_goto_blocked` 醒目、`force` 放行且醒目、
+`STOP ⑤` → 紅橫幅、按「收腳」→ 解鎖 → 橫幅轉綠 → 自動收起。
 
 ## [2026-09-15v3b] v3：01 作業流程併入 Mission、啟動改走 server.js 起 cycle_test、危險閘門取消、通訊紀錄移除
 

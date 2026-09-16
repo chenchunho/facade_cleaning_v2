@@ -2693,9 +2693,11 @@ std::string WashRobot::do_feet_realign_(bool apply_threshold, bool caller_holds_
             motion_active_ = false;
             {
                 std::lock_guard<std::mutex> slk(state_mtx_);
-                if (state_.load() != State::PausedOnError) state_before_pause_ = state_.load();
+                if (!(state_.load() == State::Paused
+                      && pause_reason_.load() == (int)PauseReason::Error)) state_before_pause_ = state_.load();
             }
-            set_state_(State::PausedOnError);
+            pause_reason_.store((int)PauseReason::Error);
+            set_state_(State::Paused);
             std::cout << "[realign] PAUSED ON ERROR — slave " << stalled_slave
                       << " stalled. Awaiting cmd_continue / emergency_stop.\n";
         } else {
@@ -3936,6 +3938,18 @@ int WashRobot::read_pressure_(int slave) {
     return p;
 }
 
+// [2026-09-16] 現在有幾顆吸盤還吸著(fresh read,不吃快取)。宣告處有理由。
+int WashRobot::cups_sealed_now_(int* out_unreadable) {
+    int sealed = 0, unreadable = 0;
+    for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) {
+        const int p = read_pressure_(s);
+        if (M_(s).error_flag != 0) { ++unreadable; continue; }
+        if (p <= VACUUM_THRESHOLD_KPA) ++sealed;
+    }
+    if (out_unreadable) *out_unreadable = unreadable;
+    return sealed;
+}
+
 std::string WashRobot::cmd_status() {
     // [2026-05-29] Refresh-on-demand: if not in motion, do a one-shot fresh
     // read of all 9 JC100 + update cache. During motion, return cache
@@ -4078,6 +4092,10 @@ std::string WashRobot::cmd_status() {
         const bool arm_ready = arm_attached_.load()
                             && arm_last_en_.load() == 1 && arm_last_init_done_.load() == 1;
         oss << " arm_ready=" << (arm_ready ? 1 : 0);
+    }
+    {   // [2026-09-16] 狀態收斂後的兩個補充欄位:Paused 在等什麼、Running 是哪一段流程。
+        oss << " pause_reason=" << pause_reason_name((PauseReason)pause_reason_.load())
+            << " flow=" << (returning_home_.load() ? "return_home" : "none");
     }
     {   // [2026-09-15 per user] 推桿的**編譯期預設轉速**,給 GUI 的 RPM 欄位當提示用。
         // GUI 那個欄位填 0 = 「沿用預設」,但畫面上只看得到 0,沒人知道預設是多少
@@ -5070,9 +5088,8 @@ std::string WashRobot::cmd_pusher(const std::string& group, const std::string& p
 // 實際有沒有介入要看 EVT：step_sync_imu_ok / _no_converge / _roll_panic。
 std::string WashRobot::cmd_imu_level() {
     State cur = state_.load();
-    if (cur == State::Error || cur == State::Running || cur == State::Balancing
-        || cur == State::ReturningHome || cur == State::WaitingConfirm
-        || cur == State::PausedOnError)
+    // [2026-09-16] 狀態收斂:Running 已含 return_home;Paused 的三種原因都算「有人在等/流程中」。
+    if (cur == State::Error || cur == State::Running || cur == State::Paused)
         return state_violation_(cur);
 
     std::lock_guard<std::mutex> lk(motion_mtx_);
@@ -5107,9 +5124,8 @@ std::string WashRobot::cmd_zdt_pusher(int slave, const std::string& action, doub
     if (rpm != 0 && (rpm < 50 || rpm > 1000)) return "ERR pusher_rpm_out_of_range (50..1000)\n";
 
     State cur = state_.load();
-    if (cur == State::Error || cur == State::Running || cur == State::Balancing
-        || cur == State::ReturningHome || cur == State::WaitingConfirm
-        || cur == State::PausedOnError)
+    // [2026-09-16] 狀態收斂:Running 已含 return_home;Paused 的三種原因都算「有人在等/流程中」。
+    if (cur == State::Error || cur == State::Running || cur == State::Paused)
         return state_violation_(cur);
 
     std::lock_guard<std::mutex> lk(motion_mtx_);
@@ -5343,7 +5359,15 @@ std::string WashRobot::cmd_return_home(int descent_cm) {
     State cur = state_.load();
     if (cur != State::Attached && cur != State::Paused && cur != State::Error)
         return state_violation_(cur);
-    set_state_(State::ReturningHome);
+    // [2026-09-16] 取代 State::ReturningHome:繩重上限與 status 的 flow= 都吃這個旗標。
+    // 🔴 RAII 清除 —— 這支有 20+ 個 return 點(fail / abort),漏清一個就會讓「吊著」的
+    //    重量上限在回到 Idle 之後還留著,而那是個看不出來的錯(只有張力守衛會怪怪的)。
+    returning_home_.store(true);
+    struct ClearReturningHome {
+        std::atomic<bool>* f;
+        ~ClearReturningHome() { f->store(false); }
+    } _crh{&returning_home_};
+    set_state_(State::Running);
 
     std::lock_guard<std::mutex> lk(motion_mtx_);
     abort_flag     = false;
@@ -5487,23 +5511,26 @@ std::string WashRobot::cmd_ping() {
 
 std::string WashRobot::cmd_pause() {
     State cur = state_.load();
-    if (cur != State::Running && cur != State::Balancing)
-        return state_violation_(cur);
+    if (cur != State::Running) return state_violation_(cur);
     {
         std::lock_guard<std::mutex> lk(state_mtx_);
         state_before_pause_ = cur;
     }
     pause_flag = true;
+    pause_reason_.store((int)PauseReason::User);
     set_state_(State::Paused);
     return "OK paused\n";
 }
 
 std::string WashRobot::cmd_resume() {
     State cur = state_.load();
-    if (cur != State::Paused) return state_violation_(cur);
+    // [2026-09-16] resume 只解「使用者暫停」;error 要 continue/skip、balance_ask 由 IMU 自己還原。
+    if (cur != State::Paused || pause_reason_.load() != (int)PauseReason::User)
+        return state_violation_(cur);
     State prev;
     { std::lock_guard<std::mutex> lk(state_mtx_); prev = state_before_pause_; }
     pause_flag = false;
+    pause_reason_.store((int)PauseReason::None);
     set_state_(prev);
     return "OK resumed\n";
 }
@@ -5524,7 +5551,7 @@ WashRobot::PauseAction WashRobot::await_user_intervention_(const std::string& co
         // cmd_continue/cmd_skip would set state back to PausedOnError → infinite
         // loop, retry/skip buttons appear non-responsive. Keep the original
         // pre-pause state (set when first entering PausedOnError).
-        if (prev != State::PausedOnError) {
+        if (!(prev == State::Paused && pause_reason_.load() == (int)PauseReason::Error)) {
             state_before_pause_ = prev;
         } else {
             std::cout << "[PAUSE-ON-ERROR] nested pause detected (state already "
@@ -5532,12 +5559,14 @@ WashRobot::PauseAction WashRobot::await_user_intervention_(const std::string& co
         }
     }
     pause_action_.store((int)PauseAction::None);
-    set_state_(State::PausedOnError);
+    pause_reason_.store((int)PauseReason::Error);
+    set_state_(State::Paused);
     evt_("error_pause context=" + context);
     std::cout << "[PAUSE-ON-ERROR] " << context
               << " — awaiting cmd_continue (retry) / cmd_skip / emergency_stop\n";
 
-    while (state_.load() == State::PausedOnError && !abort_flag.load()) {
+    while (state_.load() == State::Paused
+           && pause_reason_.load() == (int)PauseReason::Error && !abort_flag.load()) {
         sleep_ms_(POLL_INTERVAL_MS);
     }
 
@@ -5556,10 +5585,12 @@ WashRobot::PauseAction WashRobot::await_user_intervention_(const std::string& co
 // User pressed 「繼續(重試)」 — retry the failed op.
 std::string WashRobot::cmd_continue() {
     State cur = state_.load();
-    if (cur != State::PausedOnError) return state_violation_(cur);
+    if (cur != State::Paused || pause_reason_.load() != (int)PauseReason::Error)
+        return state_violation_(cur);
     pause_action_.store((int)PauseAction::Retry);
     State prev;
     { std::lock_guard<std::mutex> lk(state_mtx_); prev = state_before_pause_; }
+    pause_reason_.store((int)PauseReason::None);
     set_state_(prev);
     return "OK continue (retry)\n";
 }
@@ -5567,10 +5598,12 @@ std::string WashRobot::cmd_continue() {
 // User pressed 「略過此步」 — assume manual fix succeeded, treat as success.
 std::string WashRobot::cmd_skip() {
     State cur = state_.load();
-    if (cur != State::PausedOnError) return state_violation_(cur);
+    if (cur != State::Paused || pause_reason_.load() != (int)PauseReason::Error)
+        return state_violation_(cur);
     pause_action_.store((int)PauseAction::Skip);
     State prev;
     { std::lock_guard<std::mutex> lk(state_mtx_); prev = state_before_pause_; }
+    pause_reason_.store((int)PauseReason::None);
     set_state_(prev);
     return "OK skip\n";
 }
@@ -5588,11 +5621,35 @@ std::string WashRobot::cmd_skip() {
 // body-side state gate: never move the ropes while the cups may be holding.
 // Timeout: the crane reply carries from/now so the delta is not known up
 // front; use the worst case of one full span at crane_motion_timeout_sec_.
-std::string WashRobot::cmd_crane_goto(int height_cm) {
+std::string WashRobot::cmd_crane_goto(int height_cm, bool force) {
     State cur = state_.load();
     if (cur != State::Idle && cur != State::Ready) return state_violation_(cur);
     if (step_in_progress_.load()) return "ERR busy step_in_progress\n";
     if (height_cm < 0) return "ERR height_cm_invalid\n";
+
+    // 🔴 [2026-09-16 per user] 吸附中不准動吊機。
+    //    狀態機擋不到這件事:「中止」之後 state 是 ready,腳卻還吸在牆上、推桿還伸著 ——
+    //    這時拉繩就是拿鋼索把機器從玻璃上扯下來。吸附與吊機移動同時存在**沒有合法用途**,
+    //    所以是拒絕,不是警告。讀不到壓力也拒絕(讀不到 ≠ 沒吸住)。
+    //    救援用的 `crane_goto <cm> force` 保留,但一定留下 EVT。
+    {
+        int unreadable = 0;
+        const int sealed = cups_sealed_now_(&unreadable);
+        if (sealed > 0 || unreadable > 0) {
+            std::ostringstream w;
+            w << "cups_attached sealed=" << sealed << " unreadable=" << unreadable;
+            if (!force) {
+                std::cerr << "[crane_goto] 拒絕:" << w.str() << " — 吸附中不移動吊機\n";
+                evt_("crane_goto_blocked " + w.str());
+                return "ERR " + w.str()
+                     + " — 吸附中不可移動吊機,請先 `pusher all retract`(強制:crane_goto "
+                     + std::to_string(height_cm) + " force)\n";
+            }
+            std::cerr << "[crane_goto] ⚠️ FORCE:" << w.str() << " — 帶著吸附移動吊機\n";
+            evt_("crane_goto_forced " + w.str());
+        }
+    }
+
     if (!crane_attached_.load()) return "OK skipped crane_attached=off\n";
 
     const int to = crane_motion_timeout_sec_(CRANE_GOTO_SPAN_MAX_CM);

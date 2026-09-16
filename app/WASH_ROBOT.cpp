@@ -458,6 +458,63 @@ bool WashRobot::init() {
         std::cout << (all_ok ? "[OK] selfcheck" : "[WARN] selfcheck") << detail << "\n";
     }
 
+    // 🔴 [2026-09-16 per user] **開機盤點:一律「全關全收」,收得回才是 Idle,收不回就 Error。**
+    //
+    // 起因:改成 systemd 之後 `systemctl restart` 送 SIGTERM —— 程式直接被殺,
+    // **不跑 cmd_shutdown,繼電器維持原狀**(幫浦還開、吸盤閥還開、腳還伸著)。
+    // 新程序若直接宣稱 Idle,就是「機器貼在牆上,程式卻以為自己什麼都沒做」。
+    //
+    // per user 拍板(先是 C 案「只承認不動作」,同日改為本案):
+    //   開機偵測到**吸附中**或**壓力讀不到** → 直接跑 `emergency_detach_()`(與急停同一支):
+    //     關滾刷 → 關水泵 → 收手臂 → 風扇停 → 吸盤閥關 → 等鬆開 → 兩段收腳 → 關幫浦 A/B
+    //   · 九步全成功 → **Idle**(那時 Idle 名副其實:沒真空、沒伸出、繼電器全關)
+    //   · 任一步失敗 → **留在 Error**,`estop=partial` 指出是哪一步 ⇒ 「收不回」這件事看得見
+    // ⚠️ **這是有代價的選擇**:開機與「機器正吊在牆上」會同時發生(停電復電、跳電、重啟服務),
+    //    本案等於把上電定義成「鬆手」。per user 2026-09-16 明示採用。
+    // 📌 同步執行(不開背景執行緒):此時 TCP server 還沒起來,沒有指令會跟它搶,
+    //    而且「收完才開始接指令」正是這個設計要的順序。約 10 s。
+    {
+        int sealed = 0, readable = 0;
+        std::ostringstream pk;
+        for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) {
+            const int p = read_pressure_(s);
+            const bool ok = (M_(s).error_flag == 0);
+            if (ok) { ++readable; if (p <= VACUUM_THRESHOLD_KPA) ++sealed; }
+            pk << (s == CUP_SLAVE_FIRST ? "" : "/") << (ok ? std::to_string(p) : std::string("ERR"));
+        }
+        if (sealed > 0 || readable == 0) {
+            std::cerr << "[WARN] 開機盤點:" << (sealed > 0
+                        ? ("**吸附中**(" + std::to_string(sealed) + "/" + std::to_string(readable) + " 顆 ≤ "
+                           + std::to_string(VACUUM_THRESHOLD_KPA) + " kPa)")
+                        : std::string("四顆壓力**全部讀不到**"))
+                      << "(壓力 " << pk.str() << ")—— 上一個程序沒有正常收尾,"
+                         "現在執行全關全收(同急停的收回程序,約 10 s)…\n";
+            // Error 是 emergency_detach_ 成功時 CAS 的來源狀態;先設好它,收完才會翻成 Idle。
+            set_state_(State::Error);
+            estop_detach_state_.store(1);
+            emergency_detach_active_.store(true);
+            emergency_detach_();          // 同步;內部會把 estop_detach_state_ 設成 done/partial
+            if (state_.load() == State::Idle) {
+                std::cout << "[OK] 開機盤點:全關全收完成 → state=Idle\n";
+            } else {
+                std::cerr << "[WARN] 開機盤點:**收不回**(estop=partial,見上面逐步 log)→ 留在 Error。"
+                             "人工處理後 `reset`,或用 `return_home`。\n";
+            }
+        } else {
+            // 沒吸著:把上一個程序可能留下的繼電器狀態清乾淨,Idle 才名副其實。
+            pqw_.controlRelay(CH_BRUSH,        false);
+            pqw_.controlRelay(CH_WATER_PUMP,   false);
+            pqw_.controlRelay(CH_VALVE_RIGHT,  false);
+            if (CH_VALVE_LEFT != CH_VALVE_RIGHT) pqw_.controlRelay(CH_VALVE_LEFT, false);
+            pqw_.controlRelay(CH_BREAK_VACUUM, false);
+            pqw_.controlRelay(CH_PUMP_A,       false);
+            pqw_.controlRelay(CH_PUMP_B,       false);
+            pump_active_since_ms_.store(0);
+            std::cout << "[OK] 開機盤點:未吸附(壓力 " << pk.str()
+                      << ") → 繼電器全關、state=Idle\n";
+        }
+    }
+
     return false;
 }
 
@@ -704,19 +761,14 @@ bool WashRobot::check_abort_() {
 
 const char* WashRobot::state_name(State s) {
     switch (s) {
-        case State::Idle:           return "idle";
-        case State::Ready:          return "ready";
-        case State::Attached:       return "attached";
-        case State::Running:        return "running";
-        case State::WaitingConfirm: return "waiting_confirm";
-        case State::Paused:         return "paused";
-        case State::PausedOnError:  return "paused_on_error";
-        case State::Balancing:      return "balancing";
-        case State::ReturningHome:  return "returning_home";
-        case State::Calibrating:    return "calibrating";
-        case State::Error:          return "error";
+        case State::Idle:      return "idle";
+        case State::Ready:     return "ready";
+        case State::Attached:  return "attached";
+        case State::Running:   return "running";
+        case State::Paused:    return "paused";
+        case State::Error:     return "error";
+        default:               return "unknown";
     }
-    return "unknown";
 }
 
 void WashRobot::set_state_(State s) {
@@ -2869,17 +2921,16 @@ double WashRobot::read_rope_weight_estop_() {
 double WashRobot::rope_weight_limit_per_sensor_kg_() const {
     // State-aware: cups holding → low limit; hanging on rope → high limit.
     State s = state_.load();
+    // [2026-09-16] 狀態收斂後 ReturningHome 併進 Running,但它的重量上限屬於「吊著」那組
+    // ⇒ 改用 returning_home_ 旗標判斷,行為與收斂前逐位元相同。
+    if (returning_home_.load()) return (settings_.rope_weight_limit_hanging.load());
     switch (s) {
         case State::Attached:
         case State::Running:
-        case State::WaitingConfirm:
         case State::Paused:
-        case State::PausedOnError:
-        case State::Balancing:
             return (settings_.rope_weight_limit_attached.load());
         case State::Idle:
         case State::Ready:
-        case State::ReturningHome:
         case State::Error:
         default:
             return (settings_.rope_weight_limit_hanging.load());
@@ -3148,10 +3199,12 @@ void WashRobot::crane_watchdog_loop_() {
                 // with it corrupts the recovery target, so cmd_continue / cmd_skip
                 // would just set the state right back to PausedOnError (the
                 // skip/retry buttons appear dead). Keep the original pre-pause state.
-                if (state_.load() != State::PausedOnError)
+                if (!(state_.load() == State::Paused
+                      && pause_reason_.load() == (int)PauseReason::Error))
                     state_before_pause_ = state_.load();
             }
-            set_state_(State::PausedOnError);
+            pause_reason_.store((int)PauseReason::Error);
+            set_state_(State::Paused);
         }
 
         // ③ [2026-09-10] 鏈路逾時比較 —— 補回 4d1409c(06-22) 之前存在的那一段。
@@ -3473,9 +3526,12 @@ void WashRobot::imu_monitor_loop_() {
                 {
                     std::lock_guard<std::mutex> lk(state_mtx_);
                     State cur = state_.load();
-                    if (cur == State::Running || cur == State::Balancing || cur == State::Attached) {
+                    // [2026-09-16] WaitingConfirm 併進 Paused(reason=balance_ask)。
+                    // 沒有使用者出口(confirm_balance 在 v2 已移除),由下方 roll 回穩時自己還原。
+                    if (cur == State::Running || cur == State::Attached) {
                         state_before_wait_ = cur;
-                        set_state_(State::WaitingConfirm);
+                        pause_reason_.store((int)PauseReason::BalanceAsk);
+                        set_state_(State::Paused);
                     }
                 }
                 std::ostringstream oss;
@@ -3488,7 +3544,8 @@ void WashRobot::imu_monitor_loop_() {
             if (avg < (settings_.imu_ask_deg.load()) - IMU_HYSTERESIS_DEG) {
                 if (ask_sent) {
                     std::lock_guard<std::mutex> lk(state_mtx_);
-                    if (state_.load() == State::WaitingConfirm)
+                    if (state_.load() == State::Paused
+                        && pause_reason_.load() == (int)PauseReason::BalanceAsk)
                         set_state_(state_before_wait_);
                 }
                 ask_sent        = false;

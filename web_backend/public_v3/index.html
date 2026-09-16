@@ -70,6 +70,7 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
   .top{display:flex;align-items:center;gap:14px;padding:9px 16px;background:var(--rail);color:#DEE7E8}
   /* [2026-09-10] 本體急停。放頂欄是刻意的：它在**每一個分頁**都在，
      而急停要按的時候沒有人有空先切到對的分頁。 */
+  .estop-gap{display:inline-block;width:26px;border-left:1px solid var(--line2);height:26px;margin:0 2px}
   .top .estop{background:var(--bad);border:1px solid var(--bad);color:#fff;font-weight:700;
     padding:6px 12px;border-radius:4px;cursor:pointer;font-family:var(--sans);font-size:13px;
     white-space:nowrap;margin-right:8px}
@@ -712,10 +713,12 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
                 <button class="btn" id="mis-pause" data-backend="body">暫停</button>
                 <button class="btn" id="mis-continue" data-backend="body">繼續</button>
                 <button class="btn" id="mis-skip" data-backend="body">跳過</button>
-                <button class="btn" id="mis-stop" style="border-color:var(--bad);color:var(--bad);font-weight:700">中止</button>
-                <span style="border-left:1px solid var(--line2);height:24px;margin:0 4px"></span>
-                <!-- 急停 = 本體 emergency_stop（含 reset 出路橫幅）；任務沒在跑也可按。中止 = 停腳本，本體維持 ready。 -->
-                <button id="wr-estop" class="estop" title="本體緊急停止 —— 進入 SAFE：停吊機、收手臂、關水刷風扇、真空保持">🔴 急停</button>
+                <!-- 🔴 [2026-09-16 per user]「中止 / 急停」兩個詞容易被當成同一件事 ⇒ 名字要自己說出後果。
+                     停止作業＝正常結束（停腳本 → 收臂 → **收腳** → 關幫浦，機器留在原高度純吊在繩上）
+                     緊急脫離＝立刻九步全關全收並進 Error。兩顆視覺上隔開，後者紅色 + 二次確認。 -->
+                <button class="btn" id="mis-stop" style="font-weight:700" title="停止作業：停腳本 → 收手臂 → 收腳 → 關幫浦。機器留在原高度，純吊在繩上（不再吸附）。">停止作業</button>
+                <span class="estop-gap"></span>
+                <button id="wr-estop" class="estop" title="緊急脫離：立刻全關全收（收臂 → 關刷/水泵 → 風扇停 → 收腳 → 關真空），機器脫離玻璃並進 Error。任務沒在跑也可按。">🔴 緊急脫離</button>
                 <span class="rd" id="mis-lock" style="font-weight:400;color:var(--bad)" hidden>SAFE 鎖定：先解除 SAFE，任務停在檢查點可續</span>
           </div>
           <div class="mbar-row mbar-2nd">
@@ -742,6 +745,8 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
               <span class="rd" id="mis-sub">—</span><span class="rd" id="mis-subage" style="color:var(--ink3)"></span></div>
             <div class="ctl"><span class="cl">等真空<small><code>vac_wait</code> · p5–p8 kPa · 任一 ≤ −50 即過</small></span>
               <span class="rd" id="mis-vac">—</span><span class="rd" id="mis-vact" style="color:var(--ink3)"></span></div>
+            <div class="ctl"><span class="cl">目前工具<small>手臂 <code>STATUS</code> 的 <code>tool=</code>（角度反推）· 任務執行中每 5 s 讀一次</small></span>
+              <span class="rd" id="mis-tool">—</span><span class="rd" id="mis-tool-age" style="color:var(--ink3)"></span></div>
             <div class="ctl"><span class="cl">清潔<small>工具 · 濕/乾 · 結果</small></span>
               <span class="rd" id="mis-clean">—</span><span class="rd"></span></div>
             <div class="ctl"><span class="cl">跳過 / 沒吸住<small>本趟累計</small></span>
@@ -761,8 +766,8 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
             <span class="lock" id="pre-count" style="background:var(--idle-soft);color:var(--ink2)">—</span>
             <span class="lock" style="background:transparent;color:var(--ink3);font-weight:400" id="pre-toggle">▾ 收起</span></header>
           <div id="pre-body">
-            <div class="ctl stack" style="padding-bottom:2px"><span class="cl">一鍵前置<small>目前只剩 ④ 手臂 INIT（已綠就跳過）· 幫浦 init 由腳本自理 · ③ 推桿歸零是資訊列、要做自己按</small></span>
-              <span class="ctlrow"><button class="btn" id="pre-runall">一鍵前置（手臂 INIT）</button><span class="rd railsrc" id="pre-runall-rd" style="font-weight:400">—</span></span></div>
+            <!-- [2026-09-16 per user] 「一鍵前置」整列移除：③ 推桿歸零是資訊列、④ init 由腳本自理、
+                 手臂改成開機即待命 ⇒ 已經沒有「必做且可自動跑」的項目，留一顆只會讓人以為還有事要做。 -->
             <div class="man" id="pre-root" style="padding:0"></div>
           </div>
         </div>
@@ -982,6 +987,7 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
         <!-- 吊機 -->
         <!-- [v3] SAFE 上鎖時保留：收放繩（含 STOP）、張力保護卡（開關在那裡，救援要用）。其餘 .grp 加 inert。 -->
         <!-- [2026-09-15 下午②] 任務執行中（server.js mission.running）Manual 整頁灰掉不隱藏；STOP / PARK 不鎖。 -->
+        <div id="stopbar" class="ebanner off" hidden style="grid-column:1/-1"></div>
         <div id="manbar" class="ebanner off" hidden style="grid-column:1/-1"><strong>🔒 任務執行中，Manual 已鎖定</strong><span>要接手先按 Mission 的「中止」（腳本會自己收臂／收腳／停風扇）。STOP／PARK 仍可按。</span></div>
         <div id="safebar" class="ebanner off" hidden style="grid-column:1/-1"><strong>🔒 SAFE 中，Manual 已上鎖</strong><span>只留吊機收放繩（含張力保護開關）／STOP／PARK。解除 SAFE 請用頂欄橫幅。</span></div>
         <div class="grp" data-safe-keep>
@@ -1069,6 +1075,12 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
                  對 pay_out/retract <cm> 沒影響。吊機重啟一律回 on，畫面以 status 的 hold_guard= 為準。
                  [09-15 下午 per user] 開關本體移到「張力保護」卡最上面；這裡只留紅框與警示文案（#hg-warn）。 -->
             <div id="hg-warn" class="why" hidden style="padding:6px 12px;white-space:normal;background:var(--bad-soft);color:var(--bad);font-weight:600"></div>
+
+            <!-- [2026-09-16 per user] 吸附中鎖住吊機動作時，這一行說明 + 一顆「收腳」讓人一步解鎖。 -->
+            <div class="why" id="cup-lock-hint" hidden style="padding:6px 12px;white-space:normal;background:var(--bad-soft);color:var(--bad);font-weight:600"></div>
+            <div class="ctl"><span class="cl">收腳<small>送本體 <code>pusher all retract</code> · 收回後吊機動作解鎖</small></span>
+              <span class="rd" id="rd-retract">—</span>
+              <button class="btn" id="cup-retract">收腳</button></div>
 
             <!-- [2026-09-15 晚 per user] 拉到指定位置：全部走本體 `crane_goto <cm>`（本體代轉吊機 goto）。
                  範圍守衛在吊機端；這裡只擋明顯越界。大距離移動 ⇒ 確認窗 + motionGate，執行中顯示目前高度。 -->
@@ -1446,9 +1458,13 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
             <div class="ctl"><span class="cl">M1 大臂<small>按「讀取」才更新 · <strong>PARK 後為凍結值</strong></small></span>
               <span class="rd" id="rd-m1">—</span>
               <button class="btn" id="arm-read">讀取</button></div>
-            <div class="ctl"><span class="cl">M2 工具頭<small>0.52≈滾筒槽 · −1.0 附近≈刮刀槽</small></span>
+            <div class="ctl"><span class="cl">M2 工具頭<small>0.86≈滾筒 · 0.19≈刮刀 · 0≈置中（由角度反推，±0.09 rad）</small></span>
               <span class="rd" id="rd-m2">—</span>
               <span class="rd" id="rd-armage" style="color:var(--ink3)">未讀取</span></div>
+            <!-- [2026-09-16 per user] 目前是滾筒還是刮刀。由 STATUS `[M2] tool=` 來（實際角度反推，不是「上次叫它去哪」）。
+                 ⚠️ en=0 時 M2 不再送 CAN frame ⇒ pos 與 tool 都是快取值，顯示時必須標出來。 -->
+            <div class="ctl"><span class="cl">目前工具<small><code>tool=</code> roller／squeegee／center／between</small></span>
+              <span class="rd" id="rd-tool">—</span><span class="rd"></span></div>
 
             <div class="ctl stack"><span class="cl">力控貼合 <code>DEPLOY_F</code><small>單位 <strong>N·m</strong>（≈15）· 判準看 tau</small></span>
               <span class="ctlrow"><input id="af-nm" class="numin" type="number" value="15" min="2" max="20" step="0.5" aria-label="目標壓力 Nm">
@@ -1828,6 +1844,14 @@ function connect(){
     if (/^EVT mission /.test(line) && typeof onMissionEvt === 'function') onMissionEvt(line);
     if (/^EVT safe_/.test(line) && typeof onSafeEvt === 'function') onSafeEvt(line);
     if (/^EVT emergency_detach/.test(line) && typeof onDetachEvt === 'function') onDetachEvt(line);
+    // 手臂 STATUS 的 `[M2]` 那段常常是**另一則**（line-buffered）⇒ 這裡補接，否則工具永遠讀不到
+    if (m.src === 'arm' && typeof armApplyM2Line === 'function') armApplyM2Line(line);
+    // [2026-09-16] 吸附中被本體擋下／有人硬幹 —— 兩者都要醒目，不可混在一般 log 裡
+    if (/^EVT crane_goto_blocked/.test(line)){
+      log('🔴🔴 吊機移動被擋下（吸附中）：' + line + ' —— 先按「收腳」再移動', 'e');
+      alert('吊機移動被擋下：吸盤還吸附在牆上。\n\n請先按「收腳」（pusher all retract）。');
+    }
+    if (/^EVT crane_goto_forced/.test(line)) log('🔴🔴 有人用 force 在吸附狀態下移動吊機：' + line, 'e');
     // [2026-09-10] 幫浦 A/B 輪替事件（本體非同步推播）——收到就補一次回讀，不等下一輪。
     //   輪替本身約 11 秒（併聯 3s + 驗真空 8s），等 6 秒那輪只會讓卡片慢半拍說出已經發生的事。
     if (/^EVT pump_/.test(line) && typeof pollPump === 'function') setTimeout(pollPump, 300);
@@ -1985,7 +2009,7 @@ function paint(){
 
   // [2026-09-10] 本體 Error 橫幅 —— 放在 paint 開頭，任何一次重繪都會校正它。
   if (typeof paintEstopBanner === 'function') paintEstopBanner();
-  txt('rd-wrstate', wr && wr.state ? wr.state : '—');
+  txt('rd-wrstate', (typeof wrStateText === 'function') ? wrStateText(wr) : (wr && wr.state ? wr.state : '—'));
   if (typeof misFromStatus === 'function') misFromStatus(wr);
   if (typeof paintEstopState === 'function') paintEstopState(wr);
   if (typeof setSafeLock === 'function') setSafeLock();
@@ -2005,6 +2029,8 @@ function paint(){
     hzEl.title = (hz === 10) ? '10 Hz ＝ 編譯預設值（VFD_HOLD_HZ_DEFAULT），可能只是還沒設過' : '';
   }
   if (typeof paintHoldGuard === 'function') paintHoldGuard(cr);
+  if (typeof paintCupLock === 'function') paintCupLock();
+  if (typeof paintStopBanner === 'function') paintStopBanner();
   if (typeof paintPusherRpm === 'function') paintPusherRpm(wr);
   // [2026-09-11] 速度分段鈕：**照機器上的實際值**反白，不照剛按了哪顆。
   [].forEach.call(document.querySelectorAll('[data-hzq]'), function(b){
@@ -2557,9 +2583,12 @@ function pollFast(){
 //    📌 這是「後端沒有『腳本正在跑』的訊號」的第二個實例，同一個結構缺口。
 var POLL_FAST_MS_IDLE   = 1000;
 var POLL_FAST_MS_MOTION = 250;
-// 只列**真的在動**的狀態。paused / paused_on_error / waiting_confirm 是在等人，
-// 提高取樣率沒有意義，只是白費往返。
-var WR_MOVING = /^(running|balancing|returning_home|calibrating)$/;
+// 只列**真的在動**的狀態。`paused` 是在等人（原因看 `pause_reason`），提高取樣率沒有意義。
+// 🔴 [2026-09-16 契約] 本體狀態機由 11 個收斂成 6 個：`idle|ready|attached|running|paused|error`。
+//    `returning_home` 併進 `running`（改看 `flow=return_home`）、`balancing`/`calibrating` 刪除（死碼）、
+//    `paused_on_error`/`waiting_confirm` 併進 `paused`（改看 `pause_reason=error|balance_ask`）。
+//    ⇒ 這裡只剩 `running`；回程也是 running，本來就該快取樣，不必另外列。
+var WR_MOVING = /^running$/;
 
 function pollFastMs(){
   var cr = last.cr || {}, wr = last.wr || {};
@@ -2608,6 +2637,10 @@ function pollPwm(){
   var b = document.getElementById('wr-estop');
   if (!b) return;
   b.addEventListener('click', function(){
+    // [2026-09-16 per user] 緊急脫離要二次確認：它與「停止作業」只差一個位置，而後果差很多
+    //（全關全收 + 進 Error）。⚠️ confirm 在 kiosk 可能被自動接受 ⇒ 這是提示不是閘門，
+    //  真正的分隔是**視覺上隔開 + 紅色 + 不同名字**。
+    if (!confirmOnce('🔴 緊急脫離\n\n立刻全關全收：收手臂 → 關刷/水泵 → 風扇停 → 收腳 → 關真空幫浦，\n機器脫離玻璃並進 Error（約 10 s）。\n\n要正常結束請按「停止作業」。確定緊急脫離？')) return;
     // 🔴 [2026-09-15 晚 per user，真機踩過兩次] **先停腳本、再急停。**
     //    只送 emergency_stop 的話，cycle_test 還在跑：要等它下一道指令收到 ERR state_violation /
     //    ERR aborted 才自己 bail —— 中間那幾秒它仍在對機器下指令，與急停的收回動作交錯。
@@ -3798,11 +3831,11 @@ document.getElementById('mis-start').addEventListener('click', function(){
 });
 document.getElementById('mis-stop').addEventListener('click', function(){
   if (MISSION_BACKEND === 'script'){
-    if (!NO_CONFIRM('中止任務？\n\n順序：① 吊機 stop ② 本體 arm_park（手臂卸力）\n③ SIGINT 讓腳本跑自己的收尾 ④ 逾時才強制結束。\n\n確定？')) return;
+    if (!NO_CONFIRM('停止作業？\n\n① 吊機 stop ② 手臂卸力 ③ SIGINT 讓腳本收尾 ④ 逾時強制結束\n⑤ 行程結束後收腳 + 關幫浦 ⇒ 機器留在原高度，純吊在繩上。')) return;
     ws.send(JSON.stringify({mission: 'stop'}));
     return;
   }
-  if (!NO_CONFIRM('中止任務？\n\n本體會做收尾（arm_retract、風扇關、motion_hz 寫回）；吊機與推桿不復位。')) return;
+  if (!NO_CONFIRM('停止作業？\n\n本體會做收尾（arm_retract、風扇關、motion_hz 寫回）；吊機與推桿不復位。')) return;
   fire(WR, 'mission stop user', null, null).then(function(l){ if (/^ERR/.test(l)) log('🔴 中止失敗：' + l, 'e'); });
 });
 
@@ -3872,6 +3905,7 @@ function misParseLine(line){
   if (/週期測試：(\d+) 週期 × \(下行 (\d+) 步/.test(line)){ var mm = /週期測試：(\d+) 週期 × \(下行 (\d+) 步/.exec(line); mis.steps = +mm[2]; }
   if (/⚠ 真空未建立/.test(line)) mis.no_seal++;
   if (/跳過清潔/.test(line)) mis.skipped++;
+  if (/^\[web\] STOP ⑤/.test(line)) { stopBanner.on = true; stopBanner.clearedAt = 0; paintStopBanner(); }
   if (/^\[PAUSE\] paused/.test(line)) mis.paused = true;      // 腳本印的為準（server 的 paused 也是照它翻）
   if (/^\[PAUSE\] resumed/.test(line)) mis.paused = false;
   if (/^\s*⚠|^\s*🔴|補水|中止|^\[PAUSE\]/.test(line)) mis.sub = line.trim().slice(0, 60);
@@ -3974,6 +4008,75 @@ setInterval(misPaint, 1000);
 // 🔴 `emergency_stop` 語意已改：進 SAFE，不再回 idle。
 var safeInfo = {src:'', detail:'', at:0};
 function isSafe(){ var wr = last.wr; return !!(wr && (wr.safe === '1' || wr.state === 'safe')); }
+// 🔴 [2026-09-16 per user] **吸附中不可以動吊機。** 本體對 `crane_goto` 已有硬守衛，
+//    但 Manual 的 ▲▼ 拉繩/放繩是**直連吊機 :5002**、吊機不知道吸盤狀態 ⇒ **GUI 是那組唯一的防線**。
+//    判據與本體同一條：`p5..p8` 任一 ≤ −40，或該顆讀不到（`p_err` 非 0 / 欄位缺）。
+var CUP_ATTACH_KPA = -40;
+function cupsState(){
+  var wr = last.wr; if (!wr) return {sealed:0, unreadable:0, known:false};
+  var sealed = 0, unreadable = 0, got = 0;
+  [5,6,7,8].forEach(function(n){
+    var v = num(wr, 'p' + n);
+    if (v === null){ unreadable++; return; }
+    got++; if (v <= CUP_ATTACH_KPA) sealed++;
+  });
+  if (wr.p_err !== undefined && wr.p_err !== '0') unreadable = Math.max(unreadable, 1);
+  return {sealed:sealed, unreadable:unreadable, known: got > 0 || unreadable > 0, attached: sealed > 0 || unreadable > 0};
+}
+// 會讓吊機動的東西：三顆「拉到…」、控制列 ⤒、前置 ④ 起點的按鈕、以及 ▲▼ 六顆。
+function paintCupLock(){
+  var c = cupsState(), lock = !!c.attached;
+  var ids = ['cg-top','cg-ground','cg-go','mbar-top'];
+  ids.forEach(function(id){
+    var e = document.getElementById(id); if (!e) return;
+    if (id === 'mbar-top' && !lock) return;             // 那顆另有自己的 disabled 規則（misPaint）
+    e.disabled = lock || (id === 'mbar-top' ? e.disabled : false);
+    e.title = lock ? '吸附中不可移動吊機 —— 先按「收腳」' : '';
+  });
+  [].forEach.call(document.querySelectorAll('.btn.hold'), function(b){
+    b.disabled = lock;
+    b.title = lock ? '吸附中不可移動吊機（這組直連吊機，後端擋不到）—— 先按「收腳」' : '';
+  });
+  var pb = document.querySelector('[data-flowrun="top"]'); if (pb) pb.disabled = lock;
+  var hint = document.getElementById('cup-lock-hint');
+  if (hint){
+    hint.hidden = !lock;
+    hint.textContent = lock
+      ? '🔴 吸附中（' + c.sealed + ' 顆密封' + (c.unreadable ? '、' + c.unreadable + ' 顆讀不到' : '') + '）：會移動吊機的按鈕已鎖住，含 ▲▼ 拉繩／放繩。要移動請先按「收腳」。'
+      : '';
+  }
+}
+// 停止作業之後的常駐橫幅：腳收回、壓力回到大氣之前都留著（`[web] STOP ⑤` 之後開始看）
+var stopBanner = {on:false, clearedAt:0};
+function paintStopBanner(){
+  var el = document.getElementById('stopbar'); if (!el) return;
+  var c = cupsState();
+  if (!stopBanner.on){ ebShow(el, false); return; }
+  if (c.attached){
+    stopBanner.clearedAt = 0;
+    el.innerHTML = '<strong>🔴 停止中：機器仍吸附在牆上、腳伸出</strong><span>吊機移動已被本體鎖住（' + c.sealed + ' 顆密封' +
+                   (c.unreadable ? '、' + c.unreadable + ' 顆讀不到' : '') + '）。等收腳完成、壓力回到大氣。</span>';
+    ebShow(el, true);
+    return;
+  }
+  if (!stopBanner.clearedAt) stopBanner.clearedAt = Date.now();
+  el.innerHTML = '<strong>✅ 已脫離牆面，純吊在繩上</strong><span>四顆壓力都回到大氣，吊機移動已解鎖。</span>';
+  ebShow(el, true);
+  if (Date.now() - stopBanner.clearedAt > 8000){ stopBanner.on = false; ebShow(el, false); }
+}
+// [2026-09-16 契約] 6 狀態 + 兩個修飾欄位。`paused` 一定要連原因一起顯示 —— 三種暫停的出口不同：
+//   user → `resume`／error → `continue`/`skip`／balance_ask → **沒有指令**（IMU roll 回穩自己還原）。
+var PAUSE_WHY = {user:'使用者', error:'錯誤', balance_ask:'等平衡回穩（無指令，自動還原）'};
+function wrStateText(wr){
+  if (!wr || !wr.state) return '—';
+  var st = String(wr.state);
+  if (st === 'paused'){
+    var why = wr.pause_reason && wr.pause_reason !== 'none' ? wr.pause_reason : '';
+    return '暫停中' + (why ? '（' + (PAUSE_WHY[why] || why) + '）' : '');
+  }
+  if (st === 'running' && wr.flow === 'return_home') return 'running（回程 return_home）';
+  return st;
+}
 function onSafeEvt(line){
   var m;
   if ((m = /^EVT safe_enter src=(\S+)(?: detail=(\S+))?/.exec(line))){
@@ -4766,6 +4869,30 @@ function armSeg(line, tag){
   return o;
 }
 
+// [2026-09-16 per user] 目前工具。**唯一來源是 STATUS 的 `tool=`**（手臂由 M2 實際角度反推），
+// 不是「上次叫它去哪」—— 手轉、轉到一半、沒校正都會如實顯示 between。
+// ⚠️ `en=0` 時 M2 不再送 CAN frame ⇒ tool 是快取值，兩處顯示都要標「未使能，快取」。
+var armTool = {tool:null, en:null, at:0};
+var TOOL_ZH = {roller:'滾筒', squeegee:'刮刀', center:'置中', between:'轉換中'};
+function armToolText(){
+  if (!armTool.at) return {t:'—', stale:false};
+  var zh = armTool.tool ? (TOOL_ZH[armTool.tool] || armTool.tool) : '未回報 tool=';
+  var stale = armTool.en === '0';
+  return {t: zh + (stale ? '（未使能，快取）' : ''), stale: stale};
+}
+function paintArmTool(){
+  var r = armToolText();
+  ['rd-tool','mis-tool'].forEach(function(id){
+    var e = document.getElementById(id); if (!e) return;
+    e.textContent = r.t;
+    e.className = 'rd ' + (!armTool.at ? '' : (r.stale ? 'unv' : (armTool.tool === 'between' ? 'unv' : 'on')));
+  });
+  var a = document.getElementById('mis-tool-age');
+  if (a) a.textContent = armTool.at ? (Math.round((Date.now() - armTool.at) / 1000) + 's 前') : '';
+}
+// 任務執行中每 5 s 讀一次（那時手臂是使能的，值才有意義）；閒置時維持「按讀取才更新」的既有設計。
+setInterval(function(){ if (mis.running && conn.arm && typeof armStatus === 'function') armStatus(); }, 5000);
+setInterval(paintArmTool, 1000);
 function armStatus(){
   return armSend('STATUS').then(function(l){
     var m1 = armSeg(l, 'M1'), m2 = armSeg(l, 'M2');
@@ -4780,7 +4907,17 @@ function armStatus(){
     // 🔴🔴 `en=0` ⇒ 這顆馬達不再送 CAN frame，**pos / tau / err 全部是凍結的舊值**。
     //    整組數字都不是現況，所以標成「凍結」而不是照常顯示 —— 顯示一個看起來正常
     //    的舊值，比顯示「不知道」危險得多（PARK 之後最常踩）。
-    function fmt(el, seg, label){
+    armPaintSeg(e1, m1, 'M1');
+    armPaintSeg(e2, m2, 'M2');
+    if (m2){ armTool = {tool: m2.tool || null, en: m2.en, at: Date.now()}; paintArmTool(); }
+    if (ea) ea.textContent = '讀取於 ' + new Date().toTimeString().slice(0, 8);
+    return l;
+  });
+}
+// 🔴 [2026-09-16] STATUS 的兩段**不一定在同一行到達**：橋接是 line-buffered，
+//    假機器（與真機的部分路徑）會把 `[M1]` 與 `[M2]` 拆成兩則 ⇒ 只解析回覆那一行會永遠讀不到 M2
+//    （`rd-m2` 空著、`tool=` 讀不到）。所以繪圖抽成這支，`[M2]` 單獨飄來時也走同一條路。
+function armPaintSeg(el, seg, label){
       if (!el || !seg) return;
       var en = seg.en;                       // '1' / '0' / undefined（舊版 binary 沒有這欄）
       var st = armErr(seg.err === undefined ? '0' : seg.err);
@@ -4798,13 +4935,15 @@ function armStatus(){
         el.title = '';
       }
     }
-    fmt(e1, m1, 'M1');
-    fmt(e2, m2, 'M2');
-    if (ea) ea.textContent = '讀取於 ' + new Date().toTimeString().slice(0, 8);
-    return l;
-  });
-}
 document.getElementById('arm-read').addEventListener('click', armStatus);
+// `[M2] …` 單獨到達時（見上方註解）照樣更新工具與 M2 那一列
+function armApplyM2Line(line){
+  if (String(line).indexOf('[M2]') < 0) return;
+  var m2 = armSeg(line, 'M2'); if (!m2) return;
+  armPaintSeg(document.getElementById('rd-m2'), m2, 'M2');
+  armTool = {tool: m2.tool || null, en: m2.en, at: Date.now()};
+  paintArmTool();
+}
 
 // ---- DEPLOY_F：力控貼合 ----
 // 回覆格式（2026-09-04 實機原文）：
@@ -5043,14 +5182,17 @@ var PRE_ITEMS = [
   // ⚪ [2026-09-15 晚 per user] **④ init（幫浦）已從前置移除**：腳本自己處理 ——
   //    起跑時若 A/B 皆 OFF 就自己 `arm_attached off → init → arm_attached on`（不動手臂）並驗繼電器，
   //    回程前與收尾自動 `pump off`（只關它自己開的那顆）。`flowInit()` 保留給 Manual／需要時手動用。
-  {k:'arm', n:'④ 手臂', s:'本體 arm_init（手臂 INIT，init_done=1）· 本體 status 的 arm_ready', btn:'arm_init',
+  // 🔴 [2026-09-16 per user] 手臂**開機即待命**（`fcv-arm` 啟動 → STARTUP → 自動接 INIT）⇒ 不再是必要前置。
+  //    留成資訊列：STARTUP 失敗時不會接 INIT（位置不明時撞停點更危險），那種情況 `arm_ready=0`，這一行就是唯一的徵兆。
+  {k:'arm', n:'手臂（資訊）', s:'開機即待命：服務啟動後自動 STARTUP → INIT · arm_ready=0 表示沒接上（STARTUP 失敗）· 按鈕＝重跑 INIT', btn:'重跑 arm_init',
+   info:true,
    run:function(){ flowArmInit(); },
    state:function(){
-     var wr = last.wr; if (!wr) return {ok:null, v:'等待本體…'};
-     if (wr.arm_ready === undefined) return {ok:null, v:'本體未回 arm_ready'};
-     return {ok: wr.arm_ready === '1', v: wr.arm_ready === '1' ? 'arm_ready=1' : 'arm_ready=0（en=0 或未 INIT）'};
+     var wr = last.wr; if (!wr) return {ok:null, info:true, v:'等待本體…'};
+     if (wr.arm_ready === undefined) return {ok:null, info:true, v:'本體未回 arm_ready'};
+     return {ok:null, info:true, v: wr.arm_ready === '1' ? '已待命（arm_ready=1）' : '🔴 arm_ready=0 —— STARTUP 失敗或手臂未使能，按「重跑 arm_init」'};
    }},
-  {k:'water', n:'⑤ 水位', s:'water_full=1 · 補水＝water_inlet on → 滿再 +20 s → off（上限 180 s，同腳本 ensure_water_full）', btn:'補水',
+  {k:'water', n:'③ 水位', s:'water_full=1 · 補水＝water_inlet on → 滿再 +20 s → off（上限 180 s，同腳本 ensure_water_full）', btn:'補水',
    run:function(){ preWaterFill(); },
    state:function(){
      if (pre.busy === 'water') return {ok:null, v: pre.busyText || '補水中…'};
@@ -5060,7 +5202,7 @@ var PRE_ITEMS = [
      var inlet = last.wr && last.wr.water_inlet === '1';
      return {ok: waterLv.full, v: (waterLv.full ? '滿' : '不滿') + (inlet ? ' · 進水閥開著' : '') + ' · ' + ago(waterLv.at / 1000)};
    }},
-  {k:'top', n:'⑥ 起點', s:'吊機高度 |L| 與牆高差 ≤ ' + PRE_TOP_TOL_CM + ' cm · 回起點＝本體 crane_goto <牆高>', btn:'回起點',
+  {k:'top', n:'④ 起點', s:'吊機高度 |L| 與牆高差 ≤ ' + PRE_TOP_TOL_CM + ' cm · 回起點＝本體 crane_goto <牆高>', btn:'回起點',
    run:function(){ preGoto(); },
    state:function(){
      var h = craneHeightCm(); if (h === null) return {ok:null, v:'等待吊機…'};
@@ -5283,29 +5425,17 @@ function craneGotoTop(){
   if (!(wall.cm > 0)) { alert('牆高未量（前置 ②）—— 沒有頂端可拉'); return; }
   craneGotoAction(wall.cm, '拉到頂端', ['cg-rd', 'flow-top-rd']);
 }
-// 一鍵前置：③→④→⑤ 依序，已綠的跳過；任一步被閘門擋或失敗就停在那一步。
-function preRunAll(){
-  if (pre.busy) { alert('前置動作進行中（' + pre.busy + '）'); return; }
-  var rd = document.getElementById('pre-runall-rd');
-  // [09-15] init 由腳本自理 ⇒ 不再送；③ 推桿歸零改資訊列後**不放進一鍵**（不需要每次做，要做自己按那一顆）
-  var steps = [['arm', flowArmInit]];
-  var i = 0;
-  (function next(){
-    if (i >= steps.length){ pre.busy = null; if (rd) rd.textContent = '完成 ' + new Date().toTimeString().slice(0, 8); paintFlow(); return; }
-    var k = steps[i][0], fn = steps[i][1], it = PRE_ITEMS.filter(function(x){ return x.k === k; })[0];
-    i++;
-    if (it.state().ok === true){ log('ℹ️ 一鍵前置：' + it.n + ' 已綠，跳過', 'w'); return next(); }
-    pre.busy = 'runall'; if (rd) rd.textContent = '執行 ' + it.n + '…';
-    var r = fn();
-    if (r === false){ pre.busy = null; if (rd) rd.textContent = '停在 ' + it.n + '（被擋或取消）'; return; }
-    Promise.resolve(r).then(function(ok){
-      if (ok === false){ pre.busy = null; if (rd) rd.textContent = '停在 ' + it.n + '（失敗）'; return; }
-      // 等一輪 status 回來再判下一項（fake 幾百 ms，真機 ≤ 1 s）
-      setTimeout(next, 1200);
+// [2026-09-16] preRunAll 隨「一鍵前置」一起移除（沒有必做且可自動跑的項目了）。
+(function(){
+  var rb = document.getElementById('cup-retract');
+  if (rb) rb.addEventListener('click', function(){
+    txt('rd-retract', '收回中…');
+    fire(WR, 'pusher all retract', null, null).then(function(l){
+      txt('rd-retract', (/^OK/.test(l) ? '✅ 已收回 ' : '🔴 ' + l.slice(0, 30) + ' ') + new Date().toTimeString().slice(0, 8));
+      setTimeout(pollFast, 400);
     });
-  })();
-}
-document.getElementById('pre-runall').addEventListener('click', preRunAll);
+  });
+})();
 (function(){
   var t = document.getElementById('cg-top'), g = document.getElementById('cg-ground'),
       go = document.getElementById('cg-go'), cm = document.getElementById('cg-cm'), mt = document.getElementById('mbar-top');
@@ -5500,12 +5630,12 @@ setInterval(paint, 1000);
 // [2026-09-10] 版號寫在啟動那行，讓人一眼看得出瀏覽器拿到的是不是新版
 // （這個頁面是單一檔，改完不換檔名，快取沒清就會靜默停在舊版）。
 // ⚠️ 舊文案「server.js 未改動」已不成立 —— Mission 那批改過 server.js，拿掉。
-var CONSOLE_VER = 'v3-2026.09.15-1743';   // 唯一版號來源：scripts/deploy_web.sh 部署時 sed 這一行
+var CONSOLE_VER = 'v3-2026.09.16-1610';   // 唯一版號來源：scripts/deploy_web.sh 部署時 sed 這一行
 txt('ver-tag', CONSOLE_VER);   // 頂欄版號與這行同源，不再各寫各的
 log('console v3 啟動 —— 版本 ' + CONSOLE_VER + '（本體 mission 指令族 + SAFE + 作業流程頁；不 spawn 腳本）');
 // [v3] 無頭測試鉤（jsdom + fake_robot 端對端）。整支腳本包在 IIFE 裡，沒有這個鉤子測試碰不到 send()。
 // 🔴 只讀／送指令用，不是給頁面內部呼叫的 API；不要在別處依賴它。
-window.__v3 = {send: send, fire: fire, last: last, conn: conn, logs: function(){ return LOGBUF.slice(); }, onDetachEvt: onDetachEvt, paintEstopState: paintEstopState, isSafe: function(){ return isSafe(); }, onHoldGuardEvt: onHoldGuardEvt, misParams: misParams, misValidate: misValidate, preMissing: preMissing, onMissionMsg: onMissionMsg, wsRef: function(){ return ws; }, setBackend: function(b){ MISSION_BACKEND = b; misBackendApply(); misPaint(); }, backend: function(){ return MISSION_BACKEND; },
+window.__v3 = {send: send, fire: fire, last: last, conn: conn, logs: function(){ return LOGBUF.slice(); }, onDetachEvt: onDetachEvt, paintEstopState: paintEstopState, wrStateText: wrStateText, wrMoving: function(st){ return WR_MOVING.test(st); }, armStatus: armStatus, armTool: function(){ return armTool; }, paintArmTool: paintArmTool, armApplyM2Line: armApplyM2Line, cupsState: cupsState, isSafe: function(){ return isSafe(); }, onHoldGuardEvt: onHoldGuardEvt, misParams: misParams, misValidate: misValidate, preMissing: preMissing, onMissionMsg: onMissionMsg, wsRef: function(){ return ws; }, setBackend: function(b){ MISSION_BACKEND = b; misBackendApply(); misPaint(); }, backend: function(){ return MISSION_BACKEND; },
                mis: function(){ return mis; }, wall: function(){ return wall; }, misPaint: misPaint,
                onMissionEvt: onMissionEvt, onSafeEvt: onSafeEvt};
 

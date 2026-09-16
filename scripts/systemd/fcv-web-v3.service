@@ -1,0 +1,21 @@
+[Unit]
+Description=FCV web console v3 main console (:8081)
+After=network-online.target fcv-crane.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=user
+WorkingDirectory=/home/user/projects/facade_cleaning_v2/web
+Environment=WROBOT_IP=192.168.5.26
+Environment=CRANE_IP=127.0.0.1
+Environment=HTTP_PORT=8081
+Environment=PUBLIC_DIR=/home/user/projects/facade_cleaning_v2/web/public_v3
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/user/run/logs/web_v3_service.log
+StandardError=append:/home/user/run/logs/web_v3_service.log
+
+[Install]
+WantedBy=multi-user.target

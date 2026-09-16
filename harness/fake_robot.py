@@ -62,6 +62,8 @@ class Sim:
         self.home_ground = 0
         self.wall_height = 0          # [2026-09-15] goto ceiling (set_wall_height); 0 = unset
         self.estop = 'none'           # [2026-09-15] none|detaching|done|partial (body emergency_detach)
+        self.pause_reason = 'none'    # [2026-09-16] none|user|error|balance_ask
+        self.flow = 'none'            # [2026-09-16] none|return_home
         self.hold_guard = 1           # [2026-09-15] set_hold_guard on|off (hold-mode tension protection)
         self.level_auto = 1           # [2026-09-15] set_level_auto on|off (auto level reference from IMU)
         self.level_diff = 0
@@ -165,7 +167,9 @@ class Sim:
         cups = ' '.join(f'p{k}={v:.1f}' for k, v in s.pres.items())
         seal = ' '.join(f's{k}={1 if v < -30 else 0}' for k, v in s.pres.items())
         zdt = ' '.join(f'z{k}={s.zdt[k]["pos"]}' for k in s.zdt)
-        return (f'OK state={s.state} crane_attached={s.crane_attached} crane_peer_age_ms=200 crane_peer_fresh=1'
+        # [2026-09-16] 狀態收斂成 6 個(idle/ready/attached/running/paused/error);
+        # paused 在等什麼看 pause_reason(user|error|balance_ask),running 是哪段流程看 flow。
+        return (f'OK state={s.state} pause_reason={s.pause_reason} flow={s.flow} crane_attached={s.crane_attached} crane_peer_age_ms=200 crane_peer_fresh=1'
                 f' crane_estop_connected=1 crane_estop_down_ms=0 crane_idle_ms=300 crane_idle_ms_max=900'
                 f' crane_idle_ms_max_motion=600 crane_wd_warn_ms=3000 crane_wd_abort_ms=8000'
                 f' arm_attached={s.arm_attached} obstacle_detect=off follower_mode=imu first_step=right'
@@ -195,9 +199,17 @@ class Sim:
         return (f'OK ch1={self.pwm_duty:.0f},{self.pwm_hz},65535,1 ch2=5,50,0,0 ch3=ERR ch4=50,1000,0,0'
                 f' duty_min=5 duty_max=10 freq_lock=50 active_ch=1\n')
 
+    # [2026-09-16] 真機 STATUS 的 [M2] 段有 `tool=`(由 M2 角度反推,±0.09 rad):
+    #   滾筒 0.8558 / 刮刀 0.1913 / center 0 / 其餘 between。
+    @staticmethod
+    def _m2_tool(pos):
+        for name, ref in (('roller', 0.8558), ('squeegee', 0.1913), ('center', 0.0)):
+            if abs(pos - ref) <= 0.09: return name
+        return 'between'
+
     def arm_status(self):
         def one(tag, m):
-            extra = f' init_done={self.arm_init_done}' if tag == 'M1' else ''
+            extra = f' init_done={self.arm_init_done}' if tag == 'M1' else f' tool={SIM._m2_tool(m["pos"])}'
             return (f'[{tag}] pos={m["pos"]:.4f} vel={m["vel"]:.4f} tau={m["tau"]:.4f} hold={m["hold"]}'
                     f' moving={m["moving"]} err=NONE en={m["en"]} settle_cnt=0{extra}')
         return one('M1', self.m1) + '\n' + one('M2', self.m2) + '\n'
@@ -448,9 +460,17 @@ def wr_dispatch(line, bcast):
         if c == 'status': return s.body_status(), True
         if c == 'crane_goto':   # [2026-09-15] body passthrough → crane goto; state gate mirrors cmd_crane_goto
             if s.state not in ('idle', 'ready'): return f'ERR state_violation current={s.state}\n', True
+            # [2026-09-16] cups-attached guard, mirrors cmd_crane_goto. `force` bypasses + EVT.
+            sealed = sum(1 for v in s.pres.values() if v <= -40)
+            if sealed > 0:
+                if 'force' not in a:
+                    _bcast('washrobot', f'EVT crane_goto_blocked cups_attached sealed={sealed} unreadable=0')
+                    return (f'ERR cups_attached sealed={sealed} unreadable=0 — 吸附中不可移動吊機,'
+                            f'請先 `pusher all retract`(強制:crane_goto {a[0] if a else "?"} force)\n'), True
+                _bcast('washrobot', f'EVT crane_goto_forced cups_attached sealed={sealed} unreadable=0')
             if s.crane_attached != 'on': return 'OK skipped crane_attached=off\n', True
     if c == 'crane_goto':
-        return cr_dispatch('goto ' + ' '.join(a), lambda l: _bcast('crane', l))[0], True
+        return cr_dispatch('goto ' + (a[0] if a else ''), lambda l: _bcast('crane', l))[0], True
     with s.lock:
         if c == 'selfcheck':   # [2026-09-14 階段 1] real body: ERR busy motion / ERR busy busy=zdt_bus
             if s.moving or s.mission: return 'ERR busy motion\n', True
@@ -490,8 +510,11 @@ def wr_dispatch(line, bcast):
             return 'OK\n', True
         if c in ('zdt_pusher', 'pusher') and len(a) >= 2:
             tgt = [5, 6, 7, 8] if a[0] in ('all', 'feet') else [int(a[0])] if a[0].isdigit() else []
+            # [2026-09-16 AI-2, for agent-ai-db] extend_raw counts as extended too, and retract goes to 0:
+            # pressure follows `pos > 0`, so the old `retract → 300` kept the cups sealed forever —
+            # `pusher all retract` alone (what the GUI's 收腳 sends, and what the real feet do) must release them.
             for k in tgt:
-                if k in s.zdt: s.zdt[k]['pos'] = 30000 if a[1] == 'extend' else 300
+                if k in s.zdt: s.zdt[k]['pos'] = 30000 if a[1].startswith('extend') else 0
             return f'OK {a[0]} {a[1]}\n', True
         if c in ('zdt_home', 'zdt_zero'):
             for k in s.zdt: s.zdt[k]['pos'] = 0
