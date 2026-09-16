@@ -6,8 +6,9 @@
 > 保留「原因 / 決策(尤其被否決的)/ 驗證結論」。原則 ≤40 行,驗證表可超。
 > (原 2026-04 的「# 修改日誌」格式範本已由本說明取代。)
 
-## 索引(全部 132 條,新的在上)
+## 索引(全部 133 條,新的在上)
 
+- `[2026-09-16v3c]` v3：v1 退役收尾 —— 頂欄「v2」連結拿掉、check_console ② 4 個寫入點清零（`v3-2026.09.16-1948`，:8080）→ (本檔)
 - `[2026-09-16v3]` v3：本體狀態機收斂成 6 個 —— `WR_MOVING` 與暫停原因顯示對齊 → (本檔)
 - `[2026-09-15v3b]` v3：01 作業流程併入 Mission、啟動改走 server.js 起 cycle_test、危險閘門取消、通訊紀錄移除 → (本檔)
 - `[2026-09-15v3]` v3：Manual 張力保護 啟用/關閉鈕（吊機 `set_hold_guard`）+ Mission `fan=`/`rail=` 起跑參數 → (本檔)
@@ -143,7 +144,25 @@
 
 ---
 
-## 當月全文(2026-09,84 條)
+## 當月全文(2026-09,85 條)
+
+## [2026-09-16v3c] v3：v1 退役收尾 —— 「v2」連結拿掉、check_console ② 清零（`v3-2026.09.16-1948`，改到 :8080）
+
+**背景**：agent-ai-db 今晚把 v1 GUI（`public/`、`fcv-web.service`、:8080）退役，v3 服務改聽 :8080；
+`check_console.js` 預設改查 public_v3，報出 4 個「寫到不存在的元素」。GUI 線順手收尾（per agent-ai-db 轉述）。
+
+**改了什麼**（`web_backend/public_v3/index.html`）：
+- 頂欄 `<a href="http://localhost:8081/">v2</a>` 拿掉（現在指到空的）。
+- `rd-balen`：其實只剩一段 HTML 註解裡的 `txt('rd-balen', …)` 字樣被字面比對抓到；那格 09-11 已併進 `rd-balsrc`，註解改寫成現況。
+- `flow-zdt-rd` / `flow-arm-rd`：**不是死寫入**——列是 `renderFlow()` 用 `'flow-' + k + '-rd'` 動態長出來的，checker 只認字面 `id="…"`。
+  新增 `flowRd(k)` 集中查找（paintFlow / flowZdtHome / flowArmInit 共用），checker 不再誤報、拼法也只剩一處。
+- `flow-init-rd`：真的沒了（④ init 09-15 離開 PRE_ITEMS）——`flowInit()` 保留給手動用，只拿掉寫結果格那兩行，回饋走 log。
+- 手臂待命位改滾筒（RIGHT）：GUI `tool=` 讀真值，無「INIT 後應為 center」假設，**不需改**。
+
+**驗證**：`check_console.js` ①②③④ 全 ✅；`gui_v3_check.js` 142/142；`gui_offline.sh report` 0 not modelled；
+`deploy_web.sh` 三方 md5 `56edc1b0…` 一致（本機／Pi 檔／`http://192.168.5.25:8080/`）。
+未 commit（agent-ai-db 統一）。
+📌 本機離線 harness（`gui_offline.sh`、`gui_v3_check.js`）仍用 :8081，那是開發機的 port，與 Pi 無關，不動。
 
 ## [2026-09-16v3] v3：本體狀態機收斂成 6 個 —— GUI 的 `WR_MOVING` 與暫停顯示對齊
 

@@ -30,7 +30,10 @@
   unit 描述誤寫 v2)自樹移除;Pi 上 `web/public`、`web/public_v2` 殘留目錄清掉。`fcv-web-v3.service` HTTP_PORT 8081→**8080**(已重啟,200)。
   `server.js` 預設 PUBLIC_DIR → public_v3;`deploy.sh`/`deploy_web.sh`(PI_PORT 8080)/`check_console.js`(預設查 v3)/systemd README/CLAUDE.md 架構圖與埠表/runbook §A0 同步。
   📌 **現在 GUI 唯一位址:http://192.168.5.25:8080**(harness 的假機器仍在本機 :8081,不衝突)。
-  → 交 AI-2:index.html 那個指向 :8081 的「v2」連結拿掉;`check_console` 報 4 個寫到不存在元素(rd-balen / flow-zdt-rd / flow-init-rd / flow-arm-rd)。
+  → AI-2 已完成並部署 **v3-2026.09.16-1948**(md5 56edc1b0 三方一致):「v2」連結拿掉;check_console 四項全綠。
+  🔎 AI-2 澄清:那 4 個「寫到不存在元素」只有 `flow-init-rd` 是真死寫入(④ init 09-15 離開前置);`flow-zdt-rd`/`flow-arm-rd` 是
+  `'flow-'+k+'-rd'` **動態拼的 id,checker 字面比對看不見**(它自己寫明的盲區:字串串接組的 id)—— 加 `flowRd(k)` helper 統一拼法後不再誤報;
+  `rd-balen` 只是 HTML 註解裡的字樣。📌 **checker 的 ❌ 要先分「真死寫入」還是「動態 id 誤報」,不能照單全刪。**
 
 ## 2026-09-16 晚:同型 bug 掃描、work_log 壓縮、死碼移除(本體 −1,100 行、Linux_test 整批)、build 清單去寫死
 

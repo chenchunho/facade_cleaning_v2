@@ -524,7 +524,7 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
           title="切換電腦版／平板版（選擇會記在這台瀏覽器）">🖥 電腦</button>
   <button id="theme-btn" class="btn" style="margin-right:8px"
           title="切換亮／暗（戶外請用亮色；選擇會記在這台瀏覽器）">☀ 亮</button>
-  <a href="http://localhost:8081/" title="v2（:8081）">v2</a>
+  <!-- [2026-09-16 晚] 「v2」連結拿掉：v1 GUI（public/、:8080）與 fcv-web.service 已退役，v3 自己改到 :8080。 -->
 </div>
 
 <!-- [2026-09-10] 本體進入 Error 之後的復原橫幅。
@@ -1001,8 +1001,7 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
               <div><span class="bk">R</span>
                 <span class="bv" id="cr-r">—</span></div>
             </div>
-            <!-- ⚪ [2026-09-04] `txt('rd-balen', …)` 早就寫在 paint() 裡，但 HTML 從來沒有
-                 這個元素 ⇒ 靜默 no-op、畫面上什麼都沒有（今天第四個同型）。補上。
+            <!-- ⚪ [2026-09-04 → 09-11] 平衡「啟用/停用」那格已併進 rd-balsrc（停用時直接寫「已停用」）。
                  值得顯示的理由：09-01 對照組實測**關掉平衡**會讓平均 |roll| 由 0.68° 惡化到
                  2.52°、出帶率 22.7% → 67%。它是不是開著，是判讀姿態數據的前提。 -->
             <!-- 🔴 [2026-09-04] strip 收進 Dashboard 之後，**姿態在 Manual 就沒有第二個地方看得到了**。
@@ -5218,6 +5217,9 @@ function preMissing(){ return preRequired().filter(function(it){ return it.state
 function preAllOk(){ return preMissing().length === 0; }
 function flowMissionReady(){ return preAllOk(); }   // misPaint 用的名字沿用
 
+// 前置列的結果格是 renderFlow() 動態長出來的（`flow-<k>-rd`），不是寫死的 markup ——
+// 查找集中在這裡，check_console 才不會把它們誤報成「寫到不存在的元素」（它只認字面 id="…"）。
+function flowRd(k){ return document.getElementById('flow-' + k + '-rd'); }
 function renderFlow(){
   var root = document.getElementById('pre-root'); if (!root) return;
   root.innerHTML = PRE_ITEMS.map(function(it){
@@ -5232,7 +5234,7 @@ function paintFlow(){
   var okN = 0, needN = preRequired().length;
   PRE_ITEMS.forEach(function(it){
     var st = it.state(); if (st.ok === true && !it.info) okN++;
-    var lamp = document.getElementById('flow-lamp-' + it.k), tag = document.getElementById('flow-tag-' + it.k), rd = document.getElementById('flow-' + it.k + '-rd');
+    var lamp = document.getElementById('flow-lamp-' + it.k), tag = document.getElementById('flow-tag-' + it.k), rd = flowRd(it.k);
     var col = it.info ? 'var(--ink3)' : (st.ok === true ? 'var(--ok)' : (st.ok === false ? 'var(--bad)' : 'var(--ink3)'));
     if (lamp) lamp.style.color = col;
     if (tag){ tag.textContent = it.info ? '參考' : (st.ok === true ? 'OK' : (st.ok === false ? '未完成' : '未知'));
@@ -5303,7 +5305,7 @@ function flowZdtHome(){
   if (!dangerGate('推桿歸零 zdt_home')) return false;
   if (!NO_CONFIRM('zdt_home feet：4 支推桿會往收回方向撞硬限位（100 rpm）直到堵轉，然後定為 0。\n\n附近沒有人手在推桿上？確定？')) return false;
   dangerDisarm('已送出 zdt_home');
-  var rd = document.getElementById('flow-zdt-rd'); if (rd){ rd.dataset.busy = '1'; rd.textContent = '進行中…'; }
+  var rd = flowRd('zdt'); if (rd){ rd.dataset.busy = '1'; rd.textContent = '進行中…'; }
   return send(WR, 'zdt_home feet', 180000).then(function(l){
     if (rd) delete rd.dataset.busy;
     var bad = (l.match(/s\d=(?!homed)[a-z_]+/g) || []);
@@ -5318,7 +5320,7 @@ function flowInit(){
   if (!dangerGate('本體 init')) return false;
   if (!NO_CONFIRM('init：arm_attached off → init（開幫浦 A、開始輪替計時、校 IMU 水平基準；不伸推桿）→ arm_attached on。\n\n確定？')) return false;
   dangerDisarm('已送出 init');
-  var rd = document.getElementById('flow-init-rd'); if (rd){ rd.dataset.busy = '1'; rd.textContent = 'init 中…'; }
+  // ④ init 已不在 PRE_ITEMS（09-15），沒有結果格可寫 —— 回饋只走 log 行
   return fire(WR, 'arm_attached off', null, null).then(function(){
     return fire(WR, 'init', null, null);
   }).then(function(l){
@@ -5326,7 +5328,6 @@ function flowInit(){
     log((ok ? '✅ ' : '🔴 ') + 'init → ' + l, ok ? 'g' : 'e');
     return fire(WR, 'arm_attached on', null, null).then(function(){ return ok; });
   }).then(function(ok){
-    if (rd) delete rd.dataset.busy;
     setTimeout(pollFast, 800); setTimeout(pollRelay, 800); if (typeof pollPump === 'function') setTimeout(pollPump, 900);
     return ok;
   });
@@ -5336,7 +5337,7 @@ function flowArmInit(){
   if (!dangerGate('手臂 INIT')) return false;
   if (!NO_CONFIRM('arm_init：手臂會使能並做 INIT（大臂會動）。\n\n手臂周圍淨空？確定？')) return false;
   dangerDisarm('已送出 arm_init');
-  var rd = document.getElementById('flow-arm-rd'); if (rd){ rd.dataset.busy = '1'; rd.textContent = 'INIT 中…'; }
+  var rd = flowRd('arm'); if (rd){ rd.dataset.busy = '1'; rd.textContent = 'INIT 中…'; }
   return send(WR, 'arm_init', 120000).then(function(l){
     if (rd) delete rd.dataset.busy;
     var ok = /^OK/.test(l);
@@ -5630,7 +5631,7 @@ setInterval(paint, 1000);
 // [2026-09-10] 版號寫在啟動那行，讓人一眼看得出瀏覽器拿到的是不是新版
 // （這個頁面是單一檔，改完不換檔名，快取沒清就會靜默停在舊版）。
 // ⚠️ 舊文案「server.js 未改動」已不成立 —— Mission 那批改過 server.js，拿掉。
-var CONSOLE_VER = 'v3-2026.09.16-1610';   // 唯一版號來源：scripts/deploy_web.sh 部署時 sed 這一行
+var CONSOLE_VER = 'v3-2026.09.16-1948';   // 唯一版號來源：scripts/deploy_web.sh 部署時 sed 這一行
 txt('ver-tag', CONSOLE_VER);   // 頂欄版號與這行同源，不再各寫各的
 log('console v3 啟動 —— 版本 ' + CONSOLE_VER + '（本體 mission 指令族 + SAFE + 作業流程頁；不 spawn 腳本）');
 // [v3] 無頭測試鉤（jsdom + fake_robot 端對端）。整支腳本包在 IIFE 裡，沒有這個鉤子測試碰不到 send()。
