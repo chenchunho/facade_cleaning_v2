@@ -3,9 +3,8 @@
 // 前端「靜默失敗」檢查器
 //
 // 用法：
-//   node web_backend/tools/check_console.js web_backend/public_v2/index.html
-//   node web_backend/tools/check_console.js web_backend/public/index.html web_backend/public/app.js
-//   （不帶參數＝檢查 public_v2/index.html 與 public/{index.html,app.js}）
+//   node web_backend/tools/check_console.js web_backend/public_v3/index.html
+//   （不帶參數＝檢查 public_v3/index.html；v1 `public/` 與 v2 `public_v2/` 已於 2026-09-14/16 退役）
 //
 // 🔴 **為什麼需要這支**：這三類錯**不會有任何徵兆**——
 //   ① 重複 id       → `getElementById` 只拿得到第一個，第二個永遠不更新
@@ -116,9 +115,7 @@ const repo = path.resolve(__dirname, '..', '..');
 const groups = args.length
   ? [['指定檔案', args]]
   : [
-      ['console v2 (8081)', [path.join(repo, 'web_backend/public_v2/index.html')]],
-      ['現行 GUI (8080)',   [path.join(repo, 'web_backend/public/index.html'),
-                             path.join(repo, 'web_backend/public/app.js')]],
+      ['console v3 (8081)', [path.join(repo, 'web_backend/public_v3/index.html')]],
     ];
 
 let allOk = true;

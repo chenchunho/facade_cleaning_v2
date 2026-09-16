@@ -169,8 +169,8 @@ per user「合併到 main 了，可以用 project 的資料夾，把舊的清掉
 # 1) 吊機主程式（:5002）
 ssh user@192.168.5.25 'cd ~/run && rm -f crane_<D>_in logs/cr_<D>.log && mkfifo -m 600 crane_<D>_in && setsid nohup sh -c "exec sleep infinity > /home/user/run/crane_<D>_in" >/dev/null 2>&1 </dev/null & sleep 1; cd ~/run && setsid nohup stdbuf -oL -eL ./crane_control_PI.out > logs/cr_<D>.log 2>&1 < crane_<D>_in & sleep 12; ss -ltn | grep :5002; tail -25 ~/run/logs/cr_<D>.log'
 
-# 2) 兩個 WEB（都跑在吊機上，8080=public / 8081=console v2）
-ssh user@192.168.5.25 'D=/home/user/projects/facade_cleaning_v2/web; cd $D && WROBOT_IP=192.168.5.26 CRANE_IP=127.0.0.1 HTTP_PORT=8080 setsid nohup node server.js > ~/run/logs/web_<D>.log 2>&1 </dev/null & cd $D && WROBOT_IP=192.168.5.26 CRANE_IP=127.0.0.1 HTTP_PORT=8081 PUBLIC_DIR=$D/public_v2 setsid nohup node server.js > ~/run/logs/web_v2_<D>.log 2>&1 </dev/null & sleep 6; ss -ltn | grep -E ":(8080|8081)"'
+# 2) WEB（吊機上;2026-09-16 起只有 console v3 在 :8080,由 fcv-web-v3.service 自啟,以下手動指令是備援）
+ssh user@192.168.5.25 'D=/home/user/projects/facade_cleaning_v2/web; cd $D && WROBOT_IP=192.168.5.26 CRANE_IP=127.0.0.1 HTTP_PORT=8080 PUBLIC_DIR=$D/public_v3 setsid nohup node server.js > ~/run/logs/web_<D>.log 2>&1 </dev/null & sleep 6; ss -ltn | grep -E ":8080"'
 
 # 3) 本體主程式（:5001）
 ssh nexuni@192.168.5.26 'cd ~/run && rm -f wr_<D>_in logs/wr_<D>.log && mkfifo -m 600 wr_<D>_in && setsid nohup sh -c "exec sleep infinity > /home/nexuni/run/wr_<D>_in" >/dev/null 2>&1 </dev/null & sleep 1; cd ~/run && WR_DRIVER_DEBUG=0 FCV_EP_CRANE_HOST=192.168.5.25 setsid nohup stdbuf -oL -eL ./facade_cleaning_v2.out > logs/wr_<D>.log 2>&1 < wr_<D>_in & sleep 3; echo started'

@@ -26,6 +26,11 @@
   CLAUDE.md 目錄樹/檔案表、runbook §A0(加 systemd 說明)/§0(標 ⚰️)已改。**保留**:`scripts/link_probe.sh`(隧道 A/B 量測工具)、
   `config/axis_profile.txt`(本體在用)、`mechanism/rope_axis.h`(吊機在用)、`web_backend/public/`(v2 舊 GUI,:8080 還在服務,要不要退役等 user)。
 - 今晚合計:107 檔、−19,326 / +309 行。
+- 🗑 **v1 GUI 退役 + v3 接手 :8080(per user)**:吊機 `fcv-web.service`(v1,:8080)`disable --now` + 刪 unit;`web_backend/public/`(index.html+app.js = **v1**,
+  unit 描述誤寫 v2)自樹移除;Pi 上 `web/public`、`web/public_v2` 殘留目錄清掉。`fcv-web-v3.service` HTTP_PORT 8081→**8080**(已重啟,200)。
+  `server.js` 預設 PUBLIC_DIR → public_v3;`deploy.sh`/`deploy_web.sh`(PI_PORT 8080)/`check_console.js`(預設查 v3)/systemd README/CLAUDE.md 架構圖與埠表/runbook §A0 同步。
+  📌 **現在 GUI 唯一位址:http://192.168.5.25:8080**(harness 的假機器仍在本機 :8081,不衝突)。
+  → 交 AI-2:index.html 那個指向 :8081 的「v2」連結拿掉;`check_console` 報 4 個寫到不存在元素(rd-balen / flow-zdt-rd / flow-init-rd / flow-arm-rd)。
 
 ## 2026-09-16 晚:同型 bug 掃描、work_log 壓縮、死碼移除(本體 −1,100 行、Linux_test 整批)、build 清單去寫死
 

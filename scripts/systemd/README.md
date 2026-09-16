@@ -1,4 +1,4 @@
-# systemd units(2026-09-16 起五支程式開機自動啟動)
+# systemd units(2026-09-16 起四支程式開機自動啟動;v2 GUI 的 `fcv-web` 同日退役)
 
 這裡是**真機上那五個 unit 檔的副本**,收進 repo 的唯一理由:在此之前它們**只存在兩台 Pi 的檔案系統裡**
 —— Pi 重灌、home 被清、或換一台機器,自動啟動的設定就沒了,而且沒有任何地方記得它長什麼樣。
@@ -7,8 +7,7 @@
 | unit | 主機 | 層級 | 程式 | 對外 |
 |---|---|---|---|---|
 | `fcv-crane.service`  | 吊機 `user@192.168.5.25`   | **system**(該機有 sudo) | `~/run/crane_control_PI.out` | TCP :5002 |
-| `fcv-web.service`    | 吊機 .25 | system | `node server.js`(v2 舊版) | HTTP :8080 |
-| `fcv-web-v3.service` | 吊機 .25 | system | `node server.js`(v3 主控台) | HTTP :8081 |
+| `fcv-web-v3.service` | 吊機 .25 | system | `node server.js`(v3 主控台) | HTTP :8080(09-16 由 8081 改回,v1 退役後接手主埠) |
 | `fcv-arm.service`    | 本體 `nexuni@192.168.5.26` | **user**(此機 sudo 密碼不在 Claude 手上)| `~/projects/…/cleaning_arm/motor_api` | TCP :9527 |
 | `fcv-body.service`   | 本體 .26 | **user** | `~/run/facade_cleaning_v2.out` | TCP :5001 |
 
@@ -40,8 +39,8 @@ sudo loginctl enable-linger nexuni     # ← 沒有這行,登出就被殺、開�
 
 ```bash
 # 吊機 .25
-scp scripts/systemd/fcv-{crane,web,web-v3}.service user@192.168.5.25:/tmp/
-ssh user@192.168.5.25 'sudo cp /tmp/fcv-*.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now fcv-crane fcv-web fcv-web-v3'
+scp scripts/systemd/fcv-{crane,web-v3}.service user@192.168.5.25:/tmp/
+ssh user@192.168.5.25 'sudo cp /tmp/fcv-*.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now fcv-crane fcv-web-v3'
 
 # 本體 .26(user service)
 scp scripts/systemd/fcv-{arm,body}.service nexuni@192.168.5.26:~/.config/systemd/user/

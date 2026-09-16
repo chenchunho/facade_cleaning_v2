@@ -23,7 +23,8 @@ const HTTP_PORT       = process.env.HTTP_PORT    || 8080;
 // [2026-09-03] 靜態目錄可由環境變數指定，讓 console v2 能以**獨立行程**跑在別的埠
 // （8081）而不動到現行的 8080：兩邊各自持有自己的橋接連線，一邊掛掉不影響另一邊。
 // 預設值與先前逐字相同 —— 不帶這個變數啟動時，行為完全沒變。
-const PUBLIC_DIR      = process.env.PUBLIC_DIR   || path.join(__dirname, 'public');
+// [2026-09-16 per user] v2 console (`public/`, :8080, fcv-web.service) retired; v3 is the only console.
+const PUBLIC_DIR      = process.env.PUBLIC_DIR   || path.join(__dirname, 'public_v3');
 const WASHROBOT_IP    = process.env.WROBOT_IP    || '192.168.1.100';
 const WASHROBOT_PORT  = 5001;
 // [2026-08-28] 192.168.1.101 → 192.168.1.10. The crane Pi's wired address is

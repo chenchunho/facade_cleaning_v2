@@ -346,8 +346,7 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
                       ▼
   ┌─────────────────────────────────────────────┐
   │ 吊機 Pi  raspberry-cran                      │   ⚠️ web GUI 在吊機這台，不在本體
-  │   node server.js            :8080  現行 GUI   │
-  │   node server.js            :8081  console v3 │
+  │   node server.js            :8080  console v3 │  (v1 退役、v3 09-16 改回 :8080)
   │   Crane_control_PI          :5002            │
   └───────┬──────────────────────────┬──────────┘
           │ TCP 文字協定              │ TCP 文字協定
@@ -360,12 +359,12 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 ```
 
 🆕 **2026-09-03：web GUI 有兩個獨立行程**（per user「跟舊的分開」）。
-同一支 `server.js`、兩組環境變數，**不是兩份副本**：
+同一支 `server.js`（📌 2026-09-16 起只剩一個行程；v1 `:8080`/`web/public/` 與其 `fcv-web.service` 同日退役，git `44bcb13` 之前仍有）：
 
 | 埠 | `PUBLIC_DIR` | 內容 |
 |---|---|---|
-| `8080` | `web/public` | 現行 GUI（`index.html`，20 個子系統面板） |
-| `8081` | `web/public_v3` | **console v3**（2026-09-14 起唯一主控台：作業流程 / Mission / Manual / Setting；v2 已退役、`public_v2/` 自樹移除，git `feebc03` 仍有）🔴 Pi 上 `start_web.sh` 的 `PUBLIC_DIR` 要改指 `public_v3` |
+| ~~`8080`~~ | ~~`web/public`~~ | ⚰️ v1 GUI，2026-09-16 退役 |
+| `8080`（09-16 前是 8081） | `web/public_v3` | **console v3**（2026-09-14 起唯一主控台：作業流程 / Mission / Manual / Setting；v2 已退役、`public_v2/` 自樹移除，git `feebc03` 仍有）🔴 Pi 上 `start_web.sh` 的 `PUBLIC_DIR` 要改指 `public_v3` |
 
 `server.js` 為此加了 `PUBLIC_DIR` 環境變數（預設值與先前逐字相同，不帶就是舊行為）。
 🔴 **兩個行程各自持有自己的橋接連線** —— 一邊掛掉不影響另一邊，但也代表

@@ -5,9 +5,9 @@
 #   ./scripts/deploy.sh arm     # 手臂 motor_api               → fcv-arm  (user service @ .26)
 #   ./scripts/deploy.sh crane   # 吊機 crane_control_PI.out    → fcv-crane(system service @ .25)
 #   ./scripts/deploy.sh web     # GUI(index.html)—— 不重啟 node,交給 scripts/deploy_web.sh
-#   ./scripts/deploy.sh server  # server.js → 重啟 fcv-web + fcv-web-v3
+#   ./scripts/deploy.sh server  # server.js → 重啟 fcv-web-v3(v2 的 fcv-web 09-16 退役)
 #   ./scripts/deploy.sh script  # cycle_test.py → 兩台 Pi(無服務,不必重啟)
-#   ./scripts/deploy.sh status  # 五支服務狀態 + 機器現況
+#   ./scripts/deploy.sh status  # 四支服務狀態 + 機器現況
 #
 # 每個目標一律做完整五步:同步原始碼 → Pi 上編譯 → **備份現役 binary** → 換檔 → 重啟服務 → 驗證啟動訊息。
 #
@@ -99,8 +99,8 @@ deploy_crane() {
 deploy_server() {
     say "同步 server.js 並重啟兩支 node"
     scp -q "$REPO"/web_backend/server.js "$CRANE":/tmp/server.js.new || die "scp 失敗"
-    $SSH "$CRANE" "D=~/projects/facade_cleaning_v2/web; cp -p \$D/server.js \$D/server.js.bak-$STAMP && cp /tmp/server.js.new \$D/server.js && md5sum \$D/server.js && sudo systemctl restart fcv-web fcv-web-v3" </dev/null || die "換檔/重啟失敗"
-    $SSH "$CRANE" 'sleep 6; systemctl is-active fcv-web fcv-web-v3; tail -8 ~/run/logs/web_v3_service.log | /bin/grep -a connected' </dev/null
+    $SSH "$CRANE" "D=~/projects/facade_cleaning_v2/web; cp -p \$D/server.js \$D/server.js.bak-$STAMP && cp /tmp/server.js.new \$D/server.js && md5sum \$D/server.js && sudo systemctl restart fcv-web-v3" </dev/null || die "換檔/重啟失敗"
+    $SSH "$CRANE" 'sleep 6; systemctl is-active fcv-web-v3; tail -8 ~/run/logs/web_v3_service.log | /bin/grep -a connected' </dev/null
 }
 
 deploy_script() {
@@ -116,7 +116,7 @@ deploy_script() {
 
 show_status() {
     echo "=== 吊機 .25 ==="
-    $SSH "$CRANE" 'systemctl is-active fcv-crane fcv-web fcv-web-v3 | tr "\n" " "; echo; python3 ~/run/crcmd.py status 2>/dev/null | tr " " "\n" | /bin/grep -E "^(length_left|length_right|wall_height_cm|home_ground_cm|hold_guard|level_auto)=" | tr "\n" " "; echo' </dev/null
+    $SSH "$CRANE" 'systemctl is-active fcv-crane fcv-web-v3 | tr "\n" " "; echo; python3 ~/run/crcmd.py status 2>/dev/null | tr " " "\n" | /bin/grep -E "^(length_left|length_right|wall_height_cm|home_ground_cm|hold_guard|level_auto)=" | tr "\n" " "; echo' </dev/null
     echo "=== 本體 .26 ==="
     $SSH "$BODY" 'systemctl --user is-active fcv-arm fcv-body | tr "\n" " "; echo; python3 ~/run/crcmd.py 127.0.0.1:5001 status 2>/dev/null | tr " " "\n" | /bin/grep -E "^(state|p[5-8]|arm_ready|estop|pusher_rpm)" | tr "\n" " "; echo' </dev/null
 }

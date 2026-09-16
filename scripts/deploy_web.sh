@@ -10,7 +10,7 @@
 #      (`var CONSOLE_VER = '...'`) — the repo copy changes too, so the stamp is committed with the code.
 #   2. refuses to deploy if the source line is missing / duplicated, or the stamp did not land.
 #   3. atomic on the Pi (scp to a temp name, then mv) — a page load never sees a half-written file.
-#   4. three-way md5: local file / file on the Pi / page served by http://<pi>:8081 — any mismatch → exit 1.
+#   4. three-way md5: local file / file on the Pi / page served by http://<pi>:8080 — any mismatch → exit 1.
 #      server.js serves static files, so no restart is needed; the HTTP md5 is the proof.
 # Exit 0 only when all of the above hold. (Project convention: 0 = no error.)
 set -euo pipefail
@@ -21,7 +21,7 @@ SRC="$REPO/web_backend/public_v3/index.html"
 PI="${PI:-user@192.168.5.25}"
 PI_HOST="${PI#*@}"
 PI_DIR="${PI_DIR:-projects/facade_cleaning_v2/web/public_v3}"   # Pi side is web/ not web_backend/
-PI_PORT="${PI_PORT:-8081}"
+PI_PORT="${PI_PORT:-8080}"
 SSH_OPTS=(-o ConnectTimeout=8 -o BatchMode=yes)
 DRY=0; [[ "${1:-}" == "--dry-run" ]] && DRY=1
 

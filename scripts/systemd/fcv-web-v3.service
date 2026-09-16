@@ -1,5 +1,5 @@
 [Unit]
-Description=FCV web console v3 main console (:8081)
+Description=FCV web console v3 main console (:8080)
 After=network-online.target fcv-crane.service
 Wants=network-online.target
 
@@ -9,7 +9,7 @@ User=user
 WorkingDirectory=/home/user/projects/facade_cleaning_v2/web
 Environment=WROBOT_IP=192.168.5.26
 Environment=CRANE_IP=127.0.0.1
-Environment=HTTP_PORT=8081
+Environment=HTTP_PORT=8080
 Environment=PUBLIC_DIR=/home/user/projects/facade_cleaning_v2/web/public_v3
 ExecStart=/usr/bin/node server.js
 Restart=always
