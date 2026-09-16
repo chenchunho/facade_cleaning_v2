@@ -2659,11 +2659,17 @@ std::string DamiaoAPI::cmd_init_sequence()
 	// skip the auto-seek entirely and just move to CENTER using the existing
 	// zero/half_range. Re-running LR_CALIBRATE is still available as an explicit
 	// standalone command for whenever it's actually needed (e.g. after a crash).
+	// [2026-09-16 per user] Standby slot is the ROLLER (RIGHT), not CENTER.
+	// Two reasons: (1) every job starts with the roller, so CENTER only added a
+	// STARTUP→RIGHT→CENTER→RIGHT shuffle; (2) measured tonight: holding at
+	// CENTER the torque creeps monotonically (−0.55 → −0.90 Nm in 30 s, and
+	// −0.95 → −1.66 over minutes) while at RIGHT/LEFT it stays flat — CENTER
+	// sits on a slope the hold has to fight, the tool slots do not.
 	bool m2_calib_ok;
 	if (m2_.lr_calibrated) {
 		std::cout << "[INIT] M2 already calibrated (lr_half_range=" << m2_.lr_half_range
-			<< ") — skipping auto-seek, moving to CENTER\n";
-		m2_calib_ok = lr_move_to_slot_impl(m2_, 0 /*CENTER*/, 0.6f);
+			<< ") — skipping auto-seek, moving to RIGHT (roller, standby slot)\n";
+		m2_calib_ok = lr_move_to_slot_impl(m2_, 1 /*RIGHT = roller*/, 0.6f);
 	} else {
 		m2_calib_ok = lr_calibrate_slot(m2_, /*seek_left=*/true);
 	}
@@ -3461,6 +3467,14 @@ std::string DamiaoAPI::startup_then_init()
 		std::cerr << "[STARTUP] 失敗 → 跳過自動 INIT,請人工確認後自行送 INIT\n";
 		return st;
 	}
+	// [2026-09-16 per user] Let M2's hold build up before INIT slams M1 into its
+	// mechanical stop. Measured tonight: after arriving at a slot the hold torque
+	// ramps for ~2 min to a ~1.6 Nm plateau (static preload); the one time M2
+	// slid from the roller slot back to CENTER, tau was only +0.94 — i.e. M1's
+	// stop-seek shook it loose before the hold had built. A short dwell is cheap
+	// insurance; STARTUP_TO_INIT_DWELL_MS lives in main_api.h.
+	std::cout << "[STARTUP] M2 hold 建力等待 " << STARTUP_TO_INIT_DWELL_MS << " ms 後再 INIT…\n";
+	std::this_thread::sleep_for(std::chrono::milliseconds(STARTUP_TO_INIT_DWELL_MS));
 	std::cout << "[STARTUP] → 自動 INIT(開機即待命)…\n";
 	const std::string in = cmd_init_sequence();
 	std::cout << "[STARTUP] INIT: " << in << "\n";

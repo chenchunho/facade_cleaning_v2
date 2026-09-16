@@ -3912,15 +3912,6 @@ std::string WashRobot::cmd_shutdown() {
     return "OK shutdown\n";
 }
 
-// [2026-05-29] Background pressure poll DISABLED. Body retained as no-op
-// for backward compatibility (pressure_poll_running_ never set true).
-// Replaced by:
-//   - read_pressure_() — piggyback updates cache from natural reads
-//   - cmd_status() — fresh-reads on demand when motion idle
-void WashRobot::pressure_poll_loop_() {
-    // intentionally empty — see above
-}
-
 // [2026-05-29] Wrapper around M_(slave).read_pressure() that piggyback-updates
 // cached_pressure_[]. Use in motion paths so GUI sees fresh values without
 // background thread polling cli_22_ bus.
@@ -3990,6 +3981,7 @@ std::string WashRobot::cmd_status() {
             }
         }
     }
+    arm_status_refresh_();   // [2026-09-16] keeps arm_ready honest (rate-limited, try_lock)
     std::ostringstream oss;
     oss << "OK state=" << state_name(state_.load());
     oss << " crane_attached=" << (crane_attached_.load() ? "on" : "off");

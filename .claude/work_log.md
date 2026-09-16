@@ -1,3 +1,101 @@
+# Work Log
+
+## 2026-09-16 夜:M2 一次性滑槽 + 待命位改滾筒(per user)+ M2 hold 扭矩爬升(新觀察,無基準)
+
+- **事件**:死碼版手臂重啟時 user 看到「M2 動作異常」。log 對照三次重啟:前兩次 STARTUP→滾筒後 M1 校正期間 M2 站住(0.847/0.841);
+  這次 STARTUP 到滾筒 0.8398,M1 校正那幾秒**沒有 M2 指令**,INIT 開始時 M2 已在 **0.2367 且還在動**(vel −0.06、tau +0.94)
+  ⇒ M2 hold 不住被拖回中心。與 09-10「M2 間歇 passive/弱出力」同族。**不是死碼刪除造成**(手臂只拿掉三個零呼叫 accessor;`.prev-0916-deadcode` 在 Pi 上)。
+- **手動驗證**(per user):`M2 LR_SLOT RIGHT` → 0.8448 / `LEFT` → 0.1974,各盯 30 s 位置不動;再重啟一次 **沒有再滑**(M2 校正期間 0.8417)⇒ 一次性。
+- 📌 **決策(per user)**:**INIT 待命位 CENTER → RIGHT(滾筒)**。`main_api.cpp` INIT 尾段 `lr_move_to_slot_impl(m2_, 1)`;已部署重啟,
+  `tool=roller arm_ready=1`。理由:每趟都從滾筒開始,少一次 RIGHT→CENTER→RIGHT;且中心 hold 的扭矩爬得最兇。
+  ⚠️ GUI 若有「INIT 後應為 center」的假設要跟著改(AI-2 的 tool 顯示是讀 `tool=`,不受影響)。
+- 🔬 **新觀察:M2 hold 時 tau 單調爬升、位置一格不動** —— 中心 −0.55 → −0.90/30 s、−0.95 → −1.66/數分鐘;滾筒 +0.54 → +0.90/30 s;刮刀 30 s 內 −0.29~−0.40 較平。
+  歷史 log **沒有 M2 週期性 tau 紀錄**(只有 M1 刷屏),所以**沒有基準**判斷這是本來就有還是今天才有。已在滾筒待命位量 4 分鐘看會不會飽和(結果見下一條)。
+  ✅ **4 分鐘實測(滾筒待命位)**:重啟到位後 0.54 → 2 分鐘內爬到 **≈1.6 N·m 就飽和**,之後 3.5 分鐘全在 1.55~1.59,位置 0.8417 不動。
+  ⇒ 不是失控,是 hold 迴路慢慢把力補到一個**約 1.6 N·m 的靜態負載**(皮帶預載或刀頭重心偏置);中心那次 −1.66 同量級。**1.6 是今天的基準**,
+  之後 >2.5 才是傳動出問題的訊號。
+  🔎 回頭解釋那次滑槽:滑的時候 tau 只有 +0.94、離 1.6 還遠 ⇒ **STARTUP 剛到滾筒、hold 力還沒建立,M1 校正撞止點的震動就把它拖走了**。
+  🟡 建議防呆(未做,等 user):STARTUP 到槽後等 1~2 s 讓 hold 建力,再做 M1 校正(`main_api.cpp` 一行 sleep)。
+- 🗑 per user 刪除 repo 根目錄 `deploy_and_test.pdf`(v1 部署說明)與 `dm2j_manual_utf8.txt`(手冊文字擷取,權威在 summaries + doc/上滑台 PDF);CLAUDE.md 檔案表已標 ⚰️。
+- ✅ **防呆已加(per user)**:`startup_then_init()` 在 STARTUP 到滾筒槽後**等 `STARTUP_TO_INIT_DWELL_MS`=2000 ms** 讓 hold 建力,再做 M1 校正。
+  已部署重啟:log `M2 hold 建力等待 2000 ms 後再 INIT…` → `INIT: OK`,M2 停 0.8417。
+- 🗑 **第二輪清檔(per user「看看還有沒有不要的」)**,全部已被取代、git `842e774` 之前仍有:
+  `Crane_control_PI/readme/` + `facade_cleaning_v2/readme/`(VS Linux 專案模板的 GIF 教學,2.8 MB,VS 09-07 就不用了)、
+  `frame_capture/`(相機路線 09-01 作廢)、`scripts/cams.sh`(起相機)、`scripts/wr.sh`/`crane.sh`(tmux launcher,兩台 Pi 沒裝 tmux、
+  今天起 systemd 取代)、`scripts/bench/`(搬家前腳本副本)、`harness/__pycache__/*.pyc`(誤入版控)。
+  CLAUDE.md 目錄樹/檔案表、runbook §A0(加 systemd 說明)/§0(標 ⚰️)已改。**保留**:`scripts/link_probe.sh`(隧道 A/B 量測工具)、
+  `config/axis_profile.txt`(本體在用)、`mechanism/rope_axis.h`(吊機在用)、`web_backend/public/`(v2 舊 GUI,:8080 還在服務,要不要退役等 user)。
+- 今晚合計:107 檔、−19,326 / +309 行。
+
+## 2026-09-16 晚:同型 bug 掃描、work_log 壓縮、死碼移除(本體 −1,100 行、Linux_test 整批)、build 清單去寫死
+
+### ① 「收不到回覆就重送」同型掃描 —— 全通道只有 `crane_cmd_` 一條
+| 通道 | 重送什麼 | 判定 |
+|---|---|---|
+| `arm_cmd_` | 只在 send 失敗(0 byte 出去)重送;recv timeout 不重送 | ✅ 06-03 已有規則 |
+| `TCP_client` 重連 | 不重放任何緩衝 | ✅ |
+| 吊機 VFD `reliable_start/stop`、`dual_vfd_sync_retry` | 寫頻率/方向暫存器=設狀態 | ✅ 冪等 |
+| DM2J `PR_move` re-trigger ×3 | 只在驅動器**從沒進 busy**才重觸發;呼叫端全絕對模式 | ✅ 冪等+驗證 |
+| ZDT | 驅動層無重試;`pusher_move_many_` 讀失敗照送=絕對位置;zdt_home 相對探步單發 | ✅ |
+| 達妙 CAN `max_retries 20` | 單發後輪詢回覆 | ✅ |
+| cycle_test `ask()`/server.js/v3 GUI | 單發無重試 | ✅ |
+| 吊機 hold ▲▼ | deadman 在吊機端;watchdog 斷鏈 → `hold_all_off + allMotionOff` | ✅ |
+⇒ 單點,已修;但與 `arm_cmd_` 同族一條修過一條沒修,pitfalls 已記通則。
+
+### ② work_log 壓縮:2,145 → 1,022 行
+09-10 ~ 09-15 的 ~1,225 行壓成「歷史摘要 #2」(100 行,只留待辦/決策/伏筆/踩坑,段尾集中「本段仍開放」);09-16 四條全文;待辦總表與 #8–#15 不動;`# Work Log` 標題歸位檔首。壓縮前副本在 scratchpad(不進樹)。
+
+### ③ 死碼移除(全部 Pi 上 aarch64 建過)
+- **本體**(`app/`,−952 行):宣告無定義 12(`bal_cal_*`×7、`do_balance_calibrate_`、`do_obstacle_probe_`、`do_phase5_roll_correct_`、
+  `crane_retract_to_weight_`、`dm2j_wheels_move_verified_`);有定義零呼叫 13(`crane_keepalive_loop_`、`crane_retract_safe_`+`read_rope_weight_estop_`、
+  `crane_pay_out_to_weight_`、`dm2j_pair_move_abs_`、`dm2j_read_pos_robust_`、`ensure_arm_center_for_rope_`、`ensure_group_stall_clear_`、
+  `feet_max_overextend_cm_`、`fine_tune_extend_per_slave_`、`pressure_poll_loop_`、`pusher_extend_with_vacuum_stop_`、`reset_seal_pulse_group_`);
+  `verify_arm_deploy_` 早退之後的死半段(06-06 起不可達,09-11 被 DEPLOY_F 自己的 obstacle/no_wall 取代);
+  75 個孤兒常數/成員(`BAL_CAL_*`、`FINE_TUNE_*`、`REALIGN_*`、舊 `BREAK_VACUUM_*`、`DM2J_*_WHEEL/FOOT`、`MACHINE_WEIGHT_KG`…);
+  keepalive/pressure_poll 的執行緒成員與建構子初始化。**保留** `imu_tilt_from_accel_`(註解明寫 gimbal lock 備援)。
+  🔴 「重心校正/窗框避障是暫時 stub 要留」講的是 **dispatcher 的 cmd_**(GUI 面板),這次刪的是 private 宣告與常數,重做時 git 有。
+- **`DY_500` 驅動**:本體 `weight_[2]` 從沒用、吊機沒 include ⇒ `user_lib/DY_500_weight_sensor.{h,cpp}` 移除,三份 build 清單同步。
+- **`Linux_test/` 整批移除(per user)**,只留 `cycle_test.py`(server.js 起跑的就是它;deploy.sh `script` 目標也指它)。移除:bench 互動 console `main.cpp`(270 KB)、
+  `fake_slaves/`、~25 支一次性探針、`build_linux_test.sh`。CLAUDE.md / bench README / harness README / build README 已改。
+- **吊機** `vfdStartRopeMotion`(零呼叫 wrapper);**手臂** `m1_motor()/m2_motor()/ctrl()` 三個零呼叫 accessor。
+- 部署狀態:本體 ✅ 建+換+重啟;吊機 ✅ 建+換+重啟(user「重啟 OK」);**手臂只建未重啟**(`motor_api` 已是新檔、`.prev-0916-deadcode` 備份,下次重啟即生效)。
+
+### 踩坑
+- 🔴 `~/run/build_*.sh` 是 Pi 上的副本,repo 改了 TU 清單它不跟 ⇒ `deploy.sh` 現在每次先 scp 這支腳本再建。
+- 🔴 `build_body.sh` 把 `.o` 期望數寫死 16 ⇒ 拿掉一個 TU 就 15/16 FAILED。改成從清單算(`want=$(echo $SRCS | wc -w)`)。
+- 另:`arm_ready` 快取不再永遠 0(`status` 每 5 s try_lock 問一次手臂)。
+
+## 🔴🔴 2026-09-16 傍晚:**吊機斷電上電後自己動了** —— `crane_cmd_` 收不到回覆會重送運動指令(已修)
+
+### 事故
+- user 要「機器放下來維修」→ 我送本體 `crane_goto 0`(243 cm 下行)。下行到 L≈−195 時 user 為維修**斷吊機電**。
+- 本體 `crane_cmd_("goto 0", 105 s)` 卡著等回覆。user 把吊機**上電**→ 本體 TCP 重連成功 → 幾秒後 105 s timeout 到期 →
+  `crane_cmd_` 的第二次嘗試「強制重連 + **重送同一條指令**」→ `goto 0` 第二次送出 → **吊機自己開始放繩**(−195 → −147),
+  user 喊「為什麼吊機又動」並第二次斷電。本體 log 18:46:22 `'goto 0' attempt 1 failed — force reconnect` 是鐵證。
+- ⚠️ 人在機器旁邊。這是本次上機以來最嚴重的一次。
+
+### 根因
+- `crane_cmd_` 的 2-attempt 自癒重連(2026-05-15,治「殭屍 socket」)把 **recv timeout 也當成可重試**:
+  指令**已經離開 socket**,吊機可能做了、做到一半、或中途斷電,本體完全不知道,卻在重連後原樣再送一次。
+  對 `status` 無所謂,對 `goto/pay_out/retract` 就是「斷線期間發生什麼都不管,回來再跑一次」。
+- `arm_cmd_` 早在 2026-06-03 就有「**recv timeout 不重送**(DEPLOY/PARK 會重跑)」的規則;`crane_cmd_` 從來沒有。
+  ⇒ 同一類錯誤在兩條通道上一條修過一條沒修,**踩坑索引也沒把它列成通則**。
+
+### 已修(本體 md5 96cd3bf3,已部署重啟)
+- recv timeout → **直接回空字串放棄、不進第二次嘗試**;只有「`sendData` 失敗(一個 byte 都沒出去)」才允許重試。
+- 殭屍 socket 自癒保留:timeout 時 `close()` + 清 rx 緩衝,**下一條**指令自己重連;只是永遠不重送**這一條**。
+- 本體重啟同時把舊程序裡卡著的那條 `goto 0` 清掉。吊機上電後盯 30 s:L=−147/R=−167 不動。
+
+### 通則(進 pitfalls)
+- 🔴 **任何「收不到回覆就重送」的邏輯,對非冪等指令都是重跑**。通道自癒只能重連,不能重送;要重送必須由呼叫端在知道現場狀態後決定。
+- 🔴 **斷電維修前,先確認本體沒有卡在等吊機回覆的指令**(status `flow=`/log 最後一條 `[crane_goto] → …` 有沒有配對的回覆);
+  有的話先 `stop` 或重啟本體。最乾淨:**維修前把本體也一起斷電**。
+
+### 附帶
+- `arm_ready` 快取修正(同日稍早):本體 `status` 每 5 s 用 try_lock 順手向手臂要一次 STATUS,手臂自行 INIT 後不再永遠 0。
+- 右計米器跨斷電跳 ~15 cm(−244 → −259,IMU 平);level_auto 已學進去,但 `goto` 的悲觀端判斷會受影響,跑 FULL 前先最高歸零。
+- 吊機 Pi 第一次上電**沒跟著起**(本體 up 10 min 時它 ARP INCOMPLETE),user 手動重開才起。之後再發生要看它的電源。
+
 ## 2026-09-16 中止/急停分家:本體 crane_goto 加吸附守衛 + 中止收尾自動收腳
 
 > user:「中止跟急停容易被誤解,而且中止還吸附在牆上容易被誤操作」→ 三件一起做(user 核可「照這樣動手 三要」)。
@@ -67,7 +165,6 @@
 - 🟡 腳本模式沒有「跳過」通道（`mis-skip` 只在 body 模式顯示）。
 - 🟡 張力保護卡整張 `data-safe-keep`，jim 若不要再收窄。
 
-# Work Log
 
 ## 2026-09-16 五支程式改 systemd 開機自動啟動、本體狀態機 11→6、開機盤點、水閥時序、手臂自動 INIT
 
@@ -126,1230 +223,106 @@
 - 🟡 24 V 掉電的根因(換電源模組後症狀消失,根因未查)
 - 🟡 `work_log.md` 已約 2000 行,該壓縮了
 
-## 🆕 2026-09-15（GUI 線／AI-2）：Mission 合併、危險閘門取消、五個真機 bug
-
-**未 commit**（agent-ai-db 統一收）。逐版明細在 `changelog.md` `[2026-09-15v3]`／`[2026-09-15v3b]` 與其後的追加段；這裡只留決策／踩坑／伏筆。
-
-### 拍板（per user，都已落地）
-- **01 作業流程頁併入 Mission**（名稱保持 Mission），tab 剩四個；啟動**先走腳本**（server.js spawn `cycle_test full`），
-  參數欄位與腳本同名 ⇒ 之後接 C++ 引擎只改 `MISSION_BACKEND = 'script' | 'body'` 一個常數，**body 那條路徑原封留著**。
-- **危險按鈕 tier／60 s 解鎖窗／手臂互鎖整套取消**：只剩 4 個單次確認（`zero_meters ground`、② 最高點設定、張力保護關閉、Mission 開始）。
-  🔴 `dangerGate`／`motionGate`／`armGate` **留成永遠通過的 no-op，呼叫點一個都沒改** —— 要還原只改那一段。
-- **急停搬進 Mission 控制列**（頂欄全域紅鈕拿掉），且**先停腳本再急停**（真機踩過兩次：只送 `emergency_stop` 時
-  `cycle_test` 還在下指令，要等它自己 bail，中間幾秒與收回動作交錯）。
-- **前置項目的加減**：④ init（幫浦）移除（腳本自理）、③ 推桿歸零改**資訊列不擋**（ZDT 磁編碼器＋電池保留零點，
-  `zdt_homed_at` 只記本行程做過沒 ⇒ 當紅燈會逼人每次重做不必做的事）。目前 **5 項必要 + 1 項資訊**。
-- **救援收繩整組移除**：救援＝「關張力保護 → 用一般 ▲▼」。張力保護開關因此加 `data-safe-keep`（SAFE 中也要按得到）。
-
-### 🔴 踩坑（四個同一族：看不出來的那一層）
-1. **`hidden` 被 class 的 `display` 蓋掉**，元素明明 `el.hidden === true` 卻看得見 —— 中了兩次：`.ebanner`（兩條鎖定橫幅
-   在沒有任何鎖的情況下同時亮）、`.grp > div`（前置卡收起後打不開，因為內容沒藏住、判斷永遠算成「現在是展開」）。
-   **驗收只讀 `.hidden` 會跟著綠**。對策：用 class 收合、規則排在後面（`[hidden]` 與 `!important` 在 jsdom 不參與 computed style），
-   驗收一律看 **computed display**，並加一條全頁掃描「任何帶 hidden 的元素 computed display 必須真的是 none」。
-2. **自動收合與人打架**：⑤ 水位（15 s 輪詢）與 ⑥ 起點（±5 邊界）在真機會來回跳 ⇒ 人點開後下一個 tick 又被收起，
-   症狀同樣是「按了沒反應」。改成**人碰過之後自動收合永久退場**。
-3. **唯一入口**：收起時連卡片標題一起藏，展開入口就只剩 sticky 摘要那一顆 ⇒ 那顆失效就鎖死。現在**收起只藏內容、留標題列**，兩個入口。
-4. **腳本模式被本體 status 蓋掉**：`misFromStatus()` 無條件吃本體 `mission=`，而腳本在跑時本體是 idle ⇒ 執行中畫面跳回「閒置」、
-   中止鈕失能。限定 body 模式才吃。
-
-### 📌 伏筆／留著是有意的
-- `MISSION_BACKEND='body'` 那整條路徑（含 `mission start` 尾巴的 `fan=`/`rail=` key=value）**刻意保留不刪**，等 C++ 引擎。
-  ⚠️ 本體實作 `mission start` 時要**容忍尾巴的 key=value token**。
-- `flowInit()` 保留（前置不再有它，Manual／手動仍可用）。
-- 推桿 RPM 欄**只填 placeholder 不填 value**：填進 value 會把「空白＝用本體當下預設」變成「明確指定」，而那個預設會變。
-- `gui_v3_check.js` 已長到 119 條、8 節（`boot/evt/pre/script/mission/safe/hold/report`），**冷跑會自己起乾淨的假機器**；
-  跑前會刪 `~/run/wall_height.json`（跨 run 留著會讓「乾淨假機器」一開始就有牆高）。
-
-### 🟡 待辦（GUI 線）
-- 🟡 **Mission「開始」的確認窗要不要拿掉**等 jim 決定（§6 只列了 zero_meters 與張力保護關閉，但「開始」會讓機器真的跑）。
-- 🟡 **腳本模式沒有「跳過」通道**（`mis-skip` 只在 body 模式顯示）；要的話 server.js 需再加一個訊號。
-- 🟡 張力保護卡整張 `data-safe-keep` ⇒ 門檻輸入在 SAFE 中也可動；jim 若不要，收窄成只放行開關那一列。
-
-## 🆕 2026-09-13 文書日②:電控箱線路圖、供電填齊、§0 總綱、假機器、現場流程 v2、**三條拍板 + 計畫書**、AI-2 做 v3
-
-**commit**:`f7dbf5f`(硬體)、`feebc03`(假機器 + 流程 + 計畫 + 交接)。工作樹乾淨,AI-2 在此基線上做 v3。
-
-### 下半天(流程 → 拍板 → 計畫 → 交接)
-- **流程對照三方**:`motion_flow.md` §4(v1 凍結)/ 設計 PDF(`doc/設計/washing_robot_full.pdf`,15 頁)/ 09-11 實跑
-  → `reference/field_procedure_v2.md`。關鍵發現:**v2 的現場流程沒有任何規格在描述**,只存在於 cycle_test + runbook + 日誌;
-  **真步態在 Python**(C++ `step_*`/`run` 被繞過),**姿態監看也在 Python** ⇒ 不跑測試腳本正式作業反而沒保護。
-- **安全監看 ≠ v2 Dashboard**:Dashboard 是顯示 + 人工閘門(前置檢查守起跑、危險操作 60 s);設計 p14 的安全監控是
-  會動手的迴路,不該在瀏覽器裡。現況會動手的散在四處(吊機 hold_loop / 吊機 watchdog / 本體急停 / Python)。
-- **三條拍板(per user)**:① 編排搬回 C++ ② SAFE 最小版(風扇直接關)③ 自檢 = GUI 軟閘門 checklist(否決硬閘門,擋救援)。
-  → `plans/orchestration_to_cpp_plan.md` **已核准**;前置(`crane_cmd_` 行緩衝、本體 watchdog)確認為階段 3 前必修。
-- **fake_robot 補完凍結介面**(= 計畫階段 0):mission/EVT、SAFE 三源、自檢欄位、sim 測試鉤;實測全通。
-  順修兩處不忠實(`init` 沒開幫浦、`t_vac` 算錯)。
-- **交接 AI-2**:`handoff/ai2-v3-gui-brief.md`,基於 v2 做 v3(`public_v3/` :8082,對假機器);契約要改先問、
-  驗收 `report` 不得有 not modelled。**AI-2 進行中,完成會 SendMessage 回 agent-ai-da。**
-
-### AI-2 v3 完成回報(當日晚,**未 commit**,停在可檢視狀態)
-- 只動 `web_backend/public_v3/index.html`(+672/−280)+ changelog `[2026-09-13v3]` + work_log 一列;server.js/v2/C++/fake 未碰。
-  **:8082 在跑**。五項全做(作業流程頁兩道閘門 / Mission 純按鈕 + 十種 EVT / SAFE 橫幅與解除 / Manual `inert` 上鎖 /
-  前置改讀 C++ 回覆);jsdom + 真 WS 端對端驗過,**`report` 0 條 not modelled**。
-- 它抓到三件,我處理:① `sim noseal` 在 mission 內無效 → **已修**(改旗標);② fake `pump status` 格式與真韌體不同 →
-  **已對齊**(`active= accum_min= rotate_min= auto_rotate= counting= swapping= chA= chB=`);
-  ③ 🟡 **契約:無任務時 `safe_clear` 回 paused 會卡 `mission start`** → 計畫 §3.4 記為待拍板,建議無任務回 ready/idle,fake 先照建議。
-- 🟡 待拍板:AI-2 的 jsdom 驗證腳本要不要收進 `harness/gui_v3_check.js`(需 `npm install` 一個 dev 依賴)。
-
-### 2026-09-14 拍板(per user)
-- **v2 與 v3 整合成一個**(per user):`public_v2/` 退役、從樹移除(git `feebc03` 仍有),`public_v3/` 是唯一主控台,:8081。
-  v3 是 v2 超集,只少 7 個刻意退役的 id(修正鈕 ×2、跑腳本/stdout ×3、cycle_test 門檻參數 ×2)。**先不 commit,還要改。**
-  ~~🔴 上機時 Pi 的 `start_web.sh` 要把 `PUBLIC_DIR` 改指 `public_v3`~~ ✅ 09-14 下午已改(該腳本沒版控)。
-- `safe_clear` 無任務 → `ready`/`idle`(依建議;fake 已如此;計畫 §3.4 已記)。
-- AI-2 的 jsdom 驗證腳本:**v3 取代 v2 後仍要**(理由:v3 還會一直改,那是唯一的 GUI 自動化回歸;裝一個 dev 依賴可接受)→ 請 AI-2 整理成 `harness/gui_v3_check.js`。
-- 手臂加 `PING`(不改 web_backend);計畫 §4 已記。
-- 🗑 `/mnt/agent_ai/doc/上滑台/` 空目錄已移除(09-02 cwd 重設造成的空殼;真手冊在專案 `doc/上滑台/`)。
-- ⚠️ **踩坑(本 session 也踩)**:Bash 工具的工作目錄會在指令間**重設回 `/mnt/agent_ai`**,相對路徑的 `mkdir/cp` 會落在錯的地方 —— 一律用絕對路徑或每條指令自己 `cd`。
-
-### 2026-09-14 下午:機器回來了 —— 兩台 Pi 盤點 + 同步 + 建置驗證
-- 兩台 Pi 剛開機(uptime 4 min)、**什麼都沒在跑**(:5001/:5002/:9527/:8080/:8081 全空)。WiFi `.26`/`.25` 通,WSL 直達;有線 `192.168.1.x` 從 WSL 不可達(預期)。
-- **原始碼比對(md5)**:repo 領先 Pi,Pi 端**沒有任何 repo 缺的現場修改**。本體 10 檔差異 / 吊機 6 檔差異全是 09-12 註解與死碼刪除、
-  09-11 的 `cycle_test.py`/`DM2J_RS570.cpp`(吊機那份是 09-03 舊拷貝,實際跑的是本體那份、已一致)。已 scp 同步 + md5 逐檔複驗;
-  Pi 上 `PalletizerController.h`、`DIHOOL_control.{h,cpp}` 已刪。兩台都不是 git repo(部署靠 scp)。
-- ✅ **aarch64 建置驗證(待辦「09-12 刪除的 aarch64 build」關閉)**:本體 `facade_drv.out` 16/16 obj、**md5 與現役 `facade_cleaning_v2.out` 完全相同**
-  (`b1ecfe02…`)—— 09-12 純刪在 g++ 14.2 aarch64 -O2 也是 bit-identical no-op。吊機 `crane_drv.out` 建成(504152 B,同大小;未替換現役)。
-- ⚠️ **motor_api 建置覆蓋了現役檔**:`cleaning_arm/compile.sh` 直接輸出到 `cleaning_arm/motor_api`,而 09-11 20:23 的 `arm_0911lf` 就是從那裡起的
-  (`~/run/motor_api` 反而是 11:25 的舊版、strings 還有 `ERR DEPLOY_F: obstacle` 細掃字串)。**沒先留 .prev 就重建了** —— 但來源 `main_api.cpp`
-  與 Pi 上 09-11 20:23 那份逐位元相同、`main_api.h` 只差 9 個已證明無引用的常數,新檔功能等價。
-  🔴 踩坑:compile.sh 沒有 `.prev` 機制、產物就地覆蓋;下次動它前先 `cp -p motor_api motor_api.prev-<日期>`。
-  📌 `~/run/motor_api` 是舊版這件事本身也是坑:runbook 說手臂「已移到 ~/run/motor_api」,實際現場從 `cleaning_arm/` 起。
-- ✅ **v3 已上吊機 Pi**:`web/public_v3/index.html`(md5 `826fd1f7…` 同 repo),`~/run/start_web.sh` :8081 的 `PUBLIC_DIR` 改指 `public_v3`
-  (備份 `start_web.sh.prev-20260914`)。Pi 上 `web/public_v2/` 仍在,沒動。
-- **未啟動任何程式**(本體 init 會開幫浦/繼電器,等人在旁邊)。
-
-### 2026-09-14 下午②:程式全起、`zdt_home feet`、**階段 1 自檢欄位進 C++ 並上真機**
-- **啟動(tag 0914 → 0914b)**:全 WiFi(同 09-11:`FCV_EP_CRANE_HOST=192.168.5.25`、web `WROBOT_IP=192.168.5.26`)。
-  🔴 **隧道是斷的**:兩台 eth0 UP、各自本地段(.20/.33)正常,但 `.100↔.10` 100% 丟包、ARP FAILED/INCOMPLETE —— Fathom-X 段沒接通(線/供電待查)。「改回 192.168.1」今天做不了。
-- ✅ `zdt_home feet`:s5/s7/s6/s8 全 homed(dir=1),7.8 s。
-- ✅ **階段 1(計畫 §8)完成、真機驗過**,三個程式都重編、換檔(`.prev-20260914-1440`)、重啟:
-  - 本體:`selfcheck` 指令(真探測,`zdt_bus_mtx_` try-lock)+ status `dev_gw20/21/22 dev_zdt dev_pqw dev_dm2j dev_jc100 dev_xkc dev_qx dev_imu dev_arm selfcheck_age_s zdt_homed_at arm_ready`;`init()` 結尾自動跑一次;`arm_cmd_` 經手的 STATUS 回覆解析 `en=`/`init_done=` 餵 `arm_ready`。真機 `all_ok=1 zdt=4/4 pqw=1 dm2j=1 xkc=1 qx=1`。
-  - 手臂:`PING`→`OK pong`;STATUS [M1] 段尾 `init_done=`(INIT 成功才 1)。
-  - 吊機:status `zeroed= zeroed_at=`(行程記憶;重啟後 0 ≠ 要重歸零,見計畫 §4 註)。
-  - 📌 **設計偏離計畫 §4 並已回寫**:原想用 init 旗標當 dev_*,實作時發現 body `init()` 對 ZDT/DM2J/JC-100/XKC/QX 是 Mode B 不發包,旗標永遠 1 —— 所以做成獨立 `selfcheck`,不讓 7 筆匯流排交易上 2 Hz 的 status。
-  - fake_robot 同步(`selfcheck`、`dev_gw2x`、`selfcheck_age_s`、`zeroed_at`);AI-2 已通知:v3「重讀」鈕要先送 `selfcheck`。
-- ✅ **拍板(per user)**:① SAFE 後任務**暫停可續**(SAFE 中 `continue/skip` → `ERR safe_locked`;`safe_clear` → `paused` → `continue`);② 自檢 ③ `zeroed=0` **軟提示不硬擋**。計畫 §3.3/§3.4 已記;fake 改 `paused.clear()` + safe_locked 拒絕,實測 running→safe→ERR safe_locked→safe_cleared state=paused→continue→running。
-- 🤝 AI-2 三件交辦完成並部署 `v3-2026.09.14-1605`(三方 md5 一致):標題一行、`#ver-tag` 版號(唯一來源 `var CONSOLE_VER`)、`scripts/deploy_web.sh`(台灣時間蓋版號 + 語法閘 + 三方 md5)。
-- **未 commit**(v3 還在改;階段 1 C++ + fake + 計畫可一起進)。
-
-### 2026-09-14 下午③:前置 7 `crane_cmd_` 行緩衝 —— 本機重現、修、部署
-- 🔍 **真因比待辦表寫的多一層**:`crane_cmd_` 原本就有逐行切,但 `rx` 是**區域變數**——回覆後面同一段 recv 裡的 EVT 頭被丟掉;
-  下一次呼叫前 `TCP_client::sendData()` 會**靜默排掉最多 4096 bytes**(Modbus 網關習慣),吊機 `motion_progress` 洪水 > 4 KB 時切在行中間,
-  **尾巴變成下一條指令的回覆**(09-09 `water_inlet off` ×3 的形狀)。⚠️ 附帶危險:那 4 KB 排掉的也包含 `EVT tension_alarm`。
-- 🔧 修法:`crane_rx_buf_` 改成成員(跨呼叫保留半行);送指令**前**先用 `available()` 把佇列全部讀進緩衝、整行消化(EVT → handler;
-  非 EVT = 上一次逾時後遲到的回覆 → 記 log 丟棄、刷新 `crane_last_ok_ms_`),讓 `sendData()` 沒東西可切;強制重連時清緩衝。
-  🔴 踩坑:`receiveData(…, 0)` 不是非阻塞(SO_RCVTIMEO=0 = 永久等),要先 `available()` peek。
-- ✅ **本機 x86 重現 + 驗證**(`harness/build.sh` 建 HEAD 對照組與修補版,對 `harness/hostile_crane.py`——每個回覆後灌 12 行 EVT ≈7 KB):
-  對照組 **2/6**(第 3 條起回覆全是 `l_cm=… kg_r=60.1` 尾巴)、修補版 **6/6**。腳本存 `harness/crane_linebuf_test.sh`(要 :5001 空著)。
-- ✅ 已同步本體 Pi、重編、換檔(`.prev-20260914-1511`)、重啟 tag `0914c`;真機 `water_inlet off` → OK、selfcheck 全綠。
-- 🔧 順手:`harness/build.sh` 吊機清單補 `ZS_DIO_R_RLY`(09-10 換驅動後 harness 連結一直是壞的,沒人跑過)。
-- 📌 **前置 8(本體 watchdog)現況**:09-10 已補回比較段,**觀測模式**(`crane_wd_abort_ms=0`,warn 2000)。09-10/11 log 的 warn 全在
-  `motion_active=0`、峰值 ~2.5 s(閒置時沒人跟吊機講話,idle 自然長);**運動中峰值 `crane_idle_ms_max_motion` 還沒有實測數據**。
-  ⇒ 門檻要等 ④ full 跑完讀 status 再訂;abort → SAFE 接線歸階段 4。今天不動。
-
-### 2026-09-14 傍晚:**full 驗 8 Nm(乾掃)完整一趟 ✅**、COARSE_NM 6→4、放繩/收繩各一次
-- 前置:地面歸零(user 14:59)→ 頂 −258 → 牆高 258 → `zdt_home feet` → `init`(手臂 INIT 延後)→ 吸附 → `arm_init`。
-  🔴 **踩坑**:`start_crane.sh` 預設 `HOME_GROUND=256` 會把 `home_ground_cm` 寫回 256,但今天是**地面歸零**慣例 ⇒ cycle_test 會誤判「頂端歸零」算出高度 514 拒跑。已 `set_home_ground 0`。**地面歸零時要用 `start_crane.sh <tag> 0`**(field_procedure §3 #1 有寫,我沒照做)。
-- 放到最低(`pay_out 250` @30Hz 18.6 s,max|roll| 2.7°)給 user 看手臂;吸附(四顆 −66/−69/−67/−68)。
-- **手臂 8 Nm 力控**:第一次 RIGHT `WARN 9.82`(+23%,iters=0:粗壓一步就過門檻、細調沒跑、80 ms 後 tau 還在爬)。
-  🔧 **`DEPLOY_F_COARSE_NM 6→4`**(`main_api.h`,重編部署,舊檔 `motor_api.prev-20260914-coarse6`)→ RIGHT `OK 7.37 iters=1`、LEFT `OK 7.08 iters=1 kp_eff=52`。
-- 回頂(`retract 251` 19.9 s,max|roll| 3.3°)→ **`FCV_DRY=1 cycle_test.py full 1 5 40`**(新加的乾掃旗標:滾筒段不噴水不開刷;已同步兩台 Pi):
-  **5 步全走完 + 回程,無中止**。10 次壓牆 tau 7.67–8.74 **全部 OK**(8±1)、iters 1–2、contact θ 0.55–0.72。
-  左右差最大 4 cm(門檻 8)、roll 均 0.15–1.41°、停後 roll ≤0.86°。整步 56.8 s(滑台段 38.7 s 佔七成)、來回每公尺 ~150 s。
-  ⚠️ 吸盤密封:5 步裡多數只有 1–2 顆到 −50(step3 只有 p8、step2 只有 p6),判準「至少一顆」過關;**這段玻璃下半部四顆同時吸住的比例低**,要看。
-- 🔴 **JC-100 slave 7 通訊明顯不穩**:本輪 TIMEOUT 51 次、CRC 11、ADDR_MISMATCH 3、MODBUS_EXCEPTION 2(slave 8 也有 6/7/3);其他兩顆各 2–3 次。
-  壓力值讀到時是對的 ⇒ 接線/端子/終端電阻那一側,待辦。
-- ⚠️ WiFi 也會抖:17:05 與 17:10 本體→吊機 `reconnect failed` 各 1–3 次(user 同時說瀏覽器斷線),都自癒。
-- 📌 `crane_idle_ms_max_motion` 整趟仍是 0:cycle_test 走的路徑不設 `motion_active_`(吊機動作在吊機側)⇒ 前置 8 的門檻**拿不到資料**,要等階段 3 mission 引擎在 C++ 裡才量得到。
-- 機器現況:頂端(−260/−259)、已解除吸附、風扇關、幫浦 A 仍開、手臂已收。
-- 🔴 踩坑(本機):`pgrep -c -f "cycle_test.py full"` 會數到自己的 `bash -c` ⇒ 永遠 ≥1,等待迴圈跑滿;要錨定 `python3 -u cycle_test`。
-
-### 2026-09-14 傍晚②:6 Nm、3 Nm 各一趟 → **per user 定 3 N·m 為工作力度**;改完先不動
-- **6 Nm 乾掃 full**:整趟完成,10 次 tau 5.32–6.98 全 OK(兩次 iters=0、兩次停低邊 5.32);步態同 8 Nm、roll 更安靜(均 <0.5°)。
-- 🔧 `main_api.cpp` Step 5:粗壓門檻改 `min(COARSE_NM, target−TOL)`(3 Nm 時 = TOUCH 2,粗壓 0 步)。
-- **3 Nm 乾掃 full**:整趟完成;但力控只 3/8 落在 3±1(其餘 4.05–5.03、一次 1.90)。真因:尋觸最後一步只等 150 ms,
-  Step 6 用還沒鬆弛的瞬時 tau(2.4–3.8)判「已收斂」→ iters=0 → 200 ms 後定案時已爬到 4–5。**8 Nm 第一次的 9.82 同病**。
-  step 3 四顆 11 s 都吸不到 −50 → 腳本跳過清潔續行(牆縫,per user「有些地方有縫」)。
-- ✅ **per user:3 N·m 看起來不錯,定為工作力度** →
-  `main_api.h DEPLOY_F_TARGET_NM 8→3`、`cycle_test.py ARM_TARGET_NM 預設 8→3`、
-  `main_api.cpp` Step 6 進割線前先等 `RELAX_MS`(900 ms)重讀 tau(每次壓牆 +0.9 s,換所有目標值不再 iters=0 漂走)。
-  三檔已同步兩台 Pi、`motor_api` 已重編(17:39,舊檔 `motor_api.prev-20260914-nm3-pre`);**per user「改完先不動」:未重啟手臂、未再跑**。
-  🔴 **下次開頭**:重啟 motor_api(STARTUP 會動手臂)→ `arm_init` → 跑一趟 3 Nm 乾掃驗 10 次都在 3±1;之後才拿掉 8 Nm 的說法。
-- 現役手臂行程(tag 0914d)仍是「COARSE 上限版、TARGET 8、無 relax」——只有腳本已預設 3。
-### 2026-09-14 傍晚③:3 N·m 驗證趟 ✅(relax 修法有效)
-- 重啟 motor_api(tag 0914e、TARGET 3 + relax)→ `arm_init` → 起跑前發現**幫浦 A/B 都關**(腳本自己擋下:「沒有真空源」)。
-  查證:USR 網關無重連 ⇒ **不是 24V blip**;`pump status counting=0` ⇒ 是 `pump off` 類指令把 active=B 關掉的(`cmd_pump(false)` 會歸零計時器),
-  程式 log 沒有 emergency/shutdown/return_home。**最可能是 GUI 上按到 pump off**(v3 作業流程頁有「pump OFF 回退」)。`pump on` 後續跑。
-- **3 N·m 乾掃 full(預設值,不帶 env)**:整趟完成。8 次壓牆 **全部 OK,2.78–3.76**(3±1)。relax 讀值 2.7–5.4 → 需要退的 4 次都靠 1 次割線退到 2.78–3.08。
-  → 「iters=0 漂走」病根已除;3 N·m 力控可用。step 3 又是牆縫(四顆都吸不到)。
-- 機器:頂端 258、解除吸附、手臂收、風扇關、幫浦 B 開。
-
-### 2026-09-14 晚:斷電重開 ×5、**JC-100 slave 7 換表頭 → 通訊錯誤歸零**、.21 網關一次沒上電
-- 兩台 Pi 斷電重開 4 次 + 本體單獨 1 次(user 在動電控箱),每次照序起:`start_crane.sh <tag> 0`(**地面歸零要帶 0**)→ motor_api → 本體(WiFi 覆蓋)→ web ×2。
-  計米器 −7/−7 每次都保住(SD76 吃 220V、計數在模組);ZDT/幫浦/手臂 INIT 每次要重做。
-  🔴 第 4 次 `.21`(PWM 網關)沒起來:ping 不到、ARP INCOMPLETE、`selfcheck qx=0 dev_gw21=0` —— **selfcheck 第一次抓到真問題**;下一次重開就回來了(沒跟著上電,非壞)。
-- ✅ **P7 換新表頭**(per user):換前一趟 full slave 7 TIMEOUT 51/CRC 11/位址錯 3/例外 2;換後 40 s 靜態 33 讀 0 錯,
-  **吸附全程(zdt_home + init + 伸腳,.20/.22 同時忙)12 讀 0 錯、log 四顆 0 錯**,p7 穩定 −67。⇒ 壞的是舊表頭本身,不是接線/終端。**待辦關閉。**
-- 現況:機器離地 7 cm、**吸附中**(−67/−70/−67/−69)、幫浦 A、風扇關、手臂 STARTUP 未 INIT。
-### 2026-09-14 晚②:**濕式 full 四次都被 24V 斷電打斷**(乾掃三趟全過)
-- 🔬 **地面對照(同一序列,不動吊機)**:`arm_deploy_f 3 RIGHT` → `water_pump on` → `brush on`(分步隔 3 s 一次、**連發 0.46 s 一次**)→ rail 100/0 → off,
-  兩次都**沒掉**,四顆負載同開十幾秒繼電器板都活著。
-- 濕式 #4(前置全重做,回頂起跑):第 1 步含 brush ON **正常**,**第 2 步 `brush on` 那一刻**繼電器板 readback size=0 → 0.5 s 內 **QX-DO24(.21)也 no reply**
-  ⇒ 兩個 24V 模組同時失聯 = 24V 真的掉(USR 網關撐過去,selfcheck 事後 4/4 看不出)。
-  ⇒ **同一動作時好時壞 = 邊緣狀態**:滾刷起動突波 + 真空幫浦 + 水泵 + 四顆 ZDT 保持電流,卡在 LRS-150-24 OLP 附近。**下次要夾電表量 24V 母線**。
-  收拾同前:離地 5–6 cm、繼電器全關、手臂/推桿/滑台全收。
-- 濕式 #3(斷電重開後,前置全重做):第 1 步正常(−48/−61/−57/−56、Δmax 3),第 2 步刮刀段掉(繼電器全關、手臂壓牆、滑台 100、機器 −217)。
-  收拾:pusher retract → arm_retract → rail 0 → pay_out 211 → 離地 6–7 cm、風扇關。三次濕式,三次同形狀。
-- 濕式 full #1:起跑後第 1 步手臂段就掉——log `[pqw_relay] ch=5 (brush) set ON readback unavailable (size=0)` 之後繼電器全關、真空全失。
-- 24V 後重做 selfcheck/zdt_home/init(手臂不用:init_done 仍 1)→ 濕式 full #2:**跑完 3 步正常**(四顆壓力、Δmax 3、roll 均 <0.8),
-  第 4 步途中又掉(user 喊停):繼電器全關、幫浦停、手臂還壓在牆上(pos 0.658、刮刀槽)、機器在 −137。已 `arm_retract` + `pusher all retract`,
-  乾淨吊在 −137/−137,繼電器全關。
-- 🔴 **兩次 24V 掉都在濕式段(水泵 CH4 + 滾刷 CH5 上的瞬間);乾掃三趟 + 6/8 Nm 兩趟全程沒掉** ⇒ 濕式負載(水泵+滾刷+真空幫浦+推桿保持)
-  疊上去超過 LRS-150-24 的 OLP → hiccup(HARDWARE §5.1 假說,現在有負載相關的證據)。24V 治本從「待辦」升為**阻斷濕式作業的第一優先**。
-  ⚠️ 這次 blip **ZDT 沒重置**(收回後讀 29.9°,正常)、`selfcheck` 事後 4/4 —— 只有 PQW(繼電器板)掉,看起來 24V 幹線有分支,PQW 那支最先掉。
-- 🔴 踩坑 ×2:`pkill -f "python3 -u cycle_test.py"` 會殺掉自己那條 ssh 的 bash -c ⇒ 用 `[.]py` 錨定。
-
-### 2026-09-15 上午:**濕式 full 第一次跑完**、清潔改單程接力、風扇對照、`goto` 絕對位置、隧道測試
-- 兩台 Pi 斷電重開 ×3(tag 0915a/b/c),每次照序起;`start_crane.sh <tag> 0`。
-- ✅ **濕式 full(3 N·m)整趟完成,沒掉 24V**(昨天四趟全掉)—— user 換了電源模組;之後今天 9 趟濕式全程 `size=0`=0。
-- 🔧 **清潔改單程接力**(per user):滾筒 起點→對面、刮刀 對面→起點,每步省兩段橫走。實測滑台 100 cm 單程只 3.1 s,
-  清潔段 37→31 s;大頭是 `arm_deploy_f` ~7 s/次 ×2(尋觸+relax+確認),要再快得動手臂參數。
-- 🔧 **風扇**:三趟全程對照(停/6/7%)吸附看不出差(牆縫 step 3 永遠左邊吸不到);**風扇一轉 JC-100 RS-485 錯誤就冒**(停 0/0/2/0、7% 6/5/4/26)
-  ⇒ per user 改「只在下行移動時開」= 原 FAN_ON/FAN_OFF 切點。🔴 **5% = ESC 馬達停**,driver 擋 <5%(`must_be_5_to_10_pct`),「不開」是 5 不是 0。
-- 🔧 **full 參數改 key=value**(位置不限,GUI 尾巴 append):`fan=move[:pct]|all[:pct]`、`rail=0|100`(滑台起點;開跑前先移過去)。
-- 🔧 **補水進 cycle_test**:滾筒壓牆前讀 XKC,不滿 → `water_inlet on` → 每 2 s 讀 → 滿了**再灌 20 s**(餘量)→ 關;上限 180 s。
-  壓牆後再讀到 0 → 收臂 → **強制灌**(不看第一筆)→ 重壓一次。🔴 踩坑:XKC 單點門檻,水位在門檻附近 0/1 亂跳(rssi 1135–3463 跳、4272+ 穩),
-  只灌到「剛滿 +5 s」下一步噴 30 s 就又掉回去 —— 兩趟因此中止才改成 +20 s 與強制灌。
-- 🔧 **`goto <離地cm>` 絕對位置**(per user「相對命令收過頭,絕對的防呆」):吊機自己算差值轉 pay_out/retract,`<0`/`>跨距` 拒、跨距未設拒;
-  `set_wall_height` + status `wall_height_cm`,`start_crane.sh` 從 `wall_height.json` 讀回。本體 `crane_goto`(只 idle/ready)。
-  **兩顆計米器往上信高的、往下信低的**(失步只會少算);目標落在兩顆之間 `already_there`。fake_robot 同步。
-  📌 per user:測試性移動單次 ≤5 cm(memory 已記)。
-- 🔬 **隧道(換電源模組後)**:靜態 0% 丟包但 avg 188 ms/max 534;5 cm 動作中 0% 丟包、avg 330–400 ms/**max 1.8 s**;同段有線 0.27 ms、WiFi 8 ms。
-  09-08 是運轉掉 90%,現在不掉但延遲不能用(IMU stale 750)。**per user:維持 WiFi,隧道不切**。WiFi 也抓到一次 12 s 93% 丟包窗口。
-- 🔧 **`set_hold_guard on|off`**(per user「manual 張力保護要有啟用/關閉按鈕」):hold 模式張力檢查 off = 只警示(`manual_tension_warn`)不停;
-  重啟回 on;status `hold_guard=`、`EVT hold_guard`。GUI 交 AI-2 → **v3-2026.09.15-1152 已部署**(關閉要解鎖+確認)。
-- 📌 **v3「跨機自動急停」**:一台掉線 >3 s 就對另一台送停(吊機掉 → 本體 `emergency_stop`)。我重啟吊機都會觸發 → 事後 `reset`。
-  per user 選 ①(不加特例)。
-- 📌 user 重做地面歸零 + 最高點:**跨距 244**(昨天 258),`set_wall_height 244`、full 用 `FCV_TOP_CM=244`。
-
-### 2026-09-15 中午:**水平基準自動學習(level_auto)** —— rail=100 從三步就撞韌體 10 cm 變成連兩趟乾淨
-- rail=100 前兩趟:停後 roll +2.6 → +2.7/+3.4/+3.7、Δmax 7/10/8 → 第三步 `ERR length_diff 11cm > 10cm` 中止。當時 **L=R=−70 卻 roll +4°**:
-  `fine_adjust_level_diff_cm` 重啟後是 0(不持久化),fine_adjust 每步把兩繩拉回「等長=歪」,IMU 平衡再去打,位移差就爆。
-- 💡 **per user:水平基準 L−R 該邊跑邊用 IMU 校**(計米器一開始準、之後可能失步;IMU 定義水平)。做法:靜止 + IMU 新鮮 + 張力有效 + |roll|≤8° 時
-  `level_diff = (L−R) + roll/k`(k=0.85 °/cm,09-01 斜率),EMA ~1 s、±0.75 cm 遲滯、夾 ±20,寫進 `fine_adjust_level_diff_cm`。
-  `set_level_auto on|off`(預設 on)、`set_level_deg_per_cm`、status `level_auto= level_deg_per_cm= level_learned_age_s=`、`EVT level_diff_learned`。
-  手動 `set_fine_adjust_level_diff` 仍可用但會被蓋(回覆註明)。fake_robot 同步。吊機 tag 0915d/e。
-- ✅ **上線後 rail=100 連兩趟整趟完成**:停後 roll +0.03~+0.56、Δmax ≤5、回程出帶 0–7%;`level_diff` 整趟在 2–3 cm 學。
-  ⇒ 問題是水平基準,不是滑台方向;**rail=100 + fan=move 可當作業設定**。
-- ⚠️ 那個 +4° 在重啟後自己消失(−0.41°),中止當下可能還有擺盪/扭轉;level_auto 兩種都吸收。
-- 📌 per user 對「最高/最低點跑掉」:① `goto` 方向保守取值 ✅ 已做;② 端點靠張力事件 —— **不做**;③ 落地重歸零 —— **手動**。
-- 🔴 **JC-100 slave 8** 今天累計 56 錯(其他三顆各 ≤8),風扇開時更多,讀值仍對 ⇒ 換表頭候選。
-- 🔴 踩坑:`pkill -f "sleep infinity"` 自殺(bash -c 含該字串)且殺掉 FIFO keeper ⇒ 吊機 stdin EOF 退出。要停吊機用 `echo exit > crane_<tag>_in`;
-  `cp` 覆蓋執行中的 binary 會 `Text file busy`,先 `rm` 再 `cp`。
-- 現況:頂端 244、已解除吸附、手臂收、滑台 100、風扇停、幫浦 A、水滿。**全部未 commit**(C++ 吊機/本體、cycle_test、fake_robot、v3)。
-
-### 2026-09-15 下午:WEB 設計拍板 —— 作業流程併入 Mission、啟動先走腳本、Manual 收斂
-- 📌 **拍板(per user)**:① 01 作業流程頁拿掉、併進 Mission(**名稱保持 Mission**);② 滑台參數 `rail=<起>-<迄>`(任意 cm);
-  ③ 啟動**先走腳本**(server.js spawn `cycle_test.py full …`),欄位命名與未來 C++ `mission start` 一致,到時只換送哪裡。
-- 🔧 `cycle_test.py` `rail=a-b|off`(0–130、起≠迄;舊 0|100 仍收);`server.js` missionStart 收 `rail=a-b|off`、`arm_nm`→FCV_ARM_NM、`dry`→FCV_DRY。
-  Pi 上 server.js 換檔重啟(tag 0915f,備份 `server.js.bak-20260915`)。
-- 📌 **Manual 收斂(per user)**:救援收繩整組拿掉(救援 = 關 hold_guard + 一般 ▲▼);張力保護開關移到門檻那張卡。AI-2 → v3-2026.09.15-1323 已部署。
-  ⚠️ AI-2 附帶決定:張力保護卡整張 `data-safe-keep`(SAFE 中可操作,否則 tension 進 SAFE 沒法關保護收繩);門檻輸入因此 SAFE 中也可動,user 未表態。
-- 📋 Mission 合併簡報 `.claude/handoff/ai2-mission-merge.md` 已交 AI-2(前置七項自動判 + 一鍵前置 ③④⑤、參數同名、`MISSION_BACKEND='script'|'body'` 常數)。
-- 🔴 踩坑:遠端 `pkill -f "node server[.]js"` 之後同一條 ssh 的後續指令沒跑(session 被連帶收掉)⇒ pkill 與重啟分兩條 ssh。
-
-### 2026-09-15 下午②:**隧道當控制鏈實測失敗** → 改回 WiFi(待辦降級為「有空再修」)
-- per user 把控制鏈切到隧道(本體 `FCV_EP_CRANE_HOST=192.168.1.10`、web `WROBOT_IP=192.168.1.100`),user 從 v3 GUI 按開始跑 full。
-- 🔴 **第 1 步就實質斷線**:腳本開跑即印「roll 已過期(age 4711 ms > 750)⇒ 實際走計米器」;
-  吊機收到的 `imu_roll_age_ms` 一路爬到 **27 s**、本體 `crane_peer_age_ms` **51 s**、`crane_idle_ms` 28 萬 ms;
-  風扇寫入 TIMEOUT(QX 在本體側、不經隧道 —— 本體整個被隧道拖住)。user 按中止 → SIGINT 無反應 → SIGKILL。
-- 對照:**WiFi 靜態 age 6–259 ms**(12 筆)、隧道靜態 5–1743 ms、隧道運動中到 27 s。
-  ⇒ **隧道不能當控制鏈**(09-15 上午換電源模組後不再掉封包,但延遲量級沒解決)。**已改回 WiFi**(本體 0915f、web 0915j)。
-- ✅ 過程中 user 按「幫我急停」→ 新的 `emergency_detach` 九步全 ok(關刷/水泵 → 收臂 → 風扇停 → 閥關 → 等鬆開 → 收腳 → 關幫浦),
-  機器停在頂端 −244/−246、roll 0.78°,**真機首次驗證急停新語意**。
-- 🔧 `server.js` `missionPush` 也 `console.log`(→ `~/run/logs/web_*.log`):在此之前**從 GUI 起跑的任務輸出只存在瀏覽器**,事後在 Pi 上查不到。
-- 🔧 監看工具 `~/run/mon_crane.py` / `~/run/mon_body.py`(各自 Pi 打 127.0.0.1,不碰受測鏈路;2 s / 3 s 輪詢寫 `~/run/logs/mon_*.log`)。
-- 🔴 v3 1409 版兩個 bug(AI-2 1441 版修掉):① Manual 橫幅恆亮「任務執行中/SAFE 中」——**真因是 CSS**(`.ebanner{display:flex}` 蓋掉 `hidden`),
-  JS 讀 `el.hidden` 完全正常 ⇒ 驗收要看 computed display;② 前置 ⑥ 水位停在「等待」但 Dashboard 有水 —— 前置面板沒跟著重繪。
-- 📌 Mission 頁改版(per user「太長」):sticky 控制列、前置/參數各收成一行摘要、執行中區塊放大。
-
-### 2026-09-15 傍晚:**急停狀態機改版**(Error 放行 Manual、收回成功自動回 Idle)+ GUI 跑了兩趟
-- 📌 拍板(per user):① **急停後 Manual 要能操作** ② **全部收回後應該回到 Idle**。規劃與 as-built 見
-  `.claude/plans/state_machine_estop.md`(11 狀態表、急停時序、Error 放行清單、與計畫書 SAFE 刻意分岔)。
-- 🔧 **Error 放行人工動作**(14 處拿掉唯一的 Error 閘門):pusher/vacuum/zdt_home/zdt_zero/rail*/pwm/relay/brush/water*/pump。
-  仍擋:step_*/run/attach/mission/arm_sweep/arm_clean_sweep/pump_swap。判準寫在 `WASH_ROBOT.h` `state_violation_` 上方:
-  **Error 擋的是自動流程,不是人的手**。
-- 🔧 **`emergency_detach` 全成功 → Error 自動轉 Idle**(compare_exchange,期間被改過就不覆蓋);部分失敗留 Error。
-  status 新欄 `estop=none|detaching|done|partial`。fake_robot 的 SAFE 不動(標註刻意分岔)。
-- 🔴 踩坑:第一版用 `M1 STATUS` 找 `en=0` 判斷手臂已卸力 —— **那道指令只回 pos/vel/tau/hold/moving,沒有 en=**,
-  帶使能旗標的是整機 `STATUS` 的 `[M1]` 段 ⇒ 每次急停都誤報 `PARTIAL failed=arm_retract`。改解析 `[M1]` 段後驗證:
-  `state Error → Idle (全部收回完成)`、`estop=done`,Error 期間 `rail 5` 也真的動了。本體 tag 0915i。
-- 🖥 **user 從 v3 GUI 跑了兩趟 full**(script 模式,rail=130-0):第一趟整趟完成 code=0;第二趟 step 3 後被急停中斷
-  (`rail 0` 收到 `ERR state_violation` → 腳本 bail)。GUI 那條路徑(前置/參數/啟動/即時狀態/收尾)本身正常。
-- 🔬 **風扇順序改版的結論:沒有改善,姿態更吵**(per user 改「先吸附再關風扇、先開風扇再收腳」)。
-  兩趟同參數對照:roll 均 0.94–1.53 / 1.12–1.84(舊順序 0.83–1.31)、出帶% 38–93(舊 35–78)、回程出帶 86–94%(舊 76)。
-  吸附顆數沒變好。⇒ **建議改回原順序**(等 user 決定,尚未改回)。
-- 🔴 JC-100 slave 8 今天累計 **67 次**(其他三顆 ≤18),讀值仍正確 ⇒ 換表頭候選(比照 09-14 的 slave 7)。
-
-### 2026-09-15 傍晚②:**收腳正壓時序調校**(峰值電流 3.1A → 0.5A)、ZDT 絕對位置的兩個真相
-- 🔬 **「已經在目標還重下絕對命令 → 四支 STALL 3A」**:吸附中重按「伸 raw 10cm」,三支實時位置
-  2998.7/3018.9/3088°(目標 3000°),殘差只有 10~90 脈衝,但吸盤吸在玻璃上 ⇒ 連殘差都走不掉,
-  韌體 150 ms 判堵轉、整組失敗 → PAUSE-ON-ERROR。per user 指出「絕對位置根本不該動」——對,
-  🔧 **`pusher_move_many_` 送命令前先讀位置,殘差 ≤300 脈衝(0.1 cm)就不下命令**(讀不到照送)。
-  驗證:重按 → `已在目標 (30000 vs 30000)` 0.0 s 回 OK,不再 STALL。
-- 📌 **脈衝↔度 = 10 脈衝/度(3600/圈)**,不是手冊範例的 3200/圈。兩個獨立工作點量:收腳 300 脈衝→29.9°、
-  伸出 30000→2998~3019°。改驅動器細分要重量。
-- 📌 **ZDT 是磁編碼器+電池,零點跨斷電保留**(per user)⇒ 不需要每次開機 `zdt_home`;GUI 前置 ③ 改成
-  **資訊列**(顯示上次歸零時間、不擋開始),一鍵前置只剩手臂 INIT。
-- 🔬 **收腳正壓時序五次實測**(每組 2~3 輪,同條件:高度 0、四顆吸附 −66~−69):
-  | 時序 | 收腳 | ZDT 走完 | 峰值電流 |
-  |---|---|---|---|
-  | 舊(ON→80ms→收→閥開到累計 500) | 4.5~8.0 s | 1.5~2.3 s | 1.9~3.1 A |
-  | 灌完關閥靜置 100ms 才收 | 3.8~5.2 s | 1.2~1.8 s | 0.50~2.14 A |
-  | 開閥 500ms 後收、收完再灌 500 | 3.8~3.9 s | 1.2~1.35 s | 0.37~0.52 A |
-  | **開閥即收 + 灌 500**(300ms 靜置) | 3.1~3.3 s | 1.05~1.5 s | 0.39~0.52 A |
-  | **開閥即收 + 灌 300**(100ms 靜置) | 2.8~3.1 s | 1.05~1.5 s | 0.48~0.62 A |
-  ⇒ 有效的是「**收的當下閥開著**」,預灌沒有貢獻。**定案:關真空閥 → 100 ms → CH6 ON → 立刻送收
-  (不等到位)→ 300 ms → CH6 OFF**;伸 400 / 收 400 rpm。整趟 full 實測峰值 0.48~0.52 A,牆上與地面一致。
-- 🔴🔴 **靜置 0 ms 會讓破真空閥靜默不動作**(per user 要求試,三輪重現):峰值電流跳回 **2.09~2.28 A**、
-  收腳 2.8→3.4 s、一輪收完 p8 殘留 −3 kPa;log 照印 `CH6 ON`(Modbus 回成功)但繼電器沒動。
-  正是 `WASH_ROBOT.h` 記載的 PQW 行為(兩次寫入太近 → 第二次靜默失效)。**100 ms 是實測下限,不要再降**;
-  檢驗方法寫進常數註解:**收腳峰值 >1.5 A 就先懷疑這個值**。
-- 🔧 其他:`cmd_arm_init` 成功後補送一次 `STATUS`(`arm_ready` 只由 STATUS 餵 ⇒ 按完 INIT 前置 ④ 不會變綠,
-  症狀是「手臂 INIT 按了沒反應」);status 新增 `pusher_rpm=` / `pusher_rpm_retract=`(GUI 的 RPM 欄位顯示
-  「0＝預設 N」,不寫死)。
-- 🖥 GUI 實跑三趟 full(script 模式):兩趟完成、一趟被急停中斷(急停新語意正確:全收回後自動回 Idle)。
-  最後一趟含最低點補清、回程前關幫浦,全部正常。
-
-### 下次回來先看
-- 🔍 **AI-2 的 v3**(`web_backend/public_v3/`):對照計畫 §5 五項;跑 `./harness/gui_offline.sh` + v3 :8082 實際點;
-  `report` 有沒有契約外指令;SAFE 三條路徑 banner/上鎖/解除。
-- 然後決定我這邊開階段 1(自檢欄位 C++,低風險、本機可驗)還是先修前置(`crane_cmd_` 行緩衝)。
-
----
-#### (上半天原記錄)
-
-### 已完成
-- **電控箱接線圖改為單線圖**(per user「要的是線路圖」):`reference/wiring/` 兩張 SVG + 產生器
-  `gen_wiring_svg.py`(座標程式算、零誤接、改接線改產生器)。commit `f7dbf5f`。
-- **供電來源 per user 全數填齊**:本體 24V 上還有 QX-DO24/JC-100×4/XKC/**Fathom-X 載波**(⇒ blip 時機身端
-  隧道跟著斷);WT901 走 Pi5 USB;SD76×3 直接吃 220V;吊機**另有獨立 MW 150W 24V**(X518/ZS-DIO/載波);
-  吊機 Pi 獨立 5V 變壓器;交換器 吊機 8-port PoE / 本體 5-port hub;**機身沒有相機**;MH300 段位先留問號。
-- 🎯 **§0 系統邊界總綱(per user)**:兩箱只共用 220V 進線與隧道通訊,其餘各自負責,**與軟體邊界對齊**。
-  判斷波及:箱內不跨箱 / 220V 側同時打兩箱 / 隧道側只斷通訊。SOFTWARE.md §1 互指。
-- 缺資料 10→13 項(新增 #12 實體急停有無、#13 24V 幹線拓樸與線徑);已答 4 項。
-- 🆕 **`harness/gui_offline.sh` + `fake_robot.py`**(per user「假的資料伺服器讓 GUI 啟動」):三個假端點
-  (5001/5002/9527)回**真格式**(照 C++ `cmd_status`/`relay_status`/吊機 status/手臂 `[M1]`)、狀態會動、
-  會推 EVT;**每條收到的指令寫 `gui_cmd_log.txt` 標 KNOWN/UNKNOWN**,`report` 列出 GUI 需要但沒模擬的 ⇒
-  **從 GUI 推導程式面功能**。本機 node 20 + `npm install` 已裝;端到端(HTTP 200、WS 三目標、EVT)驗證通過。
-  🔴 第一次跑就抓到:**web_backend 每 BRIDGE_PING_MS 對手臂送 `ping`,手臂只有 7 條指令,回
-  `ERR unknown command: ping`**(`main_api.cpp:3890`)—— 保活達到目的但手臂 log 被洗。
-
-### 📌 決策(2026-09-13 per user,詳 `reference/field_procedure_v2.md` §6)
-1. **週期編排搬回 C++**:cycle_test 的 full 迴圈 → 本體 `mission` 指令族(含前置檢查與 roll 監看執行緒);
-   cycle_test 降級為對照/耐久工具。**理由:姿態保護跟著腳本走 = 正式作業反而沒有保護。**
-2. **安全模式狀態機做最小版**:跨兩箱 `SAFE`(吊機停鎖 + 本體維持吸盤/停手臂/關水/槳保壓),
-   觸發接現有三源(張力 / watchdog / roll),通報 EVT + GUI banner。環境感測不在本期。
-3. **開機自檢 = GUI 軟閘門(B)**:§3 七步 + 現有前置檢查合成一條有順序的「作業流程」checklist,
-   全綠才開放升頂 / Mission;**吊機 raw hold 不鎖**(救援)。否決 C++ 硬閘門(會擋救援)。
-   🔴 **這三條是 GUI 改版的前提**,GUI 設計以此為準。
-
-### 待完成
-- ✅ ~~計畫書~~ **已寫** `plans/orchestration_to_cpp_plan.md`(mission 指令族 + EVT / SAFE 三源接線與解除 / 自檢欄位 /
-  GUI 作業流程頁 / fake_robot 先行 / **指令序列等價驗證** / 6 階段)。✅ **09-13 per user 核准**;SAFE 進入時風扇**直接關**(拍板);前置(行緩衝、watchdog)確認為階段 3 前必修。
-  前置待辦被拉高:`crane_cmd_` 無行緩衝(EVT 半行)、本體 watchdog 死碼 —— 都是階段 3 前必修。
-- 🟡 **使用者點一輪 v2 GUI 後跑 `./harness/gui_offline.sh report`** → 得到「GUI 需要的功能清單」,
-  再對照 SOFTWARE.md §2/§3 指令面決定哪些是缺口、哪些是 GUI 該拿掉。
-- ✅ ~~手臂 `ping` 二選一~~ **09-14 拍板:手臂加 `PING`**(進計畫階段 1)。
-- 🟡 **AI-2 v3** 契約缺口（09-13 v3 離線驗收時發現，詳 changelog `[2026-09-13v3]`）：① fake `sim noseal` 在 mission 內無效 ② fake `pump status` 格式與真韌體不同 ③ `safe_clear` 無任務時停在 `paused`、`mission start` 拒 `state=paused` —— 要 `continue` 才回 idle，契約該不該讓 `safe_clear` 直接回 idle？
-- (承前)24V 治本三選項 / LRS-150-24 OLP 手冊核對 / 急停切 57.6V / 開箱拍照補 §3.2C。
-
-## 🆕 2026-09-12 文書日:軟/硬架構文件成對、.claude 整理、巨檔壓縮、**24V blip 根因確認**、ONBOARDING 歸檔、瘦身第一刀
-
-### 已完成
-
-**🔴 24V blip 根因(per user 確認)**:全系統**只有一顆 LRS-150-24(150 W)**,而**手臂 M1(DM10010L)+ M2 也接在它上面**,
-與 ZDT×4/抱閘/滾筒×2/幫浦×2/繼電器/閥共用。M1 15 Nm 壓橫桿堵轉的峰值電流拉垮 24V → 繼電器/幫浦掉、ZDT 計數器亂。
-軟體降力 8 Nm(昨天)是緩解;**治本要分離供電或加大 24V**。詳 `HARDWARE.md` §5。
-📌 設計階段其實早有預警(總表「LRS-150-24 容量 6.5A 對現有負載偏緊」),昨天那次等於把它應驗。
-
-**文件體系**(commit `1ecc6be` / `0d8408d` / `6b39f74` / `48e3b5b`)
-- `SOFTWARE.md`(as-is 軟體架構)+ `HARDWARE.md`(硬體架構,per user 校正 5 點)成對,取代 ONBOARDING。
-- `.claude/` 整理為 reference/plans/archive;changelog 按月輪替 1.98MB→316KB + 往後每條瘦身(per user);
-  work_log 07-22~09-09 壓成摘要 #8–#15(927KB→293KB);refactor_plan 標 ⏸ 暫緩(jim 拍板:改針對性瘦身)。
-- **SOFTWARE.md 全文對原始碼驗證 37 項**:行數 8/8、吊機 §3.2 九個行號區段 9/9 **逐項命中**;
-  修正 7 項(指令數 ~115→**99**、v1 死碼分類、驅動清單漏 DIHOOL、`start_*.sh` 未版控、public_v2 單檔、
-  cli_C 註解已修、cmd_ 計數語意)。🔴 **再動這些數字前請重跑比對。**
-- **壓縮保全清單 81 條核對清空**:20 條已涵蓋/已結案、2 條前提消失作廢、59 條併入總表新節(分 6 群)。
-- **ONBOARDING 歸檔**:21 項關鍵踩坑比對後 **15 項別處查不到** ⇒ 抽成 `reference/engineering_pitfalls.md`
-  (驅動踩坑 6 類 + 工程方法 5 類 + 8 條方法論教訓);原檔凍結為 `archive/ONBOARDING-2026-08-13.md`。
-  🔴 **§4 v1↔v2 機械差異、§6 步態演進無可替代,整份留在歸檔檔** —— `motion_flow.md` 至今是 v1 快照。
-
-**瘦身第一刀(純刪,零行為改動)**
-`PalletizerController.h`(352 行)、`DIHOOL_control.{h,cpp}`(0 引用且本來就沒進 build 清單)、
-手臂死常數 `FINE_*`×4 + `STIFF_*`×5、本體 header 12 條死 `cmd_` 宣告(102→**90**,與定義完全對齊)。
-✅ **本機兩層驗證**:① 7 支原始碼 `g++ -fsyntax-only` 全過零錯誤;② 預處理輸出比對 HEAD
-(harness `prove_noop.sh` 的方法論,改用 `g++ -E -P`)—— 本體差異**恰好只有那 12 行**、手臂**恰好只有那 9 個**
-(外加 3 行 `__assert_fail` 的 `__LINE__` 位移,非語意)、吊機**完全相同** ⇒ 對編譯器無副作用。
-
-**電控箱接線圖(HARDWARE.md §3.2,182→358 行)**
-應使用者要求新增**兩個電控箱的信號層接線圖** + PQW 通道表 + 吸盤腳位對應(通道對應**由程式碼抽出**,可重跑)。
-🔴 **順帶抓到三個矛盾**:① **PQW 實體是 8 路不是 16**(`PQW_TOTAL_CH=8`;驅動類別名 `PQW_IO_16O_RLY` 是 16 路版,
-且 `WASH_ROBOT.h:442` 還留著一句「now 16CH physically」**與 20 行後的 `=8` 自相矛盾**,已一併更正);
-② **真空閥現為「四顆吸盤共用一顆 VT307」**(2026-08-27 改單閥),原文件寫得像每顆一顆;
-③ 正壓閥數量對不上(§1 寫 ×2、程式寫「4 顆共用」一路 CH6)—— 待目視。
-
-**per user 解答兩個關鍵缺口(2026-09-12 晚)**
-1. 🔴 **兩顆螺旋槳 ESC 並接同一路 PWM** ⇒ 三個後果(已寫進 §6):
-   **結構上無法差動**(程式只寫 `PWM_STEP_CH=1` 是**對的**,不是漏寫一路);
-   **單邊失效無法偵測也無法補償**(另一顆仍全推 → 淨力矩,無任何回授)
-   ⇒ 待辦「單邊推力失效」的處置**只能走硬體**(NPP 的 DC OK 進 DI 互鎖),**軟體差動補償這條路是死的**;
-   **單點失效同時帶走兩具**(一條訊號線 + 斷線維持輸出)⇒ **急停必須能切斷 57.6V 動力**,送 PWM 停止值不夠。
-2. 🔴 **斷路器/保險絲都沒裝** ⇒ 全系統**無任何外加過流保護**(新增 §5.1)。
-   🎯 **這補完了 blip 的圖像**:唯一在動作的保護是 **PSU 自身 OLP**,而 LRS 系列是「限流 + 故障排除後自動恢復」
-   (hiccup)—— **正好解釋 blip 為何垂降後自己回來、不需要有人復歸**。那不是接線故障,是電源自我保護再恢復。
-   ⚠️ **此為強假說,尚未核對 LRS-150-24 手冊的 OLP 條件與恢復行為** → 待查。
-   📌 **它改變了治本的選項排序**:原本只想「分離供電 or 換大 PSU」,但**加裝過流保護是獨立且更便宜的第三刀**,
-   而且是目前唯一處理「短路」情境的手段(換大 PSU 反而讓可用故障電流變大)⇒ 三者並行評估,不是二選一。
-   AC 側同樣無保護而機器**帶水作業** —— 與待辦「漏電保護 RCD 為必要非選配」🔴(09-01 暫緩)是同一缺口。
-
-**發佈的檢視頁面**(private artifact,可在別的裝置上讀)
-- 踩坑手冊 `engineering_pitfalls.md` → https://claude.ai/code/artifact/869c98f4-39ac-417e-b461-45f3140aad28
-- 電控架構(電控箱/電源/匯流排,依電壓分色重畫)→ https://claude.ai/code/artifact/ff3cf70a-add5-4fec-9118-74066159a8d1
-
-### 🔴 三個被推翻的判斷(重要,避免重犯)
-
-1. **`DEPLOY_F_THETA_MIN` 不是死常數** —— 我早上把它列進死常數,實際它是 `DEPLOY_F [θmin]` 的預設值兼
-   `th_min >= th_max` 驗證下界(`main_api.cpp:3031`),**刪了編不過**。行為用途雖已於 09-11 移除,
-   要清得連指令簽名一起改。
-2. **`removed_in_v2` 那 15 條不同質** —— 我早上寫「已掏空、不必再砍」,但 ONBOARDING §11 記著
-   **重心校正 5 條 + 窗框避障 4 條是「暫時 stub 不是廢棄決定」**,GUI 面板 per user 明確要求保留。
-   SOFTWARE.md §2.3 已改成兩類表(真退役 6 條可刪 / 暫時 stub 9 條要留)。**差點把等著重做的接口當死碼砍了。**
-3. 🎯 **「本機不能 build」是假的** —— 本機有 **g++ 9.4.0**,能 `-fsyntax-only`、能產 x86_64 `.o`、
-   能做預處理等價比對,只是產不出 aarch64。已更正三處(`CLAUDE.md` harness 列、`harness/README.md`
-   開頭的 `apt install g++`、待辦總表「2026-07 那批從未編譯驗證」)。
-   ⇒ **`harness/` 等價比對工具其實一直可以跑**(設計上就是 x86_64 自己跟自己比,見 `build.sh` 抬頭),
-   卡著只是因為那句話沒人複驗。**下次動重構,這條驗證路是通的。**
-
-### per user 拍板
-
-- **8 Nm 對刮刀可接受** —— 滾筒與刮刀共用同一 target,**不為刮刀另訂力道目標**(別再提議拆)。
-- **DSZL-107 已校正、讀值準** —— 量測面全部結案(正負號＋量值＋線性度),我原判「線性度未驗」是過時的。
-  🔴 唯一遺留是**校出來的 scale 沒地方存**:存吊機端 setting/config;吊機端暫不規劃的話本體端也會用到,
-  介面走 **Web GUI 改數值**那個既有功能。**併入「吊機執行期參數不持久化」一起做**。
-
-### 待完成
-
-- 🔴 **24V 供電治本(選項已擴為三)**:量總負載/峰值 → 在「分離供電 / 換大 PSU / **加裝過流保護**」之間決定(`HARDWARE.md` §5、§5.1)。
-- 🔴 **核對 LRS-150-24 手冊的 OLP/hiccup 行為**,驗證「blip = PSU 自身過載保護再自動恢復」這個假說。
-- 🔴 **急停要能切斷 57.6V 動力**(螺旋槳單路 PWM + 斷線維持輸出 ⇒ 送停止值送不到)。
-- 🟡 **開箱各拍 3–5 張照片**(整體/電源區/網關區/端子台)→ 可一次補完 `HARDWARE.md` §3.2C 缺的 8 項。
-- 🔴 **測完改回隧道 192.168.1**(web `WROBOT_IP`、本體 `FCV_EP_CRANE_HOST`)—— 現暫全 WiFi。
-- 🟡 **下次上機開頭**:先 `zdt_home feet`(09-11 最後一次 blip 後未復位)→ 重跑 full 驗真 8 Nm
-  → ~~本輪純刪改動的 aarch64 實建~~ ✅ 09-14 下午做完:本體 bit-identical、吊機建成、motor_api 重建(見 09-14 下午段)。
-- 🟡 **瘦身第二刀(須上機驗證)**:`DY_500` 移除(在 body+crane 兩份 build 清單內 + `WASH_ROBOT.h` 有 include);
-  本體 v1 死碼 11 條(對照 `reference/v1_v2_feature_map.md`)。
-- 🟡 `start_*.sh` 收進 repo `scripts/run/` —— 啟動參數(`HOME_GROUND` 預設 256、寫死 IP、web 佈署路徑)
-  目前只活在兩台 Pi 的 `~/run/`,**完全沒版控**。
-- 🟡 `motion_flow.md` §2 硬體表仍是 v1(總表「規範文件架構圖與程式碼脫節」)—— 純文書,可無機器進行。
-
-## 🆕 2026-09-11(深夜④)full 又 24V blip:真因=15Nm override 沒降到 → 已補
-
-**事故(per user)**:降力版 full 跑到橫桿步**又 24V 掉電**。同一個橫桿問題。使用者判斷:**滾筒(在 24V bus 上)15Nm 壓在橫桿上卡住→堵轉過流→24V blip**。—— 這也印證 blip 根因就是**高力壓桿堵轉過流**,不是別的。
-
-**為何降力版還是 15Nm(我漏的)**:我先前只降了**手臂 DEFAULT**(main_api.h `DEPLOY_F_TARGET_NM 15→8`),但 **cycle_test.py 是顯式傳值** —— 第 137 行 `ARM_TARGET_NM = 15.0`,經 `arm_deploy_f 15.0 <slot>` 代轉,覆蓋掉手臂 default。所以 full 全程仍是 15Nm,橫桿步照樣 slam → blip。單獨 `arm_deploy_f 8` 測試沒事是因為我當時顯式傳 8。
-- 🔴 教訓:**降力必須改「顯式傳值處」,不能只改 default**。DEPLOY_F 的 target 由呼叫端決定。
-
-**已修**:cycle_test.py `ARM_TARGET_NM = float(os.environ.get("FCV_ARM_NM","8"))`(15→8,env 可覆蓋),已部署 Pi。下次 full 才是真 8Nm。低力刷過(8Nm)先前雙工具 + 滑台 0-100-0 掃已實測**零 blip**,方案本身正確,只差這個 override。
-
-### 待完成
-- 🔴 **這次 blip 後 ZDT 位置計數器可能又亂**(24V blip 慣例會打亂 slave 5-8)——下次動 ZDT/跑 full 前先 `zdt_home feet` 復位確認。
-- 🟡 重跑 full(真 8Nm):升頂→pump on→`full 1 5 40`,驗橫桿步低力刷過、不 blip、跑完整趟。
-- 🔴 測完改回隧道 192.168.1(web WROBOT_IP 5.26→1.100、本體 FCV_EP_CRANE_HOST 5.25→1.10)。現暫全 WiFi。
-- 🟡 手臂 M1 過速煞車(retract 太快觸發 BRAKE)。~~未用常數 FINE_*/STIFF_* 可清~~ ✅ 2026-09-12 已刪(THETA_MIN 查證後保留,非死常數)。
-
-
-## 🆕 2026-09-11(深夜③)橫桿問題最終定案:M1 判據放棄 → 降力刷過
-
-**結論:M1(手臂)訊號物理上分不出橫桿與玻璃,放棄偵測,改「降低下壓力道、低力刷過」。**
-
-**逐一否決的偵測法(全部實測失敗)**:
-1. **contact θ / th_min(距離)**:橫桿接觸點沿長滾筒可高可低 → θ 飄 0.55–0.60,與玻璃 0.58–0.59 **重疊**。同一橫桿近同高度量到 0.551(probe)vs 0.598(full run),差 ~20mm。full run step5 就因 θ=0.598>th_min 漏判、壓下去。(bar_test2 那 34/34 是各位置剛好撞低-θ 的巧合。)
-2. **剛度 Δtau/Δcmd(Step 4c)**:假設「硬鋼=高剛度」**錯**——滾筒偏心壓桿是繞桿 pivot、不是頂著建力,初期剛度低。實測**橫桿 9.8 = 玻璃 9.8**(工具/滾筒柔度主導低負載回應,蓋掉牆材差異)。完全無法區分。
-
-**最終方案(per user)**:`DEPLOY_F_TARGET_NM 15→8`、`DEPLOY_F_COARSE_NM 13→6`;**移除偵測**(main_api.cpp 刪掉細掃 Step4b + th_min 守衛B + 剛度 Step4c,保留 no_wall 守衛A 與 cannot_reach)。手臂低力刷過一切,刷到橫桿也無傷。motor_api 已重編部署(tag arm_0911lf,20:23)。
-
-**驗證(height 81 橫桿位、四顆全吸)**:
-- 玻璃 `arm_deploy_f 8` → OK tau 7.47/7.86(到 8 就停,不衝 15)。
-- 橫桿 `arm_deploy_f 8` → OK tau 7.96(輕頂 8Nm,無 slam)。
-- 🎯 **完整 blip 情境**(deploy 8 頂橫桿 + rail 0→100→0 掃)→ **零 blip**:四顆全程 -66~-70、rail 掃出掃回 OK、幫浦正常。blip 根因=高力堵轉過流,降力即解。
-- ⚠️ rail 0 偶發 "pos read failed"(DM2J 位置讀回 glitch,移動本身 OK、非 blip)。
-
-### 待完成
-- 🔴 **測完改回隧道 192.168.1**(per user「暫時全 WiFi 測完改回」):web WROBOT_IP 5.26→1.100、本體 FCV_EP_CRANE_HOST 5.25→1.10(重啟本體)。目前全鏈路暫走 WiFi。
-- 🟡 重跑 full(降力版):驗整趟清潔在有橫桿立面低力刷過、不中斷、不 blip。
-- ✅ ~~未用常數 FINE_*/STIFF_* 留在 .h~~ **2026-09-12 已刪 9 個**;🔴 THETA_MIN 查證後**不是**死常數(仍為 `DEPLOY_F` θmin 預設值),保留。
-- 🟡 cup5/cup7 JC100 隨位置間歇(現場幾何,非壞);DM2J 滑台無 homing、偶發 pos 讀回失敗。
-- 🟡 AI-2 v2 GUI 危險鈕閘門(2026.09.11-1919)已上;目前只開 v2、v1 停。
-
-
-## 🆕 2026-09-11(深夜②)手臂橫桿偵測:力控+距離「距離放精細」(細掃) + V2 GUI 誤觸互鎖
-
-**決策轉向(per user)**:放棄「吊機高度帶」判據(高度隨環境變、帶寬難定;高度帶已做成 opt-in
-`FCV_SKIP_BANDS`,不給就不啟用,擱著)。改回原始設計「**下壓力道 vs 距離,看哪個先達到**」,並**把「距離」這側限縮、做精細**。
-
-**根因(為何距離分不出橫桿)**:尋觸粗掃步進 `DEPLOY_F_COARSE_STEP=0.030rad≈13mm`,而橫桿(~212mm)
-只比最近玻璃(~216mm)近 ~4mm —— 13mm 的尺量不出 4mm。且 th_min=0.565 還低於橫桿接觸(0.5659)。
-🔴 滾筒是長圓柱,橫桿偏心接觸會讓粗掃 contact θ 偏高(過頭壓進桿裡才判觸)。
-
-**修法(motor_api,已重編部署)**:
-- main_api.cpp 尋觸後加 **Step 4b 細掃(fine re-seek)**:退開 FINE_BACKOFF(0.045rad)、以 FINE_STEP(0.005rad~2mm)重逼近,把 theta_contact 量到 ±2mm。
-- main_api.h 新增 DEPLOY_F_FINE_STEP/FINE_BACKOFF(0.045)/FINE_SETTLE_MS(120)/FINE_MAX(24);**THETA_MIN 0.565→0.570**。
-- 編譯:`cleaning_arm/compile.sh`(Pi 上 aarch64);重啟手臂:停舊 motor_api→FIFO 法起新(tag arm_0911fs)。
-
-**橫桿測試(deploy-based,bar_test2,height 102)**:每次真的 arm_deploy_f 壓、看判定。
-- 實測橫桿**真實 fine contact θ ≈ 0.542–0.557**(粗掃量的 0.566–0.584 是過頭假象),離 th_min 0.570 有 **6–8mm 餘裕**(比原估 2mm 寬鬆)。
-- **全部判 obstacle**(輕觸 2Nm 就判掉、不進 13Nm 粗壓 = 不撞、不 blip)。✅ 對照組(玻璃位置應全 OK)因 GUI 事件中斷,待續。
-- 📌 bar_test2 的 ask() 原本固定抽滿 timeout(每次 deploy ~90s),已改「收到 OK/ERR 就返回」+ 送前清殘留(修掉 status bleed 的 r[0] 誤判)。
-
-**🔴 V2 GUI 安全 bug(已送 AI-2 修)**:重啟 web 後手臂「自己靠上」兩次 —— arm log 證實 GUI 連著時送了 DEPLOY_F。
-af-go(壓上,index.html:4304)有 window.confirm() 兩步保護卻仍送出 → 推測 kiosk/wayvnc 本機瀏覽器自動接受 confirm,或觸控誤觸。**已切斷**(web 全停)。已請 AI-2 加「手臂解鎖」武裝互鎖(載入預設 OFF、不只靠 confirm、送一次後復位、DEPLOY/PARK 一併),更新版號回報。
-✅ 兩次誤觸都被新偵測擋成 obstacle、無 slam、無 blip —— 真實情境再次驗證修法。
-
-### 待完成
-- 🔴 **測完改回隧道 192.168.1**(per user「暫時全部 WiFi,測完再改回」):① 本體 `FCV_EP_CRANE_HOST` 192.168.5.25→**192.168.1.10**(需重啟本體=關繼電器);② web v2 `WROBOT_IP` 192.168.5.26→**192.168.1.100**(重啟 web)。現全鏈路暫走 WiFi。
-- ✅ **端對端驗證完成(2026-09-11)34/34 全對**:橫桿① h102 θ0.542–0.557 4/4、橫桿② h87 θ0.544–0.552 10/10、橫桿③ h68 θ0.542–0.544 10/10(皆 obstacle)、玻璃 h18 θ0.582–0.592 10/10 OK(tau 14.2–15.4Nm)。三種橫桿高度(68–102)接觸 θ 都穩定 0.54–0.56、玻璃 0.58–0.59。th_min 0.570 乾淨分離(離橫桿 ~8mm、離玻璃 ~5mm),兩種橫桿高度都穩定。**細掃+th_min 修法確認可用。**
-- ✅ **玻璃對照組完成(2026-09-11)**:height 18cm、四顆全吸(-66~-68)、bar_test2 10× → **10/10 OK**(tau 14.2–15.4Nm、iters 0–1、~8–9s/次)。玻璃 contact θ **0.582–0.592**,橫桿 **0.542–0.557**,th_min 0.570 居中,兩側各 ~5–6mm 餘裕、間隔 ~11mm 乾淨分離。**細掃+th_min 修法端對端驗證成功**。
-- 🟡 AI-2 修 V2 手臂武裝互鎖 → 回報版號 → 使用者重開 V2 驗證。
-- 🟡 M1 過速安全煞車:arm_retract 從遠處收回時 vel 超 0.4 觸發 BRAKE(pos 收到 0 沒事),收回速度或起步或許要調。
-- 🔴 24V blip 根因仍未解(偵測擋下壓桿後觸發機率大降,但根因在)。
-- 🟡 cup7/cup8 JC100 壞、DM2J 滑台無 homing 重啟未校正。
-
-
-## 🆕 2026-09-11(深夜)橫桿撞擊真因 + 高度帶跳過(執行期,不進記憶)
-
-**事故**:full 重跑期間手臂(滾筒 RIGHT)**第二次**撞橫桿仍下壓清潔 → 24V bus blip → 使用者雙電腦斷電。
-恢復:crane `start_crane.sh <tag> 0`(🔴 **HOME_GROUND 必須 0** —— 預設 256 是頂零約定,會打回頂零)、
-body `start_body.sh`、arm `cd cleaning_arm && motor_api`(FIFO 法);SD76 絕對位置重啟保留(height 102 可信);
-ZDT 伸出+計數器亂 → `zdt_home feet` 逐顆自探退硬限位歸零(4/4 dir=1 OK);pump 關著降 24V 負載才收。
-
-**真因診斷**(`arm_deploy_f 3 RIGHT` 對橫桿實測):
-- 橫桿 contact θ=**0.5659**,th_min=0.565 → 只差 0.0009 rad **剛好逃過守衛 B**(θ<th_min→obstacle)→ 續壓到 coarse 13Nm(=撞)。
-- 🔴 `DEPLOY_F_COARSE_NM=13`:粗壓一律到 13Nm 才細收斂,**跟 target 無關** —— 我用 target=3 想「輕壓」是錯的,coarse 仍到 14.31Nm。
-- 🔴🔴 **th_min 修法不可靠**(per user + 圖):滾筒是長圓柱,橫桿撞在滾筒上的**接觸點沿桿可高可低** → M1 量到的 contact θ 會飄、甚至落進玻璃 θ 區間 → **單靠接觸角分不出橫桿/玻璃**。
-
-**解法(per user)**:改用**與接觸角無關**的判據 = **吊機高度**(絕對、精準)。橫桿高度**隨環境變 → 不進記憶檔**,做成執行期參數。
-- cycle_test.py 新增 `FCV_SKIP_BANDS`(逗號分隔;每項 "lo-hi" 或單一 "center"+`FCV_SKIP_MARGIN_CM` 預設15)+ `in_skip_band()` + `crossbar_skip_steps` 計數 + 總結行。清潔前比對當步 `cur` 高度,落帶→**跳過手臂 deploy(連滾筒帶刮刀)、續到下一位置**,根本不壓。md5 4fd71fe8。
-- 測試法(per user,非 full):原地重複壓 —— `bar_test.py`(scratchpad→Pi /tmp)。
-
-**測試① 橫桿位置(height 102、帶 87-117)壓 10 次**:✅ 跳過 10 / 實壓 0 / 無異常;arm log 零 DEPLOY_F、只有 M1 MOVETO 0(收回)。手臂全程沒壓上橫桿。
-
-### 待完成
-- 🟡 **測試② 對照組**:移到無橫桿位置,同帶 → 手臂應 10/10 實壓+收回(等使用者移位、重建吸附後跑)。
-- 🟡 帶寬 ±15cm(cur 預設)是初值 —— 需依滾筒長度/實際干涉範圍調 `FCV_SKIP_MARGIN_CM`。
-- 🔴 24V blip 根因未解(手臂壓桿堵轉過流?邊際 PSU/斷路器?)—— 高度帶避免壓桿後應大幅降低觸發,但根因仍在。
-- 🟡 cup7/cup8 JC100 感測器壞(實體有吸,(B) 容忍);DM2J 滑台無 homing、重啟後未校正。
-- 🟡 GUI 同步:FCV_SKIP_BANDS 之後要不要做進 GUI(執行期設定,不落記憶)。
-
-
-## 🆕 2026-09-11(晚)ZDT 24V-blip 零點恢復 + 新指令 + summary 複審(per user)
-
-**事故**:full 期間 **24V bus blip 一次**(繼電器+真空馬達+ZDT 都在 24V),弄亂 ZDT 吸盤推桿(slave 5-8)驅動器**位置計數器**(計數器以為 0/收回、物理伸出 10cm)。ZDT 位置基準只能靠在已知位 set_zero 重建。
-
-**踩坑**:`zdt_disable` **不會失能馬達**(只是「從群組操作排除」,`disabled_zdt_slaves_.insert`)—— jim 按了以為鬆開其實沒有。真失能要 `motion_control_driver_EN(false)`,原本沒指令暴露。
-
-**新增本體指令(已部署):**
-- `zdt_power <5-8> <on|off>` → 真 driver_EN torque on/off。body `c9dbcd00`。
-- `zdt_home <feet|all>` → 自動堵轉歸零:**相對模式(mode=0)+ 方向自偵測**(讀位置→小步試探→判收回 dir)→ 往收回撞硬限位堵轉(zdt_wait defer_stall=成功)→ set_zero → hold。body 最終 `b1ecfe02`。
-  - 🔴 **第一版 bug(已修)**:用「絕對負目標 -66000」想收回 → ZDT pulse **無號**、負值變巨大正值 → **伸錯方向撞 20cm 硬限位並在那 set_zero**(更糟)。改相對+自偵測方向後正確。實機驗證:伸 5cm → zdt_home → dir 自判=1、往內收到 0cm、set_zero、伸 5cm 交叉驗證零點正確。
-
-**兩套重歸零方法(都實機驗過):**
-1. `zdt_power off` → 手推到 0cm → `zdt_zero all` → `zdt_power on`。(AI-2 已上 GUI:v2 `-1716`,並把「使能/失能」鈕改名「納入/排除群組」註明不斷電)
-2. `zdt_home all`(自動,一鍵)。GUI 可選加。
-
-**🔴 ZDT_MODBUS_SUMMARY.md vs 驅動 複審(per user):**
-- 暫存器/幀格式全對(set_zero 0x000A / release_stall 0x000E / EN 0x00F3 / pos 0x00FD / speed 0x00F6 / estop 0x00FE / batch 0x04-0x0043 / 狀態旗標 / CRC16)。
-- 🔴 **發現1:ZDT 有原生 homing 但 body 沒用**。驅動 `trigger_home`(0x009A,含 **mode 0x02 無感撞限位**)/`set_home_zero_position`(0x0093)/`abort_home`(0x009C)齊備、對上手冊 3.3,但 `app/*.cpp` 從沒呼叫。**「這台沒 homing、不要 home_start」註解是講 DM2J 上滑台(0x6002←0x0020),不是 ZDT**——兩者被混淆。⇒ 我手刻的 zdt_home 等於重造 ZDT 原生撞限位歸位。🔮 **待辦(不急):試 `trigger_home(0x02)`,能用就換原生歸位(參數 3.3.6 撞限速度/電流/時間門檻可能要調);不能用留 zdt_home。**
-- ⚠️ **發現2:pos_mode pulse 無號、驅動沒擋負值**。手冊 pulse 0x0~0xFFFFFFFF 無號、方向靠 dir;`motion_control_pos_mode(int pulse)` 收有號直接打包、負值→巨大正值→反向衝(=zdt_home v1 的 bug)。🔴 **待辦:驅動加 pulse<0 守衛(拒絕/abs+報錯)。**
-
-📌 **教訓**:①`zdt_disable`≠失能(命名坑,AI-2 已改名);②ZDT pulse 無號,收回要靠 dir+相對、不能用負絕對;③ZDT(cups)與 DM2J(rail)的 homing 能力/暫存器完全不同,別混。
-
----
-
-## 🆕 2026-09-11(晚)手臂力控距離量測 + 搆不到/異物跳過(per user)
-
-🔮 **待辦(per user,做進 GUI):牆面距離量測/剖面** —— DEPLOY_F 的 `contact`(M1 角度 rad)可經**實測幾何式換算成 mm**:`牆距mm = 490·sin(θ−0.38)+121`(main_api.h:ARM_LENGTH_MM=490 / VERTICAL_OFFSET_RAD=0.38,三點量測擬合殘差<0.1mm)。GUI 可顯示每個位置的牆距、標出異常(近=異物、遠=搆不到風險)。M1 上限 θ=1.10 → 最遠可及 **444mm**。
-- 實測參考(2026-09-11):正常牆距 216~253mm;某高度整片牆遠到 311~343mm(比正常遠 78~96mm)→ 刮刀 reach 餘裕小、遠牆時先 cannot-reach;橫桿=硬且微凸(226mm、比正常近~7mm)但力瞬間爆(WARN 17.24)。
-
-🔴 **待辦:DEPLOY_F obstacle 判定精修** —— 橫桿(硬、微凸 7mm)目前回 **WARN 非 obstacle**(正常 firm press 也可到 16.6,17.24 只高一點、難用 tau 門檻乾淨分)。要真正「壓到異物就不刷」需在 motor_api DEPLOY_F 用**幾何+力上升斜率**辨識異物(接觸比預期近 + 力瞬間爆),回 obstacle。需 motor_api 改+重編。目前先靠 arm_clean_combo:cannot_reach/obstacle→跳過(見下)。
-
-📌 **決策(per user):手臂力控設計 = 「壓到異物就不刷、跳過、到下一位置」**。full 的 `arm_clean_combo` 據此改:DEPLOY_F 回 **cannot_reach 或 obstacle → 跳過該把清潔、收手臂、續到下一位置(不 bail)**。(cannot_reach 先前落到 else→bail,是 step4 中止主因。)
-
----
-
-## 🆕 2026-09-11(傍晚,續)🔴 牆面座標慣例反轉 = **地面歸零**(per user 更正)
-
-**per user 拍板:慣例是「地面最低點 = SD76 0」,不是頂端歸零。** 我先前做反了(在頂端跑 `zero_meters top` 把 0 移到頂端 + home_ground_cm=261),導致「移動到0」把機器往上送到頂端(應往下到地面)。
-
-**正確慣例:**
-- 地面最低點 `zero_meters ground` → SD76=0。**不要**在頂端 `zero_meters top`。
-- 頂端讀 `status` length_left = 負值,**取 abs = 牆面最大高度**(這面牆 261)。純讀、不歸零。
-- home_ground_cm 維持 0。「降到 0 / 降到最低」= 地面安全點。
-
-**實機已修正:** 把機器從頂端降回地面安全點(pay_out ~261、分段看張力、未落地)→ `zero_meters ground`(SD76=0)+ `set_home_ground 0`(清掉 261)。現況:機器停地面、**SD76=0、home_ground_cm=0**、懸吊(tension 46/56、valid=1)、全收卸力、手臂使能。
-
-🔴 **連帶影響(與昨天/上午的 FCV_TOP_CM 結論相反,已轉達 AI-2 撤回 (a)):**
-- home_ground_cm=0 ⇒ cycle_test 拿不到 TOP(會落預設 231=錯)⇒ **full 需明確帶 `FCV_TOP_CM=牆高(261)`**。
-- GUI「② 最高點設定」**改為「讀頂端 length_left 取 abs 存牆高」,不用 `zero_meters top`**;「① 地面歸零」保留 `zero_meters ground`;START gate 改看「①做過 + ②量到牆高>0」不看 home_ground_cm。
-- full 等手臂修好才跑,不急。
-
-📌 **牆高建置持久化/自動載入 + ①② 獨立(per user,AI-2 v2 `2026.09.11-1507`):**
-- 牆高存吊機 `~/run/wall_height.json`(`{cm,at,left_raw}`),node/程式重啟不掉;GUI WS 連線第一則即推 `{src:'wall',cm}` → 開啟即顯示,不用重按。卡片標「記憶值 + 量測時間戳」。
-- **① 最低點 / ② 最高點 獨立、各自記憶、可單獨重校**(per user:有時只校一個就能用)。START gate 看「兩者都有效」不看「這次都按過」。
-- 🔴 **耦合方向(記著免踩)**:牆高(②)相對「地面 0」(①)量出。**只重 ② 一定安全**(相對現有地面重量);**只重 ①** 若在同一地面點歸零則牆高仍有效,若地面基準移位則舊牆高 stale → 要順手重 ②。起跑守衛 `|H−牆高|≤5` 是安全網。
-
-✅ **新流程實機驗證(per user「先升頂讀牆高試試」+「放到最低點」):** 地面 `zero_meters ground`(L=0)→ 升頂讀 length_left=-260 → GUI「② 最高點設定」(AI-2 v2 `2026.09.11-1456`)存 `~/run/wall_height.json` = `{"cm":260,"left_raw":-260}` ✅ 端到端通。之後降回最低點 L=0/0、懸吊安全。牆高 260(首量 261,差 1cm=升降後計米器正常漂移)。此值即 full 的 FCV_TOP_CM 來源(server.js 帶入)。
-
-📌 **教訓**:兩點式歸零若用 `zero_meters top`,0 會落在頂端 —— 與操作者「降到0=地面」的直覺相反。此機一律**地面歸零 + 頂端只讀不歸零**。
-
----
-
-## 🆕 2026-09-11(傍晚)full 首度上機 → 手臂 M1 機構異常中止(per user)
-
-**座標建置(兩點式,per user 定義的牆面高度慣例):**
-- 底端:機器懸吊處 `zero_meters ground` → SD76 左右=0(牆面最低點)。
-- 頂端:user 用 GUI 升到最高玻璃點,讀 SD76=-261 → `zero_meters top` → `home_ground_cm=261`(這棟樓可清高度)、頂端歸零。cycle_test.py 自動偵測頂端慣例、TOP=261。
-
-**init 卡 paused_on_error(非機構):**
-- init 幫浦 A ON 後,關進水閥步驟 `crane_cmd water_inlet off` → 吊機回 `water_inlet_relay_fail` ×3 → `[PAUSE-ON-ERROR] init_water_inlet_off`。
-- ⚠️ **進水球閥(ZS-DIO USR_W `.32`、slave 1、**CH4**)= 間歇、非硬故障**(2026-09-11 傍晚更正,原誤判為板子/RS485 掛):init 當下 `water_inlet off`/`water_status` 連 3 次失敗(`CH4 FAILED`/`water_read_fail`)是**載重/bus 忙時的間歇 Modbus 逾時**;**閒置重測 water_status ×3 + water_inlet off 全 OK、閥讀 water_inlet=0(關)**,jim 從 WEB 控制也一直正常。⇒ 不是阻斷項,根治要看 .32 在忙時的 timing。
-- per user 閥邏輯:**水箱只有低水位感測**,補水=低水位觸發→開閥→定時5分關(盲時,無滿水訊號)。現水箱滿(XKC output=1)⇒ 閥邏輯上關著,full 用水箱既有水(water_pump),一趟不會抽到低水位 ⇒ **`skip` 該步安全**、init 完成到 idle。
-
-**full 1 5 40 上機(本體 Pi:FCV_WROBOT_HOST=127.0.0.1 / FCV_CRANE_HOST=192.168.5.25 WiFi):**
-- 起點 L=261=TOP、平衡走 IMU、幫浦 A ON,週期 1/1 開跑。
-- step1:四顆壓力 -47/-61/-49/-52(全封);step2 -26/-56/0/-1(部分封,至少一顆≤-50 續行)。RIGHT WARN tau 16-17(過壓紮實貼牆、掃動照做)。roll 全程 <0.65、Δmax≤3,遠低於中止門檻。DEPLOY_F 提速有效:兩組合清潔 ~37s/步。
-- 🔴 **user 中止於 step ~4「手臂機構異常」**(吊機降到 length 163=離底端 98cm 處)。
-
-**手臂 log 佐證(arm_0911g.log):M1(伸出/壓上軸)異常** —
-- `[M1 SAFETY] vel 超 0.4 限速 → emergency brake` 反覆,實測 vel 衝到 -1.0~-1.15 rad/s(遠超命令)。
-- `[M1 HOLD] passive suspected … re-enabling`、`[M1 go_home] motor passive … re-enabling` 反覆 → 間歇失力再自動重使能。
-- ⇒ **M1 超速 + 間歇失力**(加先前 M2 皮帶滑動史)。需實體檢查才可再動。
-
-**安全收尾(per user 逐步):** arm_retract(M1 收離牆卸力、不失能)→ pusher all retract(四腳脫附)→ pump off(全繼電器 0)→ 放繩降(分段看張力,未落地)→ per user「不用放到地板,SD76=0 是安全位置」→ **retract 回頂端 length 0/0**(分段、看上限/張力,未撞頂)。機器停頂、懸吊、卸力、安全。
-
-🔴 **待辦:**
-1. **手臂 M1 機構異常**——實體檢查/修(超速+間歇失力;log 證據如上)。修好前不再驅動手臂。
-2. **進水球閥(.32 CH4)載重時間歇 Modbus 逾時**(閒置/WEB 正常,非硬故障)——init 關閥步驟偶爾會 paused_on_error,skip 安全(閥本就關);要根治看 .32 忙時 timing。
-3. **full 上機驗證未完成**(step ~4 中止),手臂修好後重跑 `full 1 5 40`。
-
-📌 GUI(AI-2 已上線 `2026.09.11-1419`):Mission/Manual 兩頁「牆面高度建置」卡(①地面歸零 zero_meters ground / ②最高點設定 zero_meters top,顯示 home_ground_cm,重啟回0提醒)。
-
-🔴 **FCV_TOP_CM / GUI 路徑 bug(AI-2 指出、已驗證,決策採 (a)):**
-- cycle_test.py:266 只有 **env 不存在**時 TOP 才 fallback=home_ground_cm。但 `web_backend/server.js:288/302` **一律**送 `FCV_TOP_CM=topCm`,表單 `mp-topcm` 預設 **231** ⇒ **GUI 啟動的 full/mission 永遠帶 231(或使用者填的數),不會落到 home_ground_cm**。
-- fail-safe:若送 231 而機器在真實頂端(height=261),起點檢查 `abs(261−231)=30>5` 會**擋下「起點不在頂端」**,不會用錯 TOP 亂衝 ⇒ 現況是「GUI 按 START 被拒」,非靜默錯跑。但 GUI-launched full 對非 231 的牆現在是壞的。
-- ⚠️ **今天中止那趟 full TOP=261 是對的**——我從本體 Pi shell 跑、**未設 FCV_TOP_CM**,fallback=261(抬頭「TOP=261 cm / 起點 L=261」為證)。中止純因手臂 M1 異常。
-- **決策 (a)**(AI-2 執行,腳本不動):server.js 拿掉 FCV_TOP_CM env、表單那格改唯讀顯示 home_ground_cm;且 **home_ground_cm=0(尚未建置)時 disable START**。
-
----
-
-## 🆕 2026-09-11(傍晚)牆面高度建置慣例(per user)+ full 前置
-
-**per user 定義的「牆面高度建置」慣例(之後每面牆都這樣做):**
-1. 機器開到**地面最低點** → **SD76 設 0** ⇒ 指令 `zero_meters ground`(左右計米器歸 0、`home_ground_cm` 不動、機器不動)。此點 = 底端 height 0。
-2. 機器開到**最高玻璃點** → 讀當下 SD76 繩長 = **建築物可清高度(跨距)** ⇒ 指令 `zero_meters top`(先把 `home_ground_cm` 記成 |當下 left SD76|,再在頂端歸零)。
-3. 之後 full 模式即知頂端(length≈0、height=home_ground_cm=TOP)與底端,起點檢查 `abs(height−TOP)≤5` 才過。
-
-- 📌 **對應韌體**:`Crane_control_PI/main.cpp` cmd_zero_meters(`ground`|`top`)。`home_ground_cm` **不持久化**(重啟回 0)——斷電重開後要重跑此兩點式(或用 `set_home_ground <cm>` 直接寫回上次的跨距,見 main.cpp:3785)。
-- 📌 **cycle_test.py** 的座標自動判定:`home_ground_cm>0`⇒頂端歸零(height=home_ground_cm−length_left,TOP=home_ground_cm);=0⇒底端歸零(TOP 預設 231)。所以做完 `zero_meters top` 後 full 會自動用對的頂端慣例。
-
-**本次進度(2026-09-11 傍晚,實機):**
-- 開機後吊機斷電重置 → `home_ground_cm=0`、機器吊在 length_left=258(tension_valid=1、張力 60/44kg,懸空非落地)。
-- per user「現在這個位置設牆面最低點」→ 已 `zero_meters ground` ⇒ SD76 左右=0(機器沒動)。✅ 底端基準立好。
-- ⬜ 待:user 把機器升到**最高玻璃點**→ 我讀 SD76 + `zero_meters top` 鎖跨距 → `init`(開幫浦)→ `full 1 5 40`。
-- 本體狀態:state=idle、crane/arm attached、繼電器全 OFF(無真空,要 init)、M1 收回 pos≈0、M2 在刮刀槽(0.19)、皆使能。
-- 🔴 升降前要 `pusher all retract` 收吸盤(升降不刮牆);本體無推桿「伸縮位置」回讀指令(p5..p8 是真空壓力 kPa 不是位置)。
-
----
-
-## 🆕 2026-09-11(午後續)上滑台使能顯示 + DI1 硬體事實(per user)
-
-- **上滑台馬達使能顯示**:GUI 初始由「狀態未知/尚未下過使能指令」改為「**使能(上電預設)**」,移除小字「推論值/後端無回讀/失能後可手推」(AI-2 v2 `-1353`)。之後照送出的 rail_enable on/off 更新。
-- 🔴 **硬體事實(DM2J_RS570.h:90-92)**:DM2J 出廠 **DI1=常閉(0x88)+未接線 ⇒ 訊號恆觸發 ⇒ 馬達永遠使能,連 Pr0.07=0(rail_enable off)都關不掉**。所以:
-  - 上電預設使能 = 對(per user)。
-  - ⚠️ **`rail_enable off` 在現接線下可能不生效** ⇒ 校正歸零第①步「失能→手推」可能推不動(畫面說失能、馬達仍鎖)。要真正能失能需改 DI1 接線/設定(Pr4.02→0x08)。jim 做校正若推不動就是這個。
-  - 🔮 需要「真實使能回讀」時可加 rail 狀態回讀指令(驅動有 read_status 未接成指令)——等遇到再說。
-- (吸盤推桿 ZDT 的「失能後可手推」保留,那是 ZDT 馬達、與上滑台 DM2J 不同。)
-
----
-
-## 🆕 2026-09-11(下午)rail_jog + 幫浦重疊 3s + 上滑台 GUI(per user)
-
-- **真空幫浦輪替重疊時間 5→3s**(`PUMP_SWAP_OVERLAP_MS`,per user;昨 30→5、今 5→3)。併聯管路 B 真空幾秒即跟上。
-- 🆕 **上滑台 JOG(rail_jog,本體新指令)**——`cleaning_arm` 無關,是 body:`rail_jog fwd|rev|stop [rpm]`(rpm 預設 100、10-500)。速度模式,cmd_rail_move 的 0-130 硬限位管不到 ⇒ 兩道保護:
-  - **deadman**:前端按住每 300ms 重送 fwd/rev 刷新時間戳,`rail_jog_monitor_loop_`(100ms)>600ms 沒收到自動 jog_stop(EVT `rail_jog_deadman_stop`)。
-  - **行程守衛**:jog 中每 100ms 讀位置,近 130-1 或 ≤1 自動停 + `EVT rail_jog_limit`。⚠️ 座標未校正時守衛是假的(靠歸零保證)。
-  - 實機驗:**fwd=往正(130)、rev=往0**(pos 50 送一次 fwd,deadman 600ms 自動停、pos→52.3)。deadman、行程守衛都通。
-  - 檔:`app/WASH_ROBOT.{h,cpp}`(成員+start/stop 執行緒)、`app/wash_robot_commands.cpp`(cmd_rail_jog + monitor loop)、`command/dispatcher.cpp`。body build `70f06e56`。備份 `.prev-20260911-railjog`。
-- **web GUI 上滑台(AI-2)**:`-1156` 卡片檢討(移 rail_pos 回讀/7s 輪詢、RPM 上限 500、兩步歸零、守衛=GUI 軟限位)、`-1201` 區間測試(串 rail 三段、只擋下一段)、`-1213` **JOG 上線**(方向對、放開即停、deadman 實測通)。⚠️ AI-2 補:**按住期間暫停對本體其他輪詢**——web→本體單一共用 socket,心跳可能排在慢回覆(relay_status 逾時 20s)後、超過 600ms deadman 在手還按著時被停成一頓一頓。
-  - 🔮 **伏筆**:若現場仍頓挫,下一步把 `RAIL_JOG_DEADMAN_MS` 600→1000(本體 rebuild);代價=失聯時多跑 400ms。先不動看實際。
-  - 併聯重疊 3s 後,AI-2 已把 v1/v2 所有「30s/約40秒」文字改為「3s/約11秒」(`SWAP_WAIT_MS` 75s 上限留著)。
-
-- 📌 **決策(被否決,per user):JOG 前端移除**。實測有 lag——心跳走 web→本體共用 socket、往返貼近 600ms deadman;走隧道更糟。AI-2 拔前端(v2 `-1220`)。🔴 **後端 `rail_jog` 保留**(指令+deadman+行程守衛都對,問題只在 web 延遲;要 JOG 走 `crcmd.py` 直打本體無此問題)。
-  - 🔴 **教訓**:**按住式(hold-to-move)控制不適合 web 共用 socket + 隧道**。吊機 hold 鈕能用是因它在吊機 Pi 本機(127.0.0.1:5002);本體那條要過隧道就頓。日後本體「按住才動」功能先想這條。
-  - AI-2 上滑台重排(同寬輸入框 64px / 同尺寸按鈕 72×34 / 使用順序列),v2 `-1220`。
-
-- 🆕 **ZDT 推桿 RPM 可設定(per user)**——長度已有(extend_raw <cm>),RPM 原為編譯常數。`pusher/zdt_pusher extend_raw <cm> [rpm]` 與 `... retract [rpm]` 尾端加**可選 rpm**(0/省略=沿用常數 extend 600/retract 500,逐位元不變),範圍 50..1000。cmd_pusher/cmd_zdt_pusher +rpm 參數穿到 pusher_move_many_ / pusher_two_stage_retract_(後者加 rpm 預設參數,9 個既有呼叫端不變)。⚠️ dispatcher:retract 無 cm,rpm token 直接接在 action 後(分開解析,不讀成 cm)。尋封 extend 不動。實測 extend_raw 3 200→OK、3 2000→ERR、retract 300→OK。body `8f21cad8`。前端(AI-2 `-1242`)整組+單支各有 RPM 欄、50-1000 前後端雙擋。
-  - 🔮 **伏筆(前端,AI-2)**:**新增輪詢要同步加 `quietRe` 靜音**,否則通訊紀錄被輪詢回覆淹(300 行約 5 分洗光)。這次補了 relay/pump/water/rail_sweep 五條(近兩天加的都漏了)。⚠️ crcmd.py 讀取逾時比 pusher retract(~2.9s)短、可能印不出回覆——測長動作用 raw socket。
-
-- 🆕 **上滑台區間來回 rail_sweep(本體新指令,per user:改本體端、瀏覽器關了照跑完)**——原本前端串三段、斷線就停半路。`rail_sweep <from> <to> [rpm]` / `stop` / `status`。**非同步**(detached thread,仿 cmd_pump_swap_):from→to→from 三段,每段複用 cmd_rail_move、段間檢查 stop、EVT 報進度(rail_sweep_leg/done/stopped/failed)。`rail_sweep_running_` atomic 擋重複啟動。實測 20→60→20 完成 `last=done`。body build `7b7a8363`。dispatcher `rail_sweep`。
-  - 前端(AI-2 `-1233`)已改接:run→一道 rail_sweep + 每 2s status + EVT 畫進度、stop 送 rail_sweep stop;**開頁先問 status → 本體正在跑就直接進進行中畫面**(機器擁有流程才做得到)。
-  - 🔮 **原則(與 JOG 那條互為正反)**:**長動作要機器擁有、非同步回 OK(rail_sweep);短動作才由瀏覽器串。** 按住式(JOG)不適合 web+隧道。
-
-- 🆕 **full 完整腳本整合雙組合清潔(per user「準備整合」+ 3 決定:①每步雙組合 ②每步噴水 ③收手臂不失能)**:
-  - **body 新指令 `arm_retract`**:收回 M1 但**不失能**(送 M1 MOVETO 0 + 等回零,馬達保持通電 holding)。理由 per user:「失能只在校正位置時,其他狀態不該失能——否則手臂會亂跑」。清潔流程每組合之間收手臂用它、不用 arm_park(arm_park 會失能)。dispatcher `arm_retract`。body build `a6889e6a`。
-  - **cycle_test.py full 模式**:每步清潔段由「單滾筒 arm_deploy_f+rail+arm_park」改為**輔助函式 `arm_clean_combo(slot, wet)` 呼叫兩次**——滾筒(wet:開水+滾刷+滑台掃)+ 刮刀(dry:乾掃)。維持 via-body(arm_deploy_f/arm_retract 代轉,不直連 9527)、WARN 容忍、no_wall/obstacle 跳過續行、水量守衛(空箱 bail)、用水順序(M1下才開水/滑台回0後收/收前先關水)。
-  - 兩台 Pi 部署、py_compile 過、arm_retract 實測 `OK pos=-0.0002`。⚠️ **尚未上機跑完整 full 週期驗證**(需 re-init + 腳貼牆)。
-  - ✅ **定案(per user):「只要機器上電,arm 都應該使能——失能手臂會亂跑」**。`cleanup()`(結尾/中止)由 arm_park 改為 `arm_retract`(同樣收 M1 離牆卸力/解過熱疑慮、但不失能)。**全 cycle_test 已無任何 arm_park 呼叫。** 唯一失能時機 = 校正位置(手轉量測時的 M2 DISABLE)。
-- 🔴 **踩坑(重犯)**:為部署 rail_jog 重啟本體,送 `exit` → `cmd_shutdown` **關掉所有繼電器**(pump/閥)→ **腳吸著時失去真空、推桿未收**。昨天 work_log 已記過「重啟會關繼電器」,今天卻在腳吸附狀態下重啟。**教訓:部署重啟前,若腳吸著,先 `pusher all retract` 收腳(或確認機器落地);或改用不觸發 cmd_shutdown 的停法。** 事後 `pusher all retract` 收腳(ZDT 使能跨重啟保留、不需 pump)。
-
----
-
-## 🆕 2026-09-11 DEPLOY_F 力控提速 + v1/v2 方向變更(per user)
-
-**開機**:兩台 Pi 昨關今開,全程序復原(crane :5002 / motor_api :9527 M2 新 slot 保住 / body :5001 WiFi / web :8080+:8081 by AI-2),有線隧道開機後才 UP。
-
-**手臂 DEPLOY_F 力控提速(per user「壓上去太慢」)**——`cleaning_arm/main_api.{h,cpp}`,motor_api rebuild:
-- 診斷:慢不在力控本身。真正瓶頸是 **Step4 尋觸小步爬過空氣**(0.010rad×150ms、cmd 0.40→~0.95 約 55 步 ≈ 8s);暖啟動對「兩槽交替」失效(共用單一 last_touch、RIGHT/LEFT 幾何不同)⇒ 近乎每次冷啟動。
-- 四招(per user 逐步拍板 B→A→再加):
-  1. **粗壓段**(Step5,option B→A):輕觸後大步 0.030+80ms 快壓到 `DEPLOY_F_COARSE_NM`(9→**13**),收斂剩 ~1 步。
-  2. **RELAX_MS 1500→900**(實測鬆弛 1 秒內完成、Step7 FINAL 再補)。
-  3. **deploy_speed 0.15→0.35**(接近牆空氣段加速,安全上限 0.4;接觸後不變)。
-  4. 🔴 **尋觸也改粗步**(Step4 用 COARSE_STEP/COARSE_SETTLE)——**這招才是關鍵**,空氣段 8s→1.4s。
-- 結果:**deploy ~10s → ~5.5-6s、週期 51→36s**;貼牆 tau 14-15Nm 穩定、腳吸盤零失壓。備份 `~/run/motor_api.prev-20260911-{coarse,A,spd,seek,trim}`。
-- 📌 未動的:尋觸接觸後仍慢壓、收斂割線法邏輯不變;只加速空氣段與粗壓。
-- 🔴 **觸頂(per user「收在 36s」)**:再試砍 settle(COARSE_SETTLE 80→60、RELAX 900→700)**會 overshoot**(刮刀 tau 衝 16.75、回 WARN 中止)——tau 未鬆弛完就讀→過壓,**已退回 80/900**。速度招(deploy_speed 0.35→0.40、FINAL 300→200)保留但幾乎沒再省。**36s = 實際下限**:剩 ~5.5s deploy 是物理接近行程(收回→牆 ~2s,收回為轉槽淨空不可省)+ 粗壓 + 收斂 1 步(900ms 鬆弛是準度必需)+ 複驗。再壓就是拿品質換,不划算。
-- 📌 **水平參考偏移 `fine_adjust_level_diff` = 有用、勿移除**(per user 問):它定義「L−R 差多少算水平」,本機水平時 L−R≈6(非 0),設 0 會追 L=R 把機器歪 ~3°(即昨天「停後 roll +3°」元兇)。GUI 可改名講清楚,但不可拿掉。(AI-2 已改名「水平基準 L−R」+ 一行說明、保留。)
-
-**✅ arm 雙組合耐久 10/10 通過**(`cycle_test.py arm 10 100`,提速後):兩把刀每趟貼上、tau 滾筒 14.2~16.0 / 刮刀 14.1~16.6(偶過壓 16),**四顆腳吸盤全程 -66~-70、10 趟零失壓**,每趟 ~40s(原 51s)、總 399s。
-- 🔴 **腳本改:deploy 接受 OK 或 WARN(tau≥10 即算貼牢)**——WARN=壓上了但沒收斂到 15±tol(如過壓到 16),對清潔掃動仍是有效紮實貼牆,不該中止;ERR(no_wall/obstacle/cannot_reach)仍拒。(先前 10 趟在 #2 就是被舊「只收 OK」判死。)
-- 🟡 **待選**:tau 常落 15~16.6 略偏高;要嚴格收 15 可 COARSE_NM 13→11(留更多空間給精收斂),代價每趟略慢。per user 暫不收緊。
-- 🔮 **下一步(per user)**:把此 arm 雙組合整合進 **full 完整測試腳本**(見下方整合計畫)。
-
-**web GUI(AI-2,版號 `2026.09.11-1131`)**:移除 raw command(逐顆通電改走 crcmd.py)、收放繩卡片重排、水平參考偏移改名保留、運動中平衡壓一行、按鈕 3×2 放大、速度區分段鈕反白+精簡。🔴 **決策**:v1→v2 逐項移植**作廢**,v2 自訂新方式(見上一則決策)。⚠️ v2 無 raw command 後,缺的指令(recover/zero_meter…)去 :8080 或 crcmd.py。
-**web GUI 上滑台卡片(AI-2,版號 `2026.09.11-1156`)**:標題只留「上滑台」;移除 rail_pos 回讀/7s 輪詢/座標可信度列/rail_cfg_soft_enable 列;RPM 上限修 1000→**500**(本體實限 `cmd_rail_move`);校正歸零改**兩步鈕**(rail_enable off→手推左端硬限位→rail_enable on+rail_zero,與 cmd_rail_enable 註解的三道指令一致、後端不動)。
-- 🔮 **伏筆/決策**:**行程守衛「可設定」落在 GUI 端軟限位**(localStorage/每瀏覽器一份),因**本體沒有 `set_rail_max` 指令**、硬限位 `ARM_RAIL_TRAVEL_MAX_CM=130` 不受影響。若日後要真正可設定的**硬限位**,需在本體加 `set_rail_max`(本體側工作)。
-
-📌 **決策(被否決,per user)**:原打算把 v1 功能**逐項移植**進 v2(AI-2 已做完整對照 `.claude/reference/v1_v2_feature_map.md`、分 A~I 九組)。jim 改方向:**「不用看 V1,V2 自己定義新方式」** ⇒ **不做逐項移植**,v2 依實際作業需要自訂功能、不追 v1 清單。
-- ⇒ 「切換前問 jim 日常按哪幾項」待辦**作廢**;`v1_v2_feature_map.md` 降為參考文件、§3 待移植表不再是待辦。
-- tier-1 安全五項(昨補)**保留**(v2 自己該有,與 v1 無關)。v1 續跑 :8080 暫不移除;v2 何時成唯一 GUI 改由「v2 自訂功能到哪」決定,不再由 v1 parity 決定。
-- (留這行免得下次盤點又把那九組當待辦拿出來排。)
-
----
-
-
-## ✅ 2026-09-10 傍晚 手臂清潔耐久 + M2 slot 重新定位(per user,實機)
-
-**背景**:兩台 Pi 斷電重開後復原(crane :5002 / body :5001 WiFi / motor_api :9527 / web:8080+8081 由 AI-2),init + ZDT 收 0。
-
-**M2 選刀馬達**:
-- 斷電前 M2 出現**間歇 passive/fault 弱出力**(卡在中心/刮刀推不過去、tau 忽有忽無)——**電源重置即清除**(下次再遇可先試電源重置)。
-- 🔴 舊 slot 值(刮刀 -1.0115 / 滾筒 +0.5316)**失效**:`LR_SLOT LEFT` 一致卡 -0.65 到不了。疑似高扭力硬撐後 M2 傳動(皮帶/聯軸器)滑動,編碼器↔實體對應改變(位移不均勻、auto-home 滾筒 +0.55 vs 手量 +0.86 差 18°)。
-- per user 手轉實測(失能 + `M2 MIT 0 0 0 0 0` 刷新才讀得到活值)→ **新值:刮刀 +0.1913 / 滾筒 +0.8558**,寫進 `cleaning_arm/main_api.h`(RAD + FROM_STOP 各一組,FROM_STOP=RAD−0.7204)+ rebuild motor_api(compile.sh)。改後兩把刀都貼得到牆(各 ~14.8Nm)。
-- 🔴 **待辦/風險**:若之後貼牆吃高扭力**又滑**,這兩值會再跑掉,屆時要先解決 M2 傳動滑動(已寫進 main_api.h 註解)。備份 `~/run/motor_api.prev-20260910-slots`。
-
-**手臂操作守則(per user,已寫進 run_arm)**:🔴 M1 下去才開水、滑台回 0 後 M1 拉回、M1 拉回前先關水、**切 M2 槽前 M1 必已收回**(LR_SLOT/DEPLOY 有「M1 未離開玻璃就拒絕」守衛兜底)。
-
-**cycle_test.py arm 模式大改**(`b54..→7ce48ae6`):從舊單槽 `DEPLOY 520`(位置、會失敗)改成**雙組合/週期 + 力控 DEPLOY_F 15**:滾筒(切槽→deploy→開水→滾刷→滑台0-100-0→關水→M1拉回)+ 刮刀(切槽→deploy→滑台0-100-0→M1拉回);前置檢查腳吸盤已吸牢、每組合後檢查 <-50kPa。**兩個位置參數守衛已修**(arm/crane 模式先前會被 full 模式 `int(argv)` 解析炸掉——arm 從沒實機跑過才浮現)。
-⚠️ **踩坑**:`cycle_test.py` 的 WROBOT 預設是真機 IP,**在 WSL 上「乾跑」= 連真機跑真動作**(我誤跑一次、啟動了手臂+噴水,已收拾)。沒有「本機乾跑」這回事。
-
-**10 趟耐久結果**:**9 趟全過**(兩把刀 14.6~14.8Nm、滑台掃 6.2s、腳吸盤全程 -66~-70 **零失壓**、每趟 ~50s)。第 10 趟因**水箱抽乾**(water_full=0)被安全守衛擋下(關水+收 M1,沒乾抽)——非機構問題。**水箱容量 ≈ 9 噴水趟**,跑更多需中途補水。
-🎁 **A/B 幫浦輪替實戰驗證**:耐久跑途中(accum 到 30 分)**自動 A→B 換手成功**,而腳吸盤全程 -66~-70 沒掉 ⇒ make-before-break 在真實負載下無縫、真空沒斷。收尾時 `active=B`。
-
-**收尾機器狀態**:M1 收回、M2 滾筒、腳吸盤仍吸著(閥+幫浦B 開)、噴水/刷 off、水箱空。→ **2026-09-10 收工**:jim 關機器,crane Pi(.25)由我 `shutdown -h now` 關妥,body Pi(.26)jim 自關(.26 sudo 需密碼、無 key.txt,照規範通知使用者)。
-
-### 前端/web(AI-2 今日,統一由本體 session 記)
-
-🔴 **待辦**:
-- **v2 尚未取代 v1,:8080 仍是 v1**。tier-1 安全五項已補齊,但 tier-2/3 還缺:腳本系統(save/load/list/delete/run_script/run_saved)、流程控制(pause/resume/continue/skip/recover/reset)、重心校正、手臂整合清掃、各種歸零(計米/張力/IMU)、attach/detach、imu_guard、align/realign/return_home、張力 scale、設定持久化。🔴 **切換前先問 jim 這些他日常按哪幾項**(不必全補,但不能切過去才發現少了每天用的)。
-- v1 備份(切換用):本機 `/mnt/agent_ai/.tmp/fcv2-web-v1-backup-2026-09-10.tar.gz`、吊機 Pi `~/web-v1-backup-2026-09-10.tar.gz`。⚠️ .tmp 不進雲端鏡像。
-- **本體 emergency_stop 按鈕從沒實際按過** —— 等 jim 安排安全時機驗證按鈕真的打到 body。
-- v1 無版號機制,改了要**強制重新整理**才看得到。
-
-📌 **決策(含被否決)**:
-- **Manual 完全不鎖**(jim 拍板):機制保留為關掉的 flag,`setCraneLock()` 改回 `var locked=misRunning` 一行即恢復。CLI cycle_test 偵測「不補」(同方向)。
-- 🔴 **後端刻意不消 `cmd_pump_swap_` 微秒競態窗**:消它要把 acquire 移出 pump_swap_、風險大於收益,且前端等待狀態機(先見 swapping=1 再見 0 + 75s 上限)本來就得存在(扛舊韌體無 swapping 欄位/切換中斷線)。**不寫下來下個人會當 bug 去補。**
-- swap 鈕不照 `OK swap_started` 放開(那只是「開始」,切換要 40s)。
-- **PQW CH4 送語意 `water_pump` 不送 `relay 4`**(通道搬過 6→14→4,relay 4 綁號、下次搬會靜默打錯,CH6 是破真空閥)。
-- **輪替門檻用套用鈕不用 debounce 即時送**(即時送會把打字中途值送出觸發真輪替;且 debounce 版擋掉 0=停用這個合法值)。
-- **確認窗分級**:急停不加/RESET 一道(鬆真空)/SHUTDOWN 兩道(脫附)。
-- 跨裝置自動急停 = 還原 v1 既有 fail-safe,非新自主破壞行為。
-
-🔮 **伏筆**:
-- `vac`+`vacSource()` 是 v2 真空源判定**唯一事實來源**(三路徑寫入、一處讀出);日後別再各自 grep `ch2=1`(那正是今天修 6 處的原因)。
-- 救援收繩走 `cmd_manual`(無保護)、一般收放繩走 `cmd_hold`(有保護),**刻意不合併**(前者價值就在繞過保護、保護壞時還能用)。
-- `data-setgo` 加了 `data-tgt="wr"`,本體 `set_*` 可直接沿用;沒標的逐字不變。
-
-⚠️ **踩坑**:
-- 🔴 跨裝置自動急停初版判準錯(只看「對面現在在線」⇒ 吊機本來沒接時開網頁會 3s 後自動送 estop 給 body);正解是 `wasBothUp`(掉線**前**兩台都在)。
-- 🔴 v1「水箱泵浦(CH6)」標籤停在最早版、而 CH6 現在是破真空閥 —— **通道搬家必須同步搬標籤**。
-- `pump status` 舊韌體回 `ERR expected_on_or_off` 非 `unknown_cmd`(pump 指令一直在、只是不認 status)。
-- `chA=-1` 是讀不到非關著;三態 null 不可當 false。
-- `pgrep -f "node server.js"` 命中自己 ssh 指令列 → 用 `pgrep -af`;`cd X && ...` 的 cd 失敗會短路但後續照印「通過」→ 一律絕對路徑;紅燈先確認紅在哪(harness 自身 bug 差點去改沒壞的碼)。
-
-📌 web 收尾:切換前 :8080=v1 / :8081=v2(版號 `2026.09.10-2040`);crane Pi 已關機,web 隨之下線,下次開機需重起 node。工作區未 commit(jim 長期偏好)。
-
----
-
-
-## ✅ 2026-09-10 18:5x 噴水馬達 CH4 修正 + crane 切 WiFi(per user)
-
-- 🔴 **per user:本體 PQW CH4 = 手臂噴水加壓馬達**。程式原本噴水泵寫 `CH_WATER_PUMP=14`,但
-  (1) PQW 板是 8CH(`PQW_TOTAL_CH=8`)⇒ CH14 超範圍、位址不到;(2) 舊註解「尚未接管路」⇒ 沒人發現它打不到。
-  ⇒ 改 `CH_WATER_PUMP` **14 → 4**(所有呼叫端用常數,自動跟著改)。CH4 不撞已指派(1閥/2泵A/3泵B/5刷/6破真空),尤其 **≠ CH6 破真空**(同號會在清洗時開破真空→脫落)。`relay_status` 標籤改 `ch4=噴水加壓馬達(手臂)`。
-- 部署:scp 2 檔(md5 驗)→ build(16/16)→ `grep -a` 驗中文字串在(`strings` 不吐 UTF-8,改用 grep -a)→ 備份 `.prev-20260910-ch4` → 停(15s 退)→ 換(md5 `e6b2af9d`)→ 重啟。
-- 🔴 **crane 連線改走 WiFi**:重啟帶 `FCV_EP_CRANE_HOST=192.168.5.25`(有覆蓋就完全不探測)。log:`位址由環境變數覆蓋 = 192.168.5.25`、`[OK] crane 192.168.5.25:5002`、estop/IMU 通道都連上。(之前重啟兩次都因無覆蓋自動探測選了有線 tunnel。)
-- 實測:`relay_status` → `ch4=噴水加壓馬達(手臂)` ✅;`pump status`/`water_level` 正常。
-- 🔴 **水位計 per user 裝在水箱最低位置** ⇒ 它是「水箱空了沒」偵測,不是「滿了沒」。`water_full=1`=還有水(蓋過最低點)、`=0`=空了。
-  - ⚠️ **操作**:water_full=0 時**不可開 CH4 噴水馬達**(乾抽)。放水觸發驗過:乾 rssi<1700 / 濕 rssi>4800、water_full 翻 1,乾濕分明、不誤觸發。
-  - 🟡 **待確認(未動)**:refill 邏輯把 `out==1` 當「滿了→停補水」,最低點安裝下語意是反的(水碰到底就判滿)。若這顆是低水位/空箱用途,補水判斷要改。等 user 定。
-- 備份鏈:`.prev-20260910-pump`(輪替版)→ `.prev-20260910-ch4`(輪替+CH4,現役前一版)。
-
----
-
-## ✅ 2026-09-10 18:2x 幫浦 A/B 輪替 — **整批部署上線(per user 拍板)**
-
-jim 確認「機器在地面/安全」後整批同批上機,端到端已驗:
-- **本體**:scp 4 檔(md5 逐位元驗)→ `build_body.sh`(16/16 objs)→ strings 驗新字串在、現役無 → 備份 `.prev-20260910-pump` → fifo `echo exit` 優雅停(8s 行程退乾淨,非只關埠)→ 換檔(md5 `90386f7b`)→ 重啟。啟動 log 印 `[OK] pump A/B rotation started (每 30 分輪替，0=停用)`。
-- **實測**(WiFi .5.26:5001):`pump status` → `OK active=A accum_min=0 rotate_min=30 auto_rotate=1 counting=0 swapping=0 chA=0 chB=0`;`relay_status` 標 `ch3=pumpB(A/B輪替)`。(重啟後未 init ⇒ counting=0/幫浦 off,正常。)
-- **`cycle_test.py`**:兩台 Pi md5 `130eac08` 一致。
-- **前端(AI-2)**:部署到吊機 Pi,版號 `2026.09.10-1829`,三方 md5 `66469e44`、http=200,並用真機回覆餵進真正的 `paintPump`/`vacSource` 渲染驗過(counting=0→「未計時」、真空源 false 因未 init、`ch3=pumpB` 不污染 relay 解析)。
-- 🟡 **下一觀察點**:jim 跑 `init` 後應 chA=1 counting=1 ⇒ 標籤轉「計時中」、真空源轉綠、起跑前檢查列 ✕→✓。AI-2 會看一眼。
-- 🔴 **仍待實機驗**:讓它跑滿 30 分自動輪替一次 / `pump swap` 手動切(~40s)/ 故意斷 B 看切回 A。手動 swap 兩邊都先不按,等 jim 吸盤測完一起驗。
-- 備份鏈:`~/run/facade_cleaning_v2.out.prev-20260910-pump`(前一版 = e8f772d,DM2J retry 那版)。要回滾:停程式 → `cp .prev-20260910-pump facade_cleaning_v2.out` → 重啟。
-
----
-
-## 🆕 2026-09-10 真空幫浦 A/B 輪替(磨損平均,per user)
-
-**需求**:A、B 兩顆真空幫浦輪替使用。目前這顆累計 ON 時間超過 30 分 → 換另一顆。
-**關鍵前提(per user 2026-09-10)**:**A、B 兩條氣管併聯在同一真空管路** ⇒ 開任一顆都對整管加壓,
-所以 B 不用單獨測、切換可先開後關真空不斷。切換序 per user:**開 B → 跑 30 秒 → 關 A → 真空異常就切回 A**。
-
-**實作(本體,已 syntax-check 通過,未實機驗證)**:
-- 新背景執行緒 `pump_rotate_loop_`(仿 `water_inlet_watchdog_loop_`),start() 起、stop() 停。
-- 計時:`pump_active_since_ms_`/`pump_accum_ms_`;init 武裝(active=A、關 B、歸零)、`pump off`/shutdown/return_home 暫停(since=0)。
-- 切換 `pump_swap_(from,to)`:**make-before-break** —— 開 to → 併聯 `PUMP_SWAP_OVERLAP_MS`(30s) → 記基準真空 → 關 from →
-  `PUMP_SWAP_VERIFY_MS`(8s)內驗:基準本來就深(≤-30kPa)且關後劣化逾 `PUMP_SWAP_DEGRADE_KPA`(15kPa)⇒ **判真空異常 → 重開 from、`pump_auto_rotate_enabled_=false`(防抖,等人工重啟)**。
-- 門檻 `g_pump_rotate_ms_` 預設 30 分,**0=停用輪替**(永遠留在目前顆=改動前行為)。
-- 指令:`pump on|off`(改為作用在**目前輪替中那顆**)、`pump status`、`pump swap`(手動立即換,成功則恢復自動輪替)、`pump a|b on|off`(顯式單顆)、`set_pump_rotate_min <分>`(0=停用)。
-- shutdown/return_home 改為**A、B 兩顆都關**(輪替後 B 可能正在跑);init 開 A 時**一併關 B**回到已知起點。
-- `CH_PUMP_B` 從「未啟用」改註解為「用於 A/B 輪替」;`relay_status` 標籤同步。
-
-**檔案**:`app/WASH_ROBOT.h`(成員+常數+public 指令宣告)、`app/WASH_ROBOT.cpp`(start/stop)、
-`app/wash_robot_commands.cpp`(init 武裝、cmd_pump、pump_swap_/pump_rotate_loop_/best_vacuum_kpa_/cmd_pump_status_/_swap_/_ch_/set_pump_rotate_min_、shutdown、return_home)、`command/dispatcher.cpp`(pump 子指令 + set_pump_rotate_min)。
-
-🔴 **既有邏輯要一起改(AI-2 讀碼抓出,照實際碼確認)**:前端+腳本有 6 處把真空源寫死 CH2,輪到 B 會誤判:
-- `Linux_test/cycle_test.py:874-`(我的守備)—— pump 檢查只找 pumpA、chA=0 就 `sys.exit(1)` **整趟不跑**(比 GUI 鎖鈕嚴重)。**✅ 已修**:改「A 或 B 任一 ON 即放行」(names 欄推導兩顆,py_compile 過)。B 未啟用的今天行為不變。
-- 前端 5 處(index.html:2021/2140/573/660/3310 + RELAY 表 2572)——AI-2 守備,已規劃:CH2 列改送 `pump a`、CH3 列改送 `pump b`;真空源判定改 **OR**(併聯 30s 窗 ch2=ch3=1 是刻意,非異常);致動器燈改用 `pump status` 的 chA/chB。
-
-🔴 **待辦(需機器)**:
-- 實機驗證:`pump status` / `pump swap` / 讓它跑滿 30 分自動輪替一次 / 故意讓 B 斷氣看是否切回 A。
-- 尚未 build/部署本體(等使用者確認再 `scripts/build/build_body.sh` + 部署)。
-- **WEB(AI-2)**:卡片(Monitor 頁真空量規旁)「目前運轉 A/B + 累計 N/30 分 + 立即輪替鈕 + auto_rotate=0 紅字警」——AI-2 **正在寫、寫好 hold 不部署**。後端指令規格已給。
-- 📌 **部署協定**:jim 拍板 → 我 build+部署本體 → 通知 AI-2 → AI-2 上線前端 → 兩邊一起實測。第 5 條 `pump a|b` 在本體 build 前送出會 `ERR usage`,故整包同一時間點上。
-
-📌 **決策**:累計**不跨重開機**(記憶體內,init 回 A 起算;30 分週期單場作業內就會輪到,夠用)。要跨電源保存再說。
-📌 **決策**:切換偵測「真空異常」用**相對劣化**(關前 vs 關後),cup 未密封時基準≈大氣→不誤判;只有本來撐著真空才會觸發切回。
-📌 **決策(AI-2 指出後改)**:`cmd_pump_swap_` 改**非同步** —— pump_swap_ 同步 ~40s(併聯 30s+驗真空 8s),web 對本體只有一條共用 socket,同步會卡畫面 40s 且撞 fire() 的 30s 逾時。現起 detached thread、立回 `OK swap_started`,結果靠 EVT + `pump status`。加 `swapping` 欄位 + `pump_swap_in_progress_` 互斥鎖(自動 loop 與手動 swap 不同時動繼電器)。自動輪替本來就在背景 loop、不阻塞。
-   **swap 契約**(前後端共識):`OK swap_started`=開始非完成;`swapping` 由 pump_swap_ 內部 guard 設(自動+手動兩路徑共用,故自動切換中前端鈕也鎖);`swapping=1` 涵蓋併聯 30s+驗真空 8s 全程;並發 → `ERR swap_in_progress`(命令層早擋)或 `pump_swap_busy`(內層 guard)。前端放開鈕條件=**先見 swapping=1 再見 0** + 75s 上限(旗標在 detached thread 內才設,回覆早於它一個微秒窗;且要扛舊韌體無此欄位/連線斷)。**後端不消那個窗**:會與內部 guard 的 exchange 對撞,且前端那套本就必須存在,消了是零淨值。
-
----
-
-## 🆕 2026-09-10 腳本整併:cycle_test.py 統一 runner(per user)
-
-6 支週期/運動腳本 → **1 支 `cycle_test.py`,用第一個位置參數選模式**:
-
-| 指令 | 做什麼 | 取代 |
-|---|---|---|
-| `cycle_test.py modes` | 列出所有模式與參數 | — |
-| `cycle_test.py full [cycles] [steps] [step_cm] [roll_trip] [diff_trip]` | 完整清潔週期 | (原本體) |
-| `cycle_test.py crane [trips]` | 純吊機頂↔底來回 + 姿態統計 | `mission_run.py` |
-| `cycle_test.py arm [cycles] [rail_cm] [slot]` | 手臂清潔動作耐久 | `cyc.py` / `arm_cycle.py` |
-
-🔴 **向後相容保留**:第一參數是數字(非模式字)= full,所以 `cycle_test.py 1 5 40` 與 Mission 後端(不帶模式)照舊。
-🎯 **crane 模式複用 `monitored_crane_move`** ⇒ 讀 `raw_x`、座標由 `resolve_zero_convention` 自動判定 ——
-   **mission_run.py 原有的「座標慣例過期、讀 roll 非 raw_x」兩個 bug 在此從結構上不存在**(共用同一份 height/監看)。
-🔴 **full 模式程式碼逐字未改**:模式分派放在 full 主程式之前,非 full 就先跑完 sys.exit,full 直接落下去。
-
-**檔案處置**:
-- `cyc10.py` / `cyc20.py` —— **刪除**(兩者逐位元相同、被參數化的 cyc 取代,零損失,git 有)。
-- `mission_run.py` / `cyc.py` / `arm_cycle.py` —— **轉成轉址墓碑**(執行會印「改用 cycle_test.py <mode>」並 exit;原始碼在 git)。
-- ⚠️ **crane / arm 模式尚未實機驗證**(需機器)。full 模式今日已多趟驗過。墓碑保留轉址,原檔在 git,模式若有 bug 可 `git show` 取回對照。
-
-📌 兩台 Pi 已部署(md5 `71143132`)。純 `Linux_test/` Python,與前端/C++ 無關。
-
----
-
-
-## 🆕 2026-09-10 待辦：DM2J 上滑台 `rail_move` 間歇失敗,驅動要加重試(per user)
-
-**現象**:2026-09-10 WiFi 週期測試步2 `rail 0 復位失敗：ERR rail_move_command_failed`,整輪 bail。
-**性質**:間歇。同一趟步1 的 rail 正常;bail 後手動重送 `rail 0` **一次就成功**(rail_cm=0)。
-**與 WiFi 無關**:DM2J 在本體本地 `.20` bus(與 ZDT 推桿 5-8 + PQW 共線),cycle_test 走 127.0.0.1 打它,不經隧道。是 `.20` bus 的間歇 hiccup(可能與同 bus 的 ZDT/PQW 交易爭用有關)。
-
-**來源**:`app/wash_robot_commands.cpp:438` —— `PR_move_cm_nowait(...)` 回 true(送出即失敗)→ `ERR rail_move_command_failed`。**送出階段就失敗,不是動作中逾時**(逾時是另一條 `rail_move_not_confirmed`)。
-
-🔴 **per user:修改驅動增加重試。** 兩個落點:
-- **(a) 驅動層**(per user 指定「改驅動」):`user_lib/DM2J_RS570` 的 `PR_move_cm_nowait`/底層 `txn_frame_` 送出無回應時重試 N 次(比照其他驅動的 3 次)。
-- (b) 命令層:`cmd_rail_move` 的 `PR_move_cm_nowait` 失敗時重試——較淺,但擋不到 driver 其他呼叫點。
-⚠️ **重試要有上限 + 印出來**(哪一次成功),別靜默;`rail_move_not_confirmed`(動作中逾時)那條**不要**一起重試——那時滑台可能還在動,重送會疊指令。
-📌 需重建本體 binary + 重啟本體才生效,所以先記著,擇機做。
-
----
-
-
-## 🆕 2026-09-10 待辦：Manual 手臂 M1/M2「靠上/離開」+ DEPLOY_F 雙上限（per user 已定案設計，未實作）
-
-**設計已與 per user 討論定案，尚未寫碼、機器未修好無法實機驗。**
-
-**靠上玻璃** —— 在 `DEPLOY_F` 上加距離參數，變成**壓力/距離雙上限，誰先到停誰**：
-```
-DEPLOY_F <目標壓力N·m> <slot> [預估距離mm]
-```
-- 壓力先到 → 停，`OK stopped=pressure`
-- **距離先到 → 停在那、接受當下壓力、照樣清潔**（per user 選 A：15 N·m 非硬需求，停在預估距離比為差幾 N·m 頂到硬上限安全），`OK stopped=distance`（tau 可 < 目標，不算失敗）
-- 既有兩守衛保留：接觸點 < `THETA_MIN(0.565)` → `obstacle`；沒碰到走到 `THETA_MAX(1.10)` → `no_wall`
-- 距離單位沿用 `wall_mm`（現有幾何都用它，`main_api.h` 的 wall_mm→theta 映射）
-- 預估距離可用上次接觸點 `deploy_f_last_touch_cmd_` 預填
-
-**離開玻璃** —— `PARK`，完全收回，無參數（per user：完全收）。
-
-**落地分工**：
-- 🔴 **motor_api（`cleaning_arm/main_api.cpp`）＝我**：DEPLOY_F 加距離上限分支、回覆加 `stopped=pressure|distance`。動到力控尋觸迴圈 + 壓玻璃，**寫完 syntax check、標未經硬體驗證、先不部署**，等機器修好。
-- **Manual UI ＝ AI-2**：靠上鈕 + 目標壓力框(預設15) + 預估距離框(上次接觸點預填) + 離開鈕 + slot 選擇(LEFT刮刀/CENTER/RIGHT滾筒)。
-
-📌 為什麼雙上限是對的：只有壓力 → 壓力到不了時力控一路摸到硬上限（走太遠）；只有距離 → 玻璃比預估近時壓爆。兩個誰先到 = 各擋一種風險。
-
----
-
-
-## 🔴🔴 2026-09-09：兩台 Pi 路徑大搬家 —— **本檔以下所有 `~/bringup` 都是歷史**
-
-`~/bringup/` 已不存在。新配置：
-
-| 路徑 | 放什麼 |
-|---|---|
-| `~/projects/facade_cleaning_v2/` | **原始碼**（與 repo 同構，頂層只有目錄） |
-| `~/run/` | 執行檔、`logs/`、FIFO、`cycle_logs/`、回退點、`bench/` |
-| `~/archive_20260909/` | 舊樹 tar.gz |
-
-📌 **本檔的 58 處 `~/bringup` 刻意保留不改** —— 那些是當時的事實，改掉等於竄改歷史。
-操作路徑一律以 `.claude/runbook.md` 檔首的搬家公告為準；細節見 `changelog.md [2026-09-09c5]`。
-
----
-
-## 🆕 2026-09-09 新開待辦：roll 隨週期累積漂移（+0.187°/週期）
-
-10 週期實測：停後 roll 由第 1 週期 **−0.03°** 漂到第 8/9 週期 **+2.13/+2.11°**，
-線性趨勢 **+0.187 °/週期**、9 個週期累積 **+1.68°** ——
-🔴 **而同一時間 `L−R` 的中位數是 0**，計米器路徑一直精準維持在目標上。
-⇒ 漂的是「計米器讀數 ↔ 物理水平」的關係（換算約 **0.17cm/週期** 的左右累積誤差），不是控制迴路失效。
-
-🔴🔴 **同日更正：這個結論下得太快。** 另有一個會產生**一模一樣資料**的解釋沒被排除——**漂的是 IMU 融合姿態、計米器其實是對的**。若為後者，結論整個翻轉：`balance_source=imu` 正把漂掉的目標餵進平衡迴路。
-📌 第一個該起疑的訊號我看到卻沒追：**靜置期間 roll 由 +1.62 → +1.99，機器完全沒動** —— 計米器不動就不會累積誤差。
-🎯 **2026-09-09 傍晚已解：IMU 沒有漂，原結論成立。** 判別法：加速度計以重力為基準不會漂 ⇒ 看 `roll − atan2(ay,az)`。**整天四個時點／兩個位置，偏移都在 +0.22 ± 0.6° 內**（15:50 頂端 +0.22／第二輪後頂端 +0.22／地面端靜置 −0.41），而漂移量是 **+3°／20 週期** —— 偏移根本不足以解釋。⚠️ 中途一個 +1.82° 的假訊號來自「動作剛結束、機器還在擺」時取樣，靜置後消失。⇒ **漂的是計米器讀數 ↔ 物理水平的關係，兩段式設計（計米器粗調 + IMU 細調）是必要的。** 🔬 兩輪獨立量到的漂移率 **+0.187 / +0.156 °/週期**（跨輪累積 +0.147），趨勢重現。🔧 待辦：考慮每 N 個週期插入 `roll_trim_ms` 細調，或把 IMU 細調納入回程收尾。原判別法紀錄：初步：15:50 差 **+0.22°**、第二輪運行中差 **−1.7°**，⇒ 差值本身移動了 1.9°，**傾向 IMU 在漂**，但基準粗（早先 `ay` 只有 2 位小數）且取樣在運動中，**尚不是定論**。
-🔧 從現在起每輪**靜止時**記錄該差值。外推約 30 個週期會碰到 6° 中止門檻（此外推在兩種解釋下都成立）。
-
-⚠️ **n=1 輪不當定論**（週期間散布 ±0.4°，趨勢量是它的 4 倍 ⇒ 本輪趨勢為真，但「是否每輪如此」未知）。
-📌 未排除的替代解釋：鋼索伸長／捲筒排線／載重分佈。
-🔧 **下一步：同條件再跑一輪 10 週期**（依本日教訓：A/B 前先量 A 自己的變異）。若確認，
-   考慮在每 N 個週期插入一次 `roll_trim_ms` 細調，或把 IMU 細調納入回程收尾。
-
----
-
-## 🔴🔴 2026-09-09 新開待辦：PQW 繼電器模組**會替不存在的通道編造回覆**
-
-**實測**（機器停妥、繼電器全關、`ch14` 未接負載）：8 路的模組對 `ch9`~`ch16`
-**照單全收，寫入回 `OK`、回讀也回 `1`**；對照組 `ch8`（實體存在）行為相同 ⇒ **從回應完全分不出來**。
-
-🎯 **這解開了既有謎團**：`CH_BRUSH` 2026-07-24 誤改成 15、**實機滾筒整段不轉持續五週**才被發現。
-先前只記「打到不存在的通道」，沒解釋為什麼五週沒人發現 —— **因為模組會說謊，帳面全綠。**
-
-| # | 待辦 | 狀態 |
-|---|---|---|
-| 1 | ~~`app/WASH_ROBOT.h:443` `PQW_TOTAL_CH = 16` → **改回 8**~~ → ✅ **2026-09-10 已改（AI-2 線）**，見 `changelog [2026-09-10a2]`。**本機完整建置通過（16/16 objs + link），未部署／未上機**（x86-64 ≠ ARM64，證明的是編譯連結正確）。 🔴 **但這不等於 PQW 修完了**：效果只是「模組偽造 `ch14=1` 的假確認」→「best-effort 分支印一行 `readback unavailable` 但仍回成功」＝**說謊降級為沉默＋證據**，真正的修法仍是第 2 列的通道號。安全性實查：6 個 `readAllStatus()` 消費者**全部先檢查長度才索引**，且 console v2 的 `RELAY` 表本來就只列 CH1~CH8（**前端早就是對的，後端那個 16 才是異數**） | ✅ 已改 |
-| 2 | `:491` `CH_WATER_PUMP = 14` 確定越界，要收回 8 以內（AI-2 板子排 CH8）。⚠️ **牽涉實體接線，不逕自改**。<br>📌 **2026-09-10 補一個會改變優先度的事實：console v2 完全沒有 water_pump 的 UI 入口**（`RELAY` 表只有 ch1~ch8，`web_backend/public_v2/index.html:2077`）⇒ 這條越界路徑**只有 raw command 打得到**，不是使用者隨時會踩的洞。**優先度可降，但不可關閉**——要決的仍是通道號（水路實體有沒有接） | 🔴 未修 |
-| 3 | ~~`cmd_water_pump` 是裸 `controlRelay` + 無條件 `OK` + 無回讀~~ 🔴 **2026-09-10 更正：這段敘述已過期。** 回讀與 `pqw_set_relay_verified_` **09-07 就補上了**（見下方 09-07 那列與 `changelog [2026-09-07m2]`），`wash_robot_commands.cpp:3970` 現在會回 `ch14=`。**還沒修的只有通道號**（＝第 2 列），不是回讀。原文「即使加回讀也救不了」講的是機制，**結論仍然成立** —— 模組對 ch14 回編造值，所以現在那個 `ch14=1` 正是一個看起來完全正常的假確認 | 🔴 **通道號未修**（回讀已有） |
-
-📌 吊機那顆宣告是對的（`Crane_control_PI/main.cpp:216 = 8`）；**過期的是本體那個 16**。
-📌 對 PCB：新板「寫入越界回 `0x02`」由防呆升級為**修正現行硬體的明確缺陷**（已納入 AI-2 設計 v0.6）。
-
-## 🔴 2026-09-09 AI-2 交接的待辦（讀碼發現，尚未處置）
-
-交接文件已由 `tmp/` 搬到 **`.claude/handoff/`**（`tmp/` 同時被 `.gitignore` 與
-`mirror-backup.sh` 的 EXCLUDES 排除 ⇒ **零備份**，三份 `.md` 原本只有一份）。
-
-| # | 待辦 | 出處 |
-|---|---|---|
-| 1 | 🔴 **本體端 crane watchdog 是死碼**：`crane_last_ok_ms_` 寫 3 處**讀 0 處**、`WATCHDOG_TIMEOUT_MS` 無任何運算式使用、`crane_watchdog_loop_` 只排空張力警報。比較曾存在（`9f33c6a` 04-15），到 `4d1409c` 06-22 消失。**補回或明確刪除，二選一，現狀最壞** | `ai2-watchdog-handoff.md` |
-
-#### 🔴 2026-09-10 複驗（AI-2 線）：上表第 1、2 列屬實，**但底下還有一層**
-
-三件新的，都未動手（改行為的部分要等機器線測完）：
-
-| # | 發現 | 位置 |
-|---|---|---|
-| A | ⚠️ **`crane_keepalive_loop_` 的存在理由已經沒了**（它的檔頭寫著「background ping … **so crane_watchdog doesn't false-abort**」，而那個 false-abort 的判斷式不存在了）。🔴 **但我 09-10 初版把它寫成「現在每秒送一次 ping、搶 `crane_mtx_`」是錯的** —— agent-ai-e9 指出並經我複驗：`:405-406` 的執行緒啟動**自 2026-05-15 就被註解掉**、`crane_keepalive_running_` 建構時即 `false` ⇒ **迴圈體從來沒有執行過，零執行期成本**。⇒ 正確的描述是**死碼餵死碼**（兩邊都不動），不是「活碼餵死消費者」。📌 **我的錯誤本身就是通則 #1 再演一次**：我讀了函式體與檔頭註解，卻沒問「誰啟動這個執行緒」——**跟「誰讀這個值」是同一個問題的另一層**。連帶：(c) 刪除的清理範圍比我估的更乾淨 | `app/WASH_ROBOT.cpp:3025`；啟動點 `:405-406`（已註解） |
-| B | ⚠️ **`:2957` 的函式檔頭註解掛錯函式** —— `crane_watchdog_loop_` 頭上寫的是「Per-side retract until both L/R tension >= target_kg … Used by `bal_cal_preload_`」，那是 `crane_retract_to_weight_` 的說明。函式體被刪時註解留在原地，黏到下一個函式頭上 | `app/WASH_ROBOT.cpp:2957-2959` |
-| C | ✅ **舊實作已從 git 撈回**（`6abd8c6:user_lib/WASH_ROBOT.cpp:391`）⇒ 「補回」有底稿不是重寫；`motion_active_`／`abort_flag`／`evt_` 都還在，接得回去 | — |
-
-📌 **A 修正後仍值得留一句，但要留對的那句**：原本我想記「死碼也可以是還在跑、消費者已死的迴圈」——**那個結論建立在錯誤的前提上**。真正的收穫是**查證的順序**：判斷一個迴圈有沒有在跑，要先找它的**啟動點**，不是讀它的迴圈體。
-`crane_last_ok_ms_` 的三個寫入點（含 `:2472` 專為 `motion_progress` 補的那個）**都還帶著「為了不讓 2s watchdog 誤觸發」的註解在維護** ——
-⇒ 有人一直在有意識地餵它。**這正是 AI-2 通則 #1「要找誰讀這個值，不是誰寫這個值」的第二個實例。**
-
-🔴 **傾向補回而非刪除**：刪掉等於承認「吊機斷線時本體不需要中止動作」，那是**安全決策不是清理**。
-但補回會改變執行期行為（2s 沒回應就 `abort_flag`）⇒ **不要在上機測試的當天上。**
-若最終選刪除，**A 的 keepalive 必須一起刪**，否則留下更難懂的殘骸。
-| 2 | 🔴 `crane_retract_safe_` **零呼叫點** ⇒ `crane_cli_estop_` 整條旁路在 09-09 接上急停之前**從未於執行期建立過**。`crane_retract_to_weight_` 更是**宣告了沒定義也沒呼叫** | 同上 |
-| 3 | ~~🔴 **水閥**：`set_water_inlet_` 先判失敗才 return、成功才蓋時間戳 ⇒ 開閥送到了但回覆丟了 ＝ 閥開著、watchdog 沒武裝、沒人看管~~ → ✅ **2026-09-10 已改（AI-2 線）**：先武裝後送 ＋ 獨立 `WATER_INLET_CMD_TIMEOUT_SEC = 5`，兩個獨立 hunk，見 `changelog [2026-09-10]`。**本機完整建置通過（16/16 objs + link），未部署／未上機**（x86-64 ≠ ARM64，證明的是編譯連結正確）。 🔬 兩者互動：Patch 1 讓時間戳變成「開始嘗試」，Patch 2 正好把提早量由最壞 361s 壓到 ~16s ⇒ 合法最長開閥窗 185s + 16s ＜ `WATER_INLET_OPEN_MAX_MS` 300s，**不會誤觸發強制關閥**。🟡 **§10.2 的 EVT 措辭分兩種（「確定開過」/「未確認」）未做，待拍板** —— 那是 Patch 1 唯一真成本（假 EVT 稀釋真 EVT）的解藥。❌ §10.3 B3 第四條連線未做（需 per user） | `ai2-crane-cmd-protection.md` §10 |
-| 4 | 🟡 Phase 2.3 若要做走 **Option B**（拆 `record_crane_evt_`），素樸版不該上。前置是先修 `imu_push_loop_` 的無逾時 `connectToServer` —— **與 09-09 在 `crane_stop_estop_` 修的是同一個** | `ai2-peer-visibility.md` §2 |
-
-### 📌 AI-2 帶回的通則（值得進踩坑索引）
-
-1. **判斷保護機制在不在，要找「誰讀這個值」不是「誰寫這個值」** —— 寫入點、常數、餵食執行緒、解釋註解可以全部健在，而**比較那一行不存在**
-2. **一個函式同時承載兩個關注點時，其中一個過時會把另一個一起帶走且無徵兆**（張力監控退場時把 estop 旁路一起帶走）
-3. **只宣告、沒定義、沒呼叫端 —— 編譯器一個字都不會說**
-4. **對有物理副作用的遠端指令，收不到回覆 ≠ 沒生效**；安全側應「**先武裝、後送出**」
-5. **結論對不代表推理對**（AI-2 用「一個沒接東西的繼電器」證明模組只有 8 路，那句講的是沒接負載不是沒有通道；結論碰巧對）
-6. **越界不報錯的裝置會替不存在的通道編造回覆**（見上方 PQW 實測）
-
-7. 🔴🔴 **「看到有那段程式碼」不等於「那段程式碼會執行／會適用」—— 一定要讀到閘門那一行。**
-   📌 **2026-09-10 一天之內四次，兩個 session 各兩次**，形狀完全相同：
-
-   | # | 誰 | 讀到了什麼 | 沒讀到的閘門 | 錯誤的結論 |
-   |---|---|---|---|---|
-   | 1 | AI-2 | `crane_keepalive_loop_` 的函式本體與檔頭註解 | **執行緒啟動點 `:405-406` 早已註解掉** | 「它每秒送一次 ping、搶 `crane_mtx_`」 |
-   | 2 | agent-ai-47 | `emergency_stop` 裡有 `set_water_inlet_(false)` | **外面包著 `if (ts != 0)`** | 「運動中關不掉水的出口是急停」（無條件） |
-   | 3 | AI-2 | 自己寫的降級分支會印訊息 | **latch 沒有解除路徑** | 「停掉輪詢並說明」＝以為可接受 |
-   | 4 | agent-ai-47 | 後端 `PQW_TOTAL_CH` 由 16 降為 8 | **前端 `RELAY` 表本來就只有 ch1~ch8** | 「`ch14` 每次回讀都會落進 undefined 分支」 |
-
-   ⇒ **這是通則 #1 的推廣**：#1 說「找誰讀這個值」，#7 說**任何一段程式碼都要找它的啟用條件**
-   —— 執行緒的啟動點、`if` 閘門、迴圈的解除路徑、資料的實際範圍，都是同一種東西。
-   **它們全都不在你正在讀的那幾行裡，而那幾行看起來完全自洽。**
-
-8. 🔴 **一個正確的動作配一個錯誤的理由，照單全收會在日誌裡留下一條假因果** ——
-   而下一個人會拿它去推別的結論。**動作對不對與理由對不對要分開驗，兩者都要記對的那個。**
-   （2026-09-10 `paintRelay` 的 `data-stale`：該做，但不是因為 `ch14`。真正的理由是
-   「幀損毀但仍帶 `ch1=` 而被 `expect` 認領」，那個有前科支撐。）
-
-## 🔴 2026-09-09 文件更正（三處，皆已改）
-
-| 項目 | 內容 |
-|---|---|
-| **QX-DO24 是貼牆螺旋槳不是散熱風扇** | `WASH_ROBOT.h:578`「通訊斷掉**螺旋槳不會停**；左右螺旋槳共用 CH1」。⇒ **失效語意與其他通道相反**：失聯要**保持輸出**（停止推力＝機器離牆）。`CLAUDE.md` 五處已改 |
-| **`.30`/`.31` 網關是 8N2 不是 8N1** | 六台實查。SE3 本來就設 `07-07=3=1,8,N,2`，被 SD76 逼著設 8N1；SD76 已於 05-15 移到 `.34` ⇒ 限制消失 |
-| 🔴 **`MH300` 摘要 `09-04 = 8N1` 已過期** | 「配合與 SD76 共用 bus」的理由不再成立。**照舊填會與網關（8N2）不符、整段不通** ⇒ 已標紅「待重新決定」，會咬 MH300 遷移 |
-
-📌 三條的共同點：**文件落後於硬體變更**。`.30`/`.31` 由 8N1 變 8N2 是 05-15 re-layout 帶來的，
-**在兩份手冊摘要與一份架構文件裡都沒有被更新** —— 搬動裝置那次沒有回頭掃過所有引用它的文件。
-
----
-
-## 📋 2026-09-10 給 AI-2 的決定（跨 session 訊息未送達，改寫在這裡）
-
-⚠️ **agent-ai-e9 → AI-2 的訊息兩度被擋（一則過期未放行）**，所以決定改寫進本檔。AI-2 請以此為準。
-
-| 項目 | 決定 | 理由 |
-|---|---|---|
-| **GUI 三顆按鈕確認彈窗**（`pwm save` / `zdt_zero` / `rail_cfg_soft_enable`） | ✅ **復原** | 判準是**不對稱性**：復原錯了，代價是多按一次確認、五行就能再拿掉；不復原錯了，**`pwm save` 燒掉的 flash 壽命（1~2 千次）回不來**。AI-2 的對照組把這變成事實而非判斷 —— `rail_zero` 掛著**一模一樣的 `data-confirm="1"` 卻還有彈窗**，唯一差別是 handler 寫在自己那裡而不在共用委派裡 ⇒ **差異來自程式碼結構，不是誰比較危險**。🔴 **`#relaygrp` 完全不碰**（per user 明確要求）。📌 **這是 agent-ai-e9 拍的板，不是 per user 要求的**，已向使用者揭露、他隨時可退 |
-| **`PQW_TOTAL_CH` 16→8** | ✅ 同意已做，**同意但書** | AI-2 那句要留：**「偽造的確認比缺少確認更糟，因為前者會讓下游停止追問」**。這比「改回 8」本身有價值。📌 附帶證據：console v2 的 RELAY 表**本來就只列 CH1~CH8** ⇒ **前端早就是對的，後端那個 16 才是異數** |
-| **watchdog** | 🔴 **等 per user**：補回(b) 還是刪除(c) | 補回會改變執行期行為（2s 無回應即 `abort_flag`），**是安全決策不是清理**。今天只做零行為變更的註解歸位(a)。patch 可先寫好**不要上** |
-| **水泵通道號** | 🔴 **等 per user** | 需先確認**管路到底接了沒**。沒接＝純軟體改號可現在做；接了＝等現場 |
-
-### 🔬 agent-ai-e9 查到、AI-2 要的現場事實
-
-```
-crane_retract_safe_      呼叫點 0（只有定義 :2768 + 三處註解）
-read_rope_weight_estop_  唯一呼叫點 :2807，就在 crane_retract_safe_ 體內 ⇒ 一起死
-crane_cli_estop_ 建立點三處：
-  :374  init() 預熱                 🟢 活（今天開機實跑到）
-  :2572 crane_stop_estop_ 有界自救   🟢 活（09-09 加）
-  :2705 read_rope_weight_estop_     🔴 死
-```
-⇒ **「09-09 之前從未於執行期建立過」成立**；現在活的兩條**與 `crane_retract_safe_` 無關**，刪它不會動到急停通道。
-📌 補充：`crane_keepalive_loop_` 在 `WASH_ROBOT.cpp:406` **本來就被註解掉沒在跑** ⇒ 死碼餵死消費者，兩邊都不動，(c) 的清理範圍比估的更乾淨。
-
-### ✅ 2026-09-10 AI-2 回報：三項決定已落地 + 小工作結果
-
-| 項目 | 狀態 |
-|---|---|
-| **GUI 三顆按鈕確認彈窗** | ✅ **已復原**。共用委派重新 gate 在 `data-confirm` 上 + 逐指令確認文字（`CONFIRM_MSG`）。🔴 **`#relaygrp` 未碰** |
-| **watchdog (a) 註解歸位** | ✅ **已做**（零行為變更）。移除黏錯的 `crane_retract_to_weight_` 註解，補上如實的檔頭 |
-| **watchdog (b) 補回 patch** | ✅ **已寫、刻意未套用** → `.claude/handoff/ai2-watchdog-restore-patch.md`。🔴 **拍板前必讀下方那條**，(b) 不是貼上去就好 |
-| **`PQW_TOTAL_CH` 16→8** | ✅ 已做（見 `changelog [2026-09-10a2]`） |
-| **水泵通道號** | ⏸ 未動，等 per user |
-
-#### 🆕 2026-09-10 console v2 新增「吊機繼電器 ZS-DIO CH1–4」（agent-ai-47 指派）
-
-✅ 已做，見 `changelog [2026-09-10a3]`。**只動前端一個檔**，未在真人瀏覽器實測。
-
-✅ **2026-09-10 per user：CH4 的確認視窗已移除**（按了就執行，同 `#relaygrp`）。
-🔴 **明確要求、不是疏漏，不要補回去。** 回讀誠實度的三個機制（等回讀才翻開關／
-`data-stale`／三態模組狀態）**全部保留** —— 攔截與誠實回報是兩件事。
-⚠️ **但風險轉成只靠人記得**：未武裝的閥 watchdog 與急停都不會關，
-而「先武裝後送」還在 `app/` 未部署 ⇒ 在那之前「送到了但回覆遺失」沒有任何自動關閥，
-**而且現在沒有 UI 會提醒這件事**。見 `changelog [2026-09-10a6]`。
-
-🔴🔴 **一個要拍板的偏離**：`agent-ai-47` 給的是吊機端指令（CR `:5002`），
-**我把控制改走本體**（`WATER_CTRL_VIA = WR`），回讀才走吊機。理由：
-
-**自動關閥只有一個實作 —— 本體的 `water_inlet_watchdog_loop_`（300s 強制關），
-而它由本體的 `set_water_inlet_()` 蓋時間戳武裝；吊機端沒有任何 watchdog。**
-⇒ 直送吊機 ＝ 時間戳沒被蓋 ＝ **閥開著、沒有東西會關它**。
-（v1 `public/app.js:1025` 送的也是 `washrobot`，且**另外**還有 60s 前端 auto-OFF
-＋ watchdog toast ⇒ 直送吊機會讓 v2 的保護**比 v1 更少**。）
-
-📌 **這是同日早上剛補的那個洞換一個門走進來**：早上是「回覆丟失所以沒武裝」，
-這裡是「根本沒經過武裝那段程式」——**同一個後果、兩個成因，早上的修法擋不住這個**。
-
-⚠️ 代價：走本體多一跳，`crane_cmd_` 會搶 `crane_mtx_` ⇒ 運動中可能等。
-**要改回直送只需換一個具名常數，但那等於接受沒有自動關閥。**
-
-🟡 **另外兩件待 `agent-ai-47` 處理**（屬 C++ 線，我沒動）：
-① `CLAUDE.md` 驅動表仍把 `ZS_DIO_R_RLY` 列在「未使用」；
-② 吊機拓樸圖仍寫「`.34` PQW slave 12 CH4 ＝ 進水球閥」，實際已是 **ZS-DIO 獨佔 `.32`**。
-🔴 **而 `.32` 在本檔別處還記著是「X518 左（09-01 已移除）」⇒ 同一個 IP 換了用途，
-查舊文件會查到不存在的裝置。**
-
-#### 🔴🔴 watchdog (b) 拍板前必讀：**照舊版直接貼會誤觸發**
-
-寫 patch 時挖到的，per user 決定 (b)/(c) 之前應該先看到這條：
-
-**舊版能用 `WATCHDOG_TIMEOUT_MS = 2000`，是因為它自己每 500ms 送一次 `ping` 在餵。**
-而 `crane_keepalive_loop_` 已於 2026-05-15 停用，理由寫在 `WASH_ROBOT.cpp:399`
-（「New design: no continuous ping. Each `crane_cmd_` self-heals on fail.」）——**那個理由同樣適用於 watchdog**。
-
-⇒ 若「補回比較、但不送 ping」，`crane_last_ok_ms_` 就只有**真的有指令往來**時才刷新，
-而長時間純本體動作（ZDT 伸縮 4s+、DM2J 滑台 2-3s）期間**沒有任何東西刷新它**
-⇒ **2 秒門檻極可能誤觸發 ⇒ `abort_flag` ⇒ 運動中止。**
-📌 **而那正是 2026-05-15 當初加 keepalive 要解決的問題**——繞了一圈回到原點。
-
-🎯 **這件事本身就是這條待辦的成因再演一次：把一個自洽的設計拆成兩半、只裝回一半。**
-（原成因：張力監控退場時把急停旁路一起帶走。）
-
-⇒ **建議分三步，不要一步到位**：① 先只發 EVT、不設 `abort_flag` ② 依實測 `idle_ms` 分布**重選門檻**（2s 幾乎確定太短）③ 確認不誤觸發後才接回 `abort_flag`。
-
-#### 🔬 GUI 復原的驗證（不是「改完就算」）
-
-- 逐 tag 審計：**帶 `data-cmd` + `data-confirm` 的剛好就是那三顆**（`pwm save`／`zdt_zero`／`rail_cfg_soft_enable`）
-- `rail-zero` **有 `data-confirm` 但沒有 `data-cmd`** ⇒ 委派抓不到它，走自己的 handler ⇒ **不會變成連按兩次確認**
-- 🔴 **繼電器列兩個屬性都沒有**（`RELAY.map` 只產生 `data-ch` / `data-danger`）⇒ **委派永遠攔不到繼電器**，per user 的「按了就執行」結構上就成立，不是靠我小心
-- `tools/check_console.js` 全過；另把 2 個 inline script 抽出來跑 `node --check` **實際解析通過**（該工具只驗大括號平衡，不解析 JS）
-
-#### ⑤ `web/node_modules` 可重建性 —— ✅ 可重建，**但有一個會咬人的但書**
-
-🔴 **我沒有對兩台 Pi 下任何指令**（依指示），以下全在 WSL + scratchpad 完成，**沒有真的安裝、也沒寫進樹內**：
-
-- ✅ `express@^4.19.2` 與 `ws@^8.18.0` **在 registry 都抓得到**（各有數十個符合的版本）
-- ✅ `npm install --dry-run`（scratchpad 的 `package.json` 副本）**完整解析成功：70 個套件**
-- ⚠️ **Pi 那端有沒有網路我查不到**（不能下指令）——這一項要你確認
-
-🔴🔴 **但書：`web_backend/` 底下沒有任何 lockfile**（`package-lock.json` / `shrinkwrap` / `yarn.lock` 全無，且 git 也只追蹤 7 個檔）。
-兩個相依都是 **caret 範圍**（`^4.19.2` / `^8.18.0`）⇒ **`npm install` 給的是「當下最新的相容版」，不是 Pi 上現在跑的那個版本。**
-實測解析結果是 **express `4.22.2`／ws `8.21.3`** —— 已經比 `package.json` 寫的高了好幾個 minor。
-⇒ **「可重建」成立，「可還原成同一份」不成立。**
-
-🎯 **正解是把 `package-lock.json` 進版控**（幾十 KB，比 `node_modules` 小三個數量級）。
-🔴 **但一定要在 Pi 上、從現有的 `node_modules` 產** —— 在這裡產只會把**現在最新的版本**釘死，
-**正好丟掉那份唯一副本裡真正要保存的東西**。📌 這跟「衍生副本過期」是同一類錯誤，只是方向相反。
-
-📌 **順帶更正一條**：`node_modules` **不在 `.gitignore` 裡**（我逐行看過）。
-它不是被規則排除的，是**從來沒有人加過** ⇒ 要收進版控**沒有 gitignore 的阻礙**，不需要 `-f`。
-
-## 🟢 2026-09-10 開工現況
-
-四支程式已起（吊機 `:5002` / WEB `:8080`+`:8081` / 本體 `:5001`），繼電器全 0，機器在地面端。
-
-| 項目 | 狀態 |
-|---|---|
-| ✅ **SD76 零點撐過整台斷電** | `L=258 R=255` 與昨天收工逐位相同 ⇒ `home_ground_cm=256` 直接可用，不必重新校正（**這條以前沒驗證過**） |
-| 🔴 **Fathom-X 隧道沒通** | 本體自動退回 WiFi（`有線 192.168.1.10 探測不通 → 走 WiFi`）。兩台 eth0 都 UP、各自看得到自己那側的網關，跨不過去 ⇒ **實體項**。📌 但昨天實驗顯示隧道在 VFD 運轉時掉 90% 封包，走 WiFi 對測試反而有利 |
-| ⚠️ **WEB 起不來（已修）** | `web/node_modules` 是指向我昨天刪掉的 `~/projects/web_ver2` 的 symlink。已從 tarball 取回並改成實體目錄。🔴 **它現在是唯一副本且不在版控**，`npm install` 能否還原未驗證 |
-| 🔴 `level_diff` **刻意留 0 待實測** | 現在 `L−R=+3` 而 `roll=+1.46°`，依昨天斜率該是 −3.2° ⇒ **約 4.7° 偏移**，要調平後重量 |
-
-## ✅ 2026-09-10 收工現況（13:55）
-
-四支程式全在跑，**五條跨機連線全部走有線隧道 `192.168.1`**（per user「都走192.168.1」）：
-
-| 鏈路 | 實走（`ss -tnp` 實抓，非設定值） |
-|---|---|
-| 本體 → 吊機（主 / estop bypass / IMU push） | `192.168.1.100 → 192.168.1.10:5002` ×3 |
-| WEB :8080 / :8081 → 本體 | `192.168.1.10 → 192.168.1.100:5001` ×2 |
-| WEB → 吊機 | `127.0.0.1:5002` —— 同一台 Pi，本來就不過網路 |
-
-⚠️ **切之前 WEB 是漏網的**：本體是用 `FCV_EP_CRANE_HOST=192.168.1.10` 起的，
-但兩個 node server 起得更早、帶的是 `WROBOT_IP=192.168.5.26`（WiFi），**切隧道時沒有跟著重起**。
-📌 **通則：改鏈路要盤點「所有跨機的行程」，不是只改當時手上那一支。**
-🔧 啟動腳本已固化：吊機 `~/run/start_web.sh`、本體 `~/run/start_body.sh`（IP 寫在腳本裡，不再靠手打）。
-
-🐛 **踩到一個 shell 自殺**：`ssh <pi> 'pkill -f "node server.js"; …; node server.js …'`
-—— 遠端那個 `bash -c` **自己的命令列裡就含有 `node server.js`** ⇒ pkill 連自己一起殺，
-兩個 node 停掉但後面重啟那幾行沒跑到，`ss` 也沒印（ssh 回 255）。
-🔧 **kill 與 start 要分成兩次 ssh**，或 start 走腳本讓 pattern 不出現在命令列上。
-
-### 本體已部署（13:43）
-
-binary `557eb6fd`（回退 `~/run/facade_cleaning_v2.out.prev-20260910-1343` = `3d6f3eeb`），編譯 16/16。
-內含 AI-2 的五項：水閥**先武裝後送** + `WATER_INLET_CMD_TIMEOUT_SEC=5`／`PQW_TOTAL_CH` 16→8／
-watchdog 註解歸位／**10 處**過時註解更正／`set_water_inlet_` 宣告處的**武裝三級門檻表**。
-
-✅ 實測 `relay_status` 現在回 `ch1..ch8`（原本回到 16，其中 9~16 是模組**編造**的）。
-✅ `arm_attached` 重啟後回到建構預設 `on`，已手動設回 `off`。
-
-🔴 **為什麼這次要部署**：水閥的確認彈窗當天稍早依 per user 拿掉了，
-而那個彈窗原本承載「未武裝的閥，watchdog 與急停**都不會**關」這句警告
-⇒ 拿掉之後「先武裝後送」從「有彈窗擋著的洞」變成**唯一的防線**。
-
-### 🐛 同一個坑，一天走進去兩次
-
-`.claude/runbook.md` 早就寫著「FIFO 本地 console 只認 `exit`/`quit`/`status`，其餘靜默丟棄」，
-我上午照樣對**吊機**送了四道 `set_*`（全丟），下午又對**本體**送了 `arm_attached off` / `relay_status`（全丟）。
-
-🔴 第二次還多一層：本節先前**只寫了吊機**，於是「本體的應該是好的」這個假設**從來沒被檢查過**
-——實際上是**同一段三行程式碼**（吊機 `main.cpp:5542`、本體 `facade_cleaning_v2/main.cpp:139-142`）。
-📌 **一個坑只記在它被發現的那個地方，等於默許同族的其他地方繼續踩。**
-🔧 `scripts/crcmd.py` 已支援 `host:port`，兩台都能打；runbook 已補上本體那一半。
-
-### console v2 今日累計（AI-2 線，全部已部署到 `:8081`）
-
-吊機繼電器面板（控制走 WR／回讀走 CR）→ latch 改降頻重試 → `data-stale` →
-三顆按鈕確認窗復原 → **水閥 CH4 確認窗移除**（per user）→ **Manual 依機器重新編排**
-（`▍吊機 :5002` / `▍本體 :5001` 兩段，raw command 刻意不歸段）。目前 `44620baf`。
-❌ **仍未在瀏覽器看過** —— 最後這項改的是**版面**，而版面正是自動化驗證完全蓋不到的那一類。
-
-| 項目 | 狀態 |
-|---|---|
-| 🎉 **吊機水閥第一次真正上線** | ZS-DIO 誤用 PQW driver 三個月，已改正。`gw_w=1 pqw_water=1`，on/off round-trip 實測通過。詳見 `changelog [2026-09-10a4]` |
-| ✅ 吊機 binary | `0b8e4d0d`（回退 `~/run/crane_control_PI.out.prev-20260910-1247` = `da62fcf2`）。新增 `water_status`、`status` 補 `dev_gw_w=`/`dev_pqw_water=` |
-| ✅ console v2 | AI-2 的「吊機繼電器 ZS-DIO CH1–4」面板已部署到 `:8081`（備份 `index.html.bak-20260910-1300`）。**尚未在真人瀏覽器點過** |
-| ✅ 本體 | 吊機重啟後兩條通道都自己接回（斷線 9316s / 18318 次重試後 reconnect success）。`arm_attached=off` |
-| ✅ 執行期參數 | `home_ground_cm=256` `motion_hz=30` `roll_correct_hz=30`（重啟後已重設） |
-| ✅ IMU | `n_accel=82819` —— 昨天斷電後 `n_accel=0` 的現象**沒有復發** |
-| 🔴 `level_diff` **仍是 0 且未實測** | 現在 `L=5 R=-2`（L−R=+7）而 `roll=+1.20°`。**跑任何可比較的週期測試前必須先調平再重量** |
-
-### 🔴 新開待辦：吊機端沒有水閥 deadman
-
-自動關閥**只有一個實作**，在**本體**（`water_inlet_watchdog_loop_`，300s），由本體的
-`set_water_inlet_()` 蓋時間戳武裝。吊機端**沒有任何計時器**。
-
-⇒ 兩個後果：
-1. GUI 若直接對吊機下 `water_inlet on`（繞過本體），閥開著就**沒有任何東西會關它**
-   —— 這是 AI-2 把控制路徑改走本體的原因（`changelog [2026-09-10a3]`），該決定正確、維持。
-2. 🔴 **但走本體也堵不住全部**：本體被 SIGKILL（非正常退出，`stop()` 的補關跑不到）時，
-   閥一樣永遠開著。**繼電器在吊機手上，deadman 就該在吊機手上。**
-
-🔧 **建議**：吊機端補一個「收到 `water_inlet on` 起算，逾 N 秒自動關」的執行緒
-（ZS-DIO 本身也有硬體通訊檢測暫存器 `0x0030`，斷線 N 秒全關 —— 可能更便宜且更可靠）。
-⚠️ **未動手，等 per user 拍板。**
+### 歷史摘要 #2（2026-09-10 ~ 2026-09-15）
+> 2026-09-16 壓縮。原文 ~1,225 行 → 本段;逐版明細在 `changelog.md`、指令在 git。只留**待辦／決策（含被否決）／伏筆／踩坑**。
+> 例行「裝了、跑通了」一律丟。仍開放的待辦集中在段尾「本段仍開放」;已進待辦總表的不重列。
+
+#### 09-10 幫浦 A/B 輪替、CH4 修正、腳本整併、v2 GUI、watchdog 死碼
+- **決策**:真空幫浦 A/B 每 30 分輪替,make-before-break(開 B → 併聯 3 s → 關 A → 8 s 內驗真空劣化 >15 kPa 就切回 A 並停用自動輪替)。
+  累計**不跨重開機**;`cmd_pump_swap_` 非同步回 `OK swap_started`,前端等「先見 swapping=1 再見 0」+75 s 上限;
+  **後端刻意不消那個微秒競態窗**(消它風險大於收益,前端那套本來就得存在)—— 別當 bug 補。
+- **決策**:`CH_WATER_PUMP` 14→**4**(PQW 只有 8 路,14 打不到;≠ CH6 破真空);GUI 送語意 `water_pump` 不送 `relay 4`(通道搬過三次)。
+  水位計裝在**最低點** ⇒ `water_full=0`＝空箱,不可開噴水馬達。
+- **決策**:六支腳本併成 `cycle_test.py <mode>`(full/crane/arm),第一參數是數字＝full 向後相容;舊檔轉墓碑。
+- **決策(被否決)**:v1→v2 GUI 逐項移植**作廢**,v2 自訂;Manual 完全不鎖(flag 留著);JOG 前端移除(web 共用 socket + 隧道延遲,
+  deadman 600 ms 頓挫)、**後端 `rail_jog` 保留**。通則:**按住式控制不適合 web 共用 socket;長動作要機器擁有、非同步回 OK**(`rail_sweep`)。
+- **踩坑**:PQW 對不存在的通道**照單全收並編造回讀**(`ch14=1`)⇒ CH_BRUSH 誤改 15 五週沒人發現;`PQW_TOTAL_CH` 16→8 只是「說謊降級為沉默」。
+  `zdt_disable` ≠ 失能(只是排除群組);ZDT pulse **無號**,負絕對值會反向衝;ZDT 有原生 homing 從沒用(`trigger_home 0x02`,🔮 待試)。
+  `pkill -f` 會殺到自己的 `bash -c`(node/cycle_test/sleep infinity 三次);FIFO console 只認 exit/quit/status,其餘靜默丟(兩台同一段碼,一天踩兩次)。
+  `cycle_test.py` 在 WSL「乾跑」＝連真機真動作。跨裝置自動急停判準要 `wasBothUp`。
+- **通則(AI-2)**:判斷保護在不在要找**誰讀這個值**、任何程式碼要找**啟用條件**(執行緒啟動點/if 閘門/解除路徑);只宣告沒定義編譯器不吭聲;
+  對有物理副作用的遠端指令**先武裝後送**(水閥 `set_water_inlet_`);越界不報錯的裝置會編造回覆;動作對與理由對要分開驗。
+- 本體 crane watchdog 是死碼(`crane_last_ok_ms_` 寫 3 讀 0)且 `crane_keepalive_loop_` 自 05-15 就沒啟動 ⇒ **死碼餵死碼**;
+  補回 2 s 門檻會誤觸發(沒 ping 餵)⇒ 分三步:先只發 EVT → 實測 idle 分布重選門檻 → 才接 abort(09-14 已補回觀測模式 warn=2000/abort=0)。
+- 🔮 伏筆:`vac`+`vacSource()` 是 v2 真空源唯一事實來源;救援收繩走 `cmd_manual`(無保護)刻意不與 `cmd_hold` 合併;
+  水閥控制**走本體**不直送吊機(deadman 只在本體;吊機端沒有 ⇒ 待辦「吊機端補水閥 deadman」);`web_backend` 無 lockfile,`package-lock.json` 要**在 Pi 上從現有 node_modules 產**。
+- M2 選刀槽值因傳動滑動失效 → 手轉重量:刮刀 +0.1913 / 滾筒 +0.8558;再滑就先修傳動。M2 間歇 passive 電源重置可清。
+
+#### 09-11 力控提速、橫桿問題定案、地面歸零慣例、full 首度上機、24V blip
+- **決策**:DEPLOY_F 提速四招(粗壓段 COARSE_NM、RELAX 900、deploy_speed 0.35、**尋觸也改粗步**)deploy 10→5.5 s;
+  再砍 settle 會 overshoot,**36 s/週期是實際下限**。`fine_adjust_level_diff`(水平基準 L−R)有用勿移除。
+- **決策**:橫桿偵測**放棄**(θ 與剛度都分不出橫桿/玻璃,實測全失敗)→ **降力刷過**(15→8 N·m,細掃/th_min/剛度判據全刪);
+  高度帶跳過 `FCV_SKIP_BANDS` 留 opt-in。🔴 踩坑:**降力要改「顯式傳值處」不能只改 default**(cycle_test 傳 15 蓋掉手臂 default,full 又 blip 一次)。
+- **決策**:牆面座標慣例＝**地面歸零**(`zero_meters ground` → SD76=0;頂端只讀 |length_left| 存牆高,**不要 `zero_meters top`**),
+  `home_ground_cm` 維持 0;牆高存吊機 `~/run/wall_height.json`,①地面/②最高點獨立可單獨重校(只重②一定安全)。
+  🔴 `start_crane.sh` 預設 HOME_GROUND=256 會打回頂零,地面歸零要帶 0(09-14 又踩一次)。
+- **決策**:「只要機器上電 arm 都要使能」⇒ 收手臂用 `arm_retract`(不失能),cycle_test 已無 `arm_park`;唯一失能時機＝校正位置。
+  手臂力控＝「壓到異物就不刷、跳過到下一位置」(cannot_reach/obstacle 不 bail)。
+- **決策**:上滑台 DM2J DI1 常閉未接線 ⇒ **馬達永遠使能,`rail_enable off` 不生效**;行程守衛可設定落在 GUI 軟限位(本體無 `set_rail_max`)。
+- **踩坑**:full 首度上機 step ~4 手臂 M1 超速+間歇失力中止;進水球閥 `.32` CH4 載重時間歇 Modbus 逾時(非硬故障,init 該步 skip 安全);
+  V2 GUI 重啟後手臂「自己靠上」(kiosk 自動接受 confirm)⇒ 武裝互鎖;**腳吸著時送 `exit` 重啟 ⇒ 關繼電器失真空**(重犯)。
+- 🔮 牆距可由 θ 換算 `490·sin(θ−0.38)+121` mm(GUI 剖面待辦);ZDT 推桿 rpm 可選參數(50..1000);`RAIL_JOG_DEADMAN_MS` 600→1000 若頓挫。
+
+#### 09-12 文書日:架構文件、瘦身第一刀、24V 根因
+- **24V blip 根因(per user)**:全系統只有一顆 LRS-150-24,手臂 M1/M2 也掛在上面;高力堵轉峰值拉垮 24V;**無任何斷路器/保險絲**,唯一保護是 PSU 自身 OLP hiccup
+  (解釋 blip 為何自己回來)。治本三選項並行:分離供電/換大 PSU/**加裝過流保護**。⚠️ LRS 手冊 OLP 行為未核對。
+- **螺旋槳兩顆 ESC 並接同一路 PWM** ⇒ 結構上無法差動、單邊失效無法偵測;急停必須能切 57.6V 動力。
+- `SOFTWARE.md`+`HARDWARE.md` 成對取代 ONBOARDING;`engineering_pitfalls.md` 抽出;瘦身第一刀純刪(PalletizerController、DIHOOL、9 個死常數、12 條死 cmd_ 宣告),
+  預處理比對證明無副作用。**本機能 build**(g++ 9.4 syntax/x86 .o/預處理比對,只差 aarch64)—— 「本機不能 build」是假的。
+- **三個被推翻的判斷**:`DEPLOY_F_THETA_MIN` 不是死常數;`removed_in_v2` 15 條裡**重心校正 5 + 窗框避障 4 是暫時 stub 要留**;本機可 build。
+- **拍板**:8 N·m 對刮刀可接受不拆目標;DSZL-107 已校正、scale 沒地方存 → 併入「吊機參數不持久化」。
+- PQW 實體 8 路;真空閥四顆共用一顆 VT307;正壓閥數量待目視。
+
+#### 09-13/14 假機器、三條拍板、計畫書、階段 1、行緩衝、8/6/3 N·m
+- **三條拍板(per user)**:① 編排搬回 C++(`mission` 指令族)② SAFE 最小版(風扇直接關)③ 自檢＝GUI 軟閘門(否決硬閘門,擋救援)。
+  → `plans/orchestration_to_cpp_plan.md` 已核准;`harness/fake_robot.py` + `gui_offline.sh` 是階段 0。
+- **決策**:v2/v3 整合成一個,`public_v3` :8081 唯一主控台;`safe_clear` 無任務回 idle/ready;SAFE 後任務暫停可續;`zeroed=0` 軟提示;手臂加 `PING`;
+  AI-2 的 jsdom 驗證收進 `harness/gui_v3_check.js`。
+- **階段 1 完成**:`selfcheck` 指令(真探測,不上 2 Hz status)+ `dev_*` 欄位 + `arm_ready`;偏離計畫 §4(init 旗標對 Mode B 裝置永遠 1)已回寫。
+- **`crane_cmd_` 行緩衝真因**:`rx` 是區域變數 + `sendData()` 靜默排掉 4 KB ⇒ EVT 洪水切在行中間、尾巴變下一條的回覆(也會吞 `tension_alarm`)。
+  修:`crane_rx_buf_` 成員 + 送前先消化佇列。🔴 `receiveData(…,0)` 是永久等,要先 `available()`。本機 hostile_crane 重現 2/6→6/6。
+- **力控定案**:8→6→**3 N·m 為工作力度**(per user);真因「iters=0 漂走」＝尋觸最後一步只等 150 ms 就讀瞬時 tau → Step 6 進割線前先等 RELAX 900 ms 重讀。
+  `DEPLOY_F_COARSE_NM` 6→4;粗壓門檻 `min(COARSE, target−TOL)`;`FCV_DRY=1` 乾掃旗標。
+- **踩坑**:`compile.sh` 就地覆蓋 motor_api 無 `.prev`;`~/run/motor_api` 是舊版、現場從 `cleaning_arm/` 起;`pgrep -c -f` 數到自己;
+  Bash 工作目錄會在指令間重設回 `/mnt/agent_ai`(一律絕對路徑);`start_crane.sh <tag> 0`。
+- **硬體**:JC-100 slave 7 **換表頭後錯誤歸零**(壞的是表頭);`.21` 網關一次沒跟著上電(selfcheck 第一次抓到真問題);
+  **濕式 full 四趟全被 24V 掉電打斷、乾掃三趟全過** ⇒ 濕式負載(水泵+滾刷+真空+推桿保持)疊上去超過 OLP,升為第一優先(09-15 user 換電源模組後消失)。
+  blip 時只有 PQW 掉、ZDT 沒重置 ⇒ 24V 幹線有分支。
+- 隧道(Fathom-X)當天不通,全走 WiFi;WiFi 偶抖(reconnect failed 自癒)。
+
+#### 09-15 濕式跑通、單程接力、goto、level_auto、Mission 合併、急停改版、收腳時序
+- **決策**:清潔改**單程接力**(滾筒 起→對面、刮刀 對面→起);風扇**只在下行移動時開**(風扇一轉 JC-100 RS-485 錯誤就冒;5%＝ESC 停,不是 0);
+  full 參數改 key=value(`fan=move|all[:pct]`、`rail=<起>-<迄>|off`);補水進 cycle_test(XKC 單點門檻附近 0/1 亂跳 ⇒ 滿了再灌 20 s)。
+- **決策**:`goto <離地cm>` 絕對位置(跨距外拒;**往上信高的、往下信低的**);本體 `crane_goto`;測試性移動單次 ≤5 cm(memory)。
+  端點跑掉:① goto 方向保守 ✅ ② 端點靠張力事件 **不做** ③ 落地重歸零 **手動**。
+- **決策**:水平基準 **level_auto**(靜止+IMU 新鮮+|roll|≤8° 時 `level_diff=(L−R)+roll/k`,k=0.85,EMA、±0.75 遲滯、夾 ±20)——
+  rail=100 從三步就撞 10 cm 變連兩趟乾淨;**rail=100 + fan=move 可當作業設定**。`set_hold_guard on|off`(重啟回 on)。
+- **隧道實測失敗**:換電源後不掉包但延遲 avg 330 ms/max 1.8 s、運動中 age 27 s ⇒ **維持 WiFi,隧道不切**(降級「有空再修」)。
+- **Mission 合併(per user)**:作業流程頁併入 Mission(名稱保持);啟動先走腳本(server.js spawn),`MISSION_BACKEND='script'|'body'` 常數,body 路徑原封留;
+  危險按鈕 tier/60 s 解鎖/手臂互鎖**整套取消**(`dangerGate` 等留成 no-op 呼叫點不動);急停搬進 Mission 控制列且**先停腳本再急停**;
+  救援收繩移除(＝關張力保護 + 一般 ▲▼);前置 ④ init 移除、③ 推桿歸零改資訊列(ZDT 磁編碼器+電池跨斷電保留零點)。
+- **急停狀態機**:Error 放行 14 個 manual 指令(**Error 擋的是自動流程,不是人的手**);`emergency_detach` 全成功自動 Error→Idle,`estop=` 欄位。
+  🔴 踩坑:`M1 STATUS` 沒有 `en=`,要解析整機 STATUS 的 `[M1]` 段(每次急停誤報 partial)。真機首次驗證急停九步。
+- **ZDT 兩個真相**:已在目標再下絕對命令 → 殘差走不掉 → 150 ms 判堵轉 STALL 3 A ⇒ `pusher_move_many_` 殘差 ≤300 脈衝就不送;
+  **10 脈衝/度(3600/圈)**,不是手冊的 3200。
+- **收腳正壓時序**(五組實測):有效的是「收的當下閥開著」,預灌無貢獻。定案:關真空閥 → 100 ms → CH6 ON → 立刻收(不等到位)→ 300 ms → CH6 OFF,
+  峰值 3.1 A → 0.5 A、收腳 8 → 3.1 s。🔴🔴 **靜置 0 ms 破真空閥靜默不動**(PQW 兩次寫太近第二次失效;100 ms 是實測下限;收腳峰值 >1.5 A 就懷疑它)。
+- **風扇順序改版(先吸附再關風扇、先開風扇再收腳)實測更吵、無改善**,建議改回(等 user)。`cmd_arm_init` 後補送 STATUS 餵 `arm_ready`。
+- **GUI 踩坑(AI-2,四個同族「看不出來的那一層」)**:`hidden` 被 class 的 display 蓋掉(驗收要看 computed display);自動收合與人打架(人碰過就永久退場);
+  收起連標題一起藏只剩一個入口;腳本模式被本體 `mission=` 蓋掉。伏筆:推桿 RPM 欄只填 placeholder;`gui_v3_check.js` 跑前刪 `wall_height.json`。
+- 🔴 JC-100 slave 8 一天 67 錯(其他 ≤18)→ 換表頭候選。
+
+#### 本段仍開放的待辦(未進總表的)
+- 🟡 風扇順序改回原版(先關風扇再吸附、先收腳再開風扇)—— 等 user
+- 🟡 吊機端補水閥 deadman(繼電器在吊機手上;或用 ZS-DIO `0x0030` 硬體斷線全關)—— 等拍板
+- 🟡 手臂 STATUS `tool=` 已做;牆距剖面 GUI(θ→mm)未做
+- 🟡 `trigger_home(0x02)` ZDT 原生歸位試用;ZDT 驅動加 pulse<0 守衛
+- 🟡 `package-lock.json` 在 Pi 上從現有 node_modules 產並進版控
+- 🟡 Mission「開始」確認窗要不要拿掉;腳本模式「跳過」通道;張力保護卡 `data-safe-keep` 範圍
+- 🟡 DM2J 驅動層 `PR_move_cm_nowait` 送出失敗重試(有上限、印出來;`not_confirmed` 那條不重試)
+- 🟡 Manual 手臂 M1/M2「靠上/離開」+ DEPLOY_F 壓力/距離雙上限(設計定案未實作)
+- 🟡 `motion_flow.md` §2 硬體表仍是 v1;瘦身第二刀(`DY_500`、本體 v1 死碼 11 條)
+- 🔴 24V 治本三選項 / LRS OLP 手冊核對 / 急停切 57.6V / RCD;開箱拍照補 HARDWARE §3.2C
 
 ## 🔴 待辦總表（單一權威，2026-08-27 由 mailbox / ONBOARDING 併入）
 

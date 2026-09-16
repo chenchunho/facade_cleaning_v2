@@ -1661,15 +1661,12 @@ static void allMotionEmergencyStop() {
 // 100ms but bench observed transients lasting > 300ms; bumped to 5 × 80ms
 // 2026-05-08 to handle longer windows.
 
-// Start one SE3 rope inverter at VFD_MOTION_HZ in given direction.
+// Start one SE3 rope inverter at HOLD_HZ (hold-to-pull manual operation).
 //   pay_out=true  → release rope (motor "forward" by convention)
 //   pay_out=false → retract rope (motor "reverse")
-// Returns true on error after all retries exhausted.
-static bool vfdStartRopeMotion(CraneVFD& inv, bool pay_out) {
-    return reliable_start_one(inv, g_vfd_motion_hz.load(), pay_out);
-}
-
-// Same but with HOLD_HZ (used by hold-to-pull for slower manual operation).
+// Returns true on error after all retries exhausted. (The VFD_MOTION_HZ twin
+// `vfdStartRopeMotion` had no callers — motion_rope calls reliable_start_one
+// directly — removed 2026-09-16.)
 static bool vfdStartRopeHold(CraneVFD& inv, bool pay_out) {
     return reliable_start_one(inv, g_vfd_hold_hz.load(), pay_out);
 }

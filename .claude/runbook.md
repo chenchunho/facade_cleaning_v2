@@ -146,6 +146,10 @@ per user「合併到 main 了，可以用 project 的資料夾，把舊的清掉
 
 ### A0. 🟢 日常啟動／收尾（**2026-09-09 起：原始碼 `~/projects/facade_cleaning_v2/`、執行期 `~/run/`**）
 
+> 🟢🟢 **2026-09-16 起五支程式都是 systemd 開機自啟**(吊機 `fcv-crane/fcv-web/fcv-web-v3` system unit;本體 `fcv-arm/fcv-body` user unit + linger)。
+> **日常不用再手動起程式**:開機即跑;更新程式用 `scripts/deploy.sh <body|arm|crane|server|script|web|status>`;
+> unit 檔副本與重灌安裝步驟在 `scripts/systemd/README.md`。本節以下的手動啟動段落是**它們掛掉時的備援與歷史**。
+
 > 📌 **2026-09-08 建立。** 在此之前，`~/bringup/` 的做法只以文字寫在 §0 的警語裡，
 > 全檔唯一可複製的「啟動順序」在 **§A4**，而那是 `main` 分支快照 `~/main_20260831/` 專用。
 > ⇒ 照目錄找「啟動順序」的人會起到 08-31 的舊 binary，**零徵兆**。這一節就是為了堵這個坑。
@@ -250,89 +254,13 @@ ssh nexuni@192.168.5.26 'for p in $(pgrep -x sleep); do echo "$p -> $(readlink /
 
 ---
 
-### 0. 一鍵啟動（tmux launcher，bench / 測試用）
+### 0. ~~一鍵啟動（tmux launcher）~~ ⚰️ 2026-09-16 已刪除
 
-🔴🔴 **2026-09-03 實測：這一節目前兩台都跑不起來，動手前先看這三條。**
-1. **`tmux` 兩台都沒安裝**（`dpkg -l tmux` 皆為 `un`）→ 底下所有 `*.sh start/attach` 直接失敗。
-2. ⚰️ **（2026-09-09 已過期，見檔首搬家公告）** 原文：「`~/facade_cleaning_v2` 兩台都不存在，實際工作目錄是 `~/bringup/`」——
-   **現在原始碼在 `~/projects/facade_cleaning_v2/`、執行期在 `~/run/`。** 以下三行保留作歷史：（吊機 `crane_control_PI.out`、
-   本體 `facade_cleaning_v2.out`，各自帶一串 `.prevN` 舊版），而且 **`~/bringup/` 不是 git repo**。
-   吊機的週期測試紀錄在 `~/bringup/cycle_logs/`。
-⇒ 現行實際做法是直接跑 `~/bringup/` 底下的 binary（搭配 FIFO `crane_<date>_in` 餵指令、輸出導向 `crane_<date>.log`），
-   不是走 tmux launcher。**要恢復 launcher 就得先裝 tmux 並把路徑改成 `~/bringup`。**
+`scripts/wr.sh` / `crane.sh` / `cams.sh`(tmux launcher)與 `scripts/bench/`(搬家前的建置/啟動腳本)
+**2026-09-16 隨 systemd 化一併從樹移除**(git `842e774` 之前仍有)。兩台 Pi 本來也沒裝 tmux,這一節從 09-03 起就跑不起來。
+現在的「一鍵」就是開機;要手動重啟用 `systemctl [--user] restart fcv-*`。
 
-3. 🔴🔴 **FIFO（本地 console）只認 `exit` / `quit` / `status`，其餘一律靜默丟棄**（2026-09-04 踩到）。
-   🔴 **兩台都是**（2026-09-10 確認）：吊機 `Crane_control_PI/main.cpp:5542`、
-   本體 `facade_cleaning_v2/main.cpp:139-142`，**同一段三行程式碼**。先前本節只寫吊機，
-   於是「本體的 FIFO 應該是好的」這個假設沒被檢查過——它一樣壞。
-   `Crane_control_PI/main.cpp:5542`（2026-09-10 行號，原記 5249）的 stdin 迴圈就這三個字，
-   **沒有 dispatcher、沒有錯誤訊息**：
-   ```cpp
-   while (std::getline(std::cin, line)) {
-       if (line == "exit" || line == "quit") break;
-       if (line == "status") std::cout << cmd_status();
-   }
-   ```
-   而 `status` 有輸出 ⇒ **「FIFO 看起來是通的」**，於是 `set_*` 三道全部寫進去、全部沒生效、
-   全部沒有徵兆。🔧 **執行期參數一律走 TCP `:5002`（或 GUI），不要走 FIFO。**
-   ⚠️ **2026-09-10 又踩了同一個坑一次**（本節已經寫在這裡，還是照著 FIFO 送了 `set_home_ground`／
-   `set_motion_hz`／`set_roll_correct_hz`／`water_status`，四道全部靜默丟棄）。
-   會重犯是因為手上沒有現成的 TCP 送法，FIFO 是唯一「打得出去」的動作。**現在有了**：
-   ```
-   ssh user@192.168.5.25   'cd ~/run && python3 crcmd.py "set_home_ground 256" "status"'
-   ssh nexuni@192.168.5.26 'cd ~/run && python3 crcmd.py 127.0.0.1:5001 "arm_attached off"'
-   ```
-   `~/run/crcmd.py`（09-10 放上去，正本在 repo `scripts/crcmd.py`）逐條送、濾掉 `EVT` 只印回覆。
-   **第一個參數可省略**，省略時打吊機 `127.0.0.1:5002`；要打本體就帶 `127.0.0.1:5001`。
-   🔴 它**必須持續 recv**——吊機的 `broadcast()` 在 `clients_mtx` 底下，讀端不收會把 EVT 路徑卡死。
-   📌 **開機流程順序**：程式起來 → **先設參數** → 才讓任何人碰 GUI。
-   2026-09-04 就是因為參數還沒設，per user 在 09:25 下的那趟 `down on` 跑在編譯預設
-   （`motion_hz=50` + `balance_source=meter`）之下，資料整趟不可比。
-
-每台 Pi 上都有對應的 launcher script，會用 tmux 把該機所有程式各開一個 window：
-
-```bash
-# crane Pi (192.168.1.10)
-ssh user@192.168.1.10
-cd ~/facade_cleaning_v2       # repo（scripts/ 所在處，與部署路徑不同）
-chmod +x scripts/*.sh       # 第一次用要給執行權限
-./scripts/crane.sh start    # 開 Crane_control_PI + web_backend + 一個空 shell
-./scripts/crane.sh attach   # 進去看 log
-
-# washrobot Pi (192.168.1.100)
-ssh nexuni@192.168.1.100
-cd ~/facade_cleaning_v2
-chmod +x scripts/*.sh
-./scripts/wr.sh start       # 開 facade_cleaning_v2 + frame_capture + 一個空 shell
-./scripts/wr.sh attach
-```
-
-**tmux 操作**：
-
-| 動作 | 鍵 |
-|------|----|
-| 切 window（main / cam / web / shell …） | `Ctrl-b` 然後 `0`/`1`/`2` |
-| 列表選 window | `Ctrl-b w` |
-| **離開但程式繼續跑**（SSH 斷了也沒事） | `Ctrl-b d`（detach） |
-| **只關當前 window 的程式** | `Ctrl-C` |
-| 重開剛剛關的程式 | `↑` 然後 `Enter` |
-| 全關 | `./scripts/{wr,crane}.sh stop` |
-
-**路徑覆蓋**：預設值就是下面手動段落那組實際部署路徑（`~/projects/<project>/bin/ARM64/Debug/<name>.out`）。若路徑不一樣：
-
-```bash
-WR_BIN=/path/to/facade_cleaning_v2 ./scripts/wr.sh start
-CRANE_BIN=/path/to/Crane_control_PI WEB_DIR=/path/to/web_backend ./scripts/crane.sh start
-```
-
-**測試模式吊車**（crane_shim 取代主吊車）：
-
-```bash
-CRANE_BIN="python3 $HOME/facade_cleaning_v2/crane_shim/crane_shim.py" \
-  ./scripts/crane.sh start
-```
-
-下面 1~3 是**手動逐項啟動**的對照版本（看 log 直接、能控制每個程式分開重啟）。launcher 內部就是把這些指令各塞進一個 tmux window。
+下面 1~3 是**手動逐項啟動**的對照版本(systemd 掛掉時的備援;看 log 直接):
 
 ### 1. Crane RPi (192.168.1.10) — 先啟動
 

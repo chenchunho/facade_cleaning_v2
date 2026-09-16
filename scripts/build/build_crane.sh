@@ -10,7 +10,7 @@ g++ -std=c++17 -O2 -Icommon -Iconfig -Imechanism -Itransport -Iuser_lib \
   -o "$OUT/crane_drv.out" \
   Crane_control_PI/main.cpp \
   transport/TCP_client.cpp transport/TCP_server.cpp \
-  user_lib/CLV900_inverter.cpp user_lib/DSZL_107.cpp user_lib/DY_500_weight_sensor.cpp \
+  user_lib/CLV900_inverter.cpp user_lib/DSZL_107.cpp \
   user_lib/ZS_DIO_R_RLY.cpp user_lib/MH300_inverter.cpp user_lib/SD76_length_meters.cpp \
   user_lib/SE3_inverter.cpp \
   -lpthread || { echo "BUILD FAILED"; exit 2; }

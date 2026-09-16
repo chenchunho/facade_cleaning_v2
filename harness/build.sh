@@ -61,7 +61,7 @@ SRCS=(
 # 階段 5：WASH_ROBOT.cpp 依語意分界切出的第二個 TU。
 [[ -f "$SRC/app/wash_robot_commands.cpp" ]] && SRCS+=("$SRC/app/wash_robot_commands.cpp")
 
-for d in DM2J_RS570 DY_500_weight_sensor FrameAnalyzer JC_100_METER PQW_IO_16O_RLY \
+for d in DM2J_RS570 FrameAnalyzer JC_100_METER PQW_IO_16O_RLY \
          QX_DO24 WT901BC_TTL XKC_Y25_RS485 ZDT_motor_control; do
   SRCS+=("$SRC/user_lib/$d.cpp")
 done
@@ -74,7 +74,7 @@ CRANE_SRCS=(
   "$SRC/$TRANSPORT_DIR/TCP_client.cpp"
   "$SRC/$TRANSPORT_DIR/TCP_server.cpp"
 )
-for d in CLV900_inverter DSZL_107 DY_500_weight_sensor PQW_IO_16O_RLY ZS_DIO_R_RLY \
+for d in CLV900_inverter DSZL_107 PQW_IO_16O_RLY ZS_DIO_R_RLY \
          MH300_inverter SD76_length_meters SE3_inverter; do
   CRANE_SRCS+=("$SRC/user_lib/$d.cpp")
 done

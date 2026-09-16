@@ -50,7 +50,6 @@ WashRobot::WashRobot()
     , crane_idle_ms_max_(0)
     , crane_idle_ms_max_motion_(0)
     , crane_wd_warned_(false)
-    , crane_keepalive_running_(false)
     , imu_roll0_(0.0)
     , imu_pitch0_(0.0)
     , imu_ask_pending_(false)
@@ -71,7 +70,6 @@ WashRobot::WashRobot()
     , arm_sweep_skip_rest_of_run_(false)
     , wheels_attached_(true)
     , crane_alarm_pending_(false)
-    , pressure_poll_running_(false)
     , obstacle_detect_enabled_(false)
 {
     for (int i = 0; i < 9; ++i) cached_pressure_[i].store(0);
@@ -423,8 +421,6 @@ bool WashRobot::init() {
     // is zombie TCP socket on crane_cli_ (isConnected=true but dead).
     // New design: no continuous ping. Each crane_cmd_ self-heals on fail.
     // See crane_watchdog_loop_ header comment for rationale.
-    // crane_keepalive_running_ = true;
-    // crane_keepalive_thread_  = std::thread(&WashRobot::crane_keepalive_loop_, this);
     // std::cout << "[OK] crane keepalive started\n";
 
     // [2026-05-29] Background pressure_poll_loop_ REMOVED — purely for GUI cache.
@@ -528,10 +524,6 @@ void WashRobot::stop() {
     imu_.stop();
     crane_wd_running_ = false;
     if (crane_wd_thread_.joinable()) crane_wd_thread_.join();
-    // crane_keepalive thread disabled in init() — see comment there.
-    // crane_keepalive_running_ = false;
-    // if (crane_keepalive_thread_.joinable()) crane_keepalive_thread_.join();
-    // [2026-05-29] pressure_poll_thread_ no longer started — nothing to join.
     // [2026-06-09] Stop water-inlet watchdog. Last-chance force close (one
     // attempt only — process is shutting down, no point retrying long).
     water_inlet_watchdog_running_.store(false);
@@ -646,112 +638,6 @@ bool WashRobot::dm2j_pair_poll_done_(int slave_a, int slave_b, int timeout_ms) {
     std::cout << "  [pair DM2J fail] TIMEOUT after " << timeout_ms
               << "ms (a_done=" << a_done << " b_done=" << b_done << ")\n";
     return true;   // timeout (one or both still running)
-}
-
-// Robust DM2J position read: retries until 2 consecutive reads agree within
-// `agree_cm` tolerance. Catches occasional Modbus frame corruption — bench
-// 2026-05-15 saw read return 610.x when actual position was 5cm (likely
-// stale-buffer or cross-slave contamination on USR-TCP232 gateway shared bus).
-//
-// Returns true on error (couldn't get consistent reads in max_attempts), false
-// on success with out_cm = the agreed value.
-bool WashRobot::dm2j_read_pos_robust_(int slave, double& out_cm,
-                                       int max_attempts, double agree_cm) {
-    // dm2j_motion_mtx_：跟背景 arm sweep 序列化 cli_20_。沒 lock 的話 sweep 的
-    // PR_move_cm poll 占用 TCP socket，這裡的 read_position_cm 全 5 次 timeout。
-    std::lock_guard<std::mutex> dm2j_lk(dm2j_motion_mtx_);
-    double prev = 0;
-    bool have_prev = false;
-    for (int i = 0; i < max_attempts; ++i) {
-        double v = 0;
-        if (D_(slave).read_position_cm(v)) {
-            std::cout << "  [dm2j_robust] slave " << slave << " attempt " << (i + 1)
-                      << "/" << max_attempts << " comm fail\n";
-            have_prev = false;
-            continue;
-        }
-        if (have_prev && std::fabs(v - prev) <= agree_cm) {
-            out_cm = v;
-            return false;   // success
-        }
-        if (have_prev) {
-            std::cout << "  [dm2j_robust] slave " << slave << " attempt " << (i + 1)
-                      << " prev=" << prev << " new=" << v
-                      << " (diff " << std::fabs(v - prev) << "cm > " << agree_cm
-                      << " tol) — retry\n";
-        }
-        prev = v;
-        have_prev = true;
-    }
-    std::cout << "  [dm2j_robust] slave " << slave
-              << " FAILED to get consistent reads in " << max_attempts << " attempts\n";
-    return true;
-}
-
-// Synchronized pair move to same absolute target (cm).
-// Broadcast trigger ensures same-moment start. Parallel poll ensures both
-// finish before we return. Logs before/after positions + travel for diagnostic.
-bool WashRobot::dm2j_pair_move_abs_(int slave_a, int slave_b, int pr_num,
-                                      double target_cm, int timeout_ms) {
-    // 2026-05-22 序列化：cli_20_ 上有 slave 1,2,3,4,5，跟背景 arm sweep
-    // (slave 5) 共用 TCP socket。沒這 lock → bus contention → PausedOnError。
-    std::lock_guard<std::mutex> dm2j_lk(dm2j_motion_mtx_);
-
-    // Read current positions (diagnostic baseline)
-    double pa_before = 0, pb_before = 0;
-    if (D_(slave_a).read_position_cm(pa_before)) return true;
-    if (D_(slave_b).read_position_cm(pb_before)) return true;
-    std::cout << "  [pair DM2J " << slave_a << "+" << slave_b
-              << "] before: " << slave_a << "=" << pa_before
-              << " " << slave_b << "=" << pb_before
-              << " cm → target " << target_cm << " cm\n";
-
-    // Skip-if-at-target optimization: when both slaves are already within
-    // EPSILON_CM of target, no motion is needed. Avoids ~2 s overhead from
-    // PR write + broadcast + poll + read-back when called as a no-op
-    // (e.g. feet phase target=0 with rail already at 0 from previous cycle).
-    constexpr double EPSILON_CM = 0.05;   // 0.5 mm tolerance
-    if (std::fabs(pa_before - target_cm) < EPSILON_CM &&
-        std::fabs(pb_before - target_cm) < EPSILON_CM) {
-        std::cout << "  [pair DM2J " << slave_a << "+" << slave_b
-                  << "] already at target " << target_cm << " cm — skip\n";
-        return false;
-    }
-
-    // [2026-05-29] DM2J motion active — freeze arm_monitor_during_sweep_'s
-    // tau-trigger logic (mechanical coupling on feet rail shifts arm M1/M2
-    // baselines). RAII clear on any exit path.
-    dm2j_motion_active_.store(true);
-    struct ClearMotionFlag {
-        std::atomic<bool>* flag;
-        ~ClearMotionFlag() { flag->store(false); }
-    } _clr{&dm2j_motion_active_};
-
-    // Queue targets on both slaves (same PR slot, same absolute target).
-    // Uses DM2J_RPM_FEET (faster than DM2J_RPM) since this function is exclusively
-    // called for the feet rail pair (DM2J_LEFT_FOOT + DM2J_RIGHT_FOOT).
-    D_(slave_a).PR_move_cm_set(pr_num, 1, DM2J_RPM_FEET, target_cm, DM2J_ACC, DM2J_DEC);
-    D_(slave_b).PR_move_cm_set(pr_num, 1, DM2J_RPM_FEET, target_cm, DM2J_ACC, DM2J_DEC);
-
-    // Broadcast trigger — both slaves start at exact same instant.
-    // Bystanders on bus (other DM2J) must have PR[pr_num] = rpm=0 (safe no-op).
-    D_(slave_a).PR_trigger_sync(pr_num);
-
-    // Parallel poll until both done or fault/timeout
-    bool err = dm2j_pair_poll_done_(slave_a, slave_b, timeout_ms);
-
-    // Read final positions + log actual travel
-    double pa_after = 0, pb_after = 0;
-    D_(slave_a).read_position_cm(pa_after);
-    D_(slave_b).read_position_cm(pb_after);
-    std::cout << "  [pair DM2J " << slave_a << "+" << slave_b
-              << "] after:  " << slave_a << "=" << pa_after
-              << " (Δ" << (pa_after - pa_before) << ") "
-              << slave_b << "=" << pb_after
-              << " (Δ" << (pb_after - pb_before) << ") cm"
-              << (err ? " [FAIL]" : "") << "\n";
-
-    return err;
 }
 
 bool WashRobot::check_abort_() {
@@ -873,9 +759,10 @@ std::string WashRobot::crane_cmd_(const std::string& line, int timeout_sec) {
     std::lock_guard<std::mutex> lk(crane_mtx_);
 
     // Self-healing reconnect (2026-05-15): try up to 2 attempts. First attempt
-    // uses existing TCP connection (or fresh connect if not connected). If it
-    // fails (send fails, recv timeout, no OK in reply), force-close the socket
-    // and reconnect on the second attempt. This handles "zombie socket":
+    // uses existing TCP connection (or fresh connect if not connected). If the
+    // SEND fails (nothing transmitted), force-close the socket and reconnect
+    // on the second attempt. 🔴 [2026-09-16] A receive timeout does NOT retry
+    // any more — see the comment at the bottom of the loop. This handles "zombie socket":
     // isConnected()=true but actually dead (e.g. NAT entry evicted, peer kernel
     // restart didn't send RST). Without this, the only fix was program restart
     // or operator manually toggling crane_attached.
@@ -969,11 +856,29 @@ std::string WashRobot::crane_cmd_(const std::string& line, int timeout_sec) {
                 std::cout << "[crane_cmd] '" << line << "' -> " << reply_line << "\n";
             return reply_line;
         }
-        // recv loop exhausted without a non-EVT reply → consider this attempt
-        // failed. Loop iteration ends → for loop tries attempt 1 (force reconnect).
+        // 🔴🔴 [2026-09-16] Receive timeout → give up. NEVER fall through to
+        // attempt 1 here. The command already LEFT the socket; the crane may
+        // have executed it, may be executing it, or may have died half-way.
+        // Resending it after a reconnect re-runs a MOTION command with no
+        // idea what happened in between. That is exactly what happened today:
+        // `goto 0` was in flight when the user cut crane power for
+        // maintenance; 105 s later the body timed out, the crane had just
+        // been powered back on, the retry reconnected and resent `goto 0`,
+        // and the crane started paying out rope with a person next to it
+        // (body log 18:46:22 "'goto 0' attempt 1 failed — force reconnect").
+        // Only a *send* failure (nothing transmitted) is allowed to retry —
+        // same rule arm_cmd_ has had since 2026-06-03 for DEPLOY / PARK.
+        // Zombie-socket self-healing is kept by closing the socket so the
+        // NEXT call reconnects fresh; it just never resends THIS line.
+        std::cout << "[crane_cmd] '" << line << "' no reply in " << timeout_sec
+                  << "s — NOT retrying (already sent; a resend after reconnect would re-run it). "
+                     "Socket closed; next call reconnects.\n";
+        crane_cli_.close();
+        crane_rx_buf_.clear();
+        return "";
     }
-    std::cout << "[crane_cmd] '" << line << "' FAILED after 2 attempts (no reply)\n";
-    return "";   // both attempts failed
+    std::cout << "[crane_cmd] '" << line << "' FAILED after 2 attempts (send failed twice)\n";
+    return "";   // both attempts failed to even transmit
 }
 
 // [2026-09-14] See crane_rx_buf_ in the header. Caller holds crane_mtx_.
@@ -1016,7 +921,23 @@ std::string WashRobot::arm_cmd_(const std::string& line, int timeout_sec) {
     }
 
     std::lock_guard<std::mutex> lk(arm_mtx_);
+    return arm_cmd_locked_(line, timeout_sec);
+}
 
+// [2026-09-16] Non-blocking arm_ready refresh for cmd_status. try_lock: a DEPLOY
+// or sweep holding arm_mtx_ can last many seconds and a 2 Hz status poll must
+// never queue behind it — skipping a refresh is harmless, blocking is not.
+void WashRobot::arm_status_refresh_() {
+    if (!arm_attached_.load() || !arm_cli_.isConnected()) return;
+    const int64_t now = now_ms_();
+    if (now - last_arm_status_ms_.load() < ARM_STATUS_REFRESH_MS) return;
+    std::unique_lock<std::mutex> lk(arm_mtx_, std::try_to_lock);
+    if (!lk.owns_lock()) return;
+    last_arm_status_ms_.store(now);
+    arm_cmd_locked_("STATUS", 2);   // reply parsed by note_arm_status_ inside
+}
+
+std::string WashRobot::arm_cmd_locked_(const std::string& line, int timeout_sec) {
     // [2026-06-03] DON'T manually close()/connectToServer() — TCP_client has
     // its own reconnectLoop (500ms tick) that races with manual reconnect.
     // motor_api 2026-06-03 saw 3 source ports simultaneously, 30s recovery.
@@ -1446,43 +1367,6 @@ bool WashRobot::save_settings_file_(const std::string& path) const {
     f << "arm_deploy_pos_tol_rad         " << settings_.arm_deploy_pos_tol_rad.load()         << "\n";
     f << "static_roll_offset_cm          " << settings_.static_roll_offset_cm.load()          << "\n";
     std::cout << "[settings] saved to " << path << "\n";
-    return false;
-}
-
-// ====================================================================
-// [arm rope protect TEMP 2026-05-21] — see WASH_ROBOT.h for design notes.
-// To DISABLE: flip ARM_ROPE_PROTECTION → false (both helpers no-op).
-// To REMOVE: grep for "arm rope protect TEMP" — delete helpers + all call sites.
-// ====================================================================
-bool WashRobot::ensure_arm_center_for_rope_(const std::string& ctx) {
-    if (!ARM_ROPE_PROTECTION) return false;
-    // arm_attached=off → washrobot not driving arm; skip protection entirely
-    // (otherwise arm_cmd_ returns "OK skipped" and STATUS parse would fail).
-    if (!arm_attached_.load()) return false;
-    if (arm_stow_state_.load() == ArmStowState::Center) return false;   // already stowed
-    std::cout << "[arm_protect] " << ctx << " — ENABLE + DEPLOY "
-              << ARM_ROPE_PROTECT_WALL_MM << " CENTER\n";
-    // [2026-05-28] Replaced INIT with ensure_arm_ready_(): INIT now happens
-    // only in cmd_init_impl_. If arm not calibrated, ensure_arm_ready_ returns
-    // true → pay_out blocked for safety (correct behavior — operator must
-    // cmd_init before any motion that requires arm rope protection).
-    if (ensure_arm_ready_()) {
-        std::cerr << "[arm_protect] arm not ready (calibration missing or ENABLE failed) — pay_out blocked for safety\n";
-        return true;
-    }
-    std::ostringstream oss;
-    oss << "DEPLOY " << ARM_ROPE_PROTECT_WALL_MM << " CENTER";
-    if (arm_cmd_(oss.str(), 60).rfind("OK", 0) != 0) {
-        std::cerr << "[arm_protect] DEPLOY CENTER failed — pay_out blocked for safety\n";
-        return true;
-    }
-
-    // [arm rope protect TEMP 2026-05-21] obstacle detection — refactored 5/21x
-    // into verify_arm_deploy_ helper so cmd_arm_deploy / clean_sweep sub-rounds
-    // can reuse the same STATUS-based check across LEFT / CENTER / RIGHT slots.
-    if (verify_arm_deploy_("CENTER", ARM_ROPE_PROTECT_WALL_MM)) return true;
-
-    arm_stow_state_.store(ArmStowState::Center);
     return false;
 }
 
@@ -1929,43 +1813,10 @@ bool WashRobot::verify_arm_deploy_(const std::string& slot, int wall_mm) {
     // ensure_arm_at_center_for_rope_, do_arm_clean_sweep_, do_arm_clean_sweep_continuous_)
     // all bypass with this single early return. Re-enable by removing this block.
     return false;
+    // [2026-09-16] Dead half removed: the θ-vs-wall_mm check below the early return
+    // had been unreachable since 2026-06-06 and was superseded by DEPLOY_F's own
+    // no_wall / obstacle / cannot_reach replies (2026-09-11). git has the old body.
 
-    float tool_ext;
-    if (slot == "LEFT")       tool_ext = ARM_M2_TOOL_LEFT_MM;
-    else if (slot == "RIGHT") tool_ext = ARM_M2_TOOL_RIGHT_MM;
-    else                      tool_ext = ARM_M2_TOOL_CENTER_MM;   // CENTER default
-
-    const float total_ext = ARM_M1_PASSIVE_EXT_MM + tool_ext;
-    const float usable    = (float)wall_mm - total_ext;
-    const float expected_rad = (usable <= 0.0f)
-        ? ARM_M1_VERTICAL_OFF_RAD
-        : ARM_M1_VERTICAL_OFF_RAD + std::asin(std::min(usable / ARM_M1_LENGTH_MM, 1.0f));
-
-    std::string status_reply = arm_cmd_("STATUS", 3);
-    auto p = status_reply.find("[M1] pos=");
-    if (p == std::string::npos) {
-        std::cerr << "[arm_protect] verify_deploy STATUS parse fail — reply='"
-                  << status_reply << "'\n";
-        return true;
-    }
-    float actual_rad = 0.0f;
-    try { actual_rad = std::stof(status_reply.substr(p + 9)); }
-    catch (...) {
-        std::cerr << "[arm_protect] verify_deploy pos parse exception — reply='"
-                  << status_reply << "'\n";
-        return true;
-    }
-    const float delta = expected_rad - actual_rad;
-    std::cout << "[arm_protect] verify_deploy " << slot << " wall=" << wall_mm
-              << " M1 actual=" << std::fixed << std::setprecision(3) << actual_rad
-              << " expected=" << expected_rad
-              << " delta=" << delta << " rad (tol=" << (settings_.arm_deploy_pos_tol_rad.load()) << ")\n";
-    if (delta > (settings_.arm_deploy_pos_tol_rad.load())) {
-        std::cerr << "[arm_protect] DEPLOY " << slot << " hit obstacle — M1 stopped "
-                  << (delta * ARM_M1_LENGTH_MM) << " mm short of expected wall\n";
-        return true;
-    }
-    return false;
 }
 
 // [2026-06-06] Verify M2 actually rotated to the requested slot. motor_api's
@@ -2868,56 +2719,6 @@ double WashRobot::read_rope_weight_max_kg_() {
     return WEIGHT_NO_DATA_KG;
 }
 
-// Read max rope weight (kg) via the dedicated estop TCP channel. Unlike
-// read_rope_weight_max_kg_() (whose tier-1 crane_cmd_("tension") grabs
-// crane_mtx_), this uses crane_cli_estop_ + crane_estop_mtx_ — so it works
-// WHILE a retract holds crane_mtx_ on the main thread. Sends 'tension',
-// parses "left=<kg> right=<kg>", returns max. -1 on any failure / detached.
-// Used by the crane_retract_safe_ active monitor.
-double WashRobot::read_rope_weight_estop_() {
-    if (!crane_attached_.load()) return -1.0;
-
-    std::string reply;
-    {
-        std::lock_guard<std::mutex> lk(crane_estop_mtx_);
-        if (!crane_cli_estop_.isConnected()) {
-            if (!crane_cli_estop_.connectToServer(crane_endpoint_ip_(), ep::port("CRANE", CRANE_PORT)))
-                return -1.0;
-        }
-        const char* tx = "tension\n";
-        if (!crane_cli_estop_.sendData(tx, 8, 500)) return -1.0;
-
-        // Drain lines until an OK reply (EVT lines may interleave) or timeout.
-        std::string rx;
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        char buf[256];
-        while (std::chrono::steady_clock::now() < deadline) {
-            int n = crane_cli_estop_.receiveData(buf, sizeof(buf), 300);
-            if (n <= 0) continue;
-            rx.append(buf, n);
-            size_t pos;
-            while ((pos = rx.find('\n')) != std::string::npos) {
-                std::string one = rx.substr(0, pos);
-                rx.erase(0, pos + 1);
-                if (!one.empty() && one.back() == '\r') one.pop_back();
-                if (one.rfind("OK", 0) == 0) { reply = one; break; }
-            }
-            if (!reply.empty()) break;
-        }
-    }
-    if (reply.empty()) return -1.0;
-
-    double l = -1, r = -1;
-    auto lp = reply.find("left=");
-    auto rp = reply.find("right=");
-    if (lp != std::string::npos) { try { l = std::stod(reply.substr(lp + 5)); } catch (...) {} }
-    if (rp != std::string::npos) { try { r = std::stod(reply.substr(rp + 6)); } catch (...) {} }
-    if (l >= 0 && r >= 0) return std::max(l, r);
-    if (l >= 0) return l;
-    if (r >= 0) return r;
-    return -1.0;
-}
-
 double WashRobot::rope_weight_limit_per_sensor_kg_() const {
     // State-aware: cups holding → low limit; hanging on rope → high limit.
     State s = state_.load();
@@ -2935,201 +2736,6 @@ double WashRobot::rope_weight_limit_per_sensor_kg_() const {
         default:
             return (settings_.rope_weight_limit_hanging.load());
     }
-}
-
-// Wraps `crane_cmd_("retract <cm>")` with weight-based safety guard:
-//   - Pre-check: if any sensor already > limit → refuse with ERR
-//   - Active monitor: spawn watcher polling every WEIGHT_MONITOR_POLL_MS; on
-//     overweight → send "stop" to crane, then return OK (the early stop is
-//     treated as the retract having reached its goal — slack collected).
-// On comm fail (sensors offline) → refuse all retracts (safe default).
-std::string WashRobot::crane_retract_safe_(int cm, int timeout_sec) {
-    if (cm <= 0) return "ERR retract_cm_invalid";
-
-    // [2026-06-05] timeout_sec=0 → 用 cm 算 dynamic timeout（default behavior）。
-    // 顯式傳值的 caller 維持原 timeout。
-    if (timeout_sec <= 0) timeout_sec = crane_motion_timeout_sec_(cm);
-
-    // Detached mode bypass — no rope tension to worry about
-    if (!crane_attached_.load()) {
-        std::cout << "[crane_retract_safe] crane_attached=off, skip\n";
-        return crane_cmd_("retract " + std::to_string(cm), timeout_sec);
-    }
-
-    const double limit = rope_weight_limit_per_sensor_kg_();
-    const double pre = read_rope_weight_max_kg_();
-    if (pre <= WEIGHT_NO_DATA_KG) {   // truly no reading (not just negative — DSZL uncalibrated)
-        std::cout << "[crane_retract_safe] WEIGHT SENSOR OFFLINE — refuse retract for safety\n";
-        return "ERR rope_weight_sensor_offline";
-    }
-    if (pre > limit) {
-        std::ostringstream oss;
-        oss << "ERR rope_weight_too_high pre=" << pre << "kg limit=" << limit << "kg";
-        std::cout << "[crane_retract_safe] " << oss.str() << "\n";
-        return oss.str();
-    }
-    std::cout << "[crane_retract_safe] pre=" << pre << "kg limit=" << limit
-              << "kg → start retract " << cm << " cm\n";
-
-    // Active monitor: separate thread polls weight via the dedicated estop TCP
-    // channel (read_rope_weight_estop_). It MUST use the estop channel for BOTH
-    // the read AND the stop: the main thread holds crane_mtx_ for the whole
-    // retract, so read_rope_weight_max_kg_() (tier-1 crane_cmd_) would block on
-    // that mutex and the monitor would never get a reading. On breach → send
-    // "stop" over the same estop channel.
-    std::atomic<bool> monitor_running{true};
-    std::atomic<bool> monitor_tripped{false};
-    std::atomic<double> monitor_peak_kg{pre};
-    std::thread monitor([this, &monitor_running, &monitor_tripped, &monitor_peak_kg, limit]() {
-        while (monitor_running.load()) {
-            double w = read_rope_weight_estop_();
-            if (w >= 0) {
-                if (w > monitor_peak_kg.load()) monitor_peak_kg.store(w);
-                if (w > limit) {
-                    monitor_tripped.store(true);
-                    std::cout << "[crane_retract_safe] OVERWEIGHT w=" << w
-                              << "kg > limit=" << limit << "kg — sending crane stop via estop channel\n";
-                    // [2026-09-09] Was an inline copy of the estop-channel send;
-                    // now shares crane_stop_estop_() with the two emergency paths
-                    // so there is one implementation of "stop the crane, bypassing
-                    // crane_mtx_" instead of three.
-                    if (!crane_stop_estop_())
-                        std::cout << "[crane_retract_safe] WARN: overweight stop not acked\n";
-                    break;
-                }
-            }
-            sleep_ms_(WEIGHT_MONITOR_POLL_MS);
-        }
-    });
-
-    // Main retract call (blocks until crane reply or timeout)
-    std::string reply = crane_cmd_("retract " + std::to_string(cm), timeout_sec);
-    monitor_running.store(false);
-    if (monitor.joinable()) monitor.join();
-
-    if (monitor_tripped.load()) {
-        // Tension hit the limit mid-retract — crane was stopped via the estop
-        // channel. Per user (2026-05-19): treat this as the retract having
-        // reached its goal (slack collected, rope taut), NOT an error — return
-        // OK so the motion flow continues instead of dropping to PausedOnError.
-        // The "rope_weight_tripped" marker stays in the reply for logs / EVT.
-        std::ostringstream oss;
-        oss << "OK rope_weight_tripped peak=" << monitor_peak_kg.load()
-            << "kg limit=" << limit << "kg (stopped early, treated as done)";
-        std::cout << "[crane_retract_safe] " << oss.str()
-                  << " (crane reply was: " << reply << ")\n";
-        // [arm rope protect TEMP 2026-05-21] PARK injection REMOVED 2026-05-21o:
-        // user observed that after pay_out the pole's relative position blocks
-        // the arm's PARK trajectory. Auto-PARK during intermediate retracts is
-        // therefore unsafe. Arm now stays at DEPLOY 250 CENTER throughout
-        // body phases — PARK happens only at clean_sweep cleanup (end of
-        // step_down/step_up). If clean_sweep PARK is also blocked, remove its
-        // arm_cmd_("PARK") in do_arm_clean_sweep_ cleanup too.
-        return oss.str();
-    }
-
-    std::cout << "[crane_retract_safe] retract " << cm << " cm done, peak weight="
-              << monitor_peak_kg.load() << "kg\n";
-    // [arm rope protect TEMP 2026-05-21] PARK injection REMOVED 2026-05-21o (see above)
-    return reply;
-}
-
-// Incremental pay_out: send 1cm-at-a-time, poll per-side rope tension, stop
-// when EITHER left OR right tension drops to <= target_kg (body weight
-// partially transferred to the cups). Capped at max_cm. Called at end of
-// cmd_attach.
-// (2026-05-20: changed from "both ≤ target" to "either ≤ target" per bench —
-// the "both" condition let one side overshoot way under target by the time the
-// heavier side caught up, e.g. waiting for left to drop from 14.91→12 made the
-// already-OK right side go from 9.18→1.97kg. Stopping when either side first
-// reaches target keeps the rope from going slack.)
-std::string WashRobot::crane_pay_out_to_weight_(double target_kg, int max_cm) {
-    if (target_kg <= 0 || max_cm <= 0) return "ERR invalid_params";
-
-    if (!crane_attached_.load()) {
-        std::cout << "[crane_pay_out_to_weight] crane_attached=off, skip\n";
-        return "OK skipped total_cm=0";
-    }
-
-    // Read per-side tension from crane DSZL-107: "OK left=<kg> right=<kg>".
-    // Returns true ONLY on real read failure (no OK reply / both sides
-    // unparseable). Negative values are accepted as valid (uncalibrated DSZL
-    // offset — re-read confirms it isn't a transient glitch). Per user
-    // 2026-05-20: a consistent negative is a real low-tension reading.
-    auto read_lr = [this](double& l, double& r) -> bool {
-        auto parse = [](const std::string& rep, double& a, double& b) {
-            a = b = WEIGHT_NO_DATA_KG;
-            auto lp = rep.find("left=");
-            auto rp = rep.find("right=");
-            if (lp != std::string::npos) { try { a = std::stod(rep.substr(lp + 5)); } catch (...) {} }
-            if (rp != std::string::npos) { try { b = std::stod(rep.substr(rp + 6)); } catch (...) {} }
-        };
-        std::string rep = crane_cmd_("tension", 2);
-        if (rep.rfind("OK", 0) != 0) { l = r = WEIGHT_NO_DATA_KG; return true; }
-        parse(rep, l, r);
-        // Re-read on negative (transient vs real low tension)
-        if ((l > WEIGHT_NO_DATA_KG && l < 0) || (r > WEIGHT_NO_DATA_KG && r < 0)) {
-            std::string rep2 = crane_cmd_("tension", 2);
-            if (rep2.rfind("OK", 0) == 0) {
-                double l2, r2;
-                parse(rep2, l2, r2);
-                if (l2 > WEIGHT_NO_DATA_KG) l = l2;
-                if (r2 > WEIGHT_NO_DATA_KG) r = r2;
-            }
-        }
-        return (l <= WEIGHT_NO_DATA_KG && r <= WEIGHT_NO_DATA_KG);   // fail only if both unparseable
-    };
-
-    double l = -1, r = -1;
-    if (read_lr(l, r)) {
-        std::cout << "[crane_pay_out_to_weight] tension read FAIL — skip (won't pay out blind)\n";
-        return "ERR tension_sensor_offline total_cm=0";
-    }
-    if (l <= target_kg || r <= target_kg) {
-        std::ostringstream oss;
-        oss << "OK already_at_target left=" << l << " right=" << r << " total_cm=0";
-        std::cout << "[crane_pay_out_to_weight] " << oss.str() << "\n";
-        return oss.str();
-    }
-
-    // [arm rope protect TEMP 2026-05-21 — DISABLED 2026-05-22] stow arm
-    // BEFORE pay_out loop starts. user 2026-05-22: 「把所有在收放繩之前 deploy
-    // center 都註解掉」。保留 commented 程式碼以便日後恢復。
-    //if (ensure_arm_center_for_rope_("crane_pay_out_to_weight")) {
-    //    return "ERR arm_stow_failed total_cm=0";
-    //}
-
-    int total_cm = 0;
-    while (total_cm < max_cm) {
-        if (crane_cmd_("pay_out 1").rfind("OK", 0) != 0) {
-            std::ostringstream oss;
-            oss << "ERR pay_out_step_fail total_cm=" << total_cm;
-            return oss.str();
-        }
-        total_cm += 1;
-
-        sleep_ms_(ATTACH_PAYOUT_SETTLE_MS);
-
-        if (read_lr(l, r)) {
-            std::ostringstream oss;
-            oss << "ERR tension_sensor_offline_mid_payout total_cm=" << total_cm;
-            return oss.str();
-        }
-
-        std::cout << "[crane_pay_out_to_weight] step total_cm=" << total_cm
-                  << "/" << max_cm << " left=" << l << "kg right=" << r
-                  << "kg target=" << target_kg << "kg\n";
-
-        if (l <= target_kg || r <= target_kg) {
-            std::ostringstream oss;
-            oss << "OK reached left=" << l << " right=" << r << " total_cm=" << total_cm;
-            return oss.str();
-        }
-    }
-
-    std::ostringstream oss;
-    oss << "OK max_cm_reached total_cm=" << total_cm << " left=" << l << " right=" << r;
-    return oss.str();
 }
 
 // 🔴 [2026-09-10] 上面原本有三行「Per-side retract until both L/R tension >=
@@ -3260,46 +2866,6 @@ void WashRobot::crane_watchdog_loop_() {
                     }
                 }
             }
-        }
-    }
-}
-
-// Crane keepalive (2026-05-15): background ping during washrobot-side long ops
-// so crane_watchdog doesn't false-abort. Without this, sustained washrobot
-// motion (ZDT pusher extend 4s+, DM2J rail move 2-3s, no crane comms during
-// these) silently lets crane_last_ok_ms_ age past WATCHDOG_TIMEOUT_MS (2s)
-// → abort_flag set → motion aborts mid-step.
-//
-// Logic: poll motion_active_ every PING_PERIOD_MS. When active, send "ping"
-// to crane via crane_cmd_; the OK reply refreshes crane_last_ok_ms_ via the
-// existing path in crane_cmd_. When idle, just sleep — no need to ping.
-//
-// Skip if !crane_attached_ (operator disabled crane for solo bench testing)
-// or !crane_cli_.isConnected() (TCP not up yet — avoid spammy reconnect
-// attempts; the normal reconnect path handles initial connection).
-void WashRobot::crane_keepalive_loop_() {
-    constexpr int PING_PERIOD_MS = 1000;   // 1Hz keepalive while motion active
-    int  consecutive_fail = 0;
-    while (crane_keepalive_running_.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(PING_PERIOD_MS));
-        if (!crane_keepalive_running_.load()) break;
-        if (!motion_active_.load())  { consecutive_fail = 0; continue; }
-        if (!crane_attached_.load()) { consecutive_fail = 0; continue; }
-        if (!crane_cli_.isConnected()) {
-            std::cout << "[crane_keepalive] TCP not connected — skipping ping\n";
-            consecutive_fail = 0;
-            continue;
-        }
-        // Fire-and-check: crane_cmd_ refreshes crane_last_ok_ms_ on OK reply.
-        std::string r = crane_cmd_("ping", 2);
-        const bool ok = (r.rfind("OK", 0) == 0);
-        if (!ok) {
-            consecutive_fail++;
-            std::cout << "[crane_keepalive] ping FAIL (" << consecutive_fail
-                      << ") reply='" << r << "'\n";
-        } else if (consecutive_fail > 0) {
-            std::cout << "[crane_keepalive] ping recovered after " << consecutive_fail << " fails\n";
-            consecutive_fail = 0;
         }
     }
 }
@@ -4095,131 +3661,6 @@ bool WashRobot::pusher_two_stage_retract_(const std::vector<int>& slaves, int rp
     return false;
 }
 
-
-// Group extend with concurrent vacuum watch. Per-slave wait loop combining ZDT
-// status (stall / motion stable) with JC-100 pressure read; whichever fires
-// first decides the slave is "done". Vacuum-sealed slaves get emergency_stop
-// to halt ZDT mid-motion. Stalls are deferred (cup pressed against wall).
-bool WashRobot::pusher_extend_with_vacuum_stop_(const std::vector<int>& slaves,
-                                                  const std::vector<int>& pulses,
-                                                  int rpm, int acc) {
-    // Pre-clear stall flags (matches pusher_move_many_ rationale)
-    for (int s : slaves) Z_(s).release_stall_flag();
-
-    // Send motion commands, sync=1 → wait for trigger; each slave uses its own target pulse.
-    for (size_t i = 0; i < slaves.size(); ++i) {
-        if (Z_(slaves[i]).motion_control_pos_mode_nowait(0, acc, rpm, pulses[i], 1, 1, 1)) {
-            std::cout << "[extend group ZDT:" << slaves[i] << "] pos_mode_nowait FAIL"
-                      << " (pulse=" << pulses[i] << " rpm=" << rpm << " acc=" << acc
-                      << ") — check driver_EN / stall / alarm\n";
-            return true;
-        }
-    }
-    // NOTE: trigger_sync_move() is a Modbus BROADCAST (slave addr 0x00) — per
-    // Modbus spec, broadcasts get no response. [2026-08-29] The driver used to
-    // report that missing reply as an error; it now returns false (success) when
-    // the send succeeds, so the return value is finally meaningful. Still not
-    // checked here on purpose: a broadcast cannot confirm the slaves acted on it,
-    // so real error detection stays with the poll loop below.
-    if (!slaves.empty()) Z_(slaves.front()).trigger_sync_move();
-
-    const int    timeout_ms          = 15000;
-    const int    poll_ms             = 150;
-    const int    STABLE_COUNT_NEED   = 3;
-    const double SPEED_THRESHOLD_RPM = 20.0;
-    const double POS_DELTA_DEG       = 0.15;
-
-    std::vector<int>    stable(slaves.size(), 0);
-    std::vector<double> prev_pos(slaves.size(), 1e9);
-    std::vector<bool>   done(slaves.size(), false);
-    int n_done  = 0;
-    int elapsed = 0;
-
-    // Silence ZDT hex dump during the poll loop (matches zdt_wait_motion_done_).
-    if (driver_dbg_) for (int s : slaves) Z_(s).set_debug(false);
-
-    while (n_done < (int)slaves.size() && elapsed < timeout_ms) {
-        sleep_ms_(poll_ms);
-        elapsed += poll_ms;
-
-        for (size_t i = 0; i < slaves.size(); ++i) {
-            if (done[i]) continue;
-            const int s = slaves[i];
-
-            // 1. Vacuum check FIRST — if sealing, halt motor early to avoid
-            //    over-compressing cup. Single-sample (lenient threshold tolerates
-            //    noise; motion poll cadence already gives us several reads).
-            int p = read_pressure_(s);
-            if (M_(s).error_flag == 0 && p <= VACUUM_EARLY_STOP_KPA) {
-                // Read current status snapshot for obstacle measurement (best effort)
-                double err_deg = 0, cur_ma = 0;
-                if (!Z_(s).get_system_status()) {
-                    err_deg = Z_(s).status.pos_error;
-                    cur_ma  = (double)Z_(s).status.phase_current;
-                }
-                std::cout << "[extend ZDT:" << s << "] VACUUM SEAL at " << elapsed
-                          << "ms, p=" << p << "kPa err=" << err_deg
-                          << "° I=" << cur_ma << "mA — emergency_stop early\n";
-                Z_(s).emergency_stop(false);   // single-slave halt (sync=false)
-                done[i] = true;
-                ++n_done;
-                continue;
-            }
-
-            // 2. ZDT status check
-            if (Z_(s).get_system_status()) continue;   // comm fail, retry within timeout
-            const auto& st = Z_(s).status;
-
-            // [BENCH MEASURE] log phase_current + pos_error per poll for obstacle
-            // threshold tuning. Compare values across:
-            //   - normal extend (motor moving freely)
-            //   - cup sealed against wall (still under load but at target)
-            //   - obstacle stuck (pos_error accumulates, current spikes)
-            // Remove or gate behind env var once thresholds are determined.
-            std::cout << "[obstacle_meas ZDT:" << s
-                      << "] t=" << elapsed
-                      << "ms pos=" << st.real_pos
-                      << "° err=" << st.pos_error
-                      << "° spd=" << st.real_speed
-                      << "rpm I=" << st.phase_current
-                      << "mA p=" << p << "kPa\n";
-
-            if (st.stall_flag) {
-                // Cup hit wall — defer flag release (cycle_group_ releases after
-                // vacuum check). Treat as success.
-                std::cout << "[extend ZDT:" << s << "] STALL at " << elapsed
-                          << "ms, pos=" << st.real_pos << "° err=" << st.pos_error
-                          << "° I=" << st.phase_current << "mA — DEFER stall release\n";
-                done[i] = true;
-                ++n_done;
-                continue;
-            }
-
-            // 3. Stability check — naturally reached target or held position
-            const bool speed_ok = std::fabs(st.real_speed) <= SPEED_THRESHOLD_RPM;
-            const bool pos_ok   = std::fabs(st.real_pos - prev_pos[i]) <= POS_DELTA_DEG;
-            prev_pos[i] = st.real_pos;
-            if (speed_ok && pos_ok) ++stable[i]; else stable[i] = 0;
-            if (stable[i] >= STABLE_COUNT_NEED) {
-                std::cout << "[extend ZDT:" << s << "] STABLE done at " << elapsed
-                          << "ms, pos=" << st.real_pos << "° err=" << st.pos_error
-                          << "° I=" << st.phase_current << "mA\n";
-                done[i] = true;
-                ++n_done;
-            }
-        }
-    }
-
-    if (driver_dbg_) for (int s : slaves) Z_(s).set_debug(true);
-    sleep_ms_(PUSHER_SETTLE_MS);
-
-    if (n_done < (int)slaves.size()) {
-        std::cout << "[extend group] TIMEOUT after " << timeout_ms << "ms, "
-                  << n_done << "/" << slaves.size() << " resolved\n";
-        return true;
-    }
-    return false;
-}
 
 // === Disable-seal extend ===
 // Two-phase extend with ZDT disable trick to let cup self-position under
@@ -5145,35 +4586,6 @@ void WashRobot::record_seal_pulse_(int slave, int pulse) {
     last_seal_pulse_[slave - 1].store(pulse);
 }
 
-// Reset last_seal_pulse_ for given group back to per-slave preset
-void WashRobot::reset_seal_pulse_group_(const std::string& group) {
-    auto slaves = group_slaves_(group);
-    for (int s : slaves)
-        last_seal_pulse_[s - 1].store(preset_extend_pulse_for_slave_(s));
-}
-
-// Compute max feet over-extension (cm) across feet slaves vs per-slave preset
-// [2026-06-05] Snowball protection (fix B): cap return value at
-// FEET_MAX_OVER_CAP_CM so body target = preset + over × 3000 stays within
-// body cup's physical reach (preset + cap*3000 + iter loop room <= ~60000).
-double WashRobot::feet_max_overextend_cm_() const {
-    double max_over = 0.0;
-    for (int s : {ZDT_LF1, ZDT_LF2, ZDT_RF1, ZDT_RF2}) {
-        const int preset = preset_extend_pulse_for_slave_(s);   // upper=17100, lower=18000
-        const int last   = last_seal_pulse_[s - 1].load();
-        const double over_pulses = last - preset;
-        const double over_cm     = over_pulses / (20000.0 / 7.0);   // feet ratio
-        if (over_cm > max_over) max_over = over_cm;
-    }
-    if (max_over > FEET_MAX_OVER_CAP_CM) {
-        std::cout << "[snowball] feet_max_overextend_cm uncapped=" << max_over
-                  << "cm > cap " << FEET_MAX_OVER_CAP_CM
-                  << "cm — clamping (protects body target from overshoot)\n";
-        max_over = FEET_MAX_OVER_CAP_CM;
-    }
-    return max_over;
-}
-
 // [2026-06-05] Snowball protection (fix C): cap feet target so feet pusher
 // itself can't snowball past physical reach. Without this, last_seal_pulse_
 // grows unbounded as cups push further each step to seal a receding wall.
@@ -5426,113 +4838,6 @@ void WashRobot::feet_topup_unsealed_(const std::string& group) {
     }
 }
 
-// Vacuum-feedback fine-tune: after group broadcast extend, monitor pressure
-// per-cup and incrementally push unsealed cups (up to base + MAX_OVEREXTEND).
-// Best-effort — never aborts the cycle, just returns final fails for the
-// caller's existing retry path to handle.
-std::vector<int> WashRobot::fine_tune_extend_per_slave_(const std::vector<int>& slaves,
-                                                          const std::vector<int>& start_pulses,
-                                                          const std::string& group) {
-    if (slaves.size() != start_pulses.size()) {
-        std::cout << "[fine_tune] " << group << " size mismatch (slaves=" << slaves.size()
-                  << " starts=" << start_pulses.size() << ") — abort\n";
-        return slaves;   // pretend all failed; caller will retry
-    }
-    std::vector<int> current = start_pulses;
-    // Per-slave obstacle flag: set when stall observed but vacuum still failed
-    // → cup is jammed against an obstruction (not a wall it can seal on).
-    // Once set, that slave is skipped for remaining fine_tune iterations to
-    // avoid hammering it repeatedly into the obstacle.
-    std::vector<bool> obstacle(slaves.size(), false);
-    auto idx_of = [&](int s) -> int {
-        for (size_t i = 0; i < slaves.size(); ++i) if (slaves[i] == s) return (int)i;
-        return -1;
-    };
-
-    std::vector<int> last_fails;
-    for (int iter = 0; iter < FINE_TUNE_MAX_ITERS; ++iter) {
-        last_fails = vacuum_check_(group);
-        if (last_fails.empty()) {
-            std::cout << "[fine_tune] " << group << " all sealed at iter " << iter << "\n";
-            // Record per-slave seal pulse: first-pass seal = sealed at start_pulses
-            for (size_t i = 0; i < slaves.size(); ++i)
-                record_seal_pulse_(slaves[i], current[i]);
-            return {};
-        }
-
-        // Cross-check: if any slave in last_fails has stall_flag set from a
-        // prior pusher_move_ this iteration, mark it as obstacle (stalled but
-        // not sealed = jammed on something other than wall).
-        for (int s : last_fails) {
-            int idx = idx_of(s);
-            if (idx < 0 || obstacle[idx]) continue;
-            // status was last refreshed by pusher_move_ → zdt_wait_motion_done_;
-            // stall_flag survives because defer mode left it set.
-            if (Z_(s).status.stall_flag) {
-                std::cout << "[fine_tune] slave " << s
-                          << " OBSTACLE detected (stall_flag set + vacuum still fail at "
-                          << current[idx] << " pulses) — skip remaining iterations\n";
-                evt_("obstacle_detected slave=" + std::to_string(s) + " pulse=" + std::to_string(current[idx]));
-                obstacle[idx] = true;
-            }
-        }
-
-        bool extended_any = false;
-        for (int s : last_fails) {
-            int idx = idx_of(s);
-            if (idx < 0) continue;
-            if (obstacle[idx]) continue;   // skip obstacle-flagged slaves
-            int new_target = current[idx] + FINE_TUNE_INCREMENT_PULSE;
-            const int cap = start_pulses[idx] + FINE_TUNE_MAX_OVEREXTEND;
-            if (new_target > cap) {
-                std::cout << "[fine_tune] slave " << s << " hit over-extend cap "
-                          << current[idx] << " (start=" << start_pulses[idx]
-                          << "+max=" << FINE_TUNE_MAX_OVEREXTEND << ") — give up this cup\n";
-                continue;
-            }
-            std::cout << "[fine_tune] iter " << iter << " slave " << s
-                      << " unsealed, extend " << current[idx] << " → " << new_target << "\n";
-            // defer_stall_release=true: cup pushing into wall is the desired
-            // endpoint. Stall = wall reached, treat as success and let the next
-            // vacuum_check_ decide. Stall flags cleared by cycle_group_ after
-            // fine_tune returns.
-            if (pusher_move_(s, new_target, PUSHER_RPM, PUSHER_ACC, /*defer_stall=*/true)) {
-                std::cout << "[fine_tune] slave " << s << " pusher_move_ failed at "
-                          << current[idx] << " — skip this cup, continue\n";
-                continue;
-            }
-            current[idx] = new_target;
-            extended_any = true;
-        }
-
-        if (!extended_any) {
-            std::cout << "[fine_tune] " << group << " no cup extendable this iter (all hit cap / fail / obstacle) — stop\n";
-            break;
-        }
-        sleep_ms_(FINE_TUNE_SETTLE_MS);
-    }
-
-    last_fails = vacuum_check_(group);
-    // Record seal pulse for cups that ended up sealed (D persistence — used as
-    // base for next step's extend). Cups that didn't seal keep previous value.
-    {
-        std::set<int> failing(last_fails.begin(), last_fails.end());
-        for (size_t i = 0; i < slaves.size(); ++i) {
-            int s = slaves[i];
-            if (!failing.count(s)) record_seal_pulse_(s, current[i]);
-        }
-    }
-    if (!last_fails.empty()) {
-        std::cout << "[fine_tune] " << group << " done, still failing slaves=";
-        for (size_t i = 0; i < last_fails.size(); ++i) {
-            if (i) std::cout << ",";
-            std::cout << last_fails[i];
-        }
-        std::cout << "\n";
-    }
-    return last_fails;
-}
-
 // Poll JC-100 every 200ms until all listed slaves' pressure rises above
 // DETACH_THRESHOLD_KPA (-10 kPa) OR timeout. Returns false on success (all
 // released), true on timeout. Used between valve-OFF and pusher retract.
@@ -5597,46 +4902,6 @@ bool WashRobot::vacuum_wait_release_(const std::vector<int>& slaves, int timeout
     }
     evt_(evt.str());
     return true;
-}
-
-// Pre-retract safety: scan group for latched stall_flag, release any found,
-// verify cleared. Stall on the still-holding group means ZDT firmware will
-// reject the next motion cmd on that group (e.g. when it retracts in the
-// following phase). Called before "valve OFF + retract" of the OTHER group.
-// Idempotent — no-op if all clear. Returns false=clear, true=persistent stall.
-bool WashRobot::ensure_group_stall_clear_(const std::string& group) {
-    auto slaves = group_slaves_(group);
-    if (slaves.empty()) return false;
-
-    // Pass 1: detect stalls
-    std::vector<int> stalled;
-    for (int s : slaves) {
-        if (Z_(s).get_system_status()) continue;   // comm fail, skip — best effort
-        if (Z_(s).status.stall_flag) stalled.push_back(s);
-    }
-    if (stalled.empty()) {
-        std::cout << "[stall_check " << group << "] all clear\n";
-        return false;
-    }
-
-    // Pass 2: release latched flags
-    std::cout << "[stall_check " << group << "] STALL on slaves:";
-    for (int s : stalled) std::cout << " " << s;
-    std::cout << " — releasing\n";
-    for (int s : stalled) Z_(s).release_stall_flag();
-
-    // Pass 3: verify cleared (50ms gap for firmware to update status)
-    sleep_ms_(50);
-    for (int s : stalled) {
-        if (Z_(s).get_system_status()) continue;
-        if (Z_(s).status.stall_flag) {
-            std::cout << "[stall_check " << group << "] slave " << s
-                      << " STALL persistent after release\n";
-            return true;
-        }
-    }
-    std::cout << "[stall_check " << group << "] cleared\n";
-    return false;
 }
 
 // Pre-flight stall clear on all 9 ZDT slaves. Defer-stall mode in extend leaves

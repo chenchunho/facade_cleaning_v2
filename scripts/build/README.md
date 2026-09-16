@@ -23,7 +23,6 @@
 | `build_body.sh` | 本體 `facade_cleaning_v2`（16 個 TU，完整） | `~/run/facade_drv.out` | `facade_cleaning_v2.out` |
 | `build_body_incremental.sh` | 本體，**只重編 4 個 TU** 後重連結 | `~/run/facade_cleaning_v2.new` | 同上 |
 | `build_crane.sh` | 吊機 `Crane_control_PI`（單次 g++） | `~/run/crane_drv.out` | `crane_control_PI.out` |
-| `build_linux_test.sh` | bench 工具 `Linux_test`（16 TU） | `Linux_test/linux_test.out` | 手動 scp |
 | **`cleaning_arm/compile.sh`** ← 不在本目錄 | 手臂 `motor_api` | `cleaning_arm/motor_api` | `~/run/motor_api` |
 
 🔴 **`cleaning_arm` 刻意不搬進本目錄**：它本來就有 `compile.sh` 且內容是對的，

@@ -161,6 +161,7 @@ release_feet_center → free_hang_settle(3 s)→ balancing(IMU 閉環,連續 mot
 | **先猜新參數不如換用已驗證可靠的路徑** | M2 PARK 卡 18 秒,第一版假說猜 CAN passive latch,port 偵測邏輯**沒用**;真因是 `go_home_slot()` 的 kp(≈2.5)比 `lr_move_to_slot_impl()`(`MIT_KP=28` + 摩擦前饋)**差 10 倍以上**。修法是讓 PARK 也走已驗證的那條,不是繼續猜 kp/kd |
 | 🔴 **移除看似獨立的功能前,一定要全 repo 搜一次相關字串** | 拔 Easy Crane 時才發現牽連到核心的張力 fallback(`read_rope_weight_max_kg_()` 的第三層),**事前沒有任何紀錄提過這個關聯** |
 | 🔴 **斷言的對象要是「使用者看到的東西」,不是「我設了什麼」** —— 綠燈證明的是屬性寫進去了,不是它真的生效 | 2026-09-15 v3 GUI 中了兩次:`el.hidden = true` 明明成立,但 CSS 的 `.ebanner{display:flex}` / `.grp > div{display:flex}` 把它蓋掉 ⇒ 元素照樣看得見(症狀:兩條鎖定橫幅在沒鎖時恆亮、前置卡收起後打不開),而驗收只讀 `.hidden` 所以**一路綠燈**。改法:斷言 computed display,並加一條全頁掃描「任何帶 hidden 的元素 computed display 必須真的是 none」。**同族**:`el.disabled` vs `pointer-events:none`、`textContent` 有值 vs 元素在畫面外、Modbus 寫入回成功 vs 繼電器真的動作(見 1.3 與破真空閥 0ms 那條) |
+| 🔴🔴 **通道自癒只能重連,不能重送** —— 「收不到回覆就重送」對任何非冪等指令都等於**重跑**:指令已經離開 socket,對方可能做了、做到一半、或中途斷電,本機一無所知 | 2026-09-16 `crane_cmd_` 的殭屍 socket 自癒(2026-05-15)把 recv timeout 也當可重試:`goto 0` 下行中 user 為維修**斷吊機電**,105 s 後 timeout 到、吊機剛上電、本體重連並**原樣重送 `goto 0`**,吊機在人旁邊自己開始放繩。`arm_cmd_` 早在 06-03 就為 DEPLOY/PARK 定了「timeout 不重送」,`crane_cmd_` 從沒套用 ⇒ **同一類錯誤修一條通道時要掃所有通道**。正解:timeout 只 `close()` 讓**下一條**指令重連;要重送必須由呼叫端在知道現場狀態後決定。另一條:**斷電維修前先確認本體沒有卡著等回覆的運動指令**,最乾淨是本體一起斷電 |
 | **機構層級的硬性要求不能為實作方便讓步** | sync 步伐曾想「一側伸完再伸另一側」以套用早停邏輯,被否決 ——「兩邊腳組一定要一起放」。正解是回頭改底層共用函式(`stop_group_ids` 每組獨立早停),而非犧牲同時性 |
 
 ---

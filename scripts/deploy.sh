@@ -56,6 +56,8 @@ deploy_body() {
     scp -q "$REPO"/app/WASH_ROBOT.{h,cpp} "$REPO"/app/wash_robot_commands.cpp "$BODY":~/projects/facade_cleaning_v2/app/ || die "scp app 失敗"
     scp -q "$REPO"/command/dispatcher.cpp "$BODY":~/projects/facade_cleaning_v2/command/ || die "scp command 失敗"
     say "Pi 上編譯"
+    # [2026-09-16] `~/run/build_body.sh` 是 Pi 上的副本,repo 改了 TU 清單(例如拿掉 DY_500)它不會跟著變 ⇒ 每次先同步。
+    scp -q "$REPO"/scripts/build/build_body.sh "$BODY":~/run/build_body.sh || die "scp build_body.sh 失敗"
     $SSH "$BODY" 'bash ~/run/build_body.sh 2>&1 | tail -2' </dev/null | /bin/grep -q facade_drv.out || die "編譯失敗(見上)"
     say "備份 + 換檔 + 重啟 fcv-body"
     $SSH "$BODY" "cd ~/run && cp -p facade_cleaning_v2.out facade_cleaning_v2.out.prev-$STAMP && rm -f facade_cleaning_v2.out && cp -p facade_drv.out facade_cleaning_v2.out && md5sum facade_cleaning_v2.out && systemctl --user restart fcv-body" </dev/null || die "換檔/重啟失敗"
@@ -86,6 +88,7 @@ deploy_crane() {
     say "同步原始碼"
     scp -q "$REPO"/Crane_control_PI/main.cpp "$CRANE":~/projects/facade_cleaning_v2/Crane_control_PI/ || die "scp 失敗"
     say "Pi 上編譯"
+    scp -q "$REPO"/scripts/build/build_crane.sh "$CRANE":~/run/build_crane.sh || die "scp build_crane.sh 失敗"   # 同上,副本要跟著 repo
     $SSH "$CRANE" 'bash ~/run/build_crane.sh 2>&1 | tail -2' </dev/null | /bin/grep -q crane_drv.out || die "編譯失敗(見上)"
     say "備份 + 換檔 + 重啟 fcv-crane"
     $SSH "$CRANE" "cd ~/run && cp -p crane_control_PI.out crane_control_PI.out.prev-$STAMP && rm -f crane_control_PI.out && cp -p crane_drv.out crane_control_PI.out && md5sum crane_control_PI.out && sudo systemctl restart fcv-crane" </dev/null || die "換檔/重啟失敗"

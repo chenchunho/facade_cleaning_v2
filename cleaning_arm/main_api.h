@@ -307,6 +307,10 @@ public:
     //    theta_contact < THETA_MIN  => 有東西擋著（09-03「吸不到」查明是橫桿）
     //  這兩個限是**手臂幾何**、不隨高度變，這正是它取代 wall_mm 的原因。
     // ============================================================
+    // [2026-09-16 per user] Dwell between STARTUP (M2 → roller) and auto-INIT
+    // (M1 stop-seek). Hold torque needs time to build against the ~1.6 Nm static
+    // preload; INIT's M1 slam once shook M2 off the slot while tau was still 0.94.
+    static constexpr int   STARTUP_TO_INIT_DWELL_MS = 2000;
     static constexpr float DEPLOY_F_TARGET_NM   = 5.0f;    // [2026-09-15 per user] 3→5(10 趟滾筒實測:3 N·m 時掃動中 tau 由 3.86 掉到 1.2~1.9 ⇒ 壓不住)。舊註:[2026-09-11] 15→8 → [2026-09-14] 8→3:現場看 3 Nm 清潔效果好,定為工作力度
     static constexpr float DEPLOY_F_TOUCH_NM    = 2.0f;    // 輕觸判定：超過此值視為接觸
     static constexpr float DEPLOY_F_TOL_NM      = 1.0f;    // 收斂容差
@@ -539,11 +543,6 @@ public:
     float get_velocity() const;
     float get_torque()   const;
 
-    // ---- access underlying objects ------------------------------------------
-    damiao::Motor&         m1_motor() { assert(m1_.motor); return *m1_.motor; }
-    damiao::Motor&         m2_motor() { assert(m2_.motor); return *m2_.motor; }
-    damiao::Motor_Control& ctrl()     { assert(dm_); return *dm_; }
-
 private:
     // ---- per-motor state ----------------------------------------------------
     struct MotorSlot {
@@ -625,7 +624,7 @@ private:
         // SET_HALF_RANGE). cmd_init_sequence() checks this so repeat INIT calls
         // don't re-run the auto-seek (still unreliable — false-early stops, or
         // seeks that travel huge distances finding no resistance at all) and
-        // stomp a good value; once trusted, INIT just moves to CENTER instead.
+        // stomp a good value; once trusted, INIT just moves to RIGHT (roller = standby slot, 2026-09-16 per user; was CENTER).
         // Defaults true here since lr_half_range above is now a real hand-measured
         // value, not the old ZERO_OFFSET placeholder — trust it from first boot.
         bool lr_calibrated { true };

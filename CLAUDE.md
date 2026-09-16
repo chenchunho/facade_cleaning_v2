@@ -108,7 +108,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `ZS_DIO_MODBUS_SUMMARY.md` | ZS-DIO 繼電器 | 🔴 **2026-09-10 起實際在用**（原記「已被 SE3 取代，保留作歷史對照」已作廢）：吊機水閥 @ `.32` slave 1 CH4。出廠 **38400**（非 PQW 的 9600）、原生 **FC06**、`readCoils` startCh 1 起算 |
 | 🆕 `DSZL_107_X518_MODBUS_SUMMARY.md` | **張力**：DSZL-107 測力元件 + **X518 採集器** | 🔴 **driver 名稱誤導——講 Modbus 的是 X518，DSZL-107 是類比應變片**；上電清零／零位跟蹤預設值；裝置端校準沒被用到 |
 | 🆕 `XKC_Y25_MODBUS_SUMMARY.md` | XKC-Y25-RS485 液位（`.22` slave 13） | **手冊自己前後矛盾**：寫入位址比暫存器表大 1（driver 已正確處理）；RSSI 遲滯 3900/4100 在感測器內部；靈敏度是**實體旋鈕** |
-| 🆕 `DY_500_MODBUS_SUMMARY.md` | DY-500 稱重變送器（**從未安裝**） | 出廠 19200；上電清零預設開；主動上傳模式是**單向門**（只能恢復出廠救回） |
+| `DY_500_MODBUS_SUMMARY.md` | DY-500 稱重變送器（**從未安裝;驅動 2026-09-16 已自樹移除**） | 出廠 19200；上電清零預設開；主動上傳模式是**單向門**（只能恢復出廠救回） |
 | 🆕 `WT901BC_TTL_PROTOCOL_SUMMARY.md` | WT901BC-TTL 九軸姿態儀（`/dev/ttyUSB0`） | **非 Modbus**，0x55 封包；⚠️ 來源是近親型號 WT901C 的手冊，已與 driver 逐項對照；抓到 5 個落差（含 `0x56` 氣壓是死碼） |
 | 🆕 `QX_DO24_MODBUS_SUMMARY.md` | QX-DO24 四路 PWM（`.21` slave 9，🔴 **貼牆螺旋槳，不是散熱風扇**） | **頻率 ≤65535 可用 FC `0x06` 單寫 `0x05`（8 bytes），不必用 FC `0x10`（13 bytes）** —— 驅動只實作了後者；`0x00~0x0F` 無限次改寫、其餘暫存器**實時寫 flash 且壽命僅 1~2 千次**；`VCC/GND` 緊鄰 `A/B`，保修條款明列「電源錯接到 485 導致 485 段燒毀」；`0xFF00`=`0xFFFF` 是恢復出廠（會打回 9600/addr 1） |
 | 🆕 `IPCAM_XIONGMAI_SUMMARY.md` | XiongMai 網路攝影機 ×2（`.112` / `.113`，**非 Modbus**） | 2026-09-10 新增。海思 `GK7201V200`、1080P H.264；**admin 空密碼**；RTSP 網址（結尾 `?` 不可省）、XM 私有協定 `34567` 讀設定法；🔴 NTP 停用時戳不可信、私有埠不可對外 forward |
@@ -200,7 +200,6 @@ C++ 機器人控制系統，包含洗窗機器手臂（wash robot arm）與吊�
 |---|---|---|
 | 本體 `facade_cleaning_v2` | `ssh nexuni@192.168.5.26 'bash ~/projects/facade_cleaning_v2/scripts/build/build_body.sh'` | ~18 s |
 | 吊機 `Crane_control_PI` | `ssh user@192.168.5.25 'bash ~/projects/facade_cleaning_v2/scripts/build/build_crane.sh'` | ~62 s |
-| bench `Linux_test` | `bash scripts/build/build_linux_test.sh` | — |
 | 手臂 `motor_api` | `bash cleaning_arm/compile.sh`（🔴 **不在 `scripts/build/`**，避免第二份副本） | — |
 
 🔴 **產物是 `-O2` 進 `~/run/`**（2026-09-09 搬家前是 `~/bringup/`），不是 `bin/[arch]/[config]/`。
@@ -260,12 +259,10 @@ Crane_control_PI/    # 吊機主控 binary
 cleaning_arm/        # 手臂控制 binary
                      #    ⚠️ 自成一格：不使用 user_lib，自建 socket 層（main_api.{h,cpp}）
                      #    📌 這是**刻意的服務邊界**，不是待重構的債（refactor_plan §3.4）
-Linux_test/          # bench 互動式硬體測試工具 + fake_slaves/（刻意送壞幀，測錯誤處理）
-frame_capture/       # Python 影像工具（相機路線已作廢，見 .claude/archive/）
+Linux_test/          # 只剩 cycle_test.py（任務腳本,server.js 起跑的就是它）。bench 工具/探針/fake_slaves
+                     #    2026-09-16 per user 全數移除(git 842e774 之前仍有)
 harness/             # 重構等價性驗證：假匯流排 + 軌跡比對（不需要機器）
-                     #    📌 與 fake_slaves/ 互補：這裡**永遠送好幀**測正常路徑，
-                     #       那裡送壞幀測錯誤處理。完整證明需要兩套一起跑
-scripts/             # tmux launcher：wr.sh / crane.sh / cams.sh
+scripts/             # deploy.sh(開發期部署)/ crcmd.py / systemd/(unit 副本)/ build/(建置腳本權威版)/ link_probe.sh
 tmp/                 # 暫存工作區（已 gitignore，不進版控）
 ```
 
@@ -283,11 +280,11 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 | `README.md` | repo 門面。🔴 **唯一記載 fork 出身**：自 `washrobot_new_PI` commit `9f174f9`（tag `v2-fork-from-v1`）於 2026-06-25 分出 | 🟡 「跟 v1 主要差別」多數仍是 TBD |
 | ~~`ONBOARDING.md`~~ | ⚰️ **2026-09-12 歸檔為 `.claude/archive/ONBOARDING-2026-08-13.md`**（52 KB、11 章的 08-13 快照，已凍結） | ✅ 踩坑/工程方法抽到 `.claude/reference/engineering_pitfalls.md`；架構由 `SOFTWARE.md`+`HARDWARE.md` 取代。🔴 **§4 v1↔v2 機械差異、§6 步態演進仍無可替代，留在歸檔原檔** |
 | ~~`facade_cleaning_v2.sln`~~ | ⚰️ **2026-09-07 連同 4 個 `.vcxproj` 一併刪除**（VS 不再使用） | ⚪ 取回見 git `79a2312` |
-| `deploy_and_test.pdf` | 部署測試說明，由 `.claude/archive/gen_deploy_pdf.py` 產生 | 🟡 產生腳本只能在 Windows 跑 |
-| `dm2j_manual_utf8.txt` | DM2J 手冊的**可讀**文字擷取（簡體中文） | 🟡 已被 `.claude/summaries/DM2J_RS_MODBUS_SUMMARY.md` 濃縮，保留作原文對照 |
+| ~~`deploy_and_test.pdf`~~ | ⚰️ **2026-09-16 per user 刪除**(v1 時期部署說明;產生器 `.claude/archive/gen_deploy_pdf.py` 仍在歸檔) | ⚪ git 有 |
+| ~~`dm2j_manual_utf8.txt`~~ | ⚰️ **2026-09-16 per user 刪除**(手冊文字擷取;權威是 `summaries/DM2J_RS_MODBUS_SUMMARY.md` + `doc/上滑台/DM2J-RS.V1.pdf`) | ⚪ git 有 |
 | `harness/` | **重構的等價性驗證**（2026-08-29 新增）：假匯流排 + 軌跡正規化 + 兩個版本比對。不需要機器 | 🟡 工具已完成並自我測試過；**尚未端到端跑過**。🔴 **2026-09-12 更正:「本機缺 `g++`」是錯的** —— 本機有 **g++ 9.4.0**(x86_64),`-fsyntax-only` 與 `-E` 預處理比對當日實測可用,harness 的前提早就成立。🆕 **09-13 加 `gui_offline.sh` + `fake_robot.py`**:三個假端點回真格式、狀態會動,**把 GUI 送的每條指令記成 KNOWN/UNKNOWN 清單**(從 GUI 推導程式面功能);見 `harness/README_gui_offline.md` |
-| 🆕 `scripts/build/` | **建置腳本（權威版）**：本體／吊機／`Linux_test` 三支 + `README.md`。2026-09-07 由兩台 Pi 的 `~/bringup/`（2026-09-09 已搬到 `~/projects/facade_cleaning_v2/`）逐位元取回 —— 在那之前**只存在於 Pi 上、不在版控** | 🟢 活的，**VS 移除後這是唯一的建置定義**（手臂例外，見 `cleaning_arm/compile.sh`） |
-| 🆕 `scripts/bench/` | **2026-09-09 從 Pi 取回的唯一副本**：4 支搬家前的建置／啟動腳本（皆已被 `scripts/build/` 與 runbook §A0 取代）+ `README.md`。同批取回的 9 個一次性探針放在 `Linux_test/` | ⚪ 不是現行做法，留作唯一副本與歷史對照 |
+| 🆕 `scripts/build/` | **建置腳本（權威版）**：本體／吊機兩支(`Linux_test` 那支 09-16 隨目錄一併移除) + `README.md`。2026-09-07 由兩台 Pi 的 `~/bringup/`（2026-09-09 已搬到 `~/projects/facade_cleaning_v2/`）逐位元取回 —— 在那之前**只存在於 Pi 上、不在版控** | 🟢 活的，**VS 移除後這是唯一的建置定義**（手臂例外，見 `cleaning_arm/compile.sh`） |
+| ~~`scripts/bench/`~~ | ⚰️ **2026-09-16 刪除**(09-09 從 Pi 取回的搬家前建置/啟動腳本,已被 `scripts/build/` + systemd 取代;git `842e774` 之前仍有) | ⚪ |
 | 🆕 `web_backend/tools/` | `check_console.js`：前端靜默失敗檢查器（重複 id／寫到不存在的元素／括號／`<div>` 開合）。改前端後跑一次 | 🟢 活的。⚠️ 已知盲區：只比對字面字串，樣板字串動態組的 id 看不到（工具自己會印） |
 | `doc/` | **原廠手冊**（14 個裝置／27 檔／41 MB）。`.claude/summaries/` 的 `Source:` 都指到這裡 | ⚪ 在 `.gitignore`，**不進版控但進雲端鏡像** |
 | `command/` | 🆕 **指令層**（2026-08-30 階段 2）：`dispatcher.{h,cpp}`，由 `facade_cleaning_v2/main.cpp` 抽出的 373 行分派器 | 🟢 活的 |
@@ -715,9 +712,9 @@ bool init(TCP_client& extClient, int ID, bool debug = false);
 
 ## Testing
 
-There is no automated test framework. Testing is done interactively via `Linux_test/main.cpp`, which provides a menu-driven console interface to exercise each device command (enable, disable, zero, position, speed, home, stop, etc.).
+There is no automated test framework. (The interactive bench console `Linux_test/main.cpp` was removed 2026-09-16 per user; it is in git history before `842e774`.) Historically it provided a menu-driven console interface to exercise each device command (enable, disable, zero, position, speed, home, stop, etc.).
 
-To test a device, deploy `Linux_test` to the target machine and run interactively. The test connection address defaults to `10.0.0.42:4001` in the test harness.
+Device-level probing today goes through `scripts/crcmd.py` (line protocol) and `harness/` (fake bus). Historical note: the old bench defaulted to `10.0.0.42:4001` in the test harness.
 
 ## Key Conventions
 

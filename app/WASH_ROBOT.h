@@ -20,7 +20,6 @@
 #include "JC_100_METER.h"
 #include "PQW_IO_16O_RLY.h"
 #include "QX_DO24.h"
-#include "DY_500_weight_sensor.h"
 #include "XKC_Y25_RS485.h"
 #include "Serial_port.h"
 #include "WT901BC_TTL.h"
@@ -296,9 +295,6 @@ public:
     // before/after frames so iter 1 of run_avoid has detector input.
     // Uses same patterns as step_down (two-stage retract, disable_seal extend).
     // Feet stay sealed throughout (machine doesn't fall).
-    std::string do_obstacle_probe_(std::function<void()> cap_before,
-                                   std::function<void()> cap_after,
-                                   int probe_cm = 2);
 
     //=========== balance calibration ===========
 
@@ -692,7 +688,6 @@ private:
     // [2026-08-28 → 2026-08-31] 已改回分側判準（見下方 SEAL_MIN_CUPS_PER_SIDE）。
     // ⚠️ **本常數目前沒有任何程式碼在使用**，只被 group_seal_ok_ 的註解引用來說明沿革。
     // 保留是為了讓「為什麼曾經退成總數判準」這段歷史看得見；要恢復總數判準時直接可用。
-    static constexpr int SEAL_MIN_CUPS_TOTAL = 2;   // [unused in code since 2026-08-31]
     // 🔴 [2026-08-31] 改回分側：每一側至少 SEAL_MIN_CUPS_PER_SIDE 顆吸住。
     // 上方 08-28 註解自己寫下的退場條件是「**左右歸屬確認後應改回分側判準**」——
     // 該條件已於 2026-08-31 達成：實機逐組推吸盤驗證 right={5,7}=右上+右下、
@@ -701,13 +696,6 @@ private:
     // 算出來的答案本來就不對；歸屬修好後那個前提消失。
     static constexpr int SEAL_MIN_CUPS_PER_SIDE = 1;
 
-    // DM2J rail/arm slave IDs
-    // 2026-05-26: 上滑台從 cli_20_ slave 5 搬到 cli_22_ slave 14，目的是讓
-    // arm sweep (cli_22_) 跟 feet rail (cli_20_) 真正並行不撞 bus。
-    static constexpr int DM2J_LEFT_FOOT   = 1;    // cli_20_
-    static constexpr int DM2J_LEFT_WHEEL  = 2;    // cli_20_
-    static constexpr int DM2J_RIGHT_FOOT  = 3;    // cli_20_
-    static constexpr int DM2J_RIGHT_WHEEL = 4;    // cli_20_
     // 上滑台（手臂清洗滑軌）。2026-08-28 per user 確認實體接在 192.168.1.20，
     // 掛回 cli_20_（在此之前程式對 cli_22_ 發指令，每次掃動都是 writeMulti no
     // response）。slave 號維持 14 —— .20 上只有 ZDT 5~8 與 PQW 12，不撞號。
@@ -812,10 +800,6 @@ private:
     //    ②③④ 的實測:峰值電流由舊時序的 1.1~2.1A 降到 0.37~0.56A,600rpm 也不再是問題。
     static constexpr int BREAK_VACUUM_PRE_MOVE_MS    = 0;    // CH6 ON → 送收腳指令(0 = 開閥後立刻收,2026-09-15③ per user)
     static constexpr int BREAK_VACUUM_HOLD_MOVE_MS   = 300;  // 送收腳指令 → CH6 OFF(收的過程繼續灌;2026-09-15 per user: 500→300)
-    static constexpr int BREAK_VACUUM_ON_MS          = 500;  // [已不用,2026-09-15②] 舊:ON 持續時間(到時關閥)
-    static constexpr int BREAK_VACUUM_POST_OFF_MS    = 100;  // [已不用,2026-09-15②] 舊:關閥後靜置才送收腳
-    static constexpr int BREAK_VACUUM_PRE_RETRACT_MS = 80;   // [已不用,2026-09-15] 舊:ON -> 收腳指令送出
-    static constexpr int BREAK_VACUUM_TOTAL_ON_MS    = 500;  // [已不用,2026-09-15] 舊:ON -> OFF(收腳在這段期間送出)
 
     // [2026-08-28] 真空閥 OFF -> 破真空閥 ON 之間的強制靜置。
     //
@@ -899,8 +883,6 @@ private:
     // backed off to the original position (see do_step_sync_ for the loop).
     // [2026-08-28 per user] 後退重吸機制已停用（do_step_sync_ 內以 #if 0 保留原碼，
     // 沒吸好改成停住不動），因此這個常數目前沒有任何作用。恢復該機制時才會再生效。
-    static constexpr int STEP_SYNC_BACKOFF_CM = 10;
-    static constexpr int TOTAL_DISTANCE_CM = 30;  // TODO: set actual building height
 
     // Crane watchdog
     static constexpr int HEARTBEAT_INTERVAL_MS = 500;
@@ -939,14 +921,7 @@ private:
     static constexpr double      IMU_EMERGENCY_DEG  = 45.0;
     static constexpr int         IMU_BASELINE_SEC   = 3;
     static constexpr double      IMU_HYSTERESIS_DEG = 1.0;
-    static constexpr double      ROLL_CORRECT_CM_PER_DEG  = 1.0;
-    static constexpr int         ROLL_CORRECT_RETRY_MAX   = 5;
 
-    // DM2J motion
-    static constexpr int DM2J_RPM      = 200;
-    static constexpr int DM2J_RPM_FEET = 400;   // feet rail (slave 1,3) — faster than wheels/arm
-    static constexpr int DM2J_ACC      = 500;
-    static constexpr int DM2J_DEC      = 500;
 
     // Arm sweep (上滑台 / DM2J slave 14 @ cli_22_ since 2026-05-26)
     // NOTE: DM2J ACC/DEC unit is ms/1000rpm (Leadshine convention) — LOWER = faster ramp.
@@ -1226,10 +1201,7 @@ private:
     // (despite driver comment saying 0.1 kPa — actual readings show kPa scale,
     // see 2026-04-27u). below = attached / above = detached.
     static constexpr int VACUUM_THRESHOLD_KPA   = -40;   // kPa — verified-sealed threshold (vacuum_check_) (2026-06-05: -50 → -40 Phase 1 speedup F1.3 Step A，配合 VACUUM_SEAL_DEEP_KPA 降到 -45)
-    static constexpr int VACUUM_EARLY_STOP_KPA  = -45;   // kPa — early-stop threshold near verified-sealed (was -30, too lenient → early-stopped at marginal seal)
     static constexpr int DETACH_THRESHOLD_KPA   = -10;   // kPa
-    static constexpr int VACUUM_SETTLE_MS     = 1500;   // 2026-05-22: 2000 → 1500
-    static constexpr int VACUUM_RELEASE_WAIT_MS = 700;   // wait after valve OFF before pusher retract (cup adhesion + line vent) (2026-06-01: 3000→1500; 2026-07-14: 1500→700 激進提速。⚠ 這是氣動洩壓時間、物理下限，若 bench 看到 cup 帶負壓「啵」彈開或瞬間 stall 就是砍過頭，往回加)
     // 🔴 [2026-09-03] 上面那個 700 的註解，描述的是它**沒有在做**的那件事。
     //   逐一查過所有使用點後確認：它唯一的實際用途是 vacuum_wait_release_ 的**輪詢逾時**，
     //   而註解通篇在講「氣動洩壓時間、物理下限」——那個角色**在程式碼裡沒有任何對應**
@@ -1290,11 +1262,6 @@ private:
     static constexpr int    FOLLOWER_IMU_MAX_TRIM_CM = 15;     // per-pass measured-move ceiling (backstop vs bad span/roll)
     static constexpr int    FOLLOWER_IMU_SETTLE_MS   = 800;    // let the released corner stop swinging before reading roll (2026-07-14: 1200→800 提速；多 pass 兜底)
     static constexpr double FOLLOWER_SPAN_CM         = 100.0;  // L/R cup-column horizontal span — PLACEHOLDER, bench-cal (only affects convergence speed, not final level)
-    // step_up body backup (2026-05-19): pay out (backup_cm + this margin) before
-    // the rail descends the body, then retract backup_cm back with
-    // crane_retract_safe_ (weight-threshold stop). The extra margin gives the
-    // rail-move generous slack; the monitored retract re-tensions by feedback.
-    static constexpr int    BACKUP_PAYOUT_MARGIN_CM = 5;
 
     // Obstacle rescue (2026-05-15h): if ZDT stalls before reaching this fraction
     // of the commanded pulse → treat as "hit obstacle", not endpoint. Trigger
@@ -1321,19 +1288,9 @@ private:
     static constexpr int CLOG_MA_GENTLE = 800;    // 0.8 A — during extend (was 1000mA 2026-05-15h, lowered after bench showed "推了好幾下才賭轉")
     static constexpr int CLOG_MA_NORMAL = 3000;   // 3 A — user-set default, restored after seal
 
-    // Fine-tune extend (vacuum-feedback): after group broadcast extend, per-cup
-    // adjustment loop to push unsealed cups slightly more until vacuum sealed.
-    static constexpr int FINE_TUNE_MAX_ITERS         = 3;     // up to N rounds of per-cup adjustment (3000 pulse/iter × 3 ≤ MAX_OVEREXTEND)
-    static constexpr int FINE_TUNE_INCREMENT_PULSE   = 3000;  // per round, extend unsealed cup +3000 pulses (~1 cm)
-    static constexpr int FINE_TUNE_MAX_OVEREXTEND    = 9000;  // hard cap: never exceed base+9000 (~3 cm beyond preset)
-    static constexpr int FINE_TUNE_SETTLE_MS         = 2000;  // wait after each round for vacuum to build
 
     static constexpr int RETURN_VACUUM_RELEASE_MS = 5000;  // wait after valves off before retracting pushers (return_home only)
 
-    // Disable-seal extend (2026-05-05) — 利用 ZDT disable 後 SMC LEYG25 可倒推
-    // 的特性，讓 cup 自己被真空拉到牆面後再 enable 鎖位置，避免「motor 比 cup
-    // 慢/快」的同步問題。
-    static constexpr int    VACUUM_CONTACT_KPA           = -3;   // 觸發 disable — 任何接觸跡象就早停，讓真空自己拉 cup（不要等 -10，馬達會繼續硬推 1.5cm 拉壞 body cups）
     // 2026-06-05: -60 → -45 Phase 1 speedup F1.3 Step A — 物理上 -45 kPa × 30cm²
     // cup = ~14kg 撐力/cup × 4顆 = 56kg，遠超機體 30-40kg 重量。不需要等到 -60。
     // 跟 VACUUM_EARLY_STOP_KPA -45 對齊（motor 早停的點 = iter 視為成功的點）。
@@ -1373,7 +1330,6 @@ private:
     // → MAX_ITERS 後 WEAK_SEAL。A 會接手不去污染 last_seal，下一輪重新從 preset 起算。
     // realign trigger (drift > 1.5cm) 仍是 cup 真正回 preset 的途徑。
     static constexpr double FEET_TARGET_OVER_CAP_CM   = 5.0;
-    static constexpr double FEET_MAX_OVER_CAP_CM     = 4.5;
     static constexpr int    DISABLE_PHASE_CURRENT_LIMIT_MA = 1200;  // 撞障礙物保險：2A→1.2A (2026-05-06 cup 變形)→0.9A (2026-05-15)→0.8A (2026-05-18 純電流判定)→0.9A (2026-05-18)→1.2A (2026-05-19 user 調高，減少正常壓牆建真空時的誤判)
     // [2026-05-29] peakI-based fast skip in WAIT_SEAL: cup whose push peak
     // current never exceeded this threshold clearly didn't contact anything
@@ -1400,24 +1356,15 @@ private:
     //    位置誤差那一道閘**不存在**。這不是缺陷（是 2026-05-18 的刻意決定），
     //    但讀的人若只掃過常數名稱，很容易以為「有 pos_error 保護」。
     //    ⚠️ 保留這個常數本身沒有成本，但它讓「安全常數群」看起來比實際多一道。
-    static constexpr double DISABLE_POS_ERROR_LIMIT_DEG  = 5.0;     // ⛔ 未使用，見上方
     static constexpr int    PUSHER_RPM_DISABLE_SLOW      = 50;   // Phase 2 慢速 RPM
     static constexpr int    PHASE1_BUFFER_PULSES         = 3000; // 4500→3000 (2026-05-18): Phase 1 快伸到 preset-1.0cm（原 1.5cm）。把 0.5cm 從慢 phase 搬到快 phase 加速伸腳。配 INCR 3000 → iter 0 剛好推到 preset、iter 1 = preset+1cm
     static constexpr int    DISABLE_PRE_DISABLE_DELAY_MS = 100;  // push 完到 disable EN 之間的緩衝（讓 cup 在馬達 holding 下接觸牆面）(2026-05-28: 200→100，實機觀察 stable 訊息瞬間印，200ms 過保守)
 
-    // Rope weight (DY_500 × 2 on cli_22_ slaves 10/11) — safety guard for crane retract
-    // Topology assumption: 2 ropes (left/right), each sensor on one rope. Each
-    // sensor in normal hang reads ~MACHINE_WEIGHT_KG / 2 = ~67 kg. Adjust
-    // *_PER_SENSOR_* if redundant on single rope.
-    static constexpr int    DY_SLAVE_LEFT  = 10;
-    static constexpr int    DY_SLAVE_RIGHT = 11;
-    static constexpr double MACHINE_WEIGHT_KG = 135.0;
     // State-aware threshold: when cups sealed (Attached/Running/Paused/Balancing/PausedOnError),
     // rope shouldn't bear much → low threshold to detect crane fighting cups.
     // When hanging (Idle/Ready/Error/ReturningHome), rope carries full weight → higher threshold.
     static constexpr double ROPE_WEIGHT_LIMIT_KG_PER_SENSOR_ATTACHED = 40.0;  // 2026-05-19: 50→40 per user
     static constexpr double ROPE_WEIGHT_LIMIT_KG_PER_SENSOR_HANGING  = 80.0;  // 2026-05-19: 90→80 per user
-    static constexpr int    WEIGHT_MONITOR_POLL_MS = 100;     // active monitor poll interval during crane retract
 
     // Attach finish — once all cups are sealed, pay out crane rope so the body
     // weight transfers from the rope onto the suction cups, leaving only a light
@@ -1433,49 +1380,8 @@ private:
     // ⚠️ **把那段 `#if 0` 改回 `#if 1` 之前，先把這個值換算到新單位** ——
     //    否則 fallback 目標會比預期低一半以上，pay_out 會一路放到 ATTACH_PAYOUT_MAX_CM
     //    的上限才停（多放約 50 cm 的鬆繩），而且不會有任何錯誤訊息。
-    static constexpr double ATTACH_PAYOUT_TARGET_KG  = 10.0;  // fallback target (kg) — runtime value comes from crane status
-    static constexpr int    ATTACH_PAYOUT_MAX_CM     = 50;    // safety cap — abort pay_out if tension never reaches target
-    static constexpr int    ATTACH_PAYOUT_SETTLE_MS  = 300;   // dwell after each 1cm pay_out for tension to settle
 
-    // [2026-06-02] Balance calibration constants — see cmd_balance_calibrate_* doc.
-    static constexpr int    BAL_CAL_PRELOAD_TIMEOUT_MS   = 20000;   // Phase 1 timeout (20s; user spec)
-    static constexpr int    BAL_CAL_PRELOAD_RETRACT_CM   = 30;      // max retract per attempt during preload
-    static constexpr int    BAL_CAL_FREE_HANG_SETTLE_MS  = 3000;    // wait after all cups off for swing to die
-    // [2026-06-02 v8] Cal-specific vacuum release wait — replaces the previous blind
-    // （2026-09-03 更正：此處原寫 sleep_ms_(VACUUM_RELEASE_WAIT_MS)，實際上不存在該呼叫）
-    // Calls vacuum_wait_release_ which polls JC100 pressure until p >= DETACH_THRESHOLD_KPA
-    // OR this timeout. Bench observed cup retract stalled when blind sleep ended too soon
-    // and cups were still sucking. Cal isn't time-pressured — give a generous budget.
-    static constexpr int    BAL_CAL_VACUUM_RELEASE_TIMEOUT_MS = 2000;
-    // [2026-06-02 v12] Temporary crane up_stop_total_kg raise during Phase 4.
-    // Default 50kg trips because cal cup release puts full robot weight on ropes
-    // (~50-60kg expected). 100kg leaves comfortable margin while still catching
-    // catastrophic overload. Restored to original via RAII when balance loop exits.
-    static constexpr double BAL_CAL_UP_STOP_TOTAL_KG = 100.0;
-    // [2026-06-02 v2] Proportional pulse width — 越接近 tolerance pulse 越短，
-    // 避免 ping-pong overshoot。bench 觀察 (Sadie) 拉左繩短時間就讓 roll 動
-    // 3.65°，原 300ms 對 0.5° 收斂太粗。改成 3 段比例 + tolerance 0.5°→1.0°。
-    static constexpr int    BAL_CAL_PULSE_FAR_MS         = 300;     // [deprecated 2026-06-02 v7] kept for ABI compat, no longer used
-    static constexpr int    BAL_CAL_PULSE_MID_MS         = 150;     // [deprecated 2026-06-02 v7]
-    static constexpr int    BAL_CAL_PULSE_NEAR_MS        = 80;      // [deprecated 2026-06-02 v7]
-    static constexpr int    BAL_CAL_SETTLE_MS            = 2000;    // wait after motor off for IMU/rope to settle
-    static constexpr int    BAL_CAL_MAX_ITER             = 6;       // [v7] outer iter cap (continuous mode: 1-3 typical, allow up to 6)
-    // [2026-06-02 v7] Continuous-motor design (per user, replaces pulse approach).
-    // Inner poll loop monitors IMU while motor runs continuously:
-    static constexpr int    BAL_CAL_INNER_POLL_MS        = 50;      // IMU re-read interval during motor-on phase
-    static constexpr int    BAL_CAL_INNER_MAX_MS         = 8000;    // hard cap: motor must turn off within 8s per outer iter
-    static constexpr int    BAL_CAL_INNER_STALE_LIMIT    = 60;      // 60 × 50ms = 3s of unchanged imu_.x → emergency stop (2026-06-02 v11: 20→60，1s 在 outer 0 起步、鋼索 slack 還沒拉緊時誤觸；3s 對真正 IMU 凍結還是夠快)
-    static constexpr int    BAL_CAL_TOTAL_TIMEOUT_S      = 60;      // total Phase 4 timeout (cumulative across outer iters)
-    static constexpr double BAL_CAL_OVERSHOOT_DEG        = 0.1;     // sign-flip overshoot detection: |roll| > this AND sign changed → stop
-    static constexpr double BAL_CAL_ROLL_TOL_DEG         = 1.0;     // converged when |roll - baseline| < this (2026-06-02: 0.5→1.0 務實值)
-    // Dual-threshold START gating (2026-06-02 v6, per user 反饋):
-    //   too small (< MIN) → 機體已平衡，校正無意義 → reject "已平衡"
-    //   too large (> MAX) → 太歪，preload/release 階段風險高 → reject "太危險"
-    //   中間 → 放行（這才是校正的合理使用區間）
-    static constexpr double BAL_CAL_START_ROLL_MIN_DEG   = 0.5;     // pre-check (cmd start): |roll| < this → already balanced, reject
-    static constexpr double BAL_CAL_START_ROLL_MAX_DEG   = 15.0;    // pre-check (cmd start): |roll| > this → too tilted, reject
     static constexpr double BAL_CAL_ROLL_PANIC_DEG       = 15.0;    // watchdog during Phase 4: roll > this → abort (留寬給 balance loop 的暫態擺盪)
-    static constexpr double BAL_CAL_TENSION_MIN_KG       = 10.0;    // watchdog: any side < this → abort. (2026-06-02: 30→10 — 30 對不平衡機體誤觸發；正常不平衡 R 側可低至 20-25kg；真斷繩會掉到 0-3kg；10kg 仍 catch 真故障)
 
     // Realign sequence (E) — periodic feet/body cup re-zero when fine_tune drift accumulates.
     // 2026-05-22: 從單一 max 門檻換成 hybrid（max OR mean），避免單顆 cup outlier
@@ -1487,15 +1393,6 @@ private:
     // fix 讓 Stage 0 stall non-fatal、realign 整體更穩。
     static constexpr double REALIGN_THRESHOLD_CM            = 1.0;   // single-cup max trigger (2026-07-08: 1.5 → 1.0 per user) (2026-06-05: 3.0 → 1.5 Phase 1 speedup) (2026-05-22: 1.5 → 3.0)
     static constexpr double REALIGN_THRESHOLD_MEAN_CM       = 1.0;   // mean of |drift| across cups → trigger (2026-06-05: 2.0 → 1.0 Phase 1 speedup) (2026-05-22: 1.0 → 1.5; 2026-05-28: 1.5 → 2.0)
-    // Realign crane assist target = the per-sensor weight limit (rope_weight_
-    // limit_per_sensor_kg_, 2026-05-19 per user — was a fixed 2kg). Not a
-    // constant here because the limit is state-dependent.
-    static constexpr int    REALIGN_CRANE_ASSIST_MAX_CM     = 10;    // safety upper bound on crane retract during realign
-    // Two-stage retract pattern (matches cycle_group_ body retract):
-    //   Stage A: retract delta/3 at SLOW rpm — break cup adhesion to wall
-    //   Stage B: retract remaining 2*delta/3 at FULL rpm — finish quickly once unstuck
-    static constexpr int    REALIGN_RETRACT_RPM             = 100;   // Stage A: retract while sealed (break adhesion) (2026-07-14: 50→100; v2 腳不撐重、torque spike 風險降；限速主因是拉太快扯破真空脫落，100 仍受控)
-    static constexpr int    REALIGN_RETRACT_ACC             = 200;
     static constexpr int    REALIGN_RETRACT_RPM_FULL        = 90;    // realign 單段收速度 (2026-07-14: 60→120→70；120 實機扯破真空脫封 realign_post_unsealed，降回 70。2026-07-15 per user: 70→90 試探，介於已知安全值 70 跟已知會脫封的 120 之間 — 上機台要盯 realign_post_unsealed 有沒有再出現)
     static constexpr int    REALIGN_RETRACT_ACC_FULL        = 150;   // (2026-07-14: 50→150，無載 torque spike 風險降)
     static constexpr int    REALIGN_EXTEND_RPM              = 60;    // extend short cups to preset (2026-07-14: 20→60，v2 無載、原「load builds gradually」不再適用)
@@ -1508,12 +1405,6 @@ private:
     // in_window realign where Phase 1 crane assist is skipped).
     // (Threshold to lower realign trigger from max=3.0 → smaller is PENDING — try
     // jog first, observe stall rate, then decide if threshold needs to drop.)
-    static constexpr int    REALIGN_JOG_PULSES              = 300;   // ~0.1 cm outward jog
-    static constexpr int    REALIGN_JOG_RPM                 = 30;    // gentle between extend(20) and retract(50)
-    static constexpr int    REALIGN_JOG_ACC                 = 150;   // slow ramp, avoid extra peakI
-    // Pre-equalize: when body-cup extension exceeds feet-cup extension by this, extend feet first
-    // before synchronous retract. Avoids tilt-induced over-current on upper cups during retract.
-    static constexpr double REALIGN_EQUALIZE_THRESHOLD_CM   = 3.0;
 
     //=========== hardware ===========
 
@@ -1553,12 +1444,10 @@ private:
     // timeout → PausedOnError. Mtx fixed it. Now arm sweep uses cli_22_
     // (shared with JC100/PQW/XKC/DY500) and its own TCP_client::socket_mtx_
     // handles serialization within cli_22_.
-    std::mutex        dm2j_motion_mtx_;
     ZDT_motor_control zdt_[9];   // index 0..8 → slave 1..9
     JC_100_METER      meter_[9]; // index 0..8 → slave 1..9
     PQW_IO_16O_RLY    pqw_;
     QX_DO24           pwm_;      // 4-ch PWM output, cli_22_ slave 6
-    DY_500_weight_sensor weight_[2];  // index 0 = slave 10 (left rope), 1 = slave 11 (right rope)
     XKC_Y25_RS485     lvl_;            // water tank level sensor (slave 13 on cli_22_)
 
     Serial_port  imu_serial_;
@@ -1639,9 +1528,6 @@ private:
     // long ops (pusher extend, DM2J rail moves, etc.) so the crane_watchdog
     // doesn't false-abort. Only pings when motion_active_ is true to avoid
     // spamming the bus during idle.
-    std::atomic<bool>    crane_keepalive_running_;
-    std::thread          crane_keepalive_thread_;
-    void                 crane_keepalive_loop_();
 
     // [2026-06-09] Water-inlet leak-prevention watchdog. set_water_inlet_(true)
     // stamps water_inlet_open_ts_ms_; set_water_inlet_(false) zeros it. Background
@@ -1756,9 +1642,6 @@ private:
     std::atomic<int>     arm_last_en_{-1};
     std::atomic<int>     arm_last_init_done_{-1};
     void                 note_arm_status_(const std::string& reply);
-    std::atomic<bool>    pressure_poll_running_;  // kept for backward compat (always false)
-    std::thread          pressure_poll_thread_;   // kept for backward compat (never started)
-    void                 pressure_poll_loop_();   // kept (no longer called); body becomes no-op
     // Wrapper around M_(slave).read_pressure() that piggyback-updates cache.
     // Use this in motion paths so GUI sees fresh values without background poll.
     int                  read_pressure_(int slave);
@@ -1878,11 +1761,6 @@ private:
     //   last_offset_cm_: result of last completed calibration (Phase 5 record).
     //             Also persisted to settings.static_roll_offset_cm.
     std::atomic<bool>    balance_cal_running_{false};
-    std::atomic<bool>    balance_cal_abort_requested_{false};
-    std::atomic<bool>    balance_cal_await_record_{false};
-    std::atomic<double>  balance_cal_last_offset_cm_{0.0};
-    std::mutex           balance_cal_phase_mtx_;
-    std::string          balance_cal_phase_;   // protected by mtx
 
     // =====================================================================
     // [2026-05-29] Runtime-tunable wall-tune settings (L1 + L2).
@@ -2033,10 +1911,6 @@ private:
     // is tagged for batch deletion.
     // ============================================================
     static constexpr bool ARM_ROPE_PROTECTION       = true;
-    // 2026-08-29 起同源於 ARM_WALL_MM_DEFAULT（原註解的「跟 ARM_CLEAN_WALL_MM 統一」
-    // 是人工同步的意圖，現在有共同起點了）。
-    // 沿革：2026-08-28 per user 380→400；2026-07-27 per user 360→380；2026-07-24 250→360 per user；2026-05-22 300→250 per user
-    static constexpr int  ARM_ROPE_PROTECT_WALL_MM  = ARM_WALL_MM_DEFAULT;
     enum class ArmStowState { Unknown, Center, Parked };
     // [2026-08-28] cmd_attach 的部分密封顆數，用來讓回傳字串帶出這個資訊
     // （原本只走 console + EVT，回覆是乾淨的 "OK attached"）。
@@ -2062,18 +1936,12 @@ private:
     //    才發現。本檔 CUP_SLAVE_FIRST 的註解早就寫過同一條教訓：
     //    「同一個範圍寫在兩個地方 = 遲早分岔」。
     // ⚠️ **改任何一份，另一份也要改。** 量測依據見 cleaning_arm/main_api.h 的 ARM_LENGTH_MM。
-    static constexpr float ARM_M1_LENGTH_MM        = 490.0f;   // 2026-09-02: 320→490（與 cleaning_arm 同步）
-    static constexpr float ARM_M1_PASSIVE_EXT_MM   = 86.46f;
-    static constexpr float ARM_M1_VERTICAL_OFF_RAD = 0.38f;
-    static constexpr float ARM_M2_TOOL_CENTER_MM   = 160.00f;
     // [2026-08-18 per user] LEFT/RIGHT SWAPPED to match the physical tool heads
     // being swapped left-for-right. Was LEFT=148.09 / RIGHT=134.07. Kept in sync
     // with cleaning_arm/main_api.h TOOL_EXT_LEFT_MM / TOOL_EXT_RIGHT_MM.
     // 🔴 [2026-09-02] 與 cleaning_arm/main_api.h 的 TOOL_EXT_LEFT/RIGHT_MM 同步
     //    （134.07→192.37、148.09→204.32，實機手壓量測，換算與理由見該處註解）。
     //    這份複本供 verify_arm_deploy_ 的預期角度檢查用，**兩份不同步 DEPLOY 驗證就會比錯角度**。
-    static constexpr float ARM_M2_TOOL_LEFT_MM     = 192.37f;
-    static constexpr float ARM_M2_TOOL_RIGHT_MM    = 204.32f;
     static constexpr float ARM_DEPLOY_POS_TOL_RAD  = 0.15f;   // ~8.6° / ~48mm (2026-05-22: 0.10 → 0.15, motor PD variance ~0.10 rad 自然 jitter 會誤判)
 
     // Set by crane_cmd_ when an EVT tension_alarm / tension_total_limit line is
@@ -2108,18 +1976,13 @@ private:
     // together (no sequential blocking). Logs before/after positions + travel.
     // Bystanders' PR[pr_num] must be safe (rpm=0, set in cmd_init) so broadcast
     // doesn't drive them.
-    bool           dm2j_pair_move_abs_(int slave_a, int slave_b, int pr_num,
-                                        double target_cm, int timeout_ms = 20000);
     bool           dm2j_pair_poll_done_(int slave_a, int slave_b, int timeout_ms);
     // [2026-06-12] Wheels-only verify+retry helper：trigger 兩輪 (loose sync) →
     // wait_done → read_position 驗證 → 任一輪 fail 就 retry。避免「只有一邊動」。
     // 跟其他 dm2j_* helper 一致：return true = error, false = success。
-    bool           dm2j_wheels_move_verified_(double target_cm);
     // Robust position read: retries until 2 consecutive reads agree within 1cm
     // tolerance. Catches occasional Modbus frame corruption (bench saw read 610
     // when actual was 5). Returns true on error (couldn't get consistent reads).
-    bool           dm2j_read_pos_robust_(int slave, double& out_cm,
-                                          int max_attempts = 5, double agree_cm = 1.0);
     bool           check_abort_();
 
     // Block until user resolves the error pause via cmd_continue / cmd_skip /
@@ -2337,24 +2200,15 @@ private:
     // in caller's thread (typically cmd_balance_calibrate_start's TCP handler
     // thread). Polls balance_cal_abort_requested_ between phases. Returns "" on
     // convergence (await record), "ERR <reason>" on timeout / watchdog / abort.
-    std::string do_balance_calibrate_();
     // Helpers for individual phases (so the GUI-friendly EVT emit is clean):
-    std::string bal_cal_preload_();          // Phase 1
-    std::string bal_cal_release_body_();     // Phase 2
-    std::string bal_cal_release_feet_center_(); // Phase 3
-    std::string bal_cal_balance_loop_();     // Phase 4
     // Read tension from crane status reply. Returns true on parse error.
-    bool        bal_cal_read_tensions_(double& l_kg, double& r_kg);
     // Read SD76 lengths from crane status reply. Returns true on parse error.
-    bool        bal_cal_read_lengths_(double& l_cm, double& r_cm);
     // Set phase string (mutex-protected) + broadcast EVT for GUI.
-    void        bal_cal_set_phase_(const std::string& phase);
 
     // Helper: max over-extension (cm) across feet slaves vs preset. 0 if all at preset.
     // [2026-06-05] Return value is CAPPED at FEET_MAX_OVER_CAP_CM (snowball protection
     // fix B) to prevent body target = preset + feet_over × 3000 from exceeding the
     // body pusher's physical reach (~60000 pulses).
-    double      feet_max_overextend_cm_() const;
     // Helper: convert cm overextension to ZDT pulses for the given slave's group.
     static int  cm_to_pulses_for_slave_(int slave, double cm);
     // [2026-06-05] Snowball protection (fix C) — get capped feet target for a slave.
@@ -2365,7 +2219,6 @@ private:
     // Update last_seal_pulse_[s-1] with confirmed seal pulse (called by cycle_group_/fine_tune)
     void        record_seal_pulse_(int slave, int pulse);
     // Reset last_seal_pulse_ for a group back to preset (called by realign)
-    void        reset_seal_pulse_group_(const std::string& group);
     // Get the preset extend pulse for slave (per-slave for body 7,8 SHORT)
     int         preset_extend_pulse_for_slave_(int slave) const;
 
@@ -2401,10 +2254,22 @@ private:
     // causing motor_api to see 3 simultaneous source-port connections + ~30s
     // recovery (bench 2026-06-03).
     std::string arm_cmd_(const std::string& line, int timeout_sec = 30);
+    // [2026-09-16] Body of arm_cmd_ with arm_mtx_ ALREADY HELD by the caller.
+    // Split out so cmd_status can refresh arm_ready with try_lock (never queue
+    // behind a running DEPLOY / sweep) without duplicating the send/recv logic.
+    std::string arm_cmd_locked_(const std::string& line, int timeout_sec);
+    // [2026-09-16] arm_ready is a cache fed only by STATUS replies passing
+    // through arm_cmd_. It used to be refreshed by cmd_arm_init, but the arm
+    // now INITs itself at boot (startup_then_init) so nobody asked any more
+    // and `arm_ready=0` sat there after a power cycle until someone typed
+    // arm_status by hand (2026-09-16 停電後實測). Refresh from cmd_status,
+    // rate-limited and non-blocking.
+    void        arm_status_refresh_();
+    std::atomic<int64_t> last_arm_status_ms_{0};
+    static constexpr int ARM_STATUS_REFRESH_MS = 5000;
     // [arm rope protect TEMP 2026-05-21] — gated by ARM_ROPE_PROTECTION.
     // Both return true on error, false on success / no-op.
     // ctx string is just for log clarity ("body_pre_pay_out" etc.).
-    bool ensure_arm_center_for_rope_(const std::string& ctx);
     bool ensure_arm_parked_after_rope_(const std::string& ctx);
     // [2026-05-28] Ensure damiao arm is ready for DEPLOY without re-calibrating.
     // Replaces the per-sweep arm_cmd_("INIT", 60) — INIT now runs only in
@@ -2501,7 +2366,6 @@ private:
     // [2026-09-09] 丟棄急停通道上排隊的 EVT 廣播，回傳丟棄位元組數。
     // 呼叫端必須自己持有 crane_estop_mtx_（函式名的 _locked_ 就是這個意思）。
     int  estop_drain_locked_(int budget_ms);
-    double      read_rope_weight_estop_();
     // Returns the per-sensor weight limit appropriate for current state.
     double      rope_weight_limit_per_sensor_kg_() const;
     // Wraps `crane_cmd_("retract <cm>")` with weight-based safety.
@@ -2525,13 +2389,11 @@ private:
     }
 
     // timeout_sec=0 → auto-pick via crane_motion_timeout_sec_(cm).
-    std::string crane_retract_safe_(int cm, int timeout_sec = 0);
 
     // Incremental pay_out until BOTH rope tensions drop to <= target_kg or
     // max_cm hit. Sends 1cm pay_out at a time, polls per-side DSZL-107 tension
     // ("OK left=<kg> right=<kg>"), repeats. Used at end of cmd_attach to shift
     // body weight onto the cups once all are sealed.
-    std::string crane_pay_out_to_weight_(double target_kg, int max_cm);
 
     // [2026-06-02] Per-side retract until BOTH sides hit target_kg. Mirror of
     // crane_pay_out_to_weight_ but in retract direction, AND uses single-side
@@ -2542,9 +2404,6 @@ private:
     // Loop: read L/R → if either < target, pulse that side's up cmd briefly →
     // sleep settle → re-read → repeat. Returns "" on success, "ERR ..." on
     // overweight (safety_max) / max_iter exhausted / sensor offline.
-    std::string crane_retract_to_weight_(double target_kg, double safety_max_kg,
-                                          int max_iter,
-                                          int pulse_ms = 300, int settle_ms = 500);
 
     //=========== IMU ===========
 
@@ -2569,7 +2428,6 @@ private:
     // 影響，也不依賴磁力計，是這個安裝方位下唯一可靠的傾斜來源。
     // 回傳 true = 失敗（沒有可用的加速度資料），false = 成功（專案慣例）。
     bool        imu_tilt_from_accel_(double& roll_deg, double& pitch_deg) const;
-    std::string do_phase5_roll_correct_();
     void        imu_monitor_loop_();
 
     //=========== arm ===========
@@ -2631,9 +2489,6 @@ private:
     // Caller releases stall flags after vacuum check finishes.
     // Returns false on success (all slaves resolved: sealed-stopped / stalled-at-wall
     // / reached target naturally), true on timeout or comm send fail.
-    bool             pusher_extend_with_vacuum_stop_(const std::vector<int>& slaves,
-                                                       const std::vector<int>& pulses,
-                                                       int rpm = PUSHER_RPM, int acc = PUSHER_ACC);
 
     // Disable-seal extend: brief push → motor disable → passive vacuum wait, iterated.
     // Avoids continuous slow-push (which over-stresses cup + reaction-loads other group).
@@ -2712,9 +2567,6 @@ private:
     // extend unsealed cups (up to base + FINE_TUNE_MAX_OVEREXTEND). Returns
     // the final list of cups still failing vacuum (empty = all sealed).
     // Best-effort — never fails the cycle, falls through to existing retry path.
-    std::vector<int> fine_tune_extend_per_slave_(const std::vector<int>& slaves,
-                                                  const std::vector<int>& start_pulses,
-                                                  const std::string& group);
     bool             zdt_wait_motion_done_(int slave, int timeout_ms = 15000, bool defer_stall_release = false);
     // Parallel-poll variant: waits for all slaves to reach stable (speed=0+pos stable)
     // or timeout. Returns true (error) on timeout or stall (when !defer_stall_release).
@@ -2801,7 +2653,6 @@ private:
     // (e.g. when that group eventually retracts in the next phase). Reads stall
     // status, releases any latched flags, verifies clear. Idempotent — no-op if
     // no stall was set. false=clear, true=persistent stall after release attempt.
-    bool             ensure_group_stall_clear_(const std::string& group);
     // Clear stall_flag on all 9 ZDT slaves (skipping disabled). Used at start of
     // step_down/step_up pre_cycle to catch any latched stall from previous extend
     // (defer mode) — otherwise next pos_mode is silently rejected by firmware.
