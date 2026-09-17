@@ -31,7 +31,7 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
 
   範圍（2026-09-03）：
     Mission 頁**不在瀏覽器裡重跑週期測試**。中止判準、步驟順序的安全需求、
-    風扇復原邏輯全都在 Linux_test/cycle_test.py 裡；在前端重寫一份等於製造
+    風扇復原邏輯全都在 scripts/cycle_test.py 裡；在前端重寫一份等於製造
     第二個真相，兩邊遲早會漂。這一頁負責的是「起跑前的閘門」與「跑的時候看得見」。
 -->
 <style>
@@ -3635,7 +3635,7 @@ function misValidate(p){
 function misCli(p){
   return 'FCV_WROBOT_HOST=192.168.1.100 FCV_TOP_CM=' + (wall.cm > 0 ? wall.cm : '?') + ' FCV_RAIL_CM=' + p.rail_cm +
          ' FCV_ARM_NM=' + p.arm_nm + (p.dry ? ' FCV_DRY=1' : '') +
-         ' python3 -u ~/projects/facade_cleaning_v2/Linux_test/cycle_test.py ' +
+         ' python3 -u ~/projects/facade_cleaning_v2/scripts/cycle_test.py ' +
          p.cycles + ' ' + p.steps + ' ' + p.step_cm + ' ' + p.roll_trip + ' ' + p.diff_trip + misKvTail(p);
 }
 
@@ -3870,7 +3870,7 @@ document.addEventListener('click', function(ev){
 //=========== Mission · 腳本模式（server.js `{mission:…}` WS 協定，2026-09-15 起用）===========
 //
 // 行程活在 server.js 裡、**不綁這個分頁**：關掉再開靠 backlog 接回去。
-// 週期／步／每步時間從 cycle_test 的 stdout 解析（格式見 Linux_test/cycle_test.py:1176、1360）：
+// 週期／步／每步時間從 cycle_test 的 stdout 解析（格式見 scripts/cycle_test.py:1176、1360）：
 //   「═══ 週期 n/N ═══」／每步一行「 i 伸出s 真空s 清潔s 收回s <四顆壓力> 移動s roll均 出帶% Δmax 停後roll」
 var misOutN = 0;
 function misOutClear(){ var pre = document.getElementById('mis-out'); if (pre) pre.textContent = ''; misOutN = 0; txt('mis-out-n', '0 行'); }

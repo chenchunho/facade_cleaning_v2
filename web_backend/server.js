@@ -264,7 +264,7 @@ function broadcastStatus() {
 
 const { spawn } = require('child_process');
 
-const MISSION_PY   = process.env.MISSION_PY  || path.join(__dirname, '..', 'Linux_test', 'cycle_test.py');
+const MISSION_PY   = process.env.MISSION_PY  || path.join(__dirname, '..', 'scripts', 'cycle_test.py')   // [2026-09-17] Linux_test/ 目錄退役,腳本搬到 scripts/;
 const MISSION_CWD  = process.env.MISSION_CWD || path.join(__dirname, '..');
 const MISSION_RING = 3000;          // 保留最後 N 行，供重新連上的瀏覽器補看
 

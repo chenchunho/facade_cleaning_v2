@@ -259,10 +259,9 @@ Crane_control_PI/    # 吊機主控 binary
 cleaning_arm/        # 手臂控制 binary
                      #    ⚠️ 自成一格：不使用 user_lib，自建 socket 層（main_api.{h,cpp}）
                      #    📌 這是**刻意的服務邊界**，不是待重構的債（refactor_plan §3.4）
-Linux_test/          # 只剩 cycle_test.py（任務腳本,server.js 起跑的就是它）。bench 工具/探針/fake_slaves
-                     #    2026-09-16 per user 全數移除(git 842e774 之前仍有)
 harness/             # 重構等價性驗證：假匯流排 + 軌跡比對（不需要機器）
-scripts/             # deploy.sh(開發期部署)/ crcmd.py / systemd/(unit 副本)/ build/(建置腳本權威版)/ link_probe.sh
+scripts/             # cycle_test.py(任務腳本,server.js Mission 起跑的就是它;09-17 由 Linux_test/ 搬來,該目錄退役)
+                     #    deploy.sh(開發期部署)/ deploy_web.sh / crcmd.py / systemd/(unit 副本)/ build/(建置腳本權威版)/ link_probe.sh
 tmp/                 # 暫存工作區（已 gitignore，不進版控）
 ```
 

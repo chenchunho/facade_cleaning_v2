@@ -38,7 +38,7 @@
    │ 硬體層(USR 閘道 6 + 水閥 .32、X518、IMU、Damiao、電源)→ 見 **HARDWARE.md** §2–§5      │
    └───────────────────────────────────────────────────────────────────────────────┘
 
-   編排/上機測試:Linux_test/cycle_test.py(full / arm / crane 模式,走 TCP 打三程序;server.js Mission 起跑的就是它)
+   編排/上機測試:scripts/cycle_test.py(09-17 由 Linux_test/ 搬來;full / arm / crane 模式,走 TCP 打三程序;server.js Mission 起跑的就是它)
    離線測試:    harness/(fake_robot 假端點 + gui_v3_check / fake_bus 假匯流排 + 回放比對)
    (相機管線 frame_capture/ 2026-09-16 已自樹移除;user_lib/FrameAnalyzer 仍在本體 build 內,為樁)
 ```
@@ -249,7 +249,7 @@ pivot)。已移除細掃/th_min/剛度守衛。8 Nm 雙工具 + 滑台 0–100�
 | 目錄 | 角色 |
 |---|---|
 | `web_backend/` | GUI 橋接(`server.js` 544 行)。🆕 **2026-09-14:v2 與 v3 整合成一個 —— `public_v3/` 是唯一主控台**(v2 退役,git 歷史 `feebc03`)。v3 = v2 全部功能 + 作業流程頁(兩道閘門)+ Mission 純按鈕吃 `EVT mission` + SAFE 橫幅/解除 + Manual 在 SAFE 上鎖;刻意拿掉跑腳本看 stdout 那條路。仍是**單檔 `index.html`(~320 KB)**;安全閘門(手臂武裝互鎖、危險操作 60 s)沿用。v1 `public/` 已停機。⚠️ 本機目錄 `web_backend/`,**Pi 上佈署為 `.../web/`**(start_web.sh 寫死,`PUBLIC_DIR` 要改指 `public_v3`) |
-| `Linux_test/` | `cycle_test.py`(full/arm/mission;`FCV_WROBOT_HOST`/`FCV_CRANE_HOST`/`FCV_TOP_CM`/`FCV_ARM_NM`;高度帶 `FCV_SKIP_BANDS` opt-in 已放棄)+ 各上機腳本 |
+| ~~`Linux_test/`~~ → `scripts/cycle_test.py` | 09-17 目錄退役,只剩的任務腳本搬到 scripts/。`cycle_test.py`(full/arm/mission;`FCV_WROBOT_HOST`/`FCV_CRANE_HOST`/`FCV_TOP_CM`/`FCV_ARM_NM`;高度帶 `FCV_SKIP_BANDS` opt-in 已放棄)+ 各上機腳本 |
 | `user_lib/` | **15 支成對驅動**(.cpp+.h)+ 2 個純 header(`SerialPort.h`、`damiao.h`)。本體 8:ZDT、JC100、PQW、QX_DO24、DM2J、WT901、XKC、FrameAnalyzer(樁);吊機 6:SE3、MH300、CLV900、DSZL_107、SD76、ZS-DIO;手臂:damiao.h。**每一支都在 build 清單裡**(`DIHOOL_control` 09-12、`DY_500` 09-16 已移除) |
 | `transport/` | TCP_client / TCP_server / Serial_port |
 | `common/` | endpoints.h(端點覆寫)、log_utils、profile |
@@ -326,10 +326,9 @@ facade_cleaning_v2/
 ├── Crane_control_PI/main.cpp      吊機(單體)
 ├── cleaning_arm/{main.cpp,main_api.{h,cpp},damiao.cfg,damiao_config.h,compile.sh}
 ├── web_backend/{server.js,public_v3/,tools/check_console.js}   (v1 public/ 09-16 移除)
-├── Linux_test/cycle_test.py …     編排/上機測試
 ├── user_lib/                       裝置驅動
 ├── transport/ common/ config/ mechanism/
-├── harness/ doc/(gitignore) scripts/{deploy.sh,deploy_web.sh,crcmd.py,link_probe.sh,build/,systemd/}
+├── harness/ doc/(gitignore) scripts/{cycle_test.py,deploy.sh,deploy_web.sh,crcmd.py,link_probe.sh,build/,systemd/}
 └── .claude/                        Claude 工作區 / 專案權威文件(2026-09-12 整理)
     ├── SOFTWARE.md  motion_flow.md  runbook.md  per_program_cautions.md  (權威)
     ├── work_log.md(進度+待辦總表)  changelog.md(變更日誌)

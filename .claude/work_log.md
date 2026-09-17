@@ -1,5 +1,18 @@
 # Work Log
 
+## 2026-09-17 早:開機檢查、SOFTWARE.md 對齊、`Linux_test/` 退役 → `scripts/cycle_test.py`
+
+- **開機檢查**:吊機這次**第一次上電就自己起來**(up 1 min:fcv-crane/fcv-web-v3 active、ExecStartPost 補回牆高 244/motion_hz 30、
+  :8080 → 200、三條橋接 connected);本體 **up 15 h 沒斷過**(Idle、未吸附、arm_ready=1、M2 hold 1.58 N·m 同昨晚基準)。
+  📌 昨天吊機「第一次上電沒起」沒有再現,先觀察。機器吊在 L −211 / R −204。
+- **`SOFTWARE.md` 對齊 09-16 清樹**(commit `0d9c7e4`):§1 拓樸(v1/v2 退役、v3 :8080、systemd)、目錄表、樹狀圖;
+  檔頭註明**行數類數字未重驗**(刪了 19k 行後多半過期)。CLAUDE.md 的樹昨晚已隨手改,兩份現在一致。
+- **`Linux_test/` 退役(per user)**:`cycle_test.py` → **`scripts/cycle_test.py`**(與 `crcmd.py` 同性質:兩台 Pi 都有一份的執行期腳本;
+  不另開 `mission/`,因為計畫是編排搬回 C++、它會降為對照/耐久工具)。改動:`server.js` MISSION_PY 預設、`deploy.sh script` 目標、
+  兩台 Pi `mv` + 刪目錄、fcv-web-v3 重啟(log `mission script = …/scripts/cycle_test.py`)、三方 md5 5687eb8c 一致;CLAUDE.md/SOFTWARE.md 同步。
+  → AI-2:`index.html:3638` 等效指令顯示字串與兩處註解的舊路徑。
+- 🔮 舊日誌/交接單/計畫裡的 `Linux_test/cycle_test.py` 字樣**刻意不改**(歷史事實);找檔案以 CLAUDE.md 樹為準。
+
 ## 2026-09-16 夜:M2 一次性滑槽 + 待命位改滾筒(per user)+ M2 hold 扭矩爬升(新觀察,無基準)
 
 - **事件**:死碼版手臂重啟時 user 看到「M2 動作異常」。log 對照三次重啟:前兩次 STARTUP→滾筒後 M1 校正期間 M2 站住(0.847/0.841);

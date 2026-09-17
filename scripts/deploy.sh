@@ -6,7 +6,7 @@
 #   ./scripts/deploy.sh crane   # 吊機 crane_control_PI.out    → fcv-crane(system service @ .25)
 #   ./scripts/deploy.sh web     # GUI(index.html)—— 不重啟 node,交給 scripts/deploy_web.sh
 #   ./scripts/deploy.sh server  # server.js → 重啟 fcv-web-v3(v2 的 fcv-web 09-16 退役)
-#   ./scripts/deploy.sh script  # cycle_test.py → 兩台 Pi(無服務,不必重啟)
+#   ./scripts/deploy.sh script  # scripts/cycle_test.py → 兩台 Pi(無服務,不必重啟;09-17 由 Linux_test/ 搬來)
 #   ./scripts/deploy.sh status  # 四支服務狀態 + 機器現況
 #
 # 每個目標一律做完整五步:同步原始碼 → Pi 上編譯 → **備份現役 binary** → 換檔 → 重啟服務 → 驗證啟動訊息。
@@ -105,13 +105,13 @@ deploy_server() {
 
 deploy_script() {
     say "同步 cycle_test.py 到兩台(無服務,下次起跑就是新版)"
-    python3 -m py_compile "$REPO"/Linux_test/cycle_test.py || die "語法錯誤,沒有送出"
+    python3 -m py_compile "$REPO"/scripts/cycle_test.py || die "語法錯誤,沒有送出"
     for h in "$CRANE" "$BODY"; do
-        scp -q "$REPO"/Linux_test/cycle_test.py "$h":~/projects/facade_cleaning_v2/Linux_test/ || die "scp $h 失敗"
+        scp -q "$REPO"/scripts/cycle_test.py "$h":~/projects/facade_cleaning_v2/scripts/ || die "scp $h 失敗"
     done
-    md5sum "$REPO"/Linux_test/cycle_test.py
-    $SSH "$CRANE" 'md5sum ~/projects/facade_cleaning_v2/Linux_test/cycle_test.py' </dev/null
-    $SSH "$BODY"  'md5sum ~/projects/facade_cleaning_v2/Linux_test/cycle_test.py' </dev/null
+    md5sum "$REPO"/scripts/cycle_test.py
+    $SSH "$CRANE" 'md5sum ~/projects/facade_cleaning_v2/scripts/cycle_test.py' </dev/null
+    $SSH "$BODY"  'md5sum ~/projects/facade_cleaning_v2/scripts/cycle_test.py' </dev/null
 }
 
 show_status() {
