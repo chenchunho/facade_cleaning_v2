@@ -90,7 +90,8 @@ _MODES = {
     "full":  "完整清潔週期:頂端下行 N 步×step_cm + 拉回。參數 [cycles] [steps] [step_cm] [roll_trip] [diff_trip]"
              " [fan=move[:pct]|all[:pct]](位置不限;move=只在下行移動時開 預設7,all=全程同值 預設6、all:5=不開)"
              " [rail=<起>-<迄>|off](滾筒 起→迄、刮刀 迄→起,開跑前先到起點;例 0-100、20-100、100-20;舊 0|100 仍收)"
-             " [final_clean=0|1](預設 1:最後一次放繩後在最低點再清一次)",
+             " [final_clean=0|1](預設 1:最後一次放繩後在最低點再清一次)"
+             " [return_top=0|1](預設 1:最後一個週期結束拉回頂端;0=停在最低點,週期之間仍會回頂)",
     "crane": "純吊機頂↔底來回 + 每趟姿態統計(讀 raw_x)。參數 [trips]",
     "arm":   "手臂清潔動作耐久(壓上→滑台掃→收)。參數 [cycles] [rail_cm(0=不加滑台)] [slot=RIGHT|LEFT|CENTER]",
 }
@@ -318,6 +319,10 @@ else:
 #   底部 43 直接回程)。開著就補那一次,約多 50 s。`full … final_clean=0` 可關。
 FINAL_CLEAN = KV.get("final_clean", os.environ.get("FCV_FINAL_CLEAN", "1")).strip() not in ("0", "off", "no")
 final_clean_done = [0]
+# [2026-09-17 per user] 任務結束要不要回頂端(GUI Mission 的勾勾)。0 = 最後一個週期做完停在最低點
+#   (滑台仍歸 0、幫浦仍關、風扇仍關 —— 只有「拉回頂端」那一段不做);多週期時週期之間照樣回頂,
+#   因為下一個週期的起點檢查要在頂端。
+RETURN_TOP = KV.get("return_top", os.environ.get("FCV_RETURN_TOP", "1")).strip() not in ("0", "off", "no")
 
 # [2026-09-15 per user] 滑台起點(full 參數 rail=0|100,細節見 rail_pos 那段)。提早驗,壞參數不要等到起跑才炸。
 #   [2026-09-15 per user] 升級成 `rail=<起>-<迄>`(任意 cm,0..RAIL_MAX_CM):滾筒 起→迄、刮刀 迄→起,開跑前先到起點。
@@ -446,6 +451,12 @@ def ask(addr, cmd, timeout, prefixes=("OK", "ERR")):
 def field(line, key):
     m = re.search(r"\b%s=(-?[\d.]+)" % key, line)
     return float(m.group(1)) if m else None
+
+
+def sfield(line, key):
+    """[2026-09-17] Raw string value of `key=` (field() only matches numbers; zdt_skip=- / 5,7 / arm_ready=1 need this)."""
+    m = re.search(r"(?:^|\s)%s=(\S+)" % re.escape(key), line)
+    return m.group(1) if m else "?"
 
 
 def fan(pct):
@@ -969,8 +980,8 @@ if MODE == "arm":
 if DRY_RUN:
     print("⚠️ FCV_DRY=1 乾掃:滾筒段不噴水、不開滾刷(只驗步態與力控)")
 print("風扇模式 fan=%s:下行移動 %d%% / 其他 %d%%(5 = 馬達停)" % (FAN_MODE, FAN_ON, FAN_OFF))
-print("週期測試：%d 週期 × (下行 %d 步 × %dcm = %dcm @%dHz) + 拉回 @%dHz"
-      % (CYCLES, STEPS, STEP_CM, STEPS * STEP_CM, DOWN_HZ, UP_HZ))
+print("週期測試：%d 週期 × (下行 %d 步 × %dcm = %dcm @%dHz) + 拉回 @%dHz%s"
+      % (CYCLES, STEPS, STEP_CM, STEPS * STEP_CM, DOWN_HZ, UP_HZ, "" if RETURN_TOP else "(return_top=0:結束停在最低點)"))
 print("中止門檻：|roll|>%.1f°（連續 %d 筆，可自動修正） / 左右差>%.0fcm 連續 %d 筆 / tension_valid=0 / 任一指令非 OK\n"
       % (ROLL_TRIP, ROLL_PERSIST, DIFF_TRIP, DIFF_PERSIST))
 
@@ -987,6 +998,54 @@ ws0 = ask(WROBOT, "status", 10)
 if "state=ready" not in ws0 and "state=idle" not in ws0:
     print("🔴 本體狀態非 ready/idle：%s" % ws0[:90]); sys.exit(1)
 print("起點 L=%.0f  本體 %s" % (L0, re.search(r"state=\w+", ws0).group(0)))
+
+# ============================================================================
+# 🔴 [2026-09-17 per user] 任務起跑「共用值」處理 —— Manual 與 Mission 共用同一份機器狀態
+#   (真值在本體/吊機;Manual 調什麼 Mission 就用什麼),但**安全項起跑時強制開啟**,
+#   而且把這趟實際用到的共用值印進 log 頭,出事翻 log 就知道那趟是用什麼跑的。
+#
+#   強制開啟(任一失敗就拒跑):
+#     · 吊機 set_hold_guard on    —— Manual 可關(救援收繩),任務不允許關
+#     · 吊機 set_level_auto on    —— 關了 rail=130 三步就撞 length_diff 中止(09-15)
+#     · 本體 crane_attached on    —— off 時 crane_goto/步伐全回 `OK skipped`,腳本以為在動其實沒動
+#     · 本體 zdt_power all on     —— Manual 失能過的推桿,pusher all 會失敗進 PAUSE
+#   拒跑檢查:
+#     · 已吸附(任一顆 ≤ -40 kPa)—— 不是乾淨起點;不自動收腳(那是人的決定),印出來請先收
+#     · arm_ready=1               —— 手臂 STARTUP/INIT 失敗就沒有手臂
+#   只印不改(共用值):zdt_skip、pusher_rpm/retract、吊機五個張力/繩長差門檻、level_deg_per_cm、
+#   本體尋封深度 vacuum_seal_deep_kpa。
+# ============================================================================
+def _force(addr, cmd, expect="OK"):
+    r = ask(addr, cmd, 10)
+    if not r.startswith(expect):
+        print("🔴 起跑強制 `%s` 失敗:%s —— 不跑。" % (cmd, r[:80])); sys.exit(1)
+    return r
+_force(CRANE,  "set_hold_guard on")
+_force(CRANE,  "set_level_auto on")
+_force(WROBOT, "crane_attached on")
+_force(WROBOT, "zdt_power all on")
+print("起跑強制:hold_guard on / level_auto on / crane_attached on / zdt_power all on ✅")
+ws1 = ask(WROBOT, "status", 10)
+_sealed = [k for k in ("p5", "p6", "p7", "p8") if field(ws1, k) is not None and field(ws1, k) <= -40]
+if _sealed:
+    print("🔴 起跑時已吸附(%s ≤ -40 kPa)—— 不是乾淨起點,請先 `pusher all retract` 收腳再開始。" % ",".join(_sealed))
+    sys.exit(1)
+if sfield(ws1, "arm_ready") != "1":
+    print("🔴 arm_ready=%s —— 手臂未待命(STARTUP/INIT 失敗?看 fcv-arm log),不跑。" % sfield(ws1, "arm_ready")); sys.exit(1)
+cs1 = ask(CRANE, "status", 10)
+print("共用值快照(Manual 調的、這趟就用的):")
+print("   本體  zdt_skip=%s  pusher_rpm=%s/%s  zdt_pwr=%s"
+      % (sfield(ws1, "zdt_skip"), sfield(ws1, "pusher_rpm"), sfield(ws1, "pusher_rpm_retract"), sfield(ws1, "zdt_pwr")))
+print("   吊機  tension_max=%s diff_max=%s retract_stop=%s(自動收繩軟停 + ▲手動拉停,單側) length_diff_max=%s | level_auto=%s k=%s hold_guard=%s"
+      % (sfield(cs1, "tension_max_kg"), sfield(cs1, "tension_diff_max_kg"), sfield(cs1, "retract_tension_stop_kg"),
+         sfield(cs1, "length_diff_max_cm"),
+         sfield(cs1, "level_auto"), sfield(cs1, "level_deg_per_cm"), sfield(cs1, "hold_guard")))
+_sk = sfield(ws1, "zdt_skip")
+if _sk not in ("-", "?"):
+    print("   ⚠️ 推桿 %s 被 Manual 排除,整組指令會跳過它(要含入請到 Manual 勾回)。" % _sk)
+print("")
+if os.environ.get("FCV_PREFLIGHT_ONLY") == "1":   # [2026-09-17] 只做強制+檢查+快照,不開幫浦不起跑(驗證/GUI「檢查」用)
+    print("FCV_PREFLIGHT_ONLY=1 → 前置檢查通過,到此為止。"); sys.exit(0)
 
 # 🔴 [2026-09-10] 把「這一輪的平衡實際走哪條路徑」印進抬頭。
 #
@@ -1148,6 +1207,12 @@ def ensure_water_full(force=False):
     """回 True=有水可噴;False=補水逾時(閥已關,呼叫端決定要不要中止)。
        force=True:不看第一筆讀值直接灌(剛才才讀到 0,再讀一次很可能又跳回 1 卻沒餘量)。"""
     wl = ask(WROBOT, "water_level", 8)
+    # [2026-09-17 per user] 第二顆水位計(高水位,slave 14):滿了就不補,連 force 也不補。
+    #   進水閥的關閉現在由**本體**做(watchdog 看到 water_high=1 立刻關,不再等 180 s);
+    #   這裡的背景計時器降為保險。低水位那顆的語意不變:有水才可噴。
+    if "water_high=1" in wl:
+        if "water_full=1" in wl: return True
+        print("   ⚠️ 高水位=1 但低水位=0(感測器矛盾?):%s" % wl[:70]); return "water_full=1" in wl
     if not force:
         if "water_full=1" in wl: return True
         if "water_full=0" not in wl:
@@ -1171,7 +1236,7 @@ def ensure_water_full(force=False):
         close_inlet_now("(補水逾時)")
         return False
     # 偵測到水:等 PRE_CLEAN 就放行清洗,閥留著由背景計時器在 TOPUP 時關。
-    print("   💧 偵測到水(%.0f s)→ 等 %d s 開始清洗;進水閥繼續灌,%d s 後自動關"
+    print("   💧 偵測到水(%.0f s)→ 等 %d s 開始清洗;進水閥繼續灌到高水位由本體自動關(保險:%d s 後這裡也關一次)"
           % (time.time() - t0, WATER_PRE_CLEAN_S, WATER_TOPUP_S))
     time.sleep(WATER_PRE_CLEAN_S)
     rest = max(0, WATER_TOPUP_S - WATER_PRE_CLEAN_S)
@@ -1381,6 +1446,8 @@ try:
                 arm_clean_combo("RIGHT", wet=not DRY_RUN)   # 滾筒:噴水 + 滾刷 + 滑台 起點→對面(FCV_DRY=1 → 乾掃)
                 pause_point("step%d_before_squeegee" % i)
                 arm_clean_combo("LEFT",  wet=False)   # 刮刀:乾掃(不噴不刷),滑台 對面→起點
+                _bk = ask(WROBOT, "arm_slot RIGHT", 40)   # [2026-09-17 per user] 刮刀做完回滾筒(預設工具)
+                if not _bk.startswith("OK"): print("   ⚠️ 刮刀後回滾筒失敗:%s(下一步 deploy 會再切)" % _bk[:60])
                 if rail_pos[0] != RAIL_START:         # 某把被跳過 → 滑台留在對面,步末補回起點
                     r = ask(WROBOT, "rail %d" % RAIL_START, 60)
                     if not r.startswith("OK"): bail("rail %d 復位失敗:%s" % (RAIL_START, r))
@@ -1503,6 +1570,8 @@ try:
                 arm_clean_combo("RIGHT", wet=not DRY_RUN)
                 pause_point("final_clean_before_squeegee")
                 arm_clean_combo("LEFT",  wet=False)
+                _bk = ask(WROBOT, "arm_slot RIGHT", 40)   # [2026-09-17 per user] 補清的刮刀做完也回滾筒
+                if not _bk.startswith("OK"): print("   ⚠️ 刮刀後回滾筒失敗:%s" % _bk[:60])
                 if rail_pos[0] != RAIL_START:
                     r = ask(WROBOT, "rail %d" % RAIL_START, 60)
                     if not r.startswith("OK"): bail("補清:rail %d 復位失敗:%s" % (RAIL_START, r))
@@ -1538,6 +1607,9 @@ try:
         pump_started_by_script[0] = False
         r = fan(FAN_OFF)
         if not r.startswith("OK"): bail("回程前關風扇失敗：%s" % r)
+        if not RETURN_TOP and cyc == CYCLES:
+            print("  ⏹ return_top=0:最後一個週期結束,**停在最低點**(高度 %.0f cm),不拉回頂端。\n" % cur)
+            break
         r = ask(CRANE, "set_motion_hz %d" % UP_HZ, 15)
         if not r.startswith("OK"): bail("設定 %dHz 失敗：%s" % (UP_HZ, r))
         res, stt, dur = monitored_crane_move("retract", int(TOP - cur),

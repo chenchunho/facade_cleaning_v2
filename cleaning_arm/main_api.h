@@ -313,6 +313,9 @@ public:
     static constexpr int   STARTUP_TO_INIT_DWELL_MS = 2000;
     static constexpr float DEPLOY_F_TARGET_NM   = 5.0f;    // [2026-09-15 per user] 3→5(10 趟滾筒實測:3 N·m 時掃動中 tau 由 3.86 掉到 1.2~1.9 ⇒ 壓不住)。舊註:[2026-09-11] 15→8 → [2026-09-14] 8→3:現場看 3 Nm 清潔效果好,定為工作力度
     static constexpr float DEPLOY_F_TOUCH_NM    = 2.0f;    // 輕觸判定：超過此值視為接觸
+    // [2026-09-17 per user] 防呆:目標壓力上限。15 Nm 時代壓橫桿堵轉拉垮 24V(09-11),
+    // 工作力度定 3(09-14);GUI 可即時改力道後,這裡是最後一道閘,DEPLOY_F / SETFORCE 都擋。
+    static constexpr float DEPLOY_F_MAX_NM      = 7.0f;
     static constexpr float DEPLOY_F_TOL_NM      = 1.0f;    // 收斂容差
     // 09-04 三點實測的等效剛度：Dtau/Dtheta_target = 2.54/0.0343 = 74、2.15/0.0338 = 64。
     // **不是 hold_kp(90)**，因為手臂在接觸後仍會被壓進去一點（Dtheta_actual
@@ -685,6 +688,18 @@ private:
     // [2026-09-04 per user] 力控貼合。與 cmd_deploy_sequence 共用 prepare_touch_slot_()
     // 的 Step1/Step2（收回 + 換 slot + 靜置），只有「怎麼壓上去」不同。
     std::string cmd_deploy_force_sequence(const std::string& params);
+    // [2026-09-17 per user] `M1 SETFORCE <nm>`: change the hold force while already
+    // pressed on the glass — runs only the secant convergence (Step 6/7) from the
+    // current hold, no retract / re-seek. Refuses when not in contact.
+    std::string cmd_force_adjust_sequence(const std::string& params);
+    // Shared Step 6 + 7 of DEPLOY_F (extracted 2026-09-17 so SETFORCE does not copy it).
+    // On entry `tau` must be the RELAXED reading. Returns "" on success and fills the
+    // outputs; returns an "ERR …" string on cannot_reach / press failure.
+    std::string force_converge_(float target_nm, float th_max, int kp_idx,
+                                float& theta_cmd, float& pos, float& tau,
+                                float& kp_eff, int& iters_done, bool& converged);
+    // Estimated body-to-glass distance from M1 angle (main_api.h 2026-09-02 fit).
+    static float wall_mm_from_theta(float theta) { return ARM_LENGTH_MM * std::sin(theta - VERTICAL_OFFSET_RAD) + 121.0f; }
     // Step1(M1 收回並確認靜止) + Step2(M2 換 slot) + Step2.5(等兩顆同時靜止)。
     // [2026-09-04] 由 cmd_deploy_sequence 原地抽出，讓 DEPLOY_F 不必複製一份 ——
     // 這個 repo 已經因為「同一件事寫在三個地方」吃過虧（cyc10/cyc20、

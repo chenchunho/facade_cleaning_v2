@@ -230,7 +230,8 @@ public:
     std::string cmd_zdt_zero(const std::string& group);   // "feet"|"body"|"center"|"all" — set current ZDT pos as new zero (manual 3.1.3)
     std::string cmd_zdt_disable(int slave);  // exclude slave 1..9 from all group ZDT ops (e.g. not yet installed)
     std::string cmd_zdt_enable(int slave);   // re-include previously disabled slave
-    std::string cmd_zdt_power(int slave, bool on); // [2026-09-11] REAL driver EN on/off (0x00F3, torque-off) — hand-push re-home after 24V blip corrupts ZDT counter
+    std::string cmd_zdt_power(int slave, bool on);
+    std::string cmd_set_pusher_rpm(int ext, int ret);   // [2026-09-17] shared runtime RPM (0 = keep) // [2026-09-11] REAL driver EN on/off (0x00F3, torque-off) — hand-push re-home after 24V blip corrupts ZDT counter
     std::string cmd_zdt_home(const std::string& group); // [2026-09-11] AUTO re-home: drive retract into hard-stop (stall) + set_zero — alt to hand-push
     std::string cmd_zdt_release_stall();     // release stall flags on all 9 ZDT slaves (operator manual intervention; safe during motion)
     std::string cmd_return_home(int descent_cm);
@@ -262,9 +263,12 @@ public:
     std::string cmd_arm_init();                                      // INIT — enable + tool-head calibration
     std::string cmd_arm_deploy(int wall_mm, const std::string& slot); // DEPLOY <mm> <LEFT|CENTER|RIGHT>
     // [2026-09-04 per user] 力控貼合：DEPLOY_F <target_nm> <slot>，壓力是被控量。
-    std::string cmd_arm_deploy_f(double target_nm, const std::string& slot);
+    std::string cmd_arm_deploy_f(double target_nm, const std::string& slot, int dist_mm = 0);   // [2026-09-17] dist_mm>0 = 距離上限(先到先停,OK stopped=distance)
     std::string cmd_arm_park();                                       // PARK — return + disable
     std::string cmd_arm_retract();                                    // [2026-09-11] 收回 M1 但**不失能**(清潔流程用,失能只留給校正)
+    std::string cmd_arm_slot(const std::string& slot);   // [2026-09-17 per user] M2 → LEFT|CENTER|RIGHT (arm refuses while M1 is on the glass)
+    std::string cmd_arm_force(double target_nm);           // [2026-09-17 per user] live force change while pressed → arm `M1 SETFORCE`
+    static constexpr double ARM_FORCE_MAX_NM = 7.0;        // [2026-09-17 per user] 防呆:同 motor_api DEPLOY_F_MAX_NM
     std::string cmd_arm_status();                                     // STATUS — relay arm state line
     std::string cmd_arm_attached(bool on);                            // toggle whether washrobot drives the cleaning arm
     // Cleaning routine — water + brush ON, DEPLOY arm to wall_mm, run `rounds`
@@ -570,6 +574,12 @@ private:
     // Used by cmd_arm_clean_sweep Phase A — refill until output==1, hard fail on
     // sensor offline (no fallback per 2026-05-20 design decision).
     static constexpr int XKC_SLAVE              = 13;
+    // [2026-09-17 per user] Second XKC-Y25 at the HIGH water mark (slave 14, same .22
+    // bus; it shipped at 9600/addr 1 and was re-addressed the same day). Roles:
+    //   13 (low)  = "tank not empty" — the spray pump must not run dry (existing logic)
+    //   14 (high) = "tank full"      — the inlet valve closes the moment it trips
+    // (was: a 180 s timer after the low sensor saw water).
+    static constexpr int XKC_HIGH_SLAVE         = 14;
     static constexpr int WATER_FILL_TIMEOUT_MS  = 180000;  // 180s — 2026-06-03 拉長，實機 60s 不夠水填滿（log 顯示需要 ~80s+）
     static constexpr int WATER_POLL_INTERVAL_MS = 200;     // poll output reg every 200 ms while filling
 
@@ -746,6 +756,9 @@ private:
     //    （設計彙整當初就寫「滑台有效行程建議 1.2m 以上」，140 才對得上。）
     // ⚠️ 這是**指令座標**的守衛，不是機械極限——開迴路失步時兩者會漂開。
     static constexpr double ARM_RAIL_TRAVEL_MAX_CM   = 130.0;
+    // [2026-09-17 per user] Manual 上滑台要能設負值。0 是 `rail_zero` 當時的位置(可在行程
+    // 中間歸零),所以合法窗是 ±行程;真正的邊界仍是驅動器硬限位與 GUI 軟限位。
+    static constexpr double ARM_RAIL_TRAVEL_MIN_CM   = -130.0;
 
     static constexpr int DM2J_ARM         = 14;   // cli_20_ (2026-08-28 per user)
 
@@ -790,6 +803,17 @@ private:
     // 這三個「第一段慢脫壁」專用的常數不再被 retract 邏輯使用（保留常數定義本身，
     // 因為 RETRACT_SLOW_PEEL_CM 還有 runtime settings_ 可調路徑，懶得順便拆）。
     static constexpr int PUSHER_RPM_RETRACT_FULL = 400;     // 破真空輔助單段直收速度 (2026-07-31 per user: 900→1000 比照 bench 初版 → bench 上又測過 900→700→500，同步拉回正式程式；2026-09-15 per user: 500→330 再減 1/3 → 同日 330→400→600→500→600→400(per user 定案。舊正壓時序下 600rpm 峰值 2.1A;改成「正壓包住整個收」後 500/600 都只有 0.4~0.6A,速度不再受電流限制,回到 400 取餘裕))
+    // [2026-09-17 per user] Runtime pusher RPM shared by Manual and Mission (single
+// truth in the body). The two constants above are only the compile-time
+// defaults; `set_pusher_rpm <extend> [retract]` changes these, `status` shows
+// them as pusher_rpm= / pusher_rpm_retract=, and every pusher command that is
+// given rpm<=0 resolves to them. Persisted to ~/run/body_settings.json on set
+// and re-sent by the fcv-body unit's ExecStartPost so a restart keeps them.
+    std::atomic<int> pusher_rpm_ext_{PUSHER_RPM};
+    std::atomic<int> pusher_rpm_ret_{PUSHER_RPM_RETRACT_FULL};
+    int  pusher_rpm_extend_()  const { return pusher_rpm_ext_.load(); }
+    int  pusher_rpm_retract_() const { return pusher_rpm_ret_.load(); }
+    void persist_body_settings_();   // writes ~/run/body_settings.json (best effort)
     static constexpr double RETRACT_SLOW_PEEL_CM = 1.0;     // [已不用於 retract] 原兩段式第一段慢脫壁距離
     // [2026-07-31 per user] 破真空閥時序，比照 Linux_test 功能31 bench 驗證值。
     // 🔴 [2026-09-15 per user, 當日三修] 收腳時序 = **開閥同時就收,正壓包住整個收的動作**:
@@ -1449,6 +1473,7 @@ private:
     PQW_IO_16O_RLY    pqw_;
     QX_DO24           pwm_;      // 4-ch PWM output, cli_22_ slave 6
     XKC_Y25_RS485     lvl_;            // water tank level sensor (slave 13 on cli_22_)
+    XKC_Y25_RS485     lvl_high_;       // [2026-09-17] high-water sensor (slave 14 on cli_22_)
 
     Serial_port  imu_serial_;
     WT901BC_TTL  imu_;
@@ -1534,6 +1559,10 @@ private:
     // loop polls every 10s and if (now - ts) > WATER_INLET_OPEN_MAX_MS, force-closes.
     // Catches detached-thread death, GUI forget-OFF, unhandled exceptions in sweep.
     std::atomic<int64_t> water_inlet_open_ts_ms_{0};    // 0 = closed/disarmed
+    // [2026-09-17] Cached readings for status (the watchdog thread refreshes them:
+    // every 2 s while the valve is open, every 10 s otherwise). -1 = unreadable.
+    std::atomic<int>     water_low_cached_{-1};
+    std::atomic<int>     water_high_cached_{-1};
     std::atomic<bool>    water_inlet_watchdog_running_{false};
     std::thread          water_inlet_watchdog_thread_;
     void                 water_inlet_watchdog_loop_();
@@ -1877,6 +1906,12 @@ private:
     std::atomic<bool>    emergency_detach_active_{false};
     // 0=沒跑過 1=收回中 2=收回完成(已回 Idle) 3=部分失敗(留在 Error)。status 的 `estop=` 欄位。
     std::atomic<int>     estop_detach_state_{0};
+    // [2026-09-17 per user] Last COMMANDED driver-EN state per cup slave (index s-1),
+// 1 = energised. Drivers power up enabled, so the default is 1. This is what
+// `zdt_power` last asked for, NOT a readback — reading 4 ZDT status words on
+// every 1 Hz status refresh would load the .20 bus for a field that only
+// changes when someone presses the button. status emits it as `zdt_pwr=`.
+    std::atomic<int> zdt_power_cmd_[9] {1,1,1,1,1,1,1,1,1};
     void emergency_detach_();
 
     // [2026-05-29] Gate for arm_monitor_during_sweep_: when feet rail / pushers
@@ -1950,7 +1985,7 @@ private:
     // (per Q3 design 2026-05-07: crane safety alarms = manual operator review).
     std::atomic<bool>    crane_alarm_pending_;
     std::mutex           crane_alarm_mtx_;
-    std::string          crane_alarm_kind_;       // "tension_alarm" / "tension_total_limit"
+    std::string          crane_alarm_kind_;       // "tension_alarm" / "tension_retract_stop"
     std::string          crane_alarm_detail_;     // raw EVT line for context
 
     //=========== utility ===========
@@ -2473,14 +2508,14 @@ private:
     // fine_tune extend) releases after vacuum confirms seal. Use case: cup hits
     // wall during extend; keeping motor in stall state holds cup pressed against
     // wall while vacuum builds.
-    bool             pusher_move_(int slave, int pulse, int rpm = PUSHER_RPM, int acc = PUSHER_ACC, bool defer_stall_release = false);
-    bool             pusher_move_many_(const std::vector<int>& slaves, int pulse, int rpm = PUSHER_RPM, int acc = PUSHER_ACC, bool defer_stall_release = false);
+    bool             pusher_move_(int slave, int pulse, int rpm = 0, int acc = PUSHER_ACC, bool defer_stall_release = false);   // rpm 0 = pusher_rpm_extend_()
+    bool             pusher_move_many_(const std::vector<int>& slaves, int pulse, int rpm = 0, int acc = PUSHER_ACC, bool defer_stall_release = false);
     // Pipelined two-stage retract: stage 1 slow-peels RETRACT_SLOW_PEEL_CM off
     // the wall (sync start), then each slave — the moment it finishes stage 1 —
     // immediately fires stage 2 (fast retract to 0) without waiting for siblings.
     // Returns true (error) on stall / timeout. Replaces the old pusher_move_many_
     // ×2 retract pattern at every call site.
-    bool             pusher_two_stage_retract_(const std::vector<int>& slaves, int rpm = PUSHER_RPM_RETRACT_FULL);  // [2026-09-11] rpm 可選(預設=RETRACT_FULL,既有呼叫端不變)
+    bool             pusher_two_stage_retract_(const std::vector<int>& slaves, int rpm = 0);  // [2026-09-11] rpm 可選(預設=RETRACT_FULL,既有呼叫端不變)
 
     // Group extend with concurrent vacuum monitoring. As cup pressure crosses
     // VACUUM_EARLY_STOP_KPA mid-motion, immediately emergency_stop that slave's
@@ -2534,7 +2569,7 @@ private:
     // calls — see do_step_sync_ for the caller that needs this.
     bool             pusher_extend_with_disable_seal_(const std::vector<int>& slaves,
                                                        const std::vector<int>& target_pulses,
-                                                       int fast_rpm = PUSHER_RPM,
+                                                       int fast_rpm = 0,
                                                        int acc = PUSHER_ACC,
                                                        bool* any_obstacle_out = nullptr,
                                                        bool stop_on_first_seal = false,
@@ -2879,7 +2914,7 @@ std::string WashRobot::cycle_group_(const std::string& group,
         // contacts wall → instant seal). Aligned with Linux_test menu 7 and
         // memory project_vacuum_seal_patterns.md.
         // Body group uses lower RPM/ACC: heavier load → higher stall risk on upper two pushers.
-        const int extend_rpm   = (group == "body") ? PUSHER_RPM_BODY_EXTEND : PUSHER_RPM;
+        const int extend_rpm   = (group == "body") ? PUSHER_RPM_BODY_EXTEND : pusher_rpm_extend_();
         const int extend_acc   = (group == "body") ? PUSHER_ACC_BODY_EXTEND : PUSHER_ACC;
         // Per-slave extend pulses:
         //   feet : base = last_seal_pulse_ (learned seal position, persists)

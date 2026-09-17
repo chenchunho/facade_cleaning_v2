@@ -71,11 +71,12 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
   /* [2026-09-10] 本體急停。放頂欄是刻意的：它在**每一個分頁**都在，
      而急停要按的時候沒有人有空先切到對的分頁。 */
   .estop-gap{display:inline-block;width:26px;border-left:1px solid var(--line2);height:26px;margin:0 2px}
-  .top .estop{background:var(--bad);border:1px solid var(--bad);color:#fff;font-weight:700;
+  /* [2026-09-17] 選擇器由 `.top .estop` 放寬成 `.estop`：這顆 09-15 就搬離頂欄了，之前在 Mission 裡其實沒套到紅色。 */
+  .estop{background:var(--bad);border:1px solid var(--bad);color:#fff;font-weight:700;
     padding:6px 12px;border-radius:4px;cursor:pointer;font-family:var(--sans);font-size:13px;
-    white-space:nowrap;margin-right:8px}
-  .top .estop:hover{filter:brightness(1.12)}
-  .top .estop:active{filter:brightness(0.9)}
+    white-space:nowrap}
+  .estop:hover{filter:brightness(1.12)}
+  .estop:active{filter:brightness(0.9)}
   /* 危險操作上鎖中的按鈕：留可按（handler 會擋並提示），只給一個鎖頭讓人知道要先解鎖 */
   .btn.dlocked::before{content:"🔒 ";font-size:11px}
   /* 急停後的復原橫幅。整條橫跨、紅底，不可能被當成裝飾。 */
@@ -126,9 +127,6 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
   .cell .big{font-family:var(--mono);font-size:22px;font-weight:600;line-height:1.25;margin-top:2px;
              letter-spacing:-.02em}
   .cell .sub{font-family:var(--mono);font-size:11px;color:var(--ink2);margin-top:1px}
-  .gauge{margin-top:7px;height:7px;background:var(--sunk);border-radius:1px;position:relative;overflow:hidden}
-  .gauge i{position:absolute;inset:0 auto 0 0;display:block;border-radius:1px;background:var(--ok)}
-  .gauge b{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--bad)}
   .gtxt{font-family:var(--mono);font-size:10.5px;color:var(--ink3);margin-top:4px}
   /* [2026-09-10 per user] 即時讀數改成「直接把數字放大寫出來」，不寫說明文字。
      說明（高度＝離底、繩長是 SD76 原始值）不是每次都要讀的東西，
@@ -143,6 +141,7 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
   .big .bv{font-family:var(--mono);font-weight:700;font-size:22px;line-height:1.1;
     color:var(--ink);white-space:nowrap}
   .big .bu{font-size:12px;font-weight:600;color:var(--ink3);margin-left:2px}
+  .wl-lamp{color:var(--ink3)} .wl-lamp.on{color:var(--ok)} .wl-lamp.off{color:var(--warn)} .wl-lamp.bad{color:var(--bad)}
 
   /* [2026-09-10] 真空幫浦 A/B 輪替卡 */
   .pmwarn{margin:8px 12px 0;padding:7px 9px;border-radius:4px;font-size:12px;line-height:1.55;
@@ -203,7 +202,6 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
   .mon{display:flex;flex-direction:column;gap:14px}
   .mrow{display:flex;justify-content:space-between;align-items:baseline;font-size:12.5px;gap:8px}
   .mrow .k{color:var(--ink2)} .mrow .v{font-family:var(--mono);font-weight:600}
-  .spark{margin-top:6px;display:block;width:100%;height:52px}
   /* ===== Dashboard 視覺化（2026-09-04 per user 重新規劃）===== */
 
   /* 姿態 2D —— 🔴 [2026-09-04 per user] 由 CSS 3D 改回 2D。
@@ -234,24 +232,6 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
   .tbar b{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--bad)}
   .tbar b.soft{background:var(--warn)}
 
-  .cups{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:8px 0 6px}
-  .cup{border:1px solid var(--line2);border-radius:2px;padding:6px 9px}
-  .cup .cn{font-family:var(--mono);font-size:10px;color:var(--ink3);letter-spacing:.08em}
-  .cup .cv{font-family:var(--mono);font-size:17px;font-weight:600;line-height:1.3;color:var(--ink3)}
-  .cup.sealed{border-color:var(--ok);background:var(--ok-soft)} .cup.sealed .cv{color:var(--ok)}
-
-  .verif{display:flex;flex-direction:column;gap:5px}
-  .vf{display:grid;grid-template-columns:auto 1fr auto;gap:9px;align-items:center;font-size:12.5px;
-      padding:6px 9px;border-radius:2px;background:var(--surface2)}
-  .vf .dot{width:9px;height:9px;border-radius:50%;flex:none;background:var(--idle)}
-  .vf .cmd{font-family:var(--mono);font-size:11.5px;color:var(--ink2);overflow:hidden;
-           text-overflow:ellipsis;white-space:nowrap}
-  .vf .rb{font-family:var(--mono);font-size:12px;font-weight:600;white-space:nowrap;color:var(--ink3)}
-  .vf.ok .dot{background:var(--ok)} .vf.ok .rb{color:var(--ok)}
-  .vf.unv .dot{background:transparent;border:2px solid var(--warn)} .vf.unv .rb{color:var(--warn)}
-  .vf.bad .dot{background:var(--bad)} .vf.bad .rb{color:var(--bad)}
-  .vf.pend .dot{background:var(--accent)} .vf.pend .rb{color:var(--accent)}
-
   .dash{display:grid;grid-template-columns:1.1fr 1fr}
   .dash > div{padding:15px;border-right:1px solid var(--line)}
   .dash > div:last-child{border-right:0}
@@ -274,6 +254,7 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
   .mbar-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .mbar-2nd{border-top:1px dashed var(--line2);padding-top:6px}
   .mbar-sp{flex:1}
+  #mis-why.refuse{background:var(--bad-soft);color:var(--bad);font-weight:700;padding:8px 10px;border-radius:3px}
   .mbar-lbl{font-size:11.5px;color:var(--ink3);font-family:var(--mono);letter-spacing:.06em}
   .mbar-note{font-size:11.5px;color:var(--ink3);flex:1;min-width:180px}
   .mbar-sum{font-family:var(--sans);font-size:12px;color:var(--ink2);background:var(--sunk);
@@ -283,8 +264,49 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
   .mbar-sum.ok{color:var(--ok);border-color:var(--ok)}
   .mbar-sum.bad{color:var(--bad);border-color:var(--bad)}
   .grp.collapsed > header{opacity:.75}
-  /* 執行中是主角：一屏內要看得完 */
-  .pane[data-pane="mission"] .grp.mis-main{grid-column:1/-1}
+  /* 狀態列上的 週期/步/高度 三格（原本在「執行中」卡的 .big，09-17 收進 sticky 列） */
+  .mbar-kv{display:inline-flex;align-items:baseline;gap:5px;font-family:var(--mono)}
+  .mbar-kv .bk{font-size:10.5px;color:var(--ink3);letter-spacing:.06em}
+  .mbar-kv .bv{font-weight:700;font-size:16px;line-height:1}
+  /* [2026-09-17 早 per user] Mission 主體：左 參數卡（含前置一行）、右 三顆大鈕上下排（草圖）。 */
+  .mis-grid{grid-column:1/-1;display:grid;grid-template-columns:minmax(0,1fr) 200px;gap:15px;align-items:start}
+  .mis-left{display:flex;flex-direction:column;gap:15px;min-width:0}
+  .mis-btns{display:flex;flex-direction:column;gap:10px}
+  .mis-btns .mis-big{width:100%;min-height:64px;font-size:16px;font-weight:700;border-radius:4px}
+  .mis-btns .off{display:none!important}
+  /* [2026-09-17 per user] 執行中的「緊急脫離」要一眼看到：閃爍（兩處同一個 class） */
+  @keyframes estop-blink{0%,100%{filter:brightness(1);box-shadow:0 0 0 0 rgba(200,40,40,.0)}50%{filter:brightness(1.35);box-shadow:0 0 0 6px rgba(200,40,40,.35)}}
+  .estop.blink{animation:estop-blink 1s ease-in-out infinite}
+  @media (prefers-reduced-motion: reduce){ .estop.blink{animation:none;box-shadow:0 0 0 4px rgba(200,40,40,.35)} }
+  /* Dashboard Mission 卡（一般小卡大小、右下）：三顆鈕一列、下面週期/步/高度與參數 */
+  .d-mis{display:flex;flex-direction:column;gap:8px;padding:10px 12px}
+  .d-mis-btns{display:flex;gap:8px}
+  .d-mis-btns .mis-big{flex:1 1 0;min-width:0;min-height:44px;font-size:14px;font-weight:700;border-radius:4px;padding:6px 8px}
+  .d-mis-btns .off{display:none!important}
+  .d-mis-info{display:flex;flex-direction:column;gap:4px;font-size:12px}
+  .mis-btns .estop-gap-v{width:auto;height:0;border-left:0;border-top:1px solid var(--line2);margin:4px 0}
+  .mis-btns #mp-last{text-align:center;min-height:1em}
+  #mp-card header .mbar-sum{cursor:default;max-width:34ch}
+  /* 手臂卡：兩顆鈕固定寬、不縮；結果文字獨立一列可換行（不可再擠到按鈕） */
+  .arm-btns .btn{flex:none;min-width:96px;min-height:40px}
+  /* [2026-09-17 per user] Manual 卡片按鈕同高、同最小寬（推桿卡自己有 72/34，這裡統一拉到 36） */
+  .pane[data-pane="manual"] .grp .btn{min-height:36px}
+  .arm-result{padding:4px 12px 8px}
+  .arm-result .rd{white-space:normal;word-break:break-word;display:block;line-height:1.5}
+  /* 共用值卡：zdt_skip 有值 ⇒ 整張標黃（user 最在意「Manual 留了什麼」） */
+  #ms-card.ms-warn{border-color:var(--warn)}
+  #ms-card.ms-warn > header{background:var(--warn-soft);color:var(--warn)}
+  #ms-card .ctl.mp.ms-warn{background:var(--warn-soft)}
+  #ms-card .ctl.mp{grid-template-columns:minmax(120px,auto) 1fr}
+  #ms-card .mpc{justify-content:flex-start}
+  /* 參數設定五列：標籤 | 控制項（靠右、同寬輸入框）⇒ 右邊緣與各輸入框對齊 */
+  #mp-body .ctl.mp{grid-template-columns:minmax(150px,1fr) auto}
+  #mp-body .mpc{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;justify-content:flex-end}
+  #mp-body .mpf{display:inline-flex;align-items:center;gap:4px}
+  #mp-body .mpl{font-size:11px;color:var(--ink3);font-family:var(--mono);white-space:nowrap}
+  #mp-body .numin{width:76px}
+  #mp-body .selin{min-height:32px}
+  #mp-body .seg button{padding:6px 10px}
   /* [2026-09-10 per user] Manual 依「哪一台機器」分段：吊機一段、本體一段。
      grid-column:1/-1 讓標題橫跨整列 —— .man 是 auto-fit，欄數會隨寬度變，
      寫死欄數在窄螢幕會把標題擠成一欄然後卡片跟上來，分段就白做了。 */
@@ -421,9 +443,19 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
   .zdtcard .btn.wide{min-width:170px}
   .zdtcard .ctlrow{gap:8px}
   .zdtcard .unit{font-family:var(--mono);font-size:11px;color:var(--ink3)}
-  .zdtcard #zdtsingle{display:grid;grid-template-columns:auto auto auto auto auto auto auto auto;
-    gap:6px 8px;align-items:center;justify-content:start}
-  .zdtcard #zdtsingle .band{white-space:nowrap}
+  /* [2026-09-17 現場] 單支區：每支一列、可折行。不用 grid 排欄 —— 11 欄在平板寬度會超出卡片被 overflow:hidden 裁掉。 */
+  .zdtcard #zdtsingle{display:flex;flex-direction:column}
+  .zdtcard .zrow{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center;padding:7px 0;border-top:1px dashed var(--line2)}
+  .zdtcard .zrow:first-child{border-top:0;padding-top:2px}
+  .zdtcard .zrow.hit{background:var(--ok-soft)}
+  .zdtcard .zrow .zinc-l{display:inline-flex;align-items:center;gap:6px;min-width:7.5em;cursor:pointer}
+  .zdtcard .zrow .zinc{width:20px;height:20px;margin:0;flex:none}
+  .zdtcard .zrow .zf{display:inline-flex;align-items:center;gap:3px}
+  .zdtcard .zrow .zsep{width:1px;height:26px;background:var(--line2);margin:0 2px}
+  .zdtcard .zrow .rd{min-width:7em}
+  .zdtcard .band{white-space:nowrap}
+  .zdtcard .band.skip{color:var(--ink3);text-decoration:line-through;background:var(--sunk);padding:2px 5px;border-radius:2px}
+  .zdtcard .band.skip::after{content:" 整組跳過";text-decoration:none;font-size:10px}
   /* [2026-09-11 per user] 收放繩按鈕：3×2 大格、對齊實體左右。字放大、高度加倍。 */
   .ropegrid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:8px 12px 4px}
   .ropegrid .btn.hold{min-width:0;min-height:58px;font-size:16px;font-weight:700}
@@ -490,6 +522,11 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
   /* [v3] 手機寬度（現場平板直立 / 手機）：單欄、頂欄換行、大字縮一級、表格可橫捲 */
   @media (max-width:520px){
     .man{padding:10px;grid-template-columns:1fr;gap:10px}
+    .mis-grid{grid-template-columns:1fr}
+    .mis-btns{flex-direction:row;flex-wrap:wrap}
+    .mis-btns .mis-big{width:auto;flex:1 1 30%}
+    .mis-btns #mp-last{display:none}
+    .mis-btns .estop-gap-v{display:none}
     .top{flex-wrap:wrap;gap:8px;padding:8px 10px}
     .top h1{font-size:13px}
     .top .sp{display:none}
@@ -536,9 +573,11 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
 
 <div class="shell">
   <nav class="rail" role="tablist" aria-label="主控台分頁">
-    <!-- [2026-09-15 per user] 01 作業流程併入 Mission（名稱保持 Mission），tab 剩四個，Mission 為預設。 -->
-    <button role="tab" data-p="mission" aria-selected="true"><span class="rn">01</span>Mission</button>
-    <button role="tab" data-p="dashboard" aria-selected="false"><span class="rn">02</span>Dashboard</button>
+    <!-- [2026-09-15 per user] 01 作業流程併入 Mission（名稱保持 Mission），tab 剩四個。
+         [2026-09-17 早 per user] 順序改 Dashboard → Mission → Manual → Setting；預設開 Dashboard
+         （任務執行中的細節——腳本輸出、每步時間——同日搬到那裡，開頁先看得到機器在幹嘛）。 -->
+    <button role="tab" data-p="dashboard" aria-selected="true"><span class="rn">01</span>Dashboard</button>
+    <button role="tab" data-p="mission" aria-selected="false"><span class="rn">02</span>Mission</button>
     <button role="tab" data-p="manual" aria-selected="false"><span class="rn">03</span>Manual</button>
     <span class="sep"></span>
     <button role="tab" data-p="setting" aria-selected="false"><span class="rn">04</span>Setting</button>
@@ -556,9 +595,8 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
          移除：頁首四格 strip、裝置 dev_* 旗標卡。
          🔴 移除元素時**同時**刪掉 paint() 裡對應的寫入 —— 否則會變成今天抓過四次的
             「靜默寫入不存在的元素」（找不到就 return，沒有任何徵兆）。 -->
-    <div class="pane" data-pane="dashboard" role="tabpanel">
+    <div class="pane on" data-pane="dashboard" role="tabpanel">
       <div class="man">
-
         <div class="grp">
           <header><span>機器在哪裡</span>
             <span class="lock" id="d-range" style="background:var(--idle-soft);color:var(--ink2)">—</span></header>
@@ -659,20 +697,22 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
           </div>
         </div>
 
-        <!-- [2026-09-10] 水箱水位（XKC slave 13）。v1 有、v2 之前沒有。
-             🔴 **這顆裝在水箱最低位置** ⇒ 它答的是「還有沒有水」，不是「滿了沒」。
-             欄位名叫 `water_full` 很容易讀反：`=0` 是**空箱**，不是「還沒滿、可以繼續補」。
-             所以這裡不照欄位名寫字，直接寫結論。實測：乾 rssi<1700、濕 rssi>4800。 -->
+        <!-- [2026-09-10] 水箱水位（XKC slave 13，最低位）。v1 有、v2 之前沒有。
+             🔴 低位那顆答的是「還有沒有水」，不是「滿了沒」——欄位名叫 `water_full` 很容易讀反：`=0` 是**空箱**。實測：乾 rssi<1700、濕 rssi>4800。
+             [2026-09-17 per user] 第二顆裝在**高水位**（slave 14）：`water_level` 多回 `water_high=0|1|?` `rssi_high=`，status 多 `water_low=`／`water_high=`
+             （本體背景快取，閥開著時每 2 s 刷新）。高水位=1 本體**自動關閥** + `EVT water_inlet_auto_close reason=high_level`；已滿時 `water_inlet on` 回 `OK skipped water_high=1`。
+             ⇒ 兩顆各一燈：低＝有水／空箱、高＝滿／未滿。 -->
         <div class="grp">
           <header><span>水箱水位</span>
             <span class="lock" id="wl-tag" style="background:var(--idle-soft);color:var(--ink2)">—</span></header>
           <div>
             <div class="big">
-              <div><span class="bk">水箱</span><span class="bv" id="wl-state">—</span></div>
-              <div><span class="bk">RSSI</span><span class="bv" id="wl-rssi">—</span></div>
+              <div><span class="bk">低水位 <span class="wl-lamp" id="wl-low-lamp">●</span></span><span class="bv" id="wl-state">—</span></div>
+              <div><span class="bk">高水位 <span class="wl-lamp" id="wl-high-lamp">●</span></span><span class="bv" id="wl-high">—</span></div>
+              <div><span class="bk">RSSI 低 / 高</span><span class="bv" id="wl-rssi" style="font-size:15px">—</span></div>
             </div>
             <div class="pmrow">
-              <span class="pmread">感測器在水箱<strong>最低位</strong>：有訊號＝還有水</span>
+              <span class="pmread">低位有訊號＝還有水 · 高位有訊號＝<strong>滿，本體自動關進水閥</strong></span>
               <button class="btn" id="wl-refresh">重讀</button>
             </div>
           </div>
@@ -686,61 +726,39 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
           </div>
         </div>
 
-      </div>
-    </div>
 
-    <!-- ===== MISSION ===== -->
-    <!-- [2026-09-04 per user] 同 Dashboard，改用 `.man` + `.grp` 卡片版面。
-         原本是 `.cols` 三欄裸版面，每欄底部各掛一段說明文字。
-         那些說明沒有刪掉，是折進各列的 <small> —— 它們解釋的是「這個數字怎麼讀」，
-         放在數字旁邊比放在整欄底部有用。 -->
-    <div class="pane on" data-pane="mission" role="tabpanel">
-      <div class="man">
-        <!-- ===== 固定控制列（2026-09-15 下午⑥ per user：一屏原則）=====
-             捲到哪裡都按得到「開始／暫停／中止／急停」，狀態與前置·參數摘要同一行。
-             🔴 不可以放進 .grp —— `.grp{overflow:hidden}` 會讓 position:sticky 失效。 -->
-        <div class="mbar" id="mbar">
-          <div class="mbar-row">
-            <span class="lock" id="mis-state" style="background:var(--idle-soft);color:var(--ink2)">—</span>
-            <button class="mbar-sum" id="pre-sum" type="button" title="點一下展開／收起前置七項">前置 —</button>
-            <button class="mbar-sum" id="mp-sum" type="button" title="點一下展開／收起參數">參數 —</button>
-            <span class="mbar-lbl" id="mp-last" title="server 記住的上一次成功起跑參數"></span>
-            <span class="mbar-sp"></span>
-                <button class="btn" id="mis-start" style="border-color:var(--ok);color:var(--ok);font-weight:700;min-width:120px">開始</button>
-                <!-- 腳本模式：暫停/繼續 一顆切換（{mission:'pause'|'continue'} → server.js SIGUSR1/SIGUSR2，腳本到下一檢查點停）；
-                     文字依 mission state 的 paused 切。本體模式：三顆分開（pause/continue/skip 指令）。 -->
-                <button class="btn" id="mis-pc" data-backend="script" style="min-width:96px">暫停</button>
-                <button class="btn" id="mis-pause" data-backend="body">暫停</button>
-                <button class="btn" id="mis-continue" data-backend="body">繼續</button>
-                <button class="btn" id="mis-skip" data-backend="body">跳過</button>
-                <!-- 🔴 [2026-09-16 per user]「中止 / 急停」兩個詞容易被當成同一件事 ⇒ 名字要自己說出後果。
-                     停止作業＝正常結束（停腳本 → 收臂 → **收腳** → 關幫浦，機器留在原高度純吊在繩上）
-                     緊急脫離＝立刻九步全關全收並進 Error。兩顆視覺上隔開，後者紅色 + 二次確認。 -->
-                <button class="btn" id="mis-stop" style="font-weight:700" title="停止作業：停腳本 → 收手臂 → 收腳 → 關幫浦。機器留在原高度，純吊在繩上（不再吸附）。">停止作業</button>
-                <span class="estop-gap"></span>
-                <button id="wr-estop" class="estop" title="緊急脫離：立刻全關全收（收臂 → 關刷/水泵 → 風扇停 → 收腳 → 關真空），機器脫離玻璃並進 Error。任務沒在跑也可按。">🔴 緊急脫離</button>
-                <span class="rd" id="mis-lock" style="font-weight:400;color:var(--bad)" hidden>SAFE 鎖定：先解除 SAFE，任務停在檢查點可續</span>
+        <!-- [2026-09-17 per user] Dashboard 放 Mission 三顆鈕 + 目前參數：看數據時不用切頁就能起跑／停／脫離。
+             [同日 per user 追加] 跟一般小卡一樣大、放**右下**（小卡群最後一張，`grid-column:-2/-1` 釘在最後一欄，欄數隨寬度變也一樣）。
+             三顆是 Mission 頁那三顆的**鏡像**（點了就轉去按本尊 #mis-start／#mis-stop／#wr-estop，同一支 handler、同一個確認），
+             disabled／同一格切換／閃爍由 misPaint 從本尊抄過來 —— 不是第二份實作。 -->
+        <div class="grp" id="d-mis-card" style="grid-column:-2/-1">
+          <header>Mission
+            <span class="lock" id="d-mis-state" style="background:var(--idle-soft);color:var(--ink2)">—</span></header>
+          <div class="d-mis">
+            <div class="d-mis-btns">
+              <button class="btn mis-big" id="d-mis-start" data-mirror="mis-start" style="border-color:var(--ok);color:var(--ok)">開始</button>
+              <button class="btn mis-big off" id="d-mis-stop" data-mirror="mis-stop" title="停止作業：停腳本 → 收手臂 → 收腳 → 關幫浦。機器留在原高度，純吊在繩上（不再吸附）。">停止作業</button>
+              <button class="estop mis-big" id="d-estop" data-mirror="wr-estop" title="緊急脫離：立刻全關全收，機器脫離玻璃並進 Error。任務沒在跑也可按。">🔴 緊急脫離</button>
+            </div>
+            <div class="d-mis-info">
+              <div class="mbar-row" id="d-mis-live">
+                <span class="mbar-kv"><span class="bk">週期</span><span class="bv" id="d-mis-cyc">—</span></span>
+                <span class="mbar-kv"><span class="bk">步</span><span class="bv" id="d-mis-step">—</span></span>
+                <span class="mbar-kv"><span class="bk">高度</span><span class="bv" id="d-mis-h">—</span></span>
+                <span class="mbar-kv"><span class="bk">吸住</span><span class="bv" id="d-mis-nseal">—</span></span>
+              </div>
+              <div class="why" style="padding:6px 0;white-space:normal"><span id="d-mis-src" style="color:var(--ink3)">參數</span>：<span id="d-mis-params">—</span></div>
+            </div>
           </div>
-          <div class="mbar-row mbar-2nd">
-            <button class="btn" id="mbar-top" title="crane_goto <牆高> —— 不展開前置也按得到">⤒ 拉到頂端</button>
-            <span class="mbar-lbl">立即接管</span>
-            <button class="btn" id="m-crane-stop" style="border-color:var(--bad);color:var(--bad);font-weight:700">STOP 吊機</button>
-            <button class="btn" id="m-arm-park" style="border-color:var(--warn);color:var(--warn);font-weight:700">PARK 手臂</button>
-            <span class="mbar-note">手臂壓玻璃是持續施力，過熱／過流鎖存只能斷電解除 —— 要卸力按 PARK。</span>
-          </div>
-          <div class="why" id="mis-why" hidden></div>
         </div>
 
-        <div class="grp mis-main">
-          <header>執行中
+        <!-- ===== 任務（2026-09-17 早 per user：由 Mission 搬來）=====
+             Mission 頁只留「參數 + 三顆鈕 + 狀態列」；執行中的細節到這裡看。
+             id 全部沿用（mis-*），寫入點在 misPaint / onMissionEvt / misParseLine，不必動。 -->
+        <div class="grp" style="grid-column:1/-1">
+          <header>任務執行
             <span class="lock" id="mis-phase" style="background:var(--idle-soft);color:var(--ink2)">idle</span></header>
           <div>
-            <div class="big">
-              <div><span class="bk">週期</span><span class="bv" id="mis-cyc">—</span></div>
-              <div><span class="bk">步</span><span class="bv" id="mis-step">—</span></div>
-              <div><span class="bk">高度</span><span class="bv" id="mis-h">—</span></div>
-              <div><span class="bk">吸住</span><span class="bv" id="mis-nseal">—</span></div>
-            </div>
             <div class="ctl"><span class="cl">子步驟<small>本體 <code>sub</code>／腳本最後一行</small></span>
               <span class="rd" id="mis-sub">—</span><span class="rd" id="mis-subage" style="color:var(--ink3)"></span></div>
             <div class="ctl"><span class="cl">等真空<small><code>vac_wait</code> · p5–p8 kPa · 任一 ≤ −50 即過</small></span>
@@ -759,77 +777,180 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
               <span class="rd railsrc" id="mis-last" style="font-weight:400">—</span></div>
           </div>
         </div>
-
-        <!-- 前置與參數：預設收起成一行（摘要在上面那條），要編輯才展開 -->
-        <div class="grp" id="pre-card" style="grid-column:1/-1">
-          <header style="cursor:pointer" id="pre-head">前置
-            <span class="lock" id="pre-count" style="background:var(--idle-soft);color:var(--ink2)">—</span>
-            <span class="lock" style="background:transparent;color:var(--ink3);font-weight:400" id="pre-toggle">▾ 收起</span></header>
-          <div id="pre-body">
-            <!-- [2026-09-16 per user] 「一鍵前置」整列移除：③ 推桿歸零是資訊列、④ init 由腳本自理、
-                 手臂改成開機即待命 ⇒ 已經沒有「必做且可自動跑」的項目，留一顆只會讓人以為還有事要做。 -->
-            <div class="man" id="pre-root" style="padding:0"></div>
-          </div>
-        </div>
-        <div class="grp" id="mp-card">
-          <header style="cursor:pointer" id="mp-head">任務參數
-            <span class="lock" style="background:transparent;color:var(--ink3);font-weight:400" id="mp-toggle">▾ 收起</span></header>
-          <div id="mp-body">
-            <div class="ctl"><span class="cl">單步距離 / 步數<small><code>step_cm</code>（下行每步公分）· <code>steps</code></small></span>
-              <span class="rd"></span>
-              <span style="display:flex;gap:6px">
-                <input class="numin" id="mp-stepcm" type="number" value="40" min="1" max="200" step="1" aria-label="單步距離">
-                <input class="numin" id="mp-steps" type="number" value="5" min="1" max="99" step="1" aria-label="步數">
-              </span></div>
-            <div class="ctl"><span class="cl">週期數<small><code>cycles</code> · 每週期末回頂</small></span>
-              <span class="rd"></span>
-              <input class="numin" id="mp-cycles" type="number" value="1" min="1" max="999" step="1" aria-label="週期數"></div>
-            <div class="ctl stack"><span class="cl">風扇<small><code>fan=move[:pct]</code> 只在下行移動時開 · <code>all[:pct]</code> 全程同值（all:5＝不開）· pct 5~10</small></span>
-              <span class="ctlrow">
-                <select class="selin" id="mp-fan" aria-label="風扇模式">
-                  <option value="move">move（下行才開）</option>
-                  <option value="all">all（全程）</option>
-                </select>
-                <input class="numin" id="mp-fanpct" type="number" value="7" min="5" max="10" step="1" aria-label="風扇 pct" style="width:4.5em">
-                <span class="rd" style="color:var(--ink3)">%</span>
-              </span></div>
-            <div class="ctl stack"><span class="cl">滑台<small><code>rail=&lt;起&gt;-&lt;迄&gt;</code> 0~130、起≠迄 · <code>off</code>＝清潔段不動滑台</small></span>
-              <span class="ctlrow">
-                <span class="seg" id="mp-mrail" role="group" aria-label="滑台快選">
-                  <button data-mrail="0-100">0-100</button>
-                  <button data-mrail="100-0">100-0</button>
-                  <button data-mrail="20-100">20-100</button>
-                  <button data-mrail="100-20">100-20</button>
-                  <button data-mrail="off">off</button>
-                </span>
-                <input class="numin" id="mp-rail" type="text" value="0-100" pattern="^(\d{1,3}-\d{1,3}|off)$" aria-label="滑台 起-迄" style="width:6em">
-              </span></div>
-            <div class="ctl"><span class="cl">手臂壓力 / 乾掃<small><code>arm_nm</code> 1~15 N·m · <code>dry=1</code> 不噴水不開滾刷（只驗步態與力控）</small></span>
-              <span class="rd"></span>
-              <span style="display:flex;gap:6px;align-items:center">
-                <input class="numin" id="mp-armnm" type="number" value="3" min="1" max="15" step="0.5" aria-label="手臂壓力">
-                <label style="display:flex;align-items:center;gap:4px;font-size:12px"><input type="checkbox" id="mp-dry"> 乾掃</label>
-              </span></div>
-            <div class="ctl"><span class="cl">中止門檻<small><code>roll_trip</code>（°）· <code>diff_trip</code>（左右差 cm，連續 3 筆）</small></span>
-              <span class="rd"></span>
-              <span style="display:flex;gap:6px">
-                <input class="numin" id="mp-roll" type="number" value="6" min="0.5" max="45" step="0.5" aria-label="roll 門檻">
-                <input class="numin" id="mp-diff" type="number" value="8" min="0.5" max="100" step="0.5" aria-label="左右差門檻">
-              </span></div>
-            <div class="ctl"><span class="cl">頂端高度<small>＝前置 ② 量到的牆高 · server 帶 <code>FCV_TOP_CM</code>，不填</small></span>
-              <span class="rd"></span>
-              <span class="rd wh-hg" id="mp-topcm-rd">—</span></div>
-            <div class="ctl"><span class="cl">等效指令<small>從終端機跑就是這一行（回報問題時貼這個）</small></span>
-              <span class="rd railsrc" id="mis-cli" style="font-weight:400;grid-column:2/-1">—</span></div>
-
-          </div>
-        </div>
+        <!-- 腳本模式（MISSION_BACKEND='script'）：stdout 逐行進這裡，週期／步／每步時間從行裡解析；
+             本體模式：只吃 EVT mission，不解析 log。 -->
         <div class="grp" style="grid-column:1/-1" data-backend="script">
           <header>腳本輸出 <code>cycle_test.py</code>
             <span class="lock" id="mis-out-n" style="background:var(--idle-soft);color:var(--ink2)">0 行</span></header>
           <pre id="mis-out" style="margin:0;padding:8px 12px;max-height:260px;overflow:auto;font-size:11.5px;line-height:1.45;white-space:pre-wrap"></pre>
         </div>
-        <div class="grp" data-backend="body">
+        <div class="grp" style="grid-column:1/-1">
+          <header>每步時間 <span class="lock" id="mis-steps-n" style="background:var(--idle-soft);color:var(--ink2)">0 步</span></header>
+          <div style="overflow-x:auto">
+            <table class="mtab" id="mis-table">
+              <thead><tr><th>週期</th><th>步</th><th>伸出</th><th>真空</th><th>清潔</th><th>收回</th><th>移動</th><th>停後 roll</th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div class="why" id="mis-summary" style="padding:8px 12px" hidden></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ===== MISSION ===== -->
+    <!-- [2026-09-04 per user] 同 Dashboard，改用 `.man` + `.grp` 卡片版面。
+         原本是 `.cols` 三欄裸版面，每欄底部各掛一段說明文字。
+         那些說明沒有刪掉，是折進各列的 <small> —— 它們解釋的是「這個數字怎麼讀」，
+         放在數字旁邊比放在整欄底部有用。 -->
+    <div class="pane" data-pane="mission" role="tabpanel">
+      <div class="man">
+        <!-- ===== [2026-09-17 早 per user] Mission 重排（草圖 .claude/handoff/ai2-mission-relayout.png）=====
+             左欄「參數設定」一張卡五列，右欄三顆大鈕上下排：存檔 / 開始⇄停止作業 / 緊急脫離。
+             前置七項收成一行摘要放參數卡上方（它是「開始」的閘門，不能拿掉；點一下展開）。
+             即時監看、致動器回讀、吸盤 p5–p8、單步時間基準四張卡移除；腳本輸出、每步時間搬 Dashboard。
+             狀態列（sticky）留：狀態 chip、週期/步/高度、暫停⇄繼續、立即接管 STOP/PARK（09-10 per user：
+             Mission 必須有自己的 STOP/PARK，這條不因重排而變）。
+             🔴 不可以放進 .grp —— `.grp{overflow:hidden}` 會讓 position:sticky 失效。 -->
+        <div class="mbar" id="mbar">
+          <!-- [2026-09-17 per user] 這一列的狀態字（閒置 · 本體 ready · 週期 · 步 · 高度 · 吸住）**移除**——Dashboard 的 Mission 小卡已經有；
+               按鈕留著。id 仍在（hidden 容器），因為 misPaint／onMissionEvt／Dashboard 鏡像都從這些元素讀字：mis-state 的文字是 Dashboard
+               d-mis-state 的來源、mis-h 是 d-mis-h 的來源、mis-state 也是 gui_v3_check 的判準；拿掉 id 得重寫一圈，收益是零。 -->
+          <div class="mbar-row">
+            <span hidden aria-hidden="true">
+              <span id="mis-state">—</span><span id="rd-wrstate">—</span>
+              <span id="mis-cyc">—</span><span id="mis-step">—</span><span id="mis-h">—</span><span id="mis-nseal">—</span>
+            </span>
+            <span class="mbar-lbl">任務</span>
+            <span class="mbar-sp"></span>
+            <!-- 腳本模式：暫停/繼續 一顆切換（{mission:'pause'|'continue'} → server.js SIGUSR1/SIGUSR2，腳本到下一檢查點停）；
+                 文字依 mission state 的 paused 切。本體模式：三顆分開（pause/continue/skip 指令）。 -->
+            <button class="btn" id="mis-pc" data-backend="script" style="min-width:96px">暫停</button>
+            <button class="btn" id="mis-pause" data-backend="body">暫停</button>
+            <button class="btn" id="mis-continue" data-backend="body">繼續</button>
+            <button class="btn" id="mis-skip" data-backend="body">跳過</button>
+            <span class="rd" id="mis-lock" style="font-weight:400;color:var(--bad)" hidden>SAFE 鎖定：先解除 SAFE，任務停在檢查點可續</span>
+          </div>
+          <div class="mbar-row mbar-2nd">
+            <button class="btn" id="mbar-top" title="crane_goto <牆高> —— 不展開前置也按得到">⤒ 拉到頂端</button>
+            <span class="mbar-lbl">立即接管</span>
+            <button class="btn" id="m-crane-stop" style="border-color:var(--bad);color:var(--bad);font-weight:700">STOP 吊機</button>
+            <button class="btn" id="m-arm-park" style="border-color:var(--warn);color:var(--warn);font-weight:700">PARK 手臂</button>
+            <span class="mbar-note">手臂壓玻璃是持續施力，過熱／過流鎖存只能斷電解除 —— 要卸力按 PARK。</span>
+          </div>
+          <div class="why" id="mis-why" hidden></div>
+        </div>
+
+        <div class="mis-grid">
+          <div class="mis-left">
+            <!-- 前置：預設收成一行（摘要就是標題），要看／要做才展開。判準在 PRE_ITEMS 每一項的 state()。 -->
+            <div class="grp" id="pre-card">
+              <header style="cursor:pointer" id="pre-head">
+                <button class="mbar-sum" id="pre-sum" type="button" title="點一下展開／收起前置項目">前置 —</button>
+                <span class="lock" id="pre-count" style="background:var(--idle-soft);color:var(--ink2)">—</span>
+                <span class="lock" style="background:transparent;color:var(--ink3);font-weight:400" id="pre-toggle">▾ 收起</span></header>
+              <div id="pre-body">
+                <!-- [2026-09-16 per user] 「一鍵前置」整列移除：③ 推桿歸零是資訊列、④ init 由腳本自理、
+                     手臂改成開機即待命 ⇒ 已經沒有「必做且可自動跑」的項目，留一顆只會讓人以為還有事要做。 -->
+                <div class="man" id="pre-root" style="padding:0"></div>
+              </div>
+            </div>
+
+            <!-- [2026-09-17 per user 共用值] Manual 與 Mission **共用同一份機器狀態**（真值在本體／吊機），這一行把「Manual 留了什麼」
+                 攤在開始鈕旁邊：推桿含入／跳過（zdt_skip 有值整行標黃——user 最在意的）、RPM（可改，送同一支 set_pusher_rpm）、
+                 吊機五個門檻與 level_auto（唯讀，要改去 Manual／Setting）、起跑強制項（腳本自己會 set_hold_guard on／set_level_auto on／
+                 crane_attached on／zdt_power all on）。 -->
+            <div class="grp" id="ms-card">
+              <header>共用值 <span class="lock" id="ms-tag" style="background:var(--idle-soft);color:var(--ink2)">Manual 調的、這趟就用的</span></header>
+              <div>
+                <div class="ctl mp" id="ms-skip-row"><span class="cl">推桿含入<small><code>zdt_skip</code> · 沒勾的那支整組指令會跳過</small></span>
+                  <span class="rd railsrc" id="ms-skip" style="font-weight:400">—</span></div>
+                <div class="ctl mp"><span class="cl">推桿 RPM<small>共用值 <code>set_pusher_rpm</code> · 這裡改＝Manual 也變</small></span>
+                  <span class="mpc">
+                    <span class="mpf"><span class="mpl">伸</span><input class="numin zrpm" id="ms-rpm-ext" type="number" value="" min="50" max="1000" step="50" data-rpm="ext" aria-label="共用 伸 RPM"></span>
+                    <span class="mpf"><span class="mpl">收</span><input class="numin zrpm" id="ms-rpm-ret" type="number" value="" min="50" max="1000" step="50" data-rpm="ret" aria-label="共用 收 RPM"></span>
+                    <span class="rd railsrc" id="ms-rpm-rd" style="font-weight:400"></span>
+                  </span></div>
+                <div class="ctl mp"><span class="cl">吊機門檻<small>唯讀 · 改去 Manual 張力保護卡 · 重啟由 crane_settings.txt 回放</small></span>
+                  <span class="rd railsrc" id="ms-crane" style="font-weight:400">—</span></div>
+                <div class="ctl mp"><span class="cl">起跑強制<small>腳本起跑自己做，失敗就拒跑</small></span>
+                  <span class="rd railsrc" id="ms-force" style="font-weight:400">張力保護 on · level_auto on · crane_attached on · 推桿全使能 · 已吸附／arm_ready≠1 拒跑</span></div>
+              </div>
+            </div>
+
+            <!-- ===== 參數設定（五列，順序照草圖）=====
+                 欄位與 cycle_test full **同名**（step_cm / steps / cycles / fan / rail / arm_nm / dry / roll_trip / diff_trip），
+                 未來 C++ `mission start` 用同一組名字，到時只換「啟動送哪裡」（MISSION_BACKEND）。
+                 頂端高度不填：server 從 wall 儲存帶 FCV_TOP_CM（前置 ② 量到的牆高），未量就回 wall_height_unset。 -->
+            <div class="grp" id="mp-card">
+              <header style="cursor:pointer" id="mp-head">參數設定
+                <span class="mbar-sum" id="mp-sum" title="目前這組參數的摘要">參數 —</span>
+                <span class="lock" style="background:transparent;color:var(--ink3);font-weight:400" id="mp-toggle">▾ 收起</span></header>
+              <div id="mp-body">
+                    <!-- [2026-09-17 現場 per user「按鈕對齊」] 五列同一個骨架：左 標籤 | 右 .mpc（flex、靠右、輸入框同寬）。
+                     之前混用 .ctl（三欄）與 .ctl.stack（直排）兩種，控制項左右邊都不對齊。
+                     每個輸入框前面帶一個小字標籤，人才看得出三個數字哪個是哪個。 -->
+                <div class="ctl mp"><span class="cl">單步距離 / 步數 / 週期數<small><code>step_cm</code>（下行每步公分）· <code>steps</code> · <code>cycles</code>（每週期末回頂）</small></span>
+                  <span class="mpc">
+                    <span class="mpf"><span class="mpl">cm</span><input class="numin" id="mp-stepcm" type="number" value="40" min="1" max="200" step="1" aria-label="單步距離"></span>
+                    <span class="mpf"><span class="mpl">步</span><input class="numin" id="mp-steps" type="number" value="5" min="1" max="99" step="1" aria-label="步數"></span>
+                    <span class="mpf"><span class="mpl">週期</span><input class="numin" id="mp-cycles" type="number" value="1" min="1" max="999" step="1" aria-label="週期數"></span>
+                    <!-- [2026-09-17 per user] 任務結束回頂端（預設勾）。不勾 ⇒ 送 return_top=0：最後一個週期做完**停在最低點**
+                         （滑台歸 0、幫浦關、風扇關照做，只有拉回頂端那段不做；多週期時週期之間照樣回頂）。 -->
+                    <label class="mpf" style="cursor:pointer" title="不勾＝最後一個週期做完停在最低點（return_top=0）；多週期時週期之間照樣回頂"><input type="checkbox" id="mp-rtop" checked><span class="mpl">任務結束回頂端</span></label>
+                  </span></div>
+                <div class="ctl mp"><span class="cl">風扇<small><code>fan=move[:pct]</code> 只在下行移動時開 · <code>all[:pct]</code> 全程同值（all:5＝不開）· pct 5~10</small></span>
+                  <span class="mpc">
+                    <select class="selin" id="mp-fan" aria-label="風扇模式">
+                      <option value="move">move（下行才開）</option>
+                      <option value="all">all（全程）</option>
+                    </select>
+                    <span class="mpf"><span class="mpl">%</span><input class="numin" id="mp-fanpct" type="number" value="7" min="5" max="10" step="1" aria-label="風扇 pct"></span>
+                  </span></div>
+                <div class="ctl mp"><span class="cl">滑台<small><code>rail=&lt;起&gt;-&lt;迄&gt;</code> 0~130、起≠迄 · <code>off</code>＝清潔段不動滑台</small></span>
+                  <span class="mpc">
+                    <span class="seg" id="mp-mrail" role="group" aria-label="滑台快選">
+                      <button data-mrail="0-100">0-100</button>
+                      <button data-mrail="100-0">100-0</button>
+                      <button data-mrail="20-100">20-100</button>
+                      <button data-mrail="100-20">100-20</button>
+                      <button data-mrail="off">off</button>
+                    </span>
+                    <span class="mpf"><span class="mpl">起-迄</span><input class="numin" id="mp-rail" type="text" value="0-100" pattern="^(\d{1,3}-\d{1,3}|off)$" aria-label="滑台 起-迄"></span>
+                  </span></div>
+                <div class="ctl mp"><span class="cl">手臂壓力 / 乾掃<small><code>arm_nm</code> 1~15 N·m · <code>dry=1</code> 不噴水不開滾刷（只驗步態與力控）</small></span>
+                  <span class="mpc">
+                    <label class="mpf" style="cursor:pointer"><input type="checkbox" id="mp-dry"><span class="mpl">乾掃</span></label>
+                    <span class="mpf"><span class="mpl">N·m</span><input class="numin" id="mp-armnm" type="number" value="3" min="1" max="15" step="0.5" aria-label="手臂壓力"></span>
+                  </span></div>
+                <div class="ctl mp"><span class="cl">中止門檻<small><code>roll_trip</code>（°）· <code>diff_trip</code>（左右差 cm，連續 3 筆）</small></span>
+                  <span class="mpc">
+                    <span class="mpf"><span class="mpl">roll °</span><input class="numin" id="mp-roll" type="number" value="6" min="0.5" max="45" step="0.5" aria-label="roll 門檻"></span>
+                    <span class="mpf"><span class="mpl">左右差 cm</span><input class="numin" id="mp-diff" type="number" value="8" min="0.5" max="100" step="0.5" aria-label="左右差門檻"></span>
+                  </span></div>
+                <!-- 頂端高度那列（server 帶 FCV_TOP_CM，不填）不在草圖上 ⇒ 拿掉；牆高在前置 ② 看得到，等效指令裡也帶著。 -->
+                <div class="why" style="padding:6px 12px;white-space:normal">等效指令（回報問題時貼這個）：<code id="mis-cli" style="user-select:all">—</code></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 右欄三顆大鈕。開始／停止作業是**同一格**，依 mis.running 只露一顆（misPaint 切 .off）。
+               🔴 [2026-09-16 per user] 停止作業／緊急脫離的用詞、tooltip、二次確認**照舊**，只是位置變了：
+               停止作業＝正常結束（停腳本 → 收臂 → 收腳 → 關幫浦，機器留在原高度純吊在繩上）
+               緊急脫離＝立刻全關全收並進 Error。後者紅色、隔開、confirmOnce。 -->
+          <div class="mis-btns">
+            <button class="btn mis-big" id="mp-save" title="把目前這組參數存成下次預設（server ~/run/mission_params.json，平板與筆電看到同一組）">存檔</button>
+            <span class="mbar-lbl" id="mp-last" title="server 記住的預設參數是什麼時候存的"></span>
+            <button class="btn mis-big" id="mis-start" style="border-color:var(--ok);color:var(--ok)">開始</button>
+            <button class="btn mis-big off" id="mis-stop" title="停止作業：停腳本 → 收手臂 → 收腳 → 關幫浦。機器留在原高度，純吊在繩上（不再吸附）。">停止作業</button>
+            <span class="estop-gap estop-gap-v"></span>
+            <button id="wr-estop" class="estop mis-big" title="緊急脫離：立刻全關全收（收臂 → 關刷/水泵 → 風扇停 → 收腳 → 關真空），機器脫離玻璃並進 Error。任務沒在跑也可按。">🔴 緊急脫離</button>
+          </div>
+        </div>
+
+        <!-- 本體模式才有：起跑前置由本體判定（`mission start` 先跑六項，不過就回 ERR precheck_failed）。
+             GUI 不自己算，只畫上一次啟動嘗試的結果。腳本模式整張隱藏（data-backend）。 -->
+        <div class="grp" data-backend="body" style="grid-column:1/-1">
           <header>起跑前置（由本體判定）
             <span class="lock" id="pf-count" style="background:var(--idle-soft);color:var(--ink2)">尚未嘗試</span></header>
           <div>
@@ -844,120 +965,11 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
             <div class="gate" id="gate">按「啟動」時本體會逐項檢查；被擋的那一項會標在這裡。</div>
           </div>
         </div>
-        <div class="grp" style="border-color:var(--bad)">
-          <header style="background:var(--bad-soft);color:var(--bad)">立即接管
-            <span class="lock" style="background:transparent;color:var(--bad)">不受鎖定影響</span></header>
-          <div>
-            <div class="why" style="padding:9px 12px">STOP／PARK 已移到頁面頂端的固定控制列（捲到哪裡都按得到）。</div>
-          </div>
-        </div>
 
-        <!-- ===== A. 前置（2026-09-15 per user：原 01 作業流程頁併入這裡）=====
-             七項各「狀態燈 + 讀值 + 動作鈕」，狀態一律從 status / wall 推播**自動判**，不靠自己記。
-             判準寫在 PRE_ITEMS 每一項的 state()，一處一項。沒全綠就擋「開始」並列出缺哪項。
-             可摺疊：預設展開，全綠後自動收起一次（要看再點標題）。 -->
-
-        <!-- 🔴🔴 [2026-09-10 per user] **Mission 頁必須有自己的 STOP 與 PARK。**
-             在此之前這兩顆**只存在於 Manual**（`crane-stop` / `arm-park`），而 Manual
-             在腳本執行中是被鎖的 —— 靠「把這兩顆從鎖定區裡個別挖出來」達成可按。
-             一旦改成整頁鎖／鎖 tab，那個做法就不成立 ⇒ 會變成「Manual 進不去、
-             Mission 沒得停」，比現況更糟。
-             📌 PARK 不能省：手臂壓玻璃是**持續施力**，達妙馬達過熱／過流鎖存
-                **只能斷電解除**（2026-09-03 踩過）。鎖掉卸力的唯一按鈕，代價比誤觸大。
-             📌 兩顆與 Manual 那兩顆**共用同一支 handler**（`craneStopAction` /
-                `armParkAction`），不是複製一份 —— 兩份平行實作遲早分岔。 -->
-
-        <!-- [2026-09-15] 牆面高度建置卡片從 Mission 移除：① ② 在上面「前置」裡（handler 共用），Manual 仍有一份。 -->
-
-        <!-- [2026-09-13 v3] 前置檢查改讀 C++ 回覆：`mission start` 會先跑 §2.3 六項，
-             不過就回 `ERR precheck_failed item=<k> detail=…`。GUI **不再自己算**——這裡只把
-             上一次啟動嘗試的結果畫出來（哪一項被擋、detail 是什麼）。`bal` 一項 C++ 會自動改成 imu
-             並發 `EVT mission precheck_fix`，不擋。 -->
-
-        <!-- ===== B. 參數（2026-09-15 per user）=====
-             欄位與 cycle_test full **同名**（step_cm / steps / cycles / fan / rail / arm_nm / dry / roll_trip / diff_trip），
-             未來 C++ `mission start` 用同一組名字，到時只換「啟動送哪裡」（MISSION_BACKEND）。
-             頂端高度不填：server 從 wall 儲存帶 FCV_TOP_CM，未量就回 wall_height_unset。 -->
-
-        <!-- ===== C. 執行 ===== -->
-        <!-- 腳本模式（MISSION_BACKEND='script'）：stdout 逐行進這裡，週期／步／每步時間從行裡解析；
-             本體模式：只吃 EVT mission，不解析 log。 -->
-
-        <!-- 步內顯示：只吃 EVT mission，不解析 log -->
-
-        <div class="grp" style="grid-column:1/-1">
-          <header>每步時間 <span class="lock" id="mis-steps-n" style="background:var(--idle-soft);color:var(--ink2)">0 步</span></header>
-          <div style="overflow-x:auto">
-            <table class="mtab" id="mis-table">
-              <thead><tr><th>週期</th><th>步</th><th>伸出</th><th>真空</th><th>清潔</th><th>收回</th><th>移動</th><th>停後 roll</th></tr></thead>
-              <tbody></tbody>
-            </table>
-            <div class="why" id="mis-summary" style="padding:8px 12px" hidden></div>
-          </div>
-        </div>
-
-        <div class="grp">
-          <header>即時監看
-            <span class="lock" id="mon-age" style="background:var(--idle-soft);color:var(--ink2)">—</span></header>
-          <div>
-            <div class="mrow"><span class="k">roll<small style="display:block;font-family:var(--mono);font-size:10.5px;color:var(--ink3)">讀 <code>raw_x</code>（與基準無關）· 綠帶 ±1.0° 規格 · 縱軸 ±3°</small></span><span class="v" id="m-roll">—</span></div>
-            <svg class="spark" viewBox="0 0 300 52" preserveAspectRatio="none" role="img" aria-label="roll 時序與正負一度規格帶">
-              <rect x="0" y="18" width="300" height="16" fill="var(--ok-soft)"></rect>
-              <line x1="0" y1="26" x2="300" y2="26" stroke="var(--line2)" stroke-width="1"></line>
-              <polyline id="sp" fill="none" stroke="var(--accent)" stroke-width="1.6" points=""></polyline>
-            </svg>
-            <div class="mrow" style="margin-top:8px"><span class="k">左右差 |L−R|<small style="display:block;font-family:var(--mono);font-size:10.5px;color:var(--ink3)">腳本中止 8 cm <strong>連續 3 筆</strong> · 韌體守衛 10 cm</small></span><span class="v" id="m-diff">—</span></div>
-            <div class="gauge" style="margin-top:6px"><i id="g-diff" style="width:0"></i>
-              <b style="left:80%"></b><b style="left:100%;background:var(--ink3)"></b></div>
-            <div class="mrow" style="margin-top:8px"><span class="k">張力差<small style="display:block;font-family:var(--mono);font-size:10.5px;color:var(--ink3)">水平時本來就有約 25 kg 差（重心偏左）</small></span><span class="v" id="m-tdiff">—</span></div>
-            <div class="gauge" style="margin-top:6px"><i id="g-tdiff" style="width:0"></i><b style="left:100%"></b></div>
-          </div>
-        </div>
-
-        <div class="grp">
-          <header>致動器 · 指令 ↔ 回讀</header>
-          <div>
-            <div class="verif" id="verif">
-              <div class="vf" data-v="pump"><span class="dot"></span><span class="cmd">幫浦 A/B</span><span class="rb">—</span></div>
-              <div class="vf" data-v="valve"><span class="dot"></span><span class="cmd">真空閥 ch1</span><span class="rb">—</span></div>
-              <div class="vf" data-v="fan"><span class="dot"></span><span class="cmd">風扇 pwm ch1</span><span class="rb">—</span></div>
-              <div class="vf" data-v="armf"><span class="dot"></span><span class="cmd">手臂 DEPLOY_F</span><span class="rb">—</span></div>
-            </div>
-            <div class="ctl" style="margin-top:4px"><span class="cl">四態<small>實心＝已回讀確認 · 空心＝已送出未複驗 · 紅＝確認失敗 · 橘＝等待回讀</small></span>
-              <span class="rd"></span><span class="rd"></span></div>
-          </div>
-        </div>
-
-        <div class="grp">
-          <header>吸盤 p5–p8
-            <span class="lock" id="m-seal" style="background:var(--idle-soft);color:var(--ink2)">—</span></header>
-          <div>
-            <div class="cups" id="m-cups"></div>
-          </div>
-        </div>
-
-        <div class="grp">
-          <header>單步時間基準
-            <span class="lock" style="background:var(--idle-soft);color:var(--ink2)">22.4 s · n=1</span></header>
-          <div>
-            <div style="display:flex;height:24px;border-radius:2px;overflow:hidden">
-              <span style="width:15.2%;background:var(--idle)"></span>
-              <span style="width:8.9%;background:#8FA3A7"></span>
-              <span style="width:19.6%;background:var(--accent)"></span>
-              <span style="width:16.5%;background:var(--idle)"></span>
-              <span style="width:24.1%;background:var(--ok)"></span>
-              <span style="width:15.7%;background:var(--line2)"></span>
-            </div>
-            <div class="ctl"><span class="cl">單步組成<small>09-03 中午 <strong>n=1</strong>，目前唯一一份拆解</small></span>
-              <span class="rd">伸 3.4 · 真空 2.0</span>
-              <span class="rd" style="color:var(--ink3)">滑台 4.4 · 收 3.7 · 移動 5.4 · 其他 3.6</span></div>
-            <div class="ctl"><span class="cl">每公尺耗時<small>09-03 收盤 <strong>10 週期</strong></small></span>
-              <span class="rd">來回 62.6 s</span>
-              <span class="rd" style="color:var(--ink3)">下行 54.7 · 上行 7.9</span></div>
-            <div class="ctl"><span class="cl">瓶頸<small>只有 24% 的時間在移動</small></span>
-              <span class="rd unv">調 motion_hz 幾乎沒用</span><span class="rd"></span></div>
-          </div>
-        </div>
+        <!-- 🔴🔴 [2026-09-10 per user] **Mission 頁必須有自己的 STOP 與 PARK。**（在上面 sticky 列的第二行）
+             Manual 在腳本執行中是被鎖的；一旦鎖整頁，會變成「Manual 進不去、Mission 沒得停」。
+             📌 PARK 不能省：手臂壓玻璃是**持續施力**，達妙馬達過熱／過流鎖存**只能斷電解除**（2026-09-03 踩過）。
+             📌 兩顆與 Manual 那兩顆**共用同一支 handler**（`craneStopAction` / `armParkAction`），不是複製一份。 -->
 
       </div>
     </div>
@@ -1069,7 +1081,7 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
               <button class="btn hold" data-hold="down_right">▼ 右</button>
             </div>
             <!-- [2026-09-15 per user] hold 模式張力保護的啟用/關閉。只管上面六顆（up/down on|off）：
-                 on  = 超標 hold_all_off + EVT tension_total_limit/alarm（現行）
+                 on  = 超標 hold_all_off + EVT tension_retract_stop/alarm（09-17 起；原 tension_total_limit 隨 up_stop_total_kg 一起退場）
                  off = 同一組檢查只警示不停（EVT manual_tension_warn），操作員用眼睛決定放手。
                  對 pay_out/retract <cm> 沒影響。吊機重啟一律回 on，畫面以 status 的 hold_guard= 為準。
                  [09-15 下午 per user] 開關本體移到「張力保護」卡最上面；這裡只留紅框與警示文案（#hg-warn）。 -->
@@ -1156,29 +1168,29 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
               <span class="rd" id="cr-ten2">—</span><span class="rd" id="cr-tenr2" style="color:var(--ink3)">—</span>
             </div>
 
-            <!-- 🔴 每條**各比不同的量**，不是同一個數字的四種畫法。語意逐條查過原始碼：
+            <!-- 🔴 每條**各比不同的量**，不是同一個數字的三種畫法。語意逐條查過原始碼：
                    左/右繩 tension_max_kg          → l>max || r>max            （main.cpp:1777）
                    左右差  tension_diff_max_kg     → |l−r|>diff                （main.cpp:1780）
-                   總和    up_stop_total_kg        → l+r>up   **只在拉繩時作用**（main.cpp:2222）
-                   橘點    retract_tension_stop_kg → max(l,r)>=stop            （main.cpp:2963）
+                   橘點    retract_tension_stop_kg → max(l,r)>=stop  **自動收繩軟停 + ▲ 手拉停止，同一個值**
+                 ⚪ [2026-09-17 per user] `up_stop_total_kg`（總和，只在拉繩時作用）已從吊機移除：▲ 手拉的停止改用 retract_tension_stop_kg（單側，任一側 ≥ 就 hold_all_off）。
                  渲染與 Dashboard 共用同一支 `renderTenBars()` —— 兩邊各寫一份的話，
                  改了門檻語意只改一邊，畫面就會有一邊在說謊。 -->
             <div id="m-tenbars"></div>
-            <div class="ctl" style="margin-top:5px"><span class="cl">怎麼讀<small>右端<strong>紅點＝上限</strong> · 橘點＝收繩停止（比上限先跳）</small></span>
+            <div class="ctl" style="margin-top:5px"><span class="cl">怎麼讀<small>右端<strong>紅點＝單側上限</strong> · 橘點＝收繩張力上限（自動收繩軟停 + ▲ 手拉停止；比紅點先跳）</small></span>
                 <span class="rd on">綠 未達</span><span class="rd bad">紅 已超過</span></div>
 
+            <!-- [2026-09-17 per user 更正] 門檻旁的即時值（左/右/上限、左右差/門檻、最大側/收繩上限）**不要**——同日加、同日撤。
+                 user 要的只有：左右繩差上限 `tension_diff_max_kg` 可設定（這格 09-04 起就在，標籤寫清楚）。即時張力看上面的張力條。 -->
             <div id="tenset" style="display:grid;grid-template-columns:1fr auto auto;gap:6px 9px;align-items:center">
-              <span class="band">單側上限 <code>tension_max_kg</code></span>
+              <span class="band">單側上限（kg）<code>tension_max_kg</code></span>
               <input class="numin" data-set="set_tension_max_kg" type="number" step="1" aria-label="單側張力上限">
               <button class="btn" data-setgo="set_tension_max_kg">套用</button>
-              <span class="band">左右差上限 <code>tension_diff_max_kg</code></span>
-              <input class="numin" data-set="set_tension_diff_max_kg" type="number" step="1" aria-label="左右張力差上限">
+              <span class="band">左右繩差上限（kg）<code>tension_diff_max_kg</code><br><small>|左 − 右| 超過就停 · 吊機會持久化</small></span>
+              <input class="numin" data-set="set_tension_diff_max_kg" type="number" step="1" aria-label="左右繩差上限 kg">
               <button class="btn" data-setgo="set_tension_diff_max_kg">套用</button>
-              <span class="band">總和上限 <code>up_stop_total_kg</code></span>
-              <input class="numin" data-set="set_up_stop_total_kg" type="number" step="1" aria-label="總張力上限">
-              <button class="btn" data-setgo="set_up_stop_total_kg">套用</button>
-              <span class="band">收繩停止 <code>retract_tension_stop_kg</code></span>
-              <input class="numin" data-set="set_retract_tension_stop_kg" type="number" step="1" aria-label="收繩張力停止">
+              <!-- [2026-09-17 per user] user 之前看不懂「收繩停止」是什麼 ⇒ 標籤講清楚：同一個門檻管兩件事。 -->
+              <span class="band">收繩張力上限（單側）<br><small>自動收繩軟停 + ▲ 手拉停止 · 任一側 ≥ 就停 · <code>retract_tension_stop_kg</code></small></span>
+              <input class="numin" data-set="set_retract_tension_stop_kg" type="number" step="1" aria-label="收繩張力上限（單側）">
               <button class="btn" data-setgo="set_retract_tension_stop_kg">套用</button>
             </div>
           </div>
@@ -1225,32 +1237,201 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
              raw command 不屬於任何一段（可自選 target），刻意留在最後。 -->
         <div class="man-sec">洗窗機本體</div>
 
-        <!-- [2026-09-10] 本體開關機。init / shutdown 在 v2 之前完全沒有入口，
-             而 v2 自己的幫浦橫幅還寫著「重下 init」——叫人做一件做不到的事。 -->
+        <!-- ⚪ [2026-09-17 per user] 「本體開關機」（init / shutdown）整張移除：程式 systemd 自啟、腳本起跑自己 init 幫浦，不需要人按；
+             shutdown 那顆「按錯機器就掉下來」的按鈕沒有留下的理由。（09-10 加進來是因為當時 v2 橫幅叫人「重下 init」卻沒入口。） -->
+
+        <!-- [2026-09-17 per user] 本體區依**現場操作順序**排：① 吸盤推桿（吃滿一列）→ ② 手臂 → ③ 上滑台 → ④ 水路與風扇（PQW 繼電器 + 風扇）。
+             之前是 PQW／風扇在最前、手臂在最後 —— 那是加卡片的時間順序，不是操作順序。 -->
+        <!-- ZDT -->
+        <!-- [2026-09-11 per user] 檢討：改名「吸盤推桿」、拿掉左側／右側兩列（留整組＋單支）、
+             整組與單支都能設長度與 RPM、歸零改雙重確認、按鈕同尺寸重排。
+             RPM：09-11 起指令帶 `[rpm]` 第三參數；**09-17 per user 改成共用值** `set_pusher_rpm`（兩格，指令不再帶）。
+             版面規則在 CSS `.zdtcard`（class 名先 grep 過，沒有撞名）。 -->
+        <!-- 🔴 [2026-09-17 現場 per user「單支按鈕按不到」] 單支區原本是 11 欄的 grid（勾·標籤·cm·伸rpm·收rpm·三顆鈕）：
+             平板密度下一列 >700px，卡片只有 300–450px 而 `.grp{overflow:hidden}` 把右邊的按鈕整個裁掉 ⇒ 看不到也點不到。
+             改法：① 卡片吃滿整列（grid-column:1/-1）② 每支一列、列內 flex-wrap 可折行、列與列有分隔線 ③ 失能/使能併進該支那一列。 -->
+        <div class="grp" style="grid-column:1/-1">
+          <header>吸盤推桿</header>
+          <div class="zdtcard">
+            <!-- [2026-09-17 per user 共用值] RPM 是**本體的共用執行期值**（`set_pusher_rpm <伸> [收]`，status `pusher_rpm=`/`pusher_rpm_retract=`
+                 就是它，重啟由 body_settings.txt 回放）。Manual 調什麼、Mission／腳本就用什麼 ⇒ 兩格在這裡改完（change）直接送 set_pusher_rpm，
+                 單次指令（伸 raw／尋封伸／收）**不再帶 rpm**；`EVT pusher_rpm` 來了兩格跟著變（別人改的也看得到）。
+                 09-17 早上那版「每支各自 rpm、指令帶 rpm」已作廢——共用值只有一份，逐支填五遍沒有意義。 -->
+            <div class="ctl stack"><span class="cl">推桿 RPM（共用值）<small><code>set_pusher_rpm</code> · 伸／尋封 與 收 各一 · 50~1000 · 這裡改＝Mission 也用 · 重啟不回預設</small></span>
+              <span class="ctlrow">
+                <span class="zf"><span class="unit">伸</span><input id="rpm-all" class="numin zrpm" type="number" value="" min="50" max="1000" step="50" aria-label="共用 伸 RPM" data-rpm="ext"></span>
+                <span class="zf"><span class="unit">收</span><input id="rpm-all-ret" class="numin zrpm" type="number" value="" min="50" max="1000" step="50" aria-label="共用 收 RPM" data-rpm="ret"></span>
+                <span class="rd railsrc" id="rd-prpm" style="font-weight:400">—</span>
+              </span></div>
+
+            <div class="ctl stack"><span class="cl">整組 {5,6,7,8}<small>長度 0.5–20 cm · <strong>伸 raw＝不尋封</strong>、尋封伸不吃長度</small></span>
+              <span class="ctlrow">
+                <input id="cm-all" class="numin" type="number" value="10" min="0.5" max="20" step="0.5" aria-label="整組公分">
+                <span class="unit">cm</span>
+                <button class="btn" data-praw="all">伸 raw</button>
+                <button class="btn" data-pseal="all">尋封伸</button>
+                <button class="btn" data-pret="all">收</button>
+              </span></div>
+
+            <!-- [2026-09-17 per user] 每支前面一個打勾框「整組指令包含這支」：勾／取消勾立刻送 `zdt_enable/zdt_disable <s>`
+                 （只影響群組指令，**不斷電**；09-11 jim 按了舊的「失能」以為馬達鬆開就是這個坑）。
+                 框的顯示以 status `zdt_skip=`（`-`／`7`／`5,7`）為準，不自己記 —— 真值在本體，腳本／`pusher all`／急停收腳都會跳過它。
+                 整組指令照送 `pusher all`，**GUI 不拆成單支**（收腳四支同步破真空的時序會被拆掉）。 -->
+            <div class="ctl stack"><span class="cl">單支<small>每支一列：勾＝整組指令包含這支（沒勾＝<code>pusher all</code> 跳過它，單支指令照樣可用）· 長度 · 伸 raw／尋封伸／收 · 失能／使能（真斷電，狀態＝指令狀態）· RPM 用上面的共用值</small></span>
+              <div id="zdtsingle"></div>
+              <span class="ctlrow" style="margin-top:6px">
+                <button class="btn" data-cmd="washrobot|zdt_release_stall">解堵轉</button>
+                <span class="rd railsrc" id="rd-zdtskip" style="font-weight:400">—</span>
+              </span></div>
+
+            <!-- [2026-09-17 per user] 失能／使能＝**真斷電**（`zdt_power <s|all> on|off`，Reg 0x00F3 torque-off，可手推）。
+                 與上面「納入／排除群組」（zdt_enable/zdt_disable，不斷電）是兩件事。
+                 狀態列讀 status `zdt_pwr=1111`（slave 5..8 順序）—— 那是**最後一次指令的狀態，不是回讀**，開機預設 1111。
+                 🔴 失能後再使能，馬達會回到它記得的目標位置；人手推過就會彈 ⇒ 先「當前位置歸零」再使能（寫在使能鈕 title）。 -->
+            <div class="ctl stack"><span class="cl">失能 / 使能（全部）<small>真斷電 <code>zdt_power</code> · 失能後可手推 · 單支的在上面每支那一列 · 狀態為<strong>指令狀態</strong>，不是回讀</small></span>
+              <span class="ctlrow">
+                <button class="btn" data-zpow="all" data-on="0">全部失能</button>
+                <button class="btn" data-zpow="all" data-on="1" title="使能會回到馬達記得的目標位置；若人手推過，先「當前位置歸零」再使能，否則使能瞬間會彈">全部使能</button>
+                <span class="rd railsrc" id="rd-zdtpower">—</span>
+              </span></div>
+
+            <!-- 歸零：雙重確認（per user「這個按鈕要做 double check」）。
+                 不走共用的 data-confirm 委派（那是一道），自己的 handler 做兩道。
+                 [2026-09-17 per user] 改名「當前位置歸零」、小字拿掉（後果寫在兩道確認裡）。 -->
+            <div class="ctl stack"><span class="cl" style="color:var(--bad)">當前位置歸零</span>
+              <span class="ctlrow">
+                <button class="btn wide" id="zdt-zero" style="border-color:var(--bad);color:var(--bad);font-weight:700">當前位置歸零（雙重確認）</button>
+                <span class="rd" id="rd-zdtzero">—</span>
+              </span></div>
+
+            <!-- [2026-09-17 per user] 「重歸零（24V 跳電後）」改名「自動歸零」，只留 `zdt_home all` 那顆；
+                 原本綁在這裡的「① 真失能，準備手推 → ② 歸零並使能／取消」手動流程拆成上面的失能／使能按鈕
+                 （要手推校正就：全部失能 → 手推到底 → 當前位置歸零 → 全部使能）。
+                 zdt_home：每支自偵測收回方向 → 100rpm 驅動撞硬限位堵轉 → 定 0。**會驅動馬達**，同步指令、
+                 四支逐一跑，可能超過一分鐘 ⇒ send() 給 180s，不走 fire()。 -->
+            <div class="ctl stack"><span class="cl" style="color:var(--bad)">自動歸零</span>
+              <span class="ctlrow">
+                <button class="btn wide" id="zdt-home">自動歸零（撞限位）</button>
+                <span class="rd railsrc" id="rd-zdthome">—</span>
+              </span></div>
+          </div>
+        </div>
+
+        <!-- 手臂 -->
+        <!-- 位置緊接上滑台：滑台載著手臂，兩者機構上是一組。 -->
+        <!-- [2026-09-17 per user 重做] 「manual 手臂小卡應該只會有壓上、收回、跟壓上距離跟力道」+「點壓上後顯示目前的力跟估測牆面距離，
+             可以即時修改壓上的力道按套用」+「防呆不超過 7 NM」。
+             走本體 :5001：`arm_deploy_f <nm> RIGHT [dist_mm]`（壓力／距離先到先停；距離先到回 `OK stopped=distance`）、
+             `arm_force <nm>`（已壓上時即時改力道、不重新尋觸；未接觸 `ERR SETFORCE: not_in_contact`）、`arm_retract`（M1 → 0，保持使能）。
+             >7 Nm 本體與手臂都擋（`ERR target_nm_exceeds_max_7`），前端也擋。
+             即時顯示讀手臂 STATUS `[M1]` 的 `tau=`（目前力）與 `wall_mm=`（θ 幾何式估的機身–玻璃距離；**收回時是負數，只在壓上後顯示**），
+             壓上成功後每 1 s 輪詢、收回後停（閒置時 STATUS 是凍結快取，輪詢只會把舊值刷得像活的）。
+             拿掉：解鎖列、路徑選擇、M1/M2 讀取列、工具槽（一律 RIGHT 滾筒；目前工具在 Dashboard 任務卡看 tool=）、開迴路 DEPLOY、PARK（Mission 狀態列仍有）、INIT（開機自動）。 -->
         <div class="grp">
-          <header>本體開關機 <span class="lock" style="background:var(--bad-soft);color:var(--bad)">shutdown 會脫附</span></header>
+          <header>手臂
+            <span class="lock" id="arm-contact" style="background:var(--idle-soft);color:var(--ink2)">未壓上</span></header>
           <div>
-            <div class="ctl">
-              <span class="cl">初始化 <code>init</code><small>開幫浦 A、開始輪替計時、校 IMU 水平基準、使能各軸</small></span>
-              <span class="rd" id="rd-wrstate">—</span>
-              <button class="btn" id="wr-init">INIT</button>
-            </div>
-            <div class="ctl">
-              <span class="cl" style="color:var(--bad)">關機 <code>shutdown</code><small>關刷子／噴水馬達／進水閥／<strong>真空閥與兩顆幫浦</strong></small></span>
-              <span class="rd"></span>
-              <button class="btn" id="wr-shutdown"
-                      style="border-color:var(--bad);color:var(--bad);font-weight:700">SHUTDOWN</button>
-            </div>
-            <div class="why" style="padding:0 12px 9px;white-space:normal">
-              🔴 <strong>SHUTDOWN 會關掉真空閥與兩顆幫浦 ⇒ 機體會脫附。</strong>
-              只有在機器已經落地、確認不靠真空承重時才可以按。
-            </div>
+            <div class="ctl mp"><span class="cl">力道 / 距離上限<small><code>arm_deploy_f</code> · 力道 ≤ 7 N·m · 距離 122~444 mm（機身到玻璃），空白＝不限 · 壓力／距離<strong>先到先停</strong></small></span>
+              <span class="mpc">
+                <span class="mpf"><span class="mpl">N·m</span><input id="af-nm" class="numin" type="number" value="3" min="0.5" max="7" step="0.5" aria-label="壓上力道 Nm"></span>
+                <span class="mpf"><span class="mpl">mm</span><input id="af-dist" class="numin" type="number" value="" min="122" max="444" step="1" placeholder="不限" aria-label="距離上限 mm"></span>
+              </span></div>
+            <!-- 🔴 [2026-09-17 現場 per user] 結果文字一長就把「收回」擠出卡片（.ctl 是 1fr auto auto，.rd nowrap，卡片 overflow:hidden）
+                 ⇒ 壓在牆上收不回，安全問題。改：兩顆鈕自己一列（永遠可見）、結果文字獨立一列、可換行。 -->
+            <div class="ctl mp"><span class="cl">壓上 / 收回<small>壓上一律 RIGHT（滾筒）· 收回任何時候都可按 · 壓著是持續施力，量完記得收回</small></span>
+              <span class="mpc arm-btns">
+                <button class="btn" id="af-go" style="font-weight:700">壓上</button>
+                <button class="btn" id="arm-retract" style="border-color:var(--warn);color:var(--warn);font-weight:700">收回</button>
+              </span></div>
+            <div class="arm-result"><span class="rd railsrc" id="rd-afdet" style="font-weight:400">—</span></div>
+            <div class="ctl"><span class="cl">目前<small>手臂 STATUS <code>tau=</code> 力 · <code>wall_mm=</code> 估測牆距（θ 幾何式）· 壓上後每 1 s 讀一次</small></span>
+              <span class="rd" id="rd-arm-now">—</span><span class="rd" id="rd-arm-age" style="color:var(--ink3)"></span></div>
+            <div class="ctl mp"><span class="cl">力道 → 套用<small><code>arm_force</code> · 已壓上時即時改力道、不重新尋觸（1–2 s）· ≤ 7 N·m · 未壓上時灰</small></span>
+              <span class="mpc">
+                <span class="mpf"><span class="mpl">N·m</span><input id="af-nm2" class="numin" type="number" value="4" min="0.5" max="7" step="0.5" aria-label="套用力道 Nm"></span>
+                <button class="btn" id="af-apply" disabled>套用</button>
+              </span></div>
+          </div>
+        </div>
+
+        <!-- 上滑台 -->
+        <!-- [2026-09-11 per user] 三次檢討的最終版：
+             ① 標題只留「上滑台」、拿掉 rail_pos 回讀／座標可信度／驅動器組態
+             ② 行程守衛可設定（GUI 端軟限位）、校正歸零兩步、區間測試
+             ③ **JOG 移除**（實測有 lag，走隧道會更糟；後端 rail_jog 留著，前端不再接）
+                並重排：所有輸入框同寬、所有按鈕同尺寸，一列一件事。
+             版面規則寫在 CSS `.railcard`，不要在這裡用 inline style 調寬度。 -->
+        <div class="grp">
+          <header>上滑台</header>
+          <div class="railcard">
+            <!-- [2026-09-11 per user] 上電預設就是使能 ⇒ 初始顯示「使能」，之後照送出的
+                 rail_enable on/off 更新。「未知／推論值／後端無回讀／失能後可手推」那些小字拿掉。
+                 硬體佐證：DM2J 出廠 DI1 常閉+未接線 ⇒ 訊號恆觸發、馬達上電即使能（DM2J_RS570.h:90-92）。 -->
+            <!-- 🔴 [2026-09-11 per user「按了版面會跑掉」] 按鈕放**前面**、狀態文字放後面且
+                 `flex:1 + nowrap + ellipsis`：文字變長（「上電預設」→「依 12:34:56 的指令推論」）
+                 只會被截斷，不會把按鈕擠到下一行。與 09-10 拉繩說明那次同一類：
+                 版面偏移來自**內容尺寸變化**，min-height 擋不住，要讓內容不能撐大。 -->
+            <div class="ctl stack"><span class="cl">馬達使能</span>
+              <span class="ctlrow" style="flex-wrap:nowrap">
+                <button class="btn" id="railen-on">使能</button>
+                <button class="btn" id="railen-off">失能</button>
+                <span class="rd on" id="rd-railen" style="min-width:2.5em">使能</span>
+                <span class="rd railsrc" id="rd-railensrc">上電預設</span>
+              </span></div>
+
+            <!-- [2026-09-17 per user] 可設負值：本體守衛改 −130..130（0 是 rail_zero 當時的位置，可在行程中間歸零）。 -->
+            <div class="ctl stack"><span class="cl">移動到<small>cm，−130~130（0＝歸零時的位置，可為負）· RPM 留 0＝預設（本體 10–500）</small></span>
+              <span class="ctlrow">
+                <input id="rail-cm" class="numin" type="number" value="50" min="-130" max="130" aria-label="滑台目標公分">
+                <input id="rail-rpm" class="numin" type="number" value="0" min="0" max="500" step="50" aria-label="滑台 RPM">
+                <button class="btn" id="rail-go">移動</button>
+              </span></div>
+
+            <div class="ctl stack"><span class="cl">快捷</span>
+              <span class="ctlrow">
+                <button class="btn" data-railq="-50">→ −50</button>
+                <button class="btn" data-railq="0">→ 0</button>
+                <button class="btn" data-railq="50">→ 50</button>
+                <button class="btn" data-railq="130">→ 130</button>
+              </span></div>
+
+            <!-- 區間測試：起 → 終 → 起，**本體端指令 `rail_sweep`** 自己走三段，瀏覽器關了照跑完。
+                 「中止」只擋下一段——進行中那段沒有指令能打斷，畫面直說。 -->
+            <div class="ctl stack"><span class="cl">區間測試<small>起 → 終 → 起 走一次來回 · 兩端要在行程守衛內</small></span>
+              <span class="ctlrow">
+                <input id="rs-from" class="numin" type="number" value="20" min="-130" max="130" aria-label="區間起點">
+                <span class="arrow">→</span>
+                <input id="rs-to" class="numin" type="number" value="100" min="-130" max="130" aria-label="區間終點">
+                <input id="rs-rpm" class="numin" type="number" value="0" min="0" max="500" step="50" aria-label="區間 RPM（0＝預設）" title="RPM，0＝沿用預設">
+                <button class="btn" id="rs-run">run</button>
+                <button class="btn" id="rs-abort" hidden>中止</button>
+              </span>
+              <span class="rd" id="rd-rs">—</span></div>
+
+            <!-- GUI 端軟限位：只擋這個畫面送出的目標值；本體硬限位 −130–130（09-17 起）不受影響也改不了。
+                 記在這台瀏覽器（localStorage）。 -->
+            <div class="ctl stack"><span class="cl">行程守衛<small>GUI 軟限位 · 本體硬限位 −130–130 不變 · 記在這台瀏覽器</small></span>
+              <span class="ctlrow">
+                <input id="rail-gmin" class="numin" type="number" value="-130" min="-130" max="130" step="1" aria-label="行程守衛下限">
+                <span class="arrow">–</span>
+                <input id="rail-gmax" class="numin" type="number" value="130" min="-130" max="130" step="1" aria-label="行程守衛上限">
+                <button class="btn" id="rail-gset">套用</button>
+                <span class="rd" id="rd-railguard">−130 – 130 cm</span>
+              </span></div>
+
+            <!-- 校正歸零兩步：① rail_enable off → 人手推到左端 → ② rail_enable on → rail_zero -->
+            <div class="ctl stack"><span class="cl" style="color:var(--bad)">校正歸零<small id="rail-zero-hint">按一下失能 → 手推到左端硬限位 → 再按一下使能並歸零</small></span>
+              <span class="ctlrow">
+                <button class="btn wide" id="rail-zero" style="border-color:var(--bad);color:var(--bad);font-weight:700">① 失能，準備手推</button>
+                <button class="btn" id="rail-zero-cancel" hidden>取消（只使能）</button>
+              </span>
+              <span class="rd" id="rd-railzero">—</span></div>
           </div>
         </div>
 
         <!-- PQW -->
         <div class="grp">
-          <header>PQW 繼電器 · CH1–8 <span class="lock">CH1 / CH6 需二次確認</span></header>
+          <header>水路 · PQW 繼電器 CH1–8 <span class="lock">CH1 / CH6 需二次確認</span></header>
           <div id="relaygrp"></div>
           <!-- [2026-09-10 per user] 真空幫浦輪替門檻擺在這裡，因為 CH2(pumpA) 與
                CH3(pumpB) 就在上面那張表裡 —— 門檻是它們兩顆的參數，不是吊機的。
@@ -1291,202 +1472,6 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
             <div class="ctl"><span class="cl" style="color:var(--bad)">保存到 flash<small>壽命僅 1~2 千次，每次上電只接受一次</small></span>
               <span class="rd"></span><button class="btn" data-cmd="washrobot|pwm save" data-confirm="1"
                 style="border-color:var(--bad);color:var(--bad)">save</button></div>
-          </div>
-        </div>
-
-        <!-- ZDT -->
-        <!-- [2026-09-11 per user] 檢討：改名「吸盤推桿」、拿掉左側／右側兩列（留整組＋單支）、
-             整組與單支都能設長度與 RPM、歸零改雙重確認、按鈕同尺寸重排。
-             RPM 欄位由 `ZDT_RPM_ENABLED` 控制（後端 `[rpm]` 2026-09-11 上線後已開；
-                之前藏著是因為舊 dispatcher 會靜默忽略多出來的 token）。
-             版面規則在 CSS `.zdtcard`（class 名先 grep 過，沒有撞名）。 -->
-        <div class="grp">
-          <header>吸盤推桿</header>
-          <div class="zdtcard">
-            <div class="ctl stack"><span class="cl">整組 {5,6,7,8}<small>長度 0.5–20 cm · <strong>伸 raw＝不尋封</strong>、尋封伸不吃長度</small></span>
-              <span class="ctlrow">
-                <input id="cm-all" class="numin" type="number" value="10" min="0.5" max="20" step="0.5" aria-label="整組公分">
-                <span class="unit">cm</span>
-                <!-- [2026-09-15 晚 per user] 空白／0 都是「不帶第三參數、用本體預設」。預設值由 status 的
-                     `pusher_rpm`（伸／尋封）與 `pusher_rpm_retract`（收）填進 placeholder，不寫死數字。 -->
-                <input id="rpm-all" class="numin zrpm" type="number" value="" min="0" max="1000" step="50" aria-label="整組 RPM（空＝預設）" placeholder="預設" hidden>
-                <span class="unit zrpm" hidden>rpm</span>
-                <button class="btn" data-praw="all">伸 raw</button>
-                <button class="btn" data-pseal="all">尋封伸</button>
-                <button class="btn" data-pret="all">收</button>
-              </span></div>
-
-            <div class="ctl"><span class="cl">RPM 預設值<small>空白／0 ＝ 不帶參數，由本體用這個值 · 讀 <code>status</code>，不是寫死的</small></span>
-              <span class="rd" id="rd-prpm">—</span><span class="rd" id="rd-prpm-ret" style="color:var(--ink3)">—</span></div>
-
-            <div class="ctl stack"><span class="cl">單支<small>逐支各自一組長度與 RPM</small></span>
-              <div id="zdtsingle"></div></div>
-
-            <!-- 🔴 [2026-09-11] `zdt_enable/zdt_disable` 只是「納入／排除群組操作」，**不斷電**——
-                 jim 今天按了「失能」以為馬達鬆開，其實沒有。改名講清楚；真斷電在下面的重歸零流程（zdt_power）。 -->
-            <div class="ctl stack"><span class="cl">群組 / 堵轉<small>納入／排除只影響群組指令，<strong>不斷電、推不動</strong> · 堵轉後先解除再動</small></span>
-              <span class="ctlrow">
-                <button class="btn" data-cmd="washrobot|zdt_enable">納入群組</button>
-                <button class="btn" data-cmd="washrobot|zdt_disable">排除群組</button>
-                <button class="btn" data-cmd="washrobot|zdt_release_stall">解堵轉</button>
-              </span></div>
-
-            <!-- 歸零：雙重確認（per user「這個按鈕要做 double check」）。
-                 不走共用的 data-confirm 委派（那是一道），自己的 handler 做兩道。 -->
-            <div class="ctl stack"><span class="cl" style="color:var(--bad)">歸零<small>四支<strong>已收到底</strong>時直接定為 0（不斷電）· 之後所有伸出長度以此為基準</small></span>
-              <span class="ctlrow">
-                <button class="btn wide" id="zdt-zero" style="border-color:var(--bad);color:var(--bad);font-weight:700">歸零（雙重確認）</button>
-                <span class="rd" id="rd-zdtzero">—</span>
-              </span></div>
-
-            <!-- [2026-09-11 per user] ZDT 重歸零（維護用）。背景：24V bus blip 會把驅動器位置計數器弄亂
-                 （計數器以為在 0，物理其實伸著 10cm），ZDT 沒有 homing ⇒ 需要「真失能 → 手推到底 → 歸零 → 使能」。
-                 走新指令 `zdt_power <s> on|off`（Reg 0x00F3 真 torque-off），與 zdt_disable 完全不同。
-                 🔴 順序：**先 zdt_zero 再 zdt_power on**，反過來使能瞬間會彈回舊（錯）目標。 -->
-            <div class="ctl stack"><span class="cl" style="color:var(--bad)">重歸零（24V 跳電後）<small id="zdt-rz-hint">① 真失能 4 支 → 手推到完全收回硬限位 → ② 歸零並使能 → 用上面「整組 伸 raw 5」目測驗證</small></span>
-              <span class="ctlrow">
-                <button class="btn wide" id="zdt-rz" style="border-color:var(--bad);color:var(--bad);font-weight:700">① 真失能，準備手推</button>
-                <button class="btn" id="zdt-rz-cancel" hidden>取消（只使能）</button>
-              </span>
-              <span class="rd" id="rd-zdtrz">—</span>
-              <!-- [2026-09-11] 一鍵版 `zdt_home all`：每支自偵測收回方向 → 100rpm 驅動撞硬限位堵轉 → 定 0。
-                   **會驅動馬達**，不需人手推；同步指令、四支逐一跑，可能超過一分鐘 ⇒ send() 給 180s，不走 fire()。 -->
-              <span class="ctlrow" style="margin-top:6px">
-                <button class="btn wide" id="zdt-home">自動重歸零（撞限位）</button>
-                <span class="rd railsrc" id="rd-zdthome">—</span>
-              </span></div>
-          </div>
-        </div>
-
-        <!-- 上滑台 -->
-        <!-- [2026-09-11 per user] 三次檢討的最終版：
-             ① 標題只留「上滑台」、拿掉 rail_pos 回讀／座標可信度／驅動器組態
-             ② 行程守衛可設定（GUI 端軟限位）、校正歸零兩步、區間測試
-             ③ **JOG 移除**（實測有 lag，走隧道會更糟；後端 rail_jog 留著，前端不再接）
-                並重排：所有輸入框同寬、所有按鈕同尺寸，一列一件事。
-             版面規則寫在 CSS `.railcard`，不要在這裡用 inline style 調寬度。 -->
-        <div class="grp">
-          <header>上滑台</header>
-          <div class="railcard">
-            <!-- [2026-09-11 per user] 上電預設就是使能 ⇒ 初始顯示「使能」，之後照送出的
-                 rail_enable on/off 更新。「未知／推論值／後端無回讀／失能後可手推」那些小字拿掉。
-                 硬體佐證：DM2J 出廠 DI1 常閉+未接線 ⇒ 訊號恆觸發、馬達上電即使能（DM2J_RS570.h:90-92）。 -->
-            <!-- 🔴 [2026-09-11 per user「按了版面會跑掉」] 按鈕放**前面**、狀態文字放後面且
-                 `flex:1 + nowrap + ellipsis`：文字變長（「上電預設」→「依 12:34:56 的指令推論」）
-                 只會被截斷，不會把按鈕擠到下一行。與 09-10 拉繩說明那次同一類：
-                 版面偏移來自**內容尺寸變化**，min-height 擋不住，要讓內容不能撐大。 -->
-            <div class="ctl stack"><span class="cl">馬達使能</span>
-              <span class="ctlrow" style="flex-wrap:nowrap">
-                <button class="btn" id="railen-on">使能</button>
-                <button class="btn" id="railen-off">失能</button>
-                <span class="rd on" id="rd-railen" style="min-width:2.5em">使能</span>
-                <span class="rd railsrc" id="rd-railensrc">上電預設</span>
-              </span></div>
-
-            <div class="ctl stack"><span class="cl">移動到<small>cm · RPM 留 0＝預設（本體 10–500）</small></span>
-              <span class="ctlrow">
-                <input id="rail-cm" class="numin" type="number" value="50" min="0" max="130" aria-label="滑台目標公分">
-                <input id="rail-rpm" class="numin" type="number" value="0" min="0" max="500" step="50" aria-label="滑台 RPM">
-                <button class="btn" id="rail-go">移動</button>
-              </span></div>
-
-            <div class="ctl stack"><span class="cl">快捷</span>
-              <span class="ctlrow">
-                <button class="btn" data-railq="0">→ 0</button>
-                <button class="btn" data-railq="50">→ 50</button>
-                <button class="btn" data-railq="130">→ 130</button>
-              </span></div>
-
-            <!-- 區間測試：起 → 終 → 起，**本體端指令 `rail_sweep`** 自己走三段，瀏覽器關了照跑完。
-                 「中止」只擋下一段——進行中那段沒有指令能打斷，畫面直說。 -->
-            <div class="ctl stack"><span class="cl">區間測試<small>起 → 終 → 起 走一次來回 · 兩端要在行程守衛內</small></span>
-              <span class="ctlrow">
-                <input id="rs-from" class="numin" type="number" value="20" min="0" max="130" aria-label="區間起點">
-                <span class="arrow">→</span>
-                <input id="rs-to" class="numin" type="number" value="100" min="0" max="130" aria-label="區間終點">
-                <input id="rs-rpm" class="numin" type="number" value="0" min="0" max="500" step="50" aria-label="區間 RPM（0＝預設）" title="RPM，0＝沿用預設">
-                <button class="btn" id="rs-run">run</button>
-                <button class="btn" id="rs-abort" hidden>中止</button>
-              </span>
-              <span class="rd" id="rd-rs">—</span></div>
-
-            <!-- GUI 端軟限位：只擋這個畫面送出的目標值；本體硬限位 0–130 不受影響也改不了。
-                 記在這台瀏覽器（localStorage）。 -->
-            <div class="ctl stack"><span class="cl">行程守衛<small>GUI 軟限位 · 本體硬限位 0–130 不變 · 記在這台瀏覽器</small></span>
-              <span class="ctlrow">
-                <input id="rail-gmin" class="numin" type="number" value="0" min="0" max="130" step="1" aria-label="行程守衛下限">
-                <span class="arrow">–</span>
-                <input id="rail-gmax" class="numin" type="number" value="130" min="0" max="130" step="1" aria-label="行程守衛上限">
-                <button class="btn" id="rail-gset">套用</button>
-                <span class="rd" id="rd-railguard">0 – 130 cm</span>
-              </span></div>
-
-            <!-- 校正歸零兩步：① rail_enable off → 人手推到左端 → ② rail_enable on → rail_zero -->
-            <div class="ctl stack"><span class="cl" style="color:var(--bad)">校正歸零<small id="rail-zero-hint">按一下失能 → 手推到左端硬限位 → 再按一下使能並歸零</small></span>
-              <span class="ctlrow">
-                <button class="btn wide" id="rail-zero" style="border-color:var(--bad);color:var(--bad);font-weight:700">① 失能，準備手推</button>
-                <button class="btn" id="rail-zero-cancel" hidden>取消（只使能）</button>
-              </span>
-              <span class="rd" id="rd-railzero">—</span></div>
-          </div>
-        </div>
-
-        <!-- 手臂 -->
-        <!-- 位置緊接上滑台：滑台載著手臂，兩者機構上是一組。 -->
-        <div class="grp">
-          <header>手臂 M1 / M2
-            <span class="lock" id="arm-armtag" style="background:var(--idle-soft);color:var(--ink2)">🔒 上鎖</span>
-            <span class="lock" id="arm-pathtag" style="background:var(--warn-soft);color:var(--warn)">直連 :9527</span></header>
-          <div>
-            <!-- 🔴🔴 [2026-09-11 per user] 手臂武裝互鎖。
-                 事故：web 重啟後手臂「自己靠上去」兩次 —— arm log 證實是 GUI 送出的 DEPLOY_F，
-                 而 af-go 的 handler 明明有 window.confirm()。推測 kiosk／wayvnc 的 confirm 被自動接受，
-                 或觸控幽靈點擊。**結論：NO_CONFIRM() 不能當安全機制。**
-                 ⇒ 會讓手臂動的按鈕（DEPLOY_F / DEPLOY / INIT）預設 disabled，只有在頁面內「解鎖」
-                   後 60 秒內可按；送出一次即自動上鎖；handler 內再檢查一次（disabled 被拔掉也擋）。
-                 PARK 刻意**不鎖**——它是卸力／復原的唯一手段。解鎖狀態**不持久化**、重整就上鎖。 -->
-            <div class="ctl"><span class="cl">手臂解鎖<small>會讓手臂動的按鈕預設上鎖 · 解鎖後 60 秒有效 · 送出一次即上鎖 · PARK 不受影響</small></span>
-              <span class="rd" id="rd-armarm">上鎖中</span>
-              <button class="btn" id="arm-arm" style="font-weight:700" hidden>🔓 解鎖 60s</button></div>
-            <div class="ctl"><span class="cl">走哪條路<small>兩條都到同一顆馬達，差別在中間經過誰</small></span>
-              <span class="rd"></span>
-              <select id="arm-path" class="numin" style="width:auto;text-align:left" aria-label="控制路徑">
-                <option value="direct">直連 motor_api :9527</option>
-                <option value="relay">經本體代轉 :5001</option>
-              </select></div>
-            <div class="ctl"><span class="cl">M1 大臂<small>按「讀取」才更新 · <strong>PARK 後為凍結值</strong></small></span>
-              <span class="rd" id="rd-m1">—</span>
-              <button class="btn" id="arm-read">讀取</button></div>
-            <div class="ctl"><span class="cl">M2 工具頭<small>0.86≈滾筒 · 0.19≈刮刀 · 0≈置中（由角度反推，±0.09 rad）</small></span>
-              <span class="rd" id="rd-m2">—</span>
-              <span class="rd" id="rd-armage" style="color:var(--ink3)">未讀取</span></div>
-            <!-- [2026-09-16 per user] 目前是滾筒還是刮刀。由 STATUS `[M2] tool=` 來（實際角度反推，不是「上次叫它去哪」）。
-                 ⚠️ en=0 時 M2 不再送 CAN frame ⇒ pos 與 tool 都是快取值，顯示時必須標出來。 -->
-            <div class="ctl"><span class="cl">目前工具<small><code>tool=</code> roller／squeegee／center／between</small></span>
-              <span class="rd" id="rd-tool">—</span><span class="rd"></span></div>
-
-            <div class="ctl stack"><span class="cl">力控貼合 <code>DEPLOY_F</code><small>單位 <strong>N·m</strong>（≈15）· 判準看 tau</small></span>
-              <span class="ctlrow"><input id="af-nm" class="numin" type="number" value="15" min="2" max="20" step="0.5" aria-label="目標壓力 Nm">
-                <select id="af-slot" class="numin" style="width:auto;text-align:left" aria-label="工具槽">
-                  <option value="RIGHT">RIGHT 滾筒</option>
-                  <option value="LEFT">LEFT 刮刀</option>
-                  <option value="CENTER">CENTER</option>
-                </select>
-                <button class="btn" id="af-go" disabled>壓上</button></span></div>
-            <div class="vf" data-v="armf"><span class="dot"></span><span class="cmd">DEPLOY_F 收斂結果</span><span class="rb">—</span></div>
-            <div class="ctl"><span class="cl">上次結果明細<small>theta / cmd / contact / kp_eff / iters</small></span>
-              <span class="rd" id="rd-afdet" style="color:var(--ink3)">—</span></div>
-
-            <div class="ctl stack"><span class="cl">開迴路貼合 <code>DEPLOY</code><small>單位 <strong>mm</strong>（≈520）· 壓力隨高度飄</small></span>
-              <span class="ctlrow"><input id="ad-mm" class="numin" type="number" value="520" min="440" max="620" step="5" aria-label="牆距 mm">
-                <button class="btn" id="ad-go" disabled>壓上</button></span></div>
-
-            <div class="ctl"><span class="cl">收手臂 <code>PARK</code><small>卸力歸位 —— 這顆<strong>不會</strong>被鎖</small></span>
-              <span class="rd"></span>
-              <button class="btn" id="arm-park" style="border-color:var(--warn);color:var(--warn);font-weight:700">PARK</button></div>
-            <div class="ctl"><span class="cl">初始化 <code>INIT</code><small>使能兩顆馬達並校正原點</small></span>
-              <span class="rd"></span>
-              <button class="btn" id="arm-init" disabled>INIT</button></div>
           </div>
         </div>
 
@@ -1554,9 +1539,9 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
                       整頁留白＝那些診斷靜默消失。
                    ② `fine_adjust_level_diff_cm` 與 `length_diff_max_cm` 在 GUI **沒有任何
                       設定入口**（`set_*` 全樹 0 次），這張表是它們**唯一被顯示的地方**。
-                      其餘五列（balance_source／motion_hz／retract_tension_stop_kg／
-                      up_stop_total_kg／DSZL 刻度）在 Manual 或 Mission 都有真的控制項，
-                      那五列確實是重複入口。
+                      其餘四列（balance_source／motion_hz／retract_tension_stop_kg／DSZL 刻度）
+                      在 Manual 或 Mission 都有真的控制項，那幾列確實是重複入口。
+                      （up_stop_total_kg 那列 09-17 隨吊機移除該門檻一併拿掉。）
                  📌 「使用者說沒作用」與「真的可以刪」是兩件事，中間隔著一次查證。 -->
             <details>
               <summary style="cursor:pointer;font-size:12px;color:var(--ink2);padding:8px 12px">
@@ -1624,14 +1609,10 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
                   <td class="num" id="st-ldm">—</td><td class="num">10</td>
                   <td><span class="pill pl-const">編譯常數</span></td>
                   <td class="band">10 只在 imu 模式下正確；切回 meter 應調緊</td></tr>
-              <tr><td>retract_tension_stop_kg<span class="sub2">收繩張力上限</span></td>
+              <tr><td>retract_tension_stop_kg<span class="sub2">收繩張力上限（單側）：自動收繩軟停 + ▲ 手拉停止</span></td>
                   <td class="num" id="st-rts">—</td><td class="num">75</td>
                   <td><span class="pill pl-keep">已常數化</span></td>
                   <td class="band">實測單側最大 59.7，留 26% 餘裕</td></tr>
-              <tr><td>up_stop_total_kg<span class="sub2">總張力上限</span></td>
-                  <td class="num" id="st-ust">—</td><td class="num">130</td>
-                  <td><span class="pill pl-keep">已常數化</span></td>
-                  <td class="band">整機 94 kg；舊值 70 低於自重，一按就停</td></tr>
               <tr><td>DSZL 刻度 左 / 右<span class="sub2">張力換算係數</span></td>
                   <td class="num" id="st-dsz">—</td><td class="num" style="color:var(--ink3)">—</td>
                   <td><span class="pill pl-keep">已常數化</span></td>
@@ -1687,13 +1668,7 @@ function vacSource(){
   if (vac.A === null || vac.B === null) return null;
   return {ok:false, v: v};
 }
-function paintPumpVerif(){
-  var vs = vacSource();
-  if (!vs){ setVerif('pump', '', '回讀不到'); return; }
-  setVerif('pump', vs.ok ? 'ok' : '', vs.v + ' 已確認');
-}
-var rollHist = [];
-var pending = {};              // verif key -> true while awaiting readback
+var pending = {};              // relay chKey -> true while awaiting readback (echo/poll 才可覆寫那一列)
 var queues = {};               // target -> {busy, q:[{cmd,resolve}]}
 
 //=========== transport ===========
@@ -1831,18 +1806,22 @@ function connect(){
       }
     }
     // 伺服器因張力超標自動停止 —— 前端要跟著把「按住中」的狀態清掉
-    if (/^EVT tension_(total_limit|alarm)/.test(line) && window.__craneReleaseAll){
+    // [2026-09-17] `EVT tension_total_limit total=… threshold=…` 改名 `EVT tension_retract_stop left=… right=… threshold=…`
+    //（▲ 手拉停止改用 retract_tension_stop_kg 單側門檻）。舊名暫時一併收，免得新舊吊機交錯時漏掉。
+    if (/^EVT tension_(retract_stop|total_limit|alarm)/.test(line) && window.__craneReleaseAll){
       window.__craneReleaseAll();
       log('🔴 ' + line + ' —— 伺服器已自動停止，按住狀態已清除', 'e');
     }
     // [2026-09-15] hold 模式張力保護開關與「關閉時只警示」事件（吊機）
     if (/^EVT (hold_guard|manual_tension_)/.test(line) && typeof onHoldGuardEvt === 'function') onHoldGuardEvt(line);
+    if (/^EVT pusher_rpm /.test(line) && typeof onPusherRpmEvt === 'function') onPusherRpmEvt(line);
     // [2026-09-11] 上滑台區間測試（本體端 rail_sweep）的進度事件
     if (/^EVT rail_sweep_/.test(line) && window.__railSweepEvt) window.__railSweepEvt(line);
     // [2026-09-13 v3] 本體 mission / SAFE 事件
     if (/^EVT mission /.test(line) && typeof onMissionEvt === 'function') onMissionEvt(line);
     if (/^EVT safe_/.test(line) && typeof onSafeEvt === 'function') onSafeEvt(line);
     if (/^EVT emergency_detach/.test(line) && typeof onDetachEvt === 'function') onDetachEvt(line);
+    if (/^EVT water_inlet_auto_close/.test(line) && typeof onWaterEvt === 'function') onWaterEvt(line);
     // 手臂 STATUS 的 `[M2]` 那段常常是**另一則**（line-buffered）⇒ 這裡補接，否則工具永遠讀不到
     if (m.src === 'arm' && typeof armApplyM2Line === 'function') armApplyM2Line(line);
     // [2026-09-16] 吸附中被本體擋下／有人硬幹 —— 兩者都要醒目，不可混在一般 log 裡
@@ -1919,11 +1898,6 @@ function num(o, k){ var v = o && o[k]; var f = parseFloat(v); return isFinite(f)
 //=========== paint ===========
 
 function txt(id, v){ var e = document.getElementById(id); if (e) e.textContent = v; }
-function bar(id, pct, col){
-  var e = document.getElementById(id); if (!e) return;
-  e.style.width = Math.max(0, Math.min(100, pct)) + '%';
-  if (col) e.style.background = col;
-}
 // 張力長條 + 門檻標點 —— **Dashboard 與 Manual 共用這一支**。
 // 🔴 兩邊各寫一份的話，改了門檻語意只改一邊，畫面就會有一邊在說謊 ——
 //    這一整天踩的坑幾乎都是同一個形狀（寫死的 130、寫死的 50、寫死的 6.0）。
@@ -2008,7 +1982,7 @@ function paint(){
 
   // [2026-09-10] 本體 Error 橫幅 —— 放在 paint 開頭，任何一次重繪都會校正它。
   if (typeof paintEstopBanner === 'function') paintEstopBanner();
-  txt('rd-wrstate', (typeof wrStateText === 'function') ? wrStateText(wr) : (wr && wr.state ? wr.state : '—'));
+  txt('rd-wrstate', '本體 ' + ((typeof wrStateText === 'function') ? wrStateText(wr) : (wr && wr.state ? wr.state : '—')));
   if (typeof misFromStatus === 'function') misFromStatus(wr);
   if (typeof paintEstopState === 'function') paintEstopState(wr);
   if (typeof setSafeLock === 'function') setSafeLock();
@@ -2031,6 +2005,10 @@ function paint(){
   if (typeof paintCupLock === 'function') paintCupLock();
   if (typeof paintStopBanner === 'function') paintStopBanner();
   if (typeof paintPusherRpm === 'function') paintPusherRpm(wr);
+  if (typeof waterFromStatus === 'function') waterFromStatus(wr);
+  if (typeof paintZdtPower === 'function') paintZdtPower(wr);
+  if (typeof paintZdtSkip === 'function') paintZdtSkip(wr);
+  if (typeof paintSharedVals === 'function') paintSharedVals();
   // [2026-09-11] 速度分段鈕：**照機器上的實際值**反白，不照剛按了哪顆。
   [].forEach.call(document.querySelectorAll('[data-hzq]'), function(b){
     b.classList.toggle('on', hz !== null && +b.dataset.hzq === hz);
@@ -2041,7 +2019,6 @@ function paint(){
   if (roll === null && wr) roll = num(wr, 'roll');
   if (roll !== null){
     var rs = (roll > 0 ? '+' : '') + roll.toFixed(2) + '°';
-    txt('m-roll', rs);
     txt('d-roll', rs);
 
     // ---- Dashboard 姿態 2D ----
@@ -2172,13 +2149,6 @@ function paint(){
       mmark.setAttribute('fill', Math.abs(roll) > ROLL_TRIP ? 'var(--bad)'
                                : (Math.abs(roll) > 1 ? 'var(--warn)' : 'var(--ok)'));
     }
-    rollHist.push(roll); if (rollHist.length > 60) rollHist.shift();
-    var pts = rollHist.map(function(v, i){
-      var x = rollHist.length < 2 ? 300 : i * (300 / (rollHist.length - 1));
-      var y = 26 - Math.max(-3, Math.min(3, v)) * (26 / 3) * 0.62;
-      return x.toFixed(1) + ',' + y.toFixed(1);
-    }).join(' ');
-    var sp = document.getElementById('sp'); if (sp) sp.setAttribute('points', pts);
   }
 
   // ---- position ----
@@ -2206,8 +2176,6 @@ function paint(){
     bigv('cr-r', R);
     var d = L - R;                 // 左右差是差值，不受歸零平移影響，沿用繩長即可
     txt('d-diff', (d > 0 ? '+' : '') + d.toFixed(0) + ' cm');
-    txt('m-diff', Math.abs(d).toFixed(0) + ' cm');
-    bar('g-diff', Math.abs(d) / 10 * 100, Math.abs(d) >= 8 ? 'var(--bad)' : Math.abs(d) >= 6 ? 'var(--warn)' : 'var(--ok)');
     // ---- 大樓立面：機器人位置 + 吊繩長度 ----
     // 座標：玻璃面在 svg 的 y=11（頂，屋頂下緣）到 y=200（底），機器人高 18。
     // 🔴 H 是**離底高度** ⇒ 越大越靠上，所以用 (1 - H/TOPH)。
@@ -2227,7 +2195,7 @@ function paint(){
   // ---- tension ----
   var tl = cr ? num(cr, 'tension_left') : null, tr = cr ? num(cr, 'tension_right') : null;
   if (tl !== null && tr !== null){
-    var tot = tl + tr, ratio = tr !== 0 ? (tl / tr) : 0;
+    var ratio = tr !== 0 ? (tl / tr) : 0;
     txt('d-ratio', ratio.toFixed(2) + '×');
 
     // 🔴 [2026-09-04 per user] 上方這條張力條改成「**離跳掉還有多遠**」，
@@ -2252,27 +2220,24 @@ function paint(){
     //    所以看得到「先撞到哪一道」而不只是「離最後一道多遠」。
     var sideLim = num(crf, 'tension_max_kg');
     var retLim  = num(crf, 'retract_tension_stop_kg');
-    var totLim  = num(crf, 'up_stop_total_kg');
-    // 三條給 Dashboard、四條給 Manual（Manual 有「左右差」那個門檻設定，所以多畫一條）
-    var side = {lim: sideLim, soft: retLim, softName: '收繩停止'};
+    // ⚪ [2026-09-17 per user] `up_stop_total_kg`（總和）已從吊機移除 ⇒ 「總和」那條與那道保護一併拿掉；
+    //    ▲ 手拉的停止現在就是橘點那道（retract_tension_stop_kg，單側），所以橘點的名字要把兩件事都說出來。
+    var side = {lim: sideLim, soft: retLim, softName: '收繩上限（軟停/手拉停）'};
     renderTenBars('d-tenbars', [
       {k:'左繩', v: tl,  lim: side.lim, soft: side.soft, softName: side.softName},
-      {k:'右繩', v: tr,  lim: side.lim, soft: side.soft, softName: side.softName},
-      {k:'總和', v: tot, lim: totLim,   soft: null,      softName: ''}
+      {k:'右繩', v: tr,  lim: side.lim, soft: side.soft, softName: side.softName}
     ]);
     renderTenBars('m-tenbars', [
       {k:'左繩', v: tl,               lim: side.lim, soft: side.soft, softName: side.softName},
       {k:'右繩', v: tr,               lim: side.lim, soft: side.soft, softName: side.softName},
-      {k:'左右差', v: Math.abs(tl-tr), lim: num(crf, 'tension_diff_max_kg'), soft: null, softName: ''},
-      {k:'總和（只在拉繩時作用）', v: tot, lim: totLim, soft: null, softName: ''}
+      {k:'左右差', v: Math.abs(tl-tr), lim: num(crf, 'tension_diff_max_kg'), soft: null, softName: ''}
     ]);
 
     // 抬頭徽章：直接說「先撞到哪一道」
     var prot = [
-      {n:'總和',   v: tot,               lim: totLim},
       {n:'單側',   v: Math.max(tl, tr),  lim: sideLim},
       {n:'左右差', v: Math.abs(tl - tr), lim: num(crf, 'tension_diff_max_kg')},
-      {n:'收繩',   v: Math.max(tl, tr),  lim: retLim}
+      {n:'收繩上限', v: Math.max(tl, tr), lim: retLim}
     ].filter(function(x){ return x.lim !== null && x.lim > 0; });
     var tw = document.getElementById('d-tenw');
     if (tw){
@@ -2286,12 +2251,6 @@ function paint(){
         tw.style.color      = hot ? 'var(--bad)'      : 'var(--ink2)';
       }
     }
-
-    var td = Math.abs(tl - tr);
-    txt('m-tdiff', td.toFixed(1) + ' kg');
-    // 左右差這條同樣改吃執行期門檻，不再寫死 50
-    var tdLim = num(crf, 'tension_diff_max_kg') || 50;
-    bar('g-tdiff', td / tdLim * 100, td > tdLim ? 'var(--bad)' : 'var(--ok)');
   }
 
   // ---- devices ----
@@ -2314,7 +2273,6 @@ function paint(){
     } else txt('st-lvl', '—');
     txt('st-ldm', cr.length_diff_max_cm || '—');
     txt('st-rts', cr.retract_tension_stop_kg || '—');
-    txt('st-ust', cr.up_stop_total_kg || '—');
     if (cr.dsz_left_scale) txt('st-dsz', (+cr.dsz_left_scale).toFixed(5) + ' / ' + (+cr.dsz_right_scale).toFixed(5));
     // 🔴🔴 [2026-09-10] **`balance_source` 是「想用什麼」，不是「正在用什麼」。**
     //    吊機每個 tick 重新決定（`Crane_control_PI/main.cpp:1647`）：
@@ -2405,7 +2363,6 @@ function paint(){
     // 門檻輸入框：只在使用者沒在編輯時才用現值預填，否則會把人打到一半的字蓋掉
     [['set_tension_max_kg','tension_max_kg'],
      ['set_tension_diff_max_kg','tension_diff_max_kg'],
-     ['set_up_stop_total_kg','up_stop_total_kg'],
      ['set_retract_tension_stop_kg','retract_tension_stop_kg']].forEach(function(pr){
       var el = document.querySelector('[data-set="' + pr[0] + '"]');
       if (el && document.activeElement !== el && cr[pr[1]] !== undefined) el.value = cr[pr[1]];
@@ -2424,14 +2381,12 @@ function paint(){
     var LAYOUT = [6, 5, 8, 7];                 // 左上, 右上, 左下, 右下
     var SEAL_KPA = -50;                        // 密封判準（至少一顆達標）
     var FULL_KPA = -70;                        // 圓環滿格對應的真空度（實測穩定值約 -66~-70）
-    var html = '', circ = '', sealed = 0, got = 0;
+    var circ = '', sealed = 0, got = 0;
     [5,6,7,8].forEach(function(n){
       var v = num(wr, 'p' + n);
       if (v === null) return;
       got++;
       if (v <= SEAL_KPA) sealed++;
-      html += '<div class="cup' + (v <= SEAL_KPA ? ' sealed' : '') + '"><div class="cn">' + names[n] +
-              '</div><div class="cv">' + v.toFixed(0) + '</div></div>';
     });
     circ = LAYOUT.map(function(n){
       var v = num(wr, 'p' + n);
@@ -2453,9 +2408,7 @@ function paint(){
         '<div class="cl2">' + names[n] + '</div></div>';
     }).join('');
     if (got){
-      var mc = document.getElementById('m-cups'); if (mc) mc.innerHTML = html;
       var dc = document.getElementById('d-cupg'); if (dc) dc.innerHTML = circ;
-      txt('m-seal', sealed + ' / ' + got + ' 密封');
       var ds = document.getElementById('d-seal');
       if (ds){
         ds.textContent = sealed + ' / ' + got + ' 密封（判準 ≤ ' + SEAL_KPA + ' kPa）';
@@ -2465,14 +2418,7 @@ function paint(){
     }
   }
 
-  // ---- staleness ----
-  // 第 0 格（姿態）來自 washrobot，其餘三格來自 crane —— 各自判斷新鮮度，
-  // 免得一台斷線就整條狀態列一起變灰、看不出是哪一台掉了。
-  // ⚪ [2026-09-04] 原本這裡把頁首四格各自標灰（第 0 格來自 washrobot、其餘來自 crane）。
-  //    strip 移除後改為：連線點已經逐台顯示，而各卡片的值本來就會停在最後一筆 ——
-  //    新鮮度統一由下方 mon-age 表示，不再逐格標灰。
-  var age = Math.round((Date.now() - Math.max(seenAt.wr, seenAt.cr)) / 1000);
-  txt('mon-age', isFinite(age) && age < 999 ? age + ' 秒前' : '—');
+  // ⚪ [2026-09-17] 新鮮度那格（mon-age）隨「即時監看」卡一起移除；連線點逐台顯示已足夠。
 
   setCraneLock();
   paintPreflight();
@@ -2483,14 +2429,6 @@ function paint(){
 // 結果由 paintPrecheck() 畫。這裡留一個空函式讓 paint() 的呼叫點不必改。
 function paintPreflight(){ window.__pfBlocked = []; }
 
-//=========== verification tri-state ===========
-
-function setVerif(key, cls, text){
-  var el = document.querySelector('.vf[data-v="' + key + '"]');
-  if (!el) return;
-  el.className = 'vf ' + cls;
-  el.querySelector('.rb').textContent = text;
-}
 
 function paintRelay(line){
   last.relay = line; seenAt.relay = Date.now();
@@ -2525,18 +2463,15 @@ function paintRelay(line){
   //   否則剛按下去那一瞬間的舊值會把「等待回讀…」蓋掉。
   if (st['2'] !== undefined && st['3'] !== undefined && !pending.ch2 && !pending.ch3){
     vacSet(st['2'], st['3'], 'relay');
-    paintPumpVerif();
   }
-  if (st['1'] !== undefined && !pending.ch1) setVerif('valve', st['1'] ? 'ok' : '', st['1'] ? 'ch1 = 1 已確認' : 'ch1 = 0 已確認');
 }
 
 function paintPwm(line){
   last.pwm = line; seenAt.pwm = Date.now();
   var m = /ch1=(\d+),(\d+),(\d+),(\d+)/.exec(line);
-  if (!m){ setVerif('fan', 'bad', '讀不到'); txt('rd-fan', '讀不到'); return; }
+  if (!m){ txt('rd-fan', '讀不到'); return; }
   var duty = +m[1];
   var s = duty <= 5 ? '停止' : (duty >= 10 ? '全速' : '作業');
-  setVerif('fan', 'ok', 'duty ' + duty + '% · ' + s + ' 已確認');
   txt('rd-fanraw', m[1] + ',' + m[2] + ',' + m[3] + ',' + m[4]);
   var rd = document.getElementById('rd-fan');
   rd.textContent = duty + '% ' + s + ' 已確認'; rd.className = 'rd on';
@@ -2720,63 +2655,70 @@ function paintEstopBanner(){
   }
 }
 
-//=========== 本體開關機 / 水位（2026-09-10 補 tier-1；救援收繩 09-15 移除）===========
+//=========== 水位（2026-09-10 補 tier-1；救援收繩 09-15 移除；本體開關機 09-17 移除）===========
 
 // [2026-09-15 per user] 🆘 救援收繩的按住邏輯已整組移除（見 markup 註解）。
 
-// 本體 INIT / SHUTDOWN
-(function(){
-  var i = document.getElementById('wr-init');
-  if (i) i.addEventListener('click', function(){
-    if (!NO_CONFIRM('INIT：初始化本體。\n\n開幫浦 A、開始 A/B 輪替計時、重取 IMU 水平基準、使能各軸。\n\n確定？')) return;
-    fire(WR, 'init', null, null).then(function(l){
-      log((/^OK/.test(l) ? '✅ ' : '🔴 ') + 'init → ' + l, /^OK/.test(l) ? 'g' : 'e');
-      if (typeof pollPump === 'function') setTimeout(pollPump, 500);
-    });
-  });
-  var d = document.getElementById('wr-shutdown');
-  if (d) d.addEventListener('click', function(){
-    if (!dangerGate('SHUTDOWN')) return;
-    // 🔴 全站最重的一道確認窗。這顆與急停**性質相反**：急停是「來不及想」所以不擋，
-    //    shutdown 是「想清楚再按」而且按錯會讓機器從牆上掉下來。
-    if (!NO_CONFIRM('🔴🔴 SHUTDOWN —— 這會讓機體脫附。\n\n' +
-                 '會關掉：滾筒刷、噴水加壓馬達、進水閥、真空閥、幫浦 A 與 B。\n\n' +
-                 '🔴 真空閥與兩顆幫浦一起關 ＝ 四顆吸盤同時失去真空。\n' +
-                 '🔴 如果機器還吸在牆上，按下去就是讓它掉下來。\n\n' +
-                 '只有在機器已經落地、確認不靠真空承重時才可以按。\n\n真的要 SHUTDOWN？')) return;
-    if (!NO_CONFIRM('再確認一次：機器現在**已經落地**、沒有靠真空吊著，對嗎？')) return;
-    dangerDisarm('已送出 SHUTDOWN');
-    fire(WR, 'shutdown', null, null).then(function(l){
-      log((/^OK/.test(l) ? '⏹ ' : '🔴 ') + 'shutdown → ' + l, /^OK/.test(l) ? 'w' : 'e');
-    });
-  });
-})();
+// ⚪ [2026-09-17 per user] 本體 INIT / SHUTDOWN 按鈕整組移除（見 markup 註解）。
 
 // 水箱水位。回覆是 `OK water_full=<0|1> rssi=<N>` 或 `ERR xkc_unreachable`。
 // 🔴 感測器在**最低位** ⇒ water_full=1 是「還有水」、=0 是「空箱」。不照欄位名寫字。
 // 🔴 [2026-09-15 真機確認 by agent-ai-db] 本體 **status 沒有 water_full 欄位**，水位只有 `water_level`
 //    這道指令會回（`OK water_full=1 rssi=6408`）。前置 ⑥ 因此讀這裡存下來的值，不讀 status。
-var waterLv = {full:null, at:0, err:null};
+// [2026-09-17 per user] 兩顆：`full`＝低水位（有水／空箱，欄位名沿用 water_full）、`high`＝高水位（滿／未滿；`?`＝讀不到 → null）。
+// 來源兩條：`water_level` 指令（15 s 輪詢 + 補水中每 2 s）與 status 的 `water_low=`／`water_high=`（本體快取，閥開著時每 2 s 刷新）——
+// 後者比較新，paint() 每筆 status 都併進來；`at` 記最後一次任一來源。
+var waterLv = {full:null, high:null, at:0, err:null};
 function paintWaterLevel(line){
   var m = /water_full=(\d+)\s+rssi=(\d+)/.exec(line);
-  waterLv = m ? {full: m[1] === '1', at: Date.now(), err:null}
-              : {full: null, at: Date.now(), err: /xkc_unreachable/.test(line) ? 'xkc_unreachable' : (String(line).slice(0, 24) || 'no_reply')};
-  var tag = document.getElementById('wl-tag');
+  var h = /water_high=(\d|\?)/.exec(line), hr = /rssi_high=(\d+)/.exec(line);
   if (!m){
+    waterLv = {full:null, high:null, at: Date.now(), err: /xkc_unreachable/.test(line) ? 'xkc_unreachable' : (String(line).slice(0, 24) || 'no_reply')};
+    var tag0 = document.getElementById('wl-tag');
     if (/xkc_unreachable/.test(line)){
-      txt('wl-state', '讀不到'); txt('wl-rssi', '—');
-      if (tag){ tag.textContent = '感測器不通'; tag.style.background = 'var(--bad-soft)'; tag.style.color = 'var(--bad)'; }
+      txt('wl-state', '讀不到'); txt('wl-high', '讀不到'); txt('wl-rssi', '—');
+      if (tag0){ tag0.textContent = '感測器不通'; tag0.style.background = 'var(--bad-soft)'; tag0.style.color = 'var(--bad)'; }
     }
     return;
   }
-  var has = m[1] === '1';
-  txt('wl-state', has ? '有水' : '空箱');
-  txt('wl-rssi', m[2]);
+  waterLv = {full: m[1] === '1', high: (h && h[1] !== '?') ? h[1] === '1' : null, at: Date.now(), err:null};
+  txt('wl-rssi', m[2] + ' / ' + (hr ? hr[1] : '—'));
+  paintWaterLamps();
+}
+// status 帶的快取：water_low / water_high（`?`＝讀不到）。有就蓋過指令那份（比較新）。
+function waterFromStatus(wr){
+  if (!wr || (wr.water_low === undefined && wr.water_high === undefined)) return;
+  if (wr.water_low  !== undefined) waterLv.full = wr.water_low  === '?' ? null : wr.water_low  === '1';
+  if (wr.water_high !== undefined) waterLv.high = wr.water_high === '?' ? null : wr.water_high === '1';
+  waterLv.at = Date.now(); waterLv.err = null;
+  paintWaterLamps();
+}
+function waterText(){   // 給前置 ③ 與 Dashboard 共用的一句話
+  var lo = waterLv.full, hi = waterLv.high;
+  var lt = lo === null ? '低 ?' : (lo ? '低 有水' : '低 空箱');
+  var ht = hi === null ? '高 ?' : (hi ? '高 滿' : '高 未滿');
+  return lt + ' · ' + ht;
+}
+function paintWaterLamps(){
+  var lo = waterLv.full, hi = waterLv.high;
+  txt('wl-state', lo === null ? '?' : (lo ? '有水' : '空箱'));
+  txt('wl-high',  hi === null ? '?' : (hi ? '滿' : '未滿'));
+  var lamp = function(id, v, offCls){ var e = document.getElementById(id); if (e) e.className = 'wl-lamp ' + (v === null ? 'bad' : (v ? 'on' : offCls)); };
+  lamp('wl-low-lamp', lo, 'off'); lamp('wl-high-lamp', hi, '');
+  var tag = document.getElementById('wl-tag');
   if (tag){
-    tag.textContent = has ? '正常' : '需補水';
-    tag.style.background = 'var(--' + (has ? 'ok' : 'warn') + '-soft)';
-    tag.style.color      = 'var(--' + (has ? 'ok' : 'warn') + ')';
+    var t = lo === false ? '需補水' : (hi === true ? '滿（自動關閥）' : (lo === true ? '有水 · 未滿' : '讀不到'));
+    var c = lo === false ? 'warn' : (hi === true || lo === true ? 'ok' : 'bad');
+    tag.textContent = t; tag.style.background = 'var(--' + c + '-soft)'; tag.style.color = 'var(--' + c + ')';
   }
+}
+// `EVT water_inlet_auto_close reason=high_level`：本體自己關了閥（高水位滿）
+function onWaterEvt(line){
+  var m = /^EVT water_inlet_auto_close(?:\s+reason=(\S+))?/.exec(line); if (!m) return;
+  log('💧 高水位滿，本體已自動關進水閥（' + (m[1] || 'auto_close') + '）', 'g');
+  waterLv.high = true; waterLv.at = Date.now(); paintWaterLamps();
+  if (last.wr) last.wr.water_inlet = '0';
+  setTimeout(pollFast, 300); setTimeout(pollWaterLevel, 500);
 }
 function pollWaterLevel(){
   if (!conn.washrobot) return;
@@ -2920,7 +2862,6 @@ function paintPump(line){
   if (a !== null || b !== null){
     vacSet(a === null || a < 0 ? null : a === 1,
            b === null || b < 0 ? null : b === 1, 'pump');
-    paintPumpVerif();
   }
 
   txt('pm-act', act || '—');
@@ -3096,7 +3037,7 @@ var WRELAY = [
   {ch:1, n:'CH1', d:'未接線（可通電驗證）'},
   {ch:2, n:'CH2', d:'未接線（可通電驗證）'},
   {ch:3, n:'CH3', d:'未接線（可通電驗證）'},
-  {ch:4, n:'CH4 進水球閥', d:'water_inlet · 吊機 deadman 300s 強制關', inlet:1}
+  {ch:4, n:'CH4 進水球閥', d:'water_inlet · 高水位滿了本體自動關（EVT water_inlet_auto_close）· 已滿時 on 會被跳過 · 吊機 deadman 300s 強制關', inlet:1}
 ];
 
 document.getElementById('wrelaygrp').innerHTML = WRELAY.map(function(r){
@@ -3336,26 +3277,20 @@ function applyRelayEcho(line, chKey){
   //   又不會在輪到 B 的時候用 ch2 的值去下 A/B 的結論。
   if (ch === '2' || ch === '3'){
     vacSet(ch === '2' ? on : vac.A, ch === '3' ? on : vac.B, 'echo');
-    paintPumpVerif();
   }
-  if (ch === '1') setVerif('valve', on ? 'ok' : '', 'ch1 = ' + (on ? '1' : '0') + ' 已確認');
   return true;
 }
 
-function fire(target, cmd, verifKey, chKey){
+// ⚪ [2026-09-17] `verifKey` 已無作用：「致動器 · 指令 ↔ 回讀」卡隨 Mission 重排移除（per user），
+//    三態燈（setVerif）一併刪。第 3 個參數留位是因為 50+ 個呼叫點都寫 `null, null`，改簽名只會製造 diff；chKey 仍在用（relay echo）。
+function fire(target, cmd, _verifKey, chKey){
   if (chKey){ pending[chKey] = true; }
-  if (verifKey) setVerif(verifKey, 'pend', '等待回讀…');
   log('→ [' + target + '] ' + cmd, 'w');
   return send(target, cmd, 30000).then(function(l){
-    var unv = /unverified/.test(l), bad = /^ERR/.test(l);
+    var bad = /^ERR/.test(l);
     // 先解除 pending，否則 applyRelayEcho / paintRelay 會以為還在等回讀而跳過這一列
     if (chKey) delete pending[chKey];
-    var echoed = bad ? false : applyRelayEcho(l, chKey);
-    // echo 已經把 pump/valve 的 verif 設成「已確認」了，不要再被「待回讀」蓋回去
-    var echoedVerif = echoed && (verifKey === 'pump' || verifKey === 'valve');
-    if (verifKey && !echoedVerif)
-      setVerif(verifKey, bad ? 'bad' : (unv ? 'unv' : 'pend'),
-               bad ? l.slice(0, 42) : (unv ? '已送出 · 未複驗' : '已送出 · 待回讀'));
+    if (!bad) applyRelayEcho(l, chKey);
     // 700ms 的輪詢**保留為二次確認**（也負責 PWM 與沒有 chKey 的指令），
     // 但它不再是唯一的更新來源 —— 按鈕翻不翻已經不必等它。
     setTimeout(function(){ pollRelay(); pollPwm(); }, 700);
@@ -3434,41 +3369,93 @@ document.getElementById('relaygrp').innerHTML = RELAY.map(function(r){
 //    `尋封伸`      —— 走 smart_extend 尋封序列，會一路補伸找密封（實測可達 ~16cm）。
 //    `收`          —— 兩段式收回。
 //    ⇒ 與上面群組那三列**同一組語意**，刻意保持一致，免得同一個詞在兩處意思不同。
-// 🔴 RPM 欄位在後端 `[rpm]` 參數上線前藏著（見 markup 註解）。翻 true 之後整組與單支一起出現。
-var ZDT_RPM_ENABLED = true;   // 2026-09-11 後端 [rpm] 參數已部署（body 8f21cad8），範圍 50–1000
+// ⚪ [2026-09-17] 指令的 `[rpm]` 第三參數 GUI 不再帶（本體用 set_pusher_rpm 的共用值）；`ZDT_RPM_ENABLED` 旗標隨之退場。
 var ZDT_SINGLE = [{s:5,n:'s5 右上'},{s:6,n:'s6 左上'},{s:7,n:'s7 右下'},{s:8,n:'s8 左下'}];
+// [2026-09-17 現場] 每支一列（.zrow，flex-wrap）：勾 · 標籤 · 長度 │ 伸 raw · 尋封伸 · 收 │ 狀態 · 失能 · 使能（RPM 是共用值，在上面兩格）
 document.getElementById('zdtsingle').innerHTML = ZDT_SINGLE.map(function(z){
-  return '<span class="band">' + z.n + '</span>' +
-    '<input class="numin" id="zcm-' + z.s + '" type="number" step="0.5" min="0.5" max="20" ' +
-      'value="10" aria-label="' + z.n + ' 伸出公分">' +
-    '<span class="unit">cm</span>' +
-    '<input class="numin zrpm" id="zrpm-' + z.s + '" type="number" step="50" min="0" max="1000" ' +
-      'value="" placeholder="預設" aria-label="' + z.n + ' RPM（空＝預設）" hidden>' +
-    '<span class="unit zrpm" hidden>rpm</span>' +
+  return '<div class="zrow" data-zs="' + z.s + '">' +
+    '<label class="zinc-l" title="勾＝整組指令包含這支；取消勾＝pusher all 跳過它（zdt_disable，不斷電）">' +
+      '<input type="checkbox" class="zinc" data-zinc="' + z.s + '" checked aria-label="整組指令包含 ' + z.n + '">' +
+      '<span class="band" id="zband-' + z.s + '">' + z.n + '</span></label>' +
+    '<span class="zf"><input class="numin" id="zcm-' + z.s + '" type="number" step="0.5" min="0.5" max="20" value="10" aria-label="' + z.n + ' 伸出公分"><span class="unit">cm</span></span>' +
+    '<span class="zsep"></span>' +
     '<button class="btn" data-zraw="' + z.s + '">伸 raw</button>' +
     '<button class="btn" data-cmd="washrobot|zdt_pusher ' + z.s + ' extend">尋封伸</button>' +
-    '<button class="btn" data-zret="' + z.s + '">收</button>';
+    '<button class="btn" data-zret="' + z.s + '">收</button>' +
+    '<span class="zsep"></span>' +
+    '<span class="rd" id="zpw-' + z.s + '">—</span>' +
+    '<button class="btn" data-zpow="' + z.s + '" data-on="0">失能</button>' +
+    '<button class="btn" data-zpow="' + z.s + '" data-on="1" title="使能會回到馬達記得的目標位置；若人手推過，先「當前位置歸零」再使能，否則使能瞬間會彈">使能</button>' +
+  '</div>';
 }).join('');
-[].forEach.call(document.querySelectorAll('.zrpm'), function(e){ e.hidden = !ZDT_RPM_ENABLED; });
-// [2026-09-15 晚 per user] 本體 status 的 `pusher_rpm`（伸／尋封）與 `pusher_rpm_retract`（收）。
-// 🔴 只填 placeholder 與說明格，**不填 value** —— 填進去會讓「空白＝用預設」變成「明確指定」，
-//    而那兩個值今天改過三次；把當下的預設寫進指令等於把它凍在送出的那一刻。
+// 每支那列的按鈕點了要看得出是哪一支：整列輕微反白 0.6 s
+document.addEventListener('click', function(ev){
+  var r = ev.target.closest('.zrow'); if (!r || !ev.target.closest('button')) return;
+  r.classList.add('hit'); setTimeout(function(){ r.classList.remove('hit'); }, 600);
+});
+// 整組包含／跳過（zdt_skip）：勾／取消勾立刻送；顯示以 status 為準，送出後到下一筆 status 前不讓 status 蓋回去
+document.addEventListener('change', function(ev){
+  var cb = ev.target.closest('input.zinc'); if (!cb) return;
+  var sv = cb.dataset.zinc, inc = cb.checked;
+  cb.dataset.pending = '1';
+  fire(WR, (inc ? 'zdt_enable ' : 'zdt_disable ') + sv, null, null).then(function(l){
+    delete cb.dataset.pending;
+    if (/^ERR/.test(l)) txt('rd-zdtskip', '🔴 s' + sv + ' ' + l.slice(0, 40));
+    setTimeout(pollFast, 300);
+  });
+});
+function paintZdtSkip(wr){
+  var v = wr && wr.zdt_skip; if (v === undefined) return;
+  var skip = String(v) === '-' ? [] : String(v).split(',').filter(Boolean);
+  ZDT_SINGLE.forEach(function(z){
+    var off = skip.indexOf(String(z.s)) >= 0;
+    var cb = document.querySelector('input.zinc[data-zinc="' + z.s + '"]');
+    if (cb && !cb.dataset.pending) cb.checked = !off;
+    var band = document.getElementById('zband-' + z.s);
+    if (band){ band.classList.toggle('skip', off); band.title = off ? '整組指令會跳過這支（zdt_skip）' : ''; }
+  });
+  txt('rd-zdtskip', skip.length ? ('整組指令跳過 s' + skip.join('、s') + '（本體 zdt_skip）') : '整組指令包含 4 支');
+}
+// [2026-09-17 per user 共用值] 推桿 RPM 是本體的**共用執行期值**：status `pusher_rpm`（伸／尋封）→ data-rpm=ext、
+// `pusher_rpm_retract`（收）→ data-rpm=ret，填進所有 `input.zrpm`（Manual 兩格 + Mission 共用值列兩格，同一個值）。
+// 人正在打字或改了還沒送出（data-user）的格不覆寫 —— 否則 1 s 一輪的 status 會把打到一半的字吃掉；送出 OK 後清掉 data-user 讓 status 接手。
 function paintPusherRpm(wr){
   if (!wr) return;
-  var ext = wr.pusher_rpm, ret = wr.pusher_rpm_retract;
-  if (ext !== undefined){
-    txt('rd-prpm', '伸／尋封 ' + ext + ' rpm');
-    [].forEach.call(document.querySelectorAll('.zrpm'), function(e){ if (e.tagName === 'INPUT') e.placeholder = '預設 ' + ext; });
-  }
-  if (ret !== undefined) txt('rd-prpm-ret', '收 ' + ret + ' rpm');
+  var v = {ext: wr.pusher_rpm, ret: wr.pusher_rpm_retract};
+  [].forEach.call(document.querySelectorAll('input.zrpm'), function(e){
+    var d = v[e.dataset.rpm]; if (d === undefined) return;
+    if (e.dataset.user || document.activeElement === e) return;
+    if (e.value !== String(d)) e.value = d;
+  });
 }
-// 讀 RPM 欄：沒開、空白、0 都回 0（＝不帶參數、沿用預設）；範圍 50–1000。
-function zdtRpm(id){
-  if (!ZDT_RPM_ENABLED) return 0;
-  var e = document.getElementById(id), v = e ? parseInt(e.value, 10) : 0;
-  if (!v) return 0;
-  if (v < 50 || v > 1000){ alert('RPM 允許 50~1000（0＝預設）'); return null; }
-  return v;
+// 改完（change）就送 `set_pusher_rpm <伸> <收>`：另一格沒改就送它現在顯示的值（＝共用值，等於不改）。
+// 回 `OK pusher_rpm=450 pusher_rpm_retract=380`；壞值 `ERR range:50..1000 (0=keep)`。本體會廣播 `EVT pusher_rpm`。
+function setPusherRpmFrom(e){
+  var ext = e.dataset.rpm === 'ext' ? e : null, ret = e.dataset.rpm === 'ret' ? e : null;
+  var wr = last.wr || {};
+  var vE = ext ? parseInt(ext.value, 10) : (parseInt(wr.pusher_rpm, 10) || 0);
+  var vR = ret ? parseInt(ret.value, 10) : (parseInt(wr.pusher_rpm_retract, 10) || 0);
+  var bad = [vE, vR].some(function(v){ return v && (v < 50 || v > 1000); });
+  if (bad){ alert('RPM 允許 50~1000'); return; }
+  txt('rd-prpm', '設定中…'); txt('ms-rpm-rd', '設定中…');
+  fire(WR, 'set_pusher_rpm ' + (vE || 0) + ' ' + (vR || 0), null, null).then(function(l){
+    var ok = /^OK/.test(l), t = (ok ? '✅ 共用值 ' : '🔴 ') + l.replace(/^(OK|ERR) /, '').slice(0, 50) + ' ' + new Date().toTimeString().slice(0, 8);
+    txt('rd-prpm', t); txt('ms-rpm-rd', t);
+    [].forEach.call(document.querySelectorAll('input.zrpm'), function(x){ delete x.dataset.user; });
+    var m = /pusher_rpm=(\d+) pusher_rpm_retract=(\d+)/.exec(l);
+    if (ok && m && last.wr){ last.wr.pusher_rpm = m[1]; last.wr.pusher_rpm_retract = m[2]; paintPusherRpm(last.wr); paintSharedVals(); }
+    setTimeout(pollFast, 300);
+  });
+}
+document.addEventListener('input',  function(ev){ var e = ev.target.closest('input.zrpm'); if (e) e.dataset.user = '1'; });
+document.addEventListener('change', function(ev){ var e = ev.target.closest('input.zrpm'); if (e) setPusherRpmFrom(e); });
+// `EVT pusher_rpm <伸> <收>`：別人（另一台平板／腳本）改了也要看到
+function onPusherRpmEvt(line){
+  var m = /^EVT pusher_rpm (\d+) (\d+)/.exec(line); if (!m) return;
+  if (!last.wr) last.wr = {};
+  last.wr.pusher_rpm = m[1]; last.wr.pusher_rpm_retract = m[2];
+  paintPusherRpm(last.wr); paintSharedVals();
+  log('推桿共用 RPM 改為 伸 ' + m[1] + ' / 收 ' + m[2] + '（EVT pusher_rpm）', 'w');
 }
 
 // 單支「伸 raw」：範圍檢查與群組版共用同一支 pusherCm 的判準（0.5~20.0），
@@ -3481,87 +3468,68 @@ document.addEventListener('click', function(ev){
   var el = document.getElementById('zcm-' + sv);
   var cm = el ? parseFloat(el.value) : NaN;
   if (!(cm >= 0.5 && cm <= 20)) { alert('公分允許 0.5~20.0'); return; }
-  var rpm = zdtRpm('zrpm-' + sv); if (rpm === null) return;
-  fire(WR, 'zdt_pusher ' + sv + ' extend_raw ' + cm + (rpm ? ' ' + rpm : ''), null, null);
+  fire(WR, 'zdt_pusher ' + sv + ' extend_raw ' + cm, null, null);   // rpm＝本體共用值，不帶
 });
 document.addEventListener('click', function(ev){
   var b = ev.target.closest('[data-zret]');
   if (!b) return;
-  var rpm = zdtRpm('zrpm-' + b.dataset.zret); if (rpm === null) return;
-  fire(WR, 'zdt_pusher ' + b.dataset.zret + ' retract' + (rpm ? ' ' + rpm : ''), null, null);
+  fire(WR, 'zdt_pusher ' + b.dataset.zret + ' retract', null, null);
 });
-// ---- ZDT 重歸零流程（2026-09-11 per user；維護用）----
-// 狀態 idle / pushed。四支逐一送指令，任何一支 ERR 就停在那一步、寫出是哪一支。
-(function(){
-  var b = document.getElementById('zdt-rz'), c = document.getElementById('zdt-rz-cancel');
-  if (!b) return;
-  var SL = [5,6,7,8], st = 'idle';
-  function ui(msg, cls){
-    b.textContent = st === 'idle' ? '① 真失能，準備手推' : '② 推好了，歸零並使能';
-    txt('zdt-rz-hint', st === 'idle'
-      ? '① 真失能 4 支 → 手推到完全收回硬限位 → ② 歸零並使能 → 用上面「整組 伸 raw 5」目測驗證'
-      : '🔴 4 支已真失能（可手推）—— 請把 4 支都推到完全收回的硬限位，推好再按');
-    c.hidden = (st === 'idle');
-    var r = document.getElementById('rd-zdtrz'); if (r){ r.textContent = msg || '—'; r.className = 'rd ' + (cls || ''); }
-  }
-  // 逐支送，回傳 Promise<null | '失敗字串'>
-  function each(cmdOf){
-    var i = 0;
-    return new Promise(function(done){
-      (function next(){
-        if (i >= SL.length) return done(null);
-        var sv = SL[i++];
-        fire(WR, cmdOf(sv), null, null).then(function(l){
-          if (/^ERR/.test(l)) return done('slave ' + sv + '：' + l.slice(0, 30));
-          next();
-        });
-      })();
-    });
-  }
-  b.addEventListener('click', function(){
-    if (st === 'idle'){
-      if (!dangerGate('吸盤推桿重歸零')) return;
-      dangerDisarm('已開始吸盤推桿重歸零');
-      if (!NO_CONFIRM('① 真失能 4 支推桿（zdt_power off，馬達鬆開）。\n\n之後要人工把 4 支推到完全收回的硬限位。\n\n確定？')) return;
-      b.disabled = true; ui('失能中…', 'pend');
-      each(function(sv){ return 'zdt_power ' + sv + ' off'; }).then(function(err){
-        b.disabled = false;
-        if (err){ ui('失能失敗 ' + err, 'bad'); return; }
-        st = 'pushed'; ui('等待手推…', 'unv');
-      });
-      return;
-    }
-    if (!NO_CONFIRM('② 4 支都推到完全收回了嗎？\n\n接下來：zdt_zero all（把現在定為 0）→ 再逐支 zdt_power on。\n順序不能反。\n\n確定？')) return;
-    b.disabled = true; ui('歸零中…', 'pend');
-    fire(WR, 'zdt_zero', null, null).then(function(l){
-      if (/^ERR/.test(l)){ b.disabled = false; ui('歸零失敗：' + l.slice(0, 30) + '，可重按', 'bad'); return; }
-      ui('使能中…', 'pend');
-      return each(function(sv){ return 'zdt_power ' + sv + ' on'; }).then(function(err){
-        b.disabled = false;
-        if (err){ ui('已歸零，但使能失敗 ' + err + '，可重按 ②（會再歸零一次，無害）', 'bad'); return; }
-        st = 'idle'; ui('✅ 重歸零完成 ' + new Date().toTimeString().slice(0, 8) + ' · 請用「整組 伸 raw 5」目測驗證', 'on');
-        log('✅ ZDT 重歸零完成 —— 驗證：整組 伸 raw 5 cm 目測約 5 cm，再「收」回 0', 'g');
-      });
-    });
+// Mission「共用值」列：本體 zdt_skip／RPM／zdt_pwr + 吊機五門檻／level_auto／hold_guard。有 skip 整行標黃。
+function paintSharedVals(){
+  var wr = last.wr, cr = last.cr, card = document.getElementById('ms-card'); if (!card) return;
+  var skip = (wr && wr.zdt_skip !== undefined) ? (String(wr.zdt_skip) === '-' ? [] : String(wr.zdt_skip).split(',').filter(Boolean)) : null;
+  var inc = skip ? ['5','6','7','8'].filter(function(x){ return skip.indexOf(x) < 0; }) : null;
+  var row = document.getElementById('ms-skip-row');
+  if (skip === null) txt('ms-skip', '等待本體…');
+  else if (skip.length) txt('ms-skip', '🟡 推桿 ' + skip.join('、') + ' 被 Manual 排除，整組指令會跳過它 · 含入 ' + inc.join(','));
+  else txt('ms-skip', '含入 5,6,7,8（跳過 —）');
+  var warn = !!(skip && skip.length);
+  card.classList.toggle('ms-warn', warn);
+  if (row) row.classList.toggle('ms-warn', warn);
+  var tag = document.getElementById('ms-tag');
+  if (tag){ tag.textContent = warn ? '🟡 Manual 排除了推桿 ' + skip.join('、') : 'Manual 調的、這趟就用的';
+            tag.style.background = warn ? 'var(--warn-soft)' : 'var(--idle-soft)'; tag.style.color = warn ? 'var(--warn)' : 'var(--ink2)'; }
+  if (cr){
+    var g = function(k){ return cr[k] !== undefined ? cr[k] : '?'; };
+    txt('ms-crane', '單側上限 ' + g('tension_max_kg') + ' / 左右差 ' + g('tension_diff_max_kg') + ' / 收繩上限(軟停+手拉停) ' + g('retract_tension_stop_kg') + ' kg · 繩長差 ' + g('length_diff_max_cm') + ' cm · level_auto ' + (cr.level_auto === '1' ? 'on' : 'off') + ' · 張力保護 ' + (cr.hold_guard === '1' ? 'on' : 'off'));
+  } else txt('ms-crane', '等待吊機…');
+  if (wr && wr.zdt_pwr !== undefined && String(wr.zdt_pwr) !== '1111')
+    txt('ms-force', '張力保護 on · level_auto on · crane_attached on · 推桿全使能（現在 zdt_pwr=' + wr.zdt_pwr + '，起跑會全部使能）· 已吸附／arm_ready≠1 拒跑');
+}
+// ---- 失能／使能（2026-09-17 per user；由 09-11 的「重歸零手動流程」拆出）----
+// `zdt_power <5..8|all> on|off`：all 回 `OK zdt_power all=on|off`、失敗 `ERR zdt_power_fail slaves=5,7`；單支回 `OK`。
+// 狀態畫 status 的 `zdt_pwr=1111`（slave 5..8 順序，指令狀態不是回讀）。
+function paintZdtPower(wr){
+  var v = wr && wr.zdt_pwr; if (v === undefined) return;
+  ZDT_SINGLE.forEach(function(z, i){
+    var e = document.getElementById('zpw-' + z.s); if (!e) return;
+    var on = String(v).charAt(i) === '1';
+    e.textContent = on ? '使能' : '失能（可手推）';
+    e.className = 'rd ' + (on ? 'on' : 'unv');
   });
-  c.addEventListener('click', function(){
-    if (!NO_CONFIRM('取消：只把 4 支重新使能，不歸零。\n（零點維持原狀——若本來就亂，還是亂的）\n\n確定？')) return;
-    each(function(sv){ return 'zdt_power ' + sv + ' on'; }).then(function(err){
-      st = 'idle'; ui(err ? ('取消時使能失敗 ' + err) : '已取消（未歸零）', err ? 'bad' : 'unv');
-    });
+}
+document.addEventListener('click', function(ev){
+  var b = ev.target.closest('[data-zpow]'); if (!b) return;
+  var who = b.dataset.zpow, on = b.dataset.on === '1';
+  if (!on && !NO_CONFIRM('真失能 ' + (who === 'all' ? '4 支' : 'slave ' + who) + '（zdt_power off，馬達鬆開、可手推）？\n\n手推過之後要先「當前位置歸零」再使能，否則使能瞬間會彈回舊目標。')) return;
+  txt('rd-zdtpower', (on ? '使能中…' : '失能中…') + (who === 'all' ? '' : ' s' + who));
+  fire(WR, 'zdt_power ' + who + (on ? ' on' : ' off'), null, null).then(function(l){
+    var ok = /^OK/.test(l);
+    txt('rd-zdtpower', (ok ? '✅ ' : '🔴 ') + (who === 'all' ? '全部' : 's' + who) + (on ? '使能' : '失能') + (ok ? ' ' : '失敗 ' + l.slice(0, 40) + ' ') + new Date().toTimeString().slice(0, 8));
+    setTimeout(pollFast, 300);
   });
-  ui();
-})();
+});
 
-// 一鍵自動重歸零：zdt_home all。回覆例 `OK zdt_home group=all s5=homed(dir=1) … s7=no_stall`。
+// 自動歸零：zdt_home all。// 一鍵自動重歸零：zdt_home all。回覆例 `OK zdt_home group=all s5=homed(dir=1) … s7=no_stall`。
 (function(){
   var b = document.getElementById('zdt-home'); if (!b) return;
   b.addEventListener('click', function(){
-    if (!dangerGate('自動重歸零 zdt_home')) return;
-    if (!NO_CONFIRM('自動重歸零（zdt_home all）\n\n🔴 會驅動 4 支推桿往收回方向撞硬限位（100 rpm）直到堵轉，然後定為 0。\n不需人手推；四支逐一跑，可能超過一分鐘。\n\n機器附近沒有人手在推桿上？確定？')) return;
+    if (!dangerGate('自動歸零 zdt_home')) return;
+    if (!NO_CONFIRM('自動歸零（zdt_home all）\n\n🔴 會驅動 4 支推桿往收回方向撞硬限位（100 rpm）直到堵轉，然後定為 0。\n不需人手推；四支逐一跑，可能超過一分鐘。\n\n機器附近沒有人手在推桿上？確定？')) return;
     dangerDisarm('已送出 zdt_home');
     b.disabled = true; txt('rd-zdthome', '進行中…四支逐一撞限位');
-    log('→ [washrobot] zdt_home all（自動重歸零，約 1 分鐘）', 'w');
+    log('→ [washrobot] zdt_home all（自動歸零，約 1 分鐘）', 'w');
     send(WR, 'zdt_home all', 180000).then(function(l){
       b.disabled = false;
       var bad = (l.match(/s\d=(?!homed)[a-z_]+/g) || []);
@@ -3575,7 +3543,7 @@ document.addEventListener('click', function(ev){
 // 歸零：雙重確認（per user）。第二道把後果講白——不是重複問一次同樣的話。
 document.getElementById('zdt-zero').addEventListener('click', function(){
   if (!dangerGate('吸盤推桿歸零')) return;
-  if (!NO_CONFIRM('歸零：把四支推桿「目前的位置」定為 0。\n\n之後所有伸出長度都以這個新原點為基準。\n\n確定？')) return;
+  if (!NO_CONFIRM('當前位置歸零：把四支推桿「目前的位置」定為 0（不斷電）。\n\n之後所有伸出長度都以這個新原點為基準。\n\n確定？')) return;
   if (!NO_CONFIRM('再確認一次：四支推桿現在都是「收到底」的狀態嗎？\n\n如果有任何一支還伸著，歸零後它的 0 就是錯的，\n下次伸 10 cm 會變成伸更多。\n\n確定全部收到底了、要歸零？')) return;
   dangerDisarm('已送出 zdt_zero');
   fire(WR, 'zdt_zero', null, null).then(function(l){
@@ -3614,10 +3582,11 @@ function misParams(){
           dry:       document.getElementById('mp-dry') && document.getElementById('mp-dry').checked ? 1 : 0,
           roll_trip: +g('mp-roll') || 6,
           diff_trip: +g('mp-diff') || 8,
+          return_top: (document.getElementById('mp-rtop') && !document.getElementById('mp-rtop').checked) ? 0 : 1,   // [09-17] 0 才送 return_top=0
           rail_cm:   100};                    // 滑台總行程，腳本既有介面（FCV_RAIL_CM），固定 100 不露出
 }
 // 尾巴的 key=value 字串（cycle_test full 慣例：位置不限）。
-function misKvTail(p){ return ' fan=' + p.fan + ' rail=' + p.rail; }
+function misKvTail(p){ return ' fan=' + p.fan + ' rail=' + p.rail + (p.return_top === 0 ? ' return_top=0' : ''); }
 function misValidate(p){
   var bad = [];
   if (!(p.step_cm >= 1 && p.step_cm <= 200)) bad.push('step_cm 1~200');
@@ -3674,6 +3643,17 @@ function misPaint(){
   // [09-14 拍板] safe_clear：有任務 → paused（running 已鎖啟動）；無任務 → ready/idle ⇒ 不需要另外的 paused 閘。
   if (b('mis-start'))    b('mis-start').disabled    = running || safe || !conn.washrobot || !flowOk;
   if (b('mis-stop'))     b('mis-stop').disabled     = !running;
+  // [2026-09-17 per user] 開始／停止作業是右欄同一格：有任務露「停止作業」，沒任務露「開始」。
+  if (b('mis-start'))    b('mis-start').classList.toggle('off', running);
+  if (b('mis-stop'))     b('mis-stop').classList.toggle('off', !running);
+  if (b('mp-save'))      b('mp-save').disabled      = !wsUp;
+  // [09-17 per user] 執行中緊急脫離閃爍（兩處）；Dashboard 三顆鏡像抄本尊的 disabled／同一格切換
+  [].forEach.call(document.querySelectorAll('.estop'), function(e){ e.classList.toggle('blink', !!running); e.disabled = false; });
+  [['d-mis-start','mis-start'],['d-mis-stop','mis-stop']].forEach(function(pr){
+    var d = b(pr[0]), src = b(pr[1]); if (!d || !src) return;
+    d.disabled = src.disabled; d.classList.toggle('off', src.classList.contains('off'));
+  });
+  paintDashMission(running, safe);
   // [09-14 拍板] SAFE 後任務＝暫停可續：SAFE 期間本體對 pause/continue/skip 一律 `ERR safe_locked`，
   // 所以三顆按鈕在 SAFE 中直接失能（平板上按了沒反應比按了被拒清楚），只留「中止」與橫幅的「解除 SAFE」。
   if (b('mis-pause'))    b('mis-pause').disabled    = safe || !running || mis.phase === 'paused';
@@ -3691,14 +3671,15 @@ function misPaint(){
     st.style.color      = safe ? 'var(--bad)'      : (running ? 'var(--ok)'      : 'var(--ink2)');
   }
   var why = b('mis-why'), msg = '';
-  if (safe) msg = '本體在 SAFE —— 先用頂欄橫幅「解除 SAFE」，狀態會回 paused，再按「繼續」或「中止」。';
+  if (misRefuse && !running) msg = '🔴 腳本拒跑：' + misRefuse + '（詳見 Dashboard 腳本輸出）';
+  else if (safe) msg = '本體在 SAFE —— 先用頂欄橫幅「解除 SAFE」，狀態會回 paused，再按「繼續」或「中止」。';
   else if (!conn.washrobot) msg = 'washrobot 未連線。';
-  else if (!running && !flowOk) msg = '前置未全綠，缺：' + (typeof preMissing === 'function' ? preMissing().join('、') : '?') + ' —— 上面「前置」補完再開始。';
-  if (why){ why.textContent = msg; why.hidden = !msg; }
+  else if (!running && !flowOk) msg = '前置未全綠，缺：' + (typeof preMissing === 'function' ? preMissing().join('、') : '?') + ' —— 點「前置」那行展開補完再開始。';
+  if (why){ why.textContent = msg; why.hidden = !msg; why.classList.toggle('refuse', !!(misRefuse && !running)); }
   var pp = misParams();
   var cli = b('mis-cli'); if (cli) cli.textContent = misCli(pp);
   var msum = b('mp-sum');
-  if (msum) msum.textContent = pp.steps + ' 步×' + pp.step_cm + 'cm ×' + pp.cycles + ' 週期 · ' + pp.arm_nm + ' N·m · fan=' + pp.fan + ' · rail=' + pp.rail + (pp.dry ? ' · 乾掃' : '') + ' ▾';
+  if (msum) msum.textContent = pp.steps + ' 步×' + pp.step_cm + 'cm ×' + pp.cycles + ' 週期 · ' + pp.arm_nm + ' N·m · fan=' + pp.fan + ' · rail=' + pp.rail + (pp.dry ? ' · 乾掃' : '') + (pp.return_top === 0 ? ' · 結束停最低點' : '');
   // 開跑後參數收成摘要（改了也不會套用到正在跑的那一輪）；同前置，人手動展開後就不再自動收
   if (running && !mis.paramsLockedOnce && !mis.paramsManual){ mis.paramsLockedOnce = true; mpCollapse(true); }
   if (!running && mis.paramsLockedOnce){ mis.paramsLockedOnce = false; }
@@ -3709,6 +3690,28 @@ function misPaint(){
   txt('mis-subage', mis.lastAt ? (Math.round((Date.now() - mis.lastAt) / 1000) + 's 前') : '');
 }
 
+// Dashboard Mission 卡：狀態 chip、週期/步/高度、目前參數（執行中＝server 的 mission.args；閒置＝表單，也就是 defaults 帶入後的那組）
+function paintDashMission(running, safe){
+  var st = document.getElementById('d-mis-state'), src = document.getElementById('mis-state');
+  if (st && src){ st.textContent = src.textContent; st.style.background = src.style.background; st.style.color = src.style.color; }
+  txt('d-mis-cyc', mis.cyc); txt('d-mis-step', mis.step); txt('d-mis-nseal', mis.n_seal === null ? '—' : mis.n_seal + '/4');
+  var h = document.getElementById('mis-h'); if (h) txt('d-mis-h', h.textContent);
+  var a = running && mis.args ? mis.args : null, t;
+  if (a){
+    t = a.cycles + ' 週期 × ' + a.steps + ' 步 × ' + a.step_cm + ' cm · 門檻 roll ' + a.roll_trip + '° / 左右差 ' + a.diff_trip + ' cm' +
+        (a.kv && a.kv.length ? ' · ' + a.kv.join(' ') : '') + (a.top_cm ? ' · 頂 ' + a.top_cm + ' cm' : '') +
+        (mis.env && mis.env.FCV_ARM_NM ? ' · 手臂 ' + mis.env.FCV_ARM_NM + ' N·m' : '') + (mis.env && mis.env.FCV_DRY ? ' · 乾掃' : '') +
+        (a.kv && a.kv.indexOf('return_top=0') >= 0 ? '' : ' · 結束回頂');
+    txt('d-mis-src', '執行中（server 起跑的那組）');
+  } else {
+    var pp = misParams();
+    t = pp.cycles + ' 週期 × ' + pp.steps + ' 步 × ' + pp.step_cm + ' cm · fan=' + pp.fan + ' · rail=' + pp.rail + ' · 手臂 ' + pp.arm_nm + ' N·m' + (pp.dry ? ' · 乾掃' : '') +
+        ' · 門檻 roll ' + pp.roll_trip + '° / 左右差 ' + pp.diff_trip + ' cm · ' + (pp.return_top === 0 ? '結束停最低點' : '結束回頂') +
+        (wall.cm > 0 ? ' · 頂 ' + wall.cm + ' cm' : ' · 頂 ?（牆高未量）');
+    txt('d-mis-src', running ? '參數' : '下一趟（Mission 頁表單）');
+  }
+  txt('d-mis-params', t);
+}
 // `EVT mission <kind> k=v …` → 更新 mis 並畫
 function onMissionEvt(line){
   var m = /^EVT mission (\S+)\s*(.*)$/.exec(line); if (!m) return;
@@ -3803,13 +3806,13 @@ document.getElementById('mis-start').addEventListener('click', function(){
   var miss = (typeof preMissing === 'function') ? preMissing() : [];
   if (miss.length) { alert('前置未全綠，缺：' + miss.join('、')); return; }
   if (!confirmOnce('開始任務？\n\n' + p.cycles + ' 週期 × ' + p.steps + ' 步 × ' + p.step_cm + ' cm\n' +
-      'fan=' + p.fan + ' · rail=' + p.rail + ' · 手臂 ' + p.arm_nm + ' N·m' + (p.dry ? ' · 乾掃' : '') + '\n' +
+      'fan=' + p.fan + ' · rail=' + p.rail + ' · 手臂 ' + p.arm_nm + ' N·m' + (p.dry ? ' · 乾掃' : '') + (p.return_top === 0 ? ' · 結束停在最低點（不回頂）' : ' · 結束回頂端') + '\n' +
       '頂端＝牆高 ' + wall.cm + ' cm · 中止門檻 roll ' + p.roll_trip + '° / 左右差 ' + p.diff_trip + ' cm\n\n' +
       (MISSION_BACKEND === 'script' ? '由 server 起 cycle_test.py，機器會開始移動。' : '本體會先跑六項前置檢查，全過才動。'))) return;
   dangerDisarm('已送出 mission start');
   if (MISSION_BACKEND === 'script'){
     if (!wsUp) return log('🔴 ws 未連線', 'e');
-    misOutClear();
+    misOutClear(); misRefuse = null;
     log('▶ 開始（腳本）：' + misCli(p), 'w');
     ws.send(JSON.stringify({mission: 'start', params: p}));
     return;
@@ -3838,6 +3841,21 @@ document.getElementById('mis-stop').addEventListener('click', function(){
   fire(WR, 'mission stop user', null, null).then(function(l){ if (/^ERR/.test(l)) log('🔴 中止失敗：' + l, 'e'); });
 });
 
+// [2026-09-17 per user] Dashboard 的三顆鏡像鈕：點了就按本尊（同一支 handler、同一個確認；本尊 disabled 時 click() 是 no-op）
+document.addEventListener('click', function(ev){
+  var b = ev.target.closest('[data-mirror]'); if (!b) return;
+  var src = document.getElementById(b.dataset.mirror); if (src && !src.disabled) src.click();
+});
+// [2026-09-17 早 per user] 存檔：把目前參數存成 server 的預設（~/run/mission_params.json），不起跑。
+// 在此之前預設值只在「成功起跑」時才會存 —— 想先把參數調好、下次開機直接用，就得先跑一趟。
+// 走 `{mission:'save', params}`（server.js 09-17 加的一支，驗證與 start 同一套，不 spawn）。
+document.getElementById('mp-save').addEventListener('click', function(){
+  var p = misParams(), bad = misValidate(p);
+  if (bad.length) { alert('參數不合法：' + bad.join('、')); return; }
+  if (!wsUp) return log('🔴 ws 未連線', 'e');
+  log('💾 存檔：' + misCli(p), 'w');
+  ws.send(JSON.stringify({mission: 'save', params: p}));
+});
 document.getElementById('mis-pc').addEventListener('click', function(){
   if (!wsUp) return log('🔴 ws 未連線', 'e');
   ws.send(JSON.stringify({mission: mis.paused ? 'continue' : 'pause'}));
@@ -3863,7 +3881,7 @@ document.addEventListener('click', function(ev){
   var inp = document.getElementById('mp-rail'); if (inp) inp.value = b.dataset.mrail;
   misPaint();
 });
-['mp-stepcm','mp-steps','mp-cycles','mp-fan','mp-fanpct','mp-rail','mp-armnm','mp-dry','mp-roll','mp-diff'].forEach(function(id){
+['mp-stepcm','mp-steps','mp-cycles','mp-fan','mp-fanpct','mp-rail','mp-armnm','mp-dry','mp-roll','mp-diff','mp-rtop'].forEach(function(id){
   var el = document.getElementById(id); if (el) el.addEventListener('input', misPaint);
 });
 
@@ -3883,9 +3901,13 @@ function misOut(line){
 }
 var MIS_CYC_RE  = /^═+ 週期 (\d+)\/(\d+) ═+/;
 var MIS_ROW_RE  = /^\s*(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(.*?)\s+([\d.]+)\s+(-?[\d.]+)\s+(\d+)%\s+([\d.-]+)\s+(\S+)\s*$/;
+// [2026-09-17 per user 共用值] 腳本起跑先做強制與檢查，不過就印「🔴 … 不跑。」並 exit 1。
+// 那幾行若只留在 Dashboard 的腳本輸出裡，人在 Mission 頁按了開始只會看到「沒動」⇒ 抄到狀態列的 #mis-why（紅）並進 log。
+var misRefuse = null;
 function misParseLine(line){
   var m;
   mis.lastAt = Date.now();
+  if (/^🔴 .*不跑/.test(line)){ misRefuse = line; log('🔴🔴 腳本拒跑：' + line, 'e'); misPaint(); return; }
   if ((m = MIS_CYC_RE.exec(line))){ mis.cyc = m[1] + '/' + m[2]; mis.step = '—'; mis.sub = '週期 ' + m[1] + ' 開始'; return; }
   if ((m = MIS_ROW_RE.exec(line))){
     mis.step = m[1] + (mis.steps ? '/' + mis.steps : '');
@@ -3940,9 +3962,11 @@ function misApplyDefaults(d){
               if (mm){ set('mp-fan', mm[1]); if (mm[2]) set('mp-fanpct', mm[2]); } }
   if (d.rail) set('mp-rail', d.rail);
   var dry = document.getElementById('mp-dry'); if (dry) dry.checked = (d.dry === 1 || d.dry === '1' || d.dry === true);
+  var rt = document.getElementById('mp-rtop'); if (rt && d.return_top !== undefined && d.return_top !== null) rt.checked = !(d.return_top === 0 || d.return_top === '0' || d.return_top === false);
   var at = document.getElementById('mp-last');
-  if (at) at.textContent = d.at ? ('上次起跑 ' + (typeof fmtAt === 'function' ? fmtAt(d.at) : String(d.at))) : '';
-  log('↩ 已帶入上次起跑的參數（server 記憶）：' + JSON.stringify(d), 'w');
+  // `saved:1` 是「存檔」鈕存的（09-17），沒有就是上次成功起跑存的
+  if (at) at.textContent = d.at ? ((d.saved ? '已存 ' : '上次起跑 ') + (typeof fmtAt === 'function' ? fmtAt(d.at) : String(d.at))) : '';
+  log('↩ 已帶入 server 記住的預設參數：' + JSON.stringify(d), 'w');
   if (typeof misPaint === 'function') misPaint();
 }
 function misScriptReset(){
@@ -3967,6 +3991,8 @@ function onMissionMsg(m){
     mis.stopping = !!m.state.stopping; mis.paused = !!m.state.paused;
     if (m.state.stopping) mis.sub = '中止中（① 吊機 stop ② arm_park ③ SIGINT）';
     if (m.state.args && mis.running) mis.steps = +m.state.args.steps || mis.steps;
+    if (m.state.args) mis.args = m.state.args;           // Dashboard Mission 卡顯示「server 起跑的那組」
+    if (m.state.env)  mis.env  = m.state.env;
   }
   if (m.backlog){ misOutClear(); m.backlog.forEach(function(l){ misOut(l); misParseLine(l); }); }
   if (m.line){ misOut(m.line); misParseLine(m.line); }
@@ -3974,8 +4000,15 @@ function onMissionMsg(m){
     if (m.err === 'already_running'){ mis.running = true; log('🔴 已經有任務在跑：' + JSON.stringify(m.running && m.running.args), 'e'); }
     else log('🔴 啟動失敗：' + m.err + (m.detail ? ' ' + JSON.stringify(m.detail) : ''), 'e');
   }
-  if (m.ack === 'start' && m.ok){ misScriptReset(); mis.running = true; mis.freshRun = true; log('✅ 腳本已起：' + JSON.stringify(m.running && m.running.args), 'g'); }
+  if (m.ack === 'start' && m.ok){ misScriptReset(); mis.running = true; mis.freshRun = true; if (m.running && m.running.args) mis.args = m.running.args; if (m.running && m.running.env) mis.env = m.running.env; log('✅ 腳本已起：' + JSON.stringify(m.running && m.running.args), 'g'); }
   if (m.ack === 'stop' && m.ok === false) log('🔴 中止失敗：' + m.err, 'e');
+  if (m.ack === 'save'){
+    if (m.ok){
+      var at = document.getElementById('mp-last'), d = m.defaults || {};
+      if (at) at.textContent = d.at ? ('已存 ' + (typeof fmtAt === 'function' ? fmtAt(d.at) : String(d.at))) : '已存';
+      log('✅ 參數已存為預設（server）：' + JSON.stringify(d), 'g');
+    } else log('🔴 存檔失敗：' + m.err + (m.detail ? ' ' + JSON.stringify(m.detail) : ''), 'e');
+  }
   if ((m.ack === 'pause' || m.ack === 'continue') && m.ok === false) log('🔴 ' + m.ack + ' 失敗：' + m.err, 'e');
   misPaint();
 }
@@ -4526,14 +4559,12 @@ document.addEventListener('click', function(ev){
   if (!motionGate('吸盤推桿 伸 raw')) return;
   var g = b.dataset.praw, cm = pusherCm(g);
   if (cm === null) return;
-  var rpm = zdtRpm('rpm-' + g); if (rpm === null) return;
-  fire(WR, 'pusher ' + g + ' extend_raw ' + cm + (rpm ? ' ' + rpm : ''), null, null);
+  fire(WR, 'pusher ' + g + ' extend_raw ' + cm, null, null);   // rpm＝本體共用值（set_pusher_rpm），不帶
 });
 document.addEventListener('click', function(ev){
   var b = ev.target.closest('[data-pret]');
   if (!b) return;
-  var rpm = zdtRpm('rpm-' + b.dataset.pret); if (rpm === null) return;
-  fire(WR, 'pusher ' + b.dataset.pret + ' retract' + (rpm ? ' ' + rpm : ''), null, null);
+  fire(WR, 'pusher ' + b.dataset.pret + ' retract', null, null);
 });
 document.addEventListener('click', function(ev){
   var b = ev.target.closest('[data-pseal]');
@@ -4545,11 +4576,11 @@ document.addEventListener('click', function(ev){
   fire(WR, 'pusher ' + g + ' extend', null, null);
 });
 // ---- 上滑台行程守衛（GUI 端軟限位，2026-09-11 per user「可設定」）----
-// 🔴 這道守衛只擋**這個畫面**送出的目標值。本體另有硬限位 0–130（`cmd_rail_move` :407），
+// 🔴 這道守衛只擋**這個畫面**送出的目標值。本體另有硬限位 −130–130（09-17 per user 由 0–130 放寬；0＝rail_zero 當時的位置），
 //    那才是真正的保護；這裡是讓現場能把範圍縮窄（例如裝了手臂不想跑到兩端）。
 //    守衛值記在 localStorage —— 每台瀏覽器各自一份，不進本體。
-var RAIL_HARD = {min:0, max:130};
-var railGuard = {min:0, max:130};
+var RAIL_HARD = {min:-130, max:130};
+var railGuard = {min:-130, max:130};
 (function(){
   try {
     var g = JSON.parse(localStorage.getItem('railGuard') || 'null');
@@ -4818,9 +4849,9 @@ var ARM_EXPECT = {
   INIT:     /^OK/
 };
 
-function armPath(){
-  return ARM_PATHS[document.getElementById('arm-path').value] || ARM_PATHS.direct;
-}
+// [2026-09-17] 路徑選擇器已隨手臂卡重做拿掉：STATUS／PARK 走直連（tool=／wall_mm 都在 [M1]/[M2] 行裡），
+// 壓上／套用／收回走本體 `arm_deploy_f`／`arm_force`／`arm_retract`（見下方 armCmd）。
+function armPath(){ return ARM_PATHS.direct; }
 
 // op 用中性代號，各路徑再翻成自己的指令名 —— 這樣呼叫端不必知道走哪條。
 function armSend(op, args){
@@ -4830,10 +4861,6 @@ function armSend(op, args){
   return send(p.target, cmd, p.ms, ARM_EXPECT[op] || null);
 }
 
-document.getElementById('arm-path').addEventListener('change', function(){
-  var t = document.getElementById('arm-pathtag');
-  if (t) t.textContent = armPath().tag;
-});
 
 // STATUS 一律按需讀取，不進輪詢迴圈。
 // 🔴 理由不是省流量：M1 失能之後就不再送 CAN 幀，STATUS 讀到的是**凍結的快取**
@@ -4842,14 +4869,15 @@ document.getElementById('arm-path').addEventListener('change', function(){
 // 錯誤碼判讀 —— 🔴 健康值是字串 `"0"`，**不是** `OK`。
 // `err_name()`（main_api.cpp:3236）只把 0x8~0xE 印成 `8:OVER_VOLT` 這種帶名字的形式，
 // 0x0 印成 `"0"`，其餘落到 default 印成 `0x1` 這種原始十六進位。
-// ⚠️ 所以「非 0 就是故障」是錯的，分三級：0 正常 / 具名碼才算故障 / 其餘標成待查。
-// 🔴 [2026-09-04 更正] 先前這裡寫「`0x1` 依協定是仍使能」——**那個推測已被上游收回**
-//    （PARK 後讀到的 `err` 本身就是凍結值，證明不了任何當下狀態）。
-//    ⇒ **使能狀態一律看 `en=`，不要從 `err` 反推。** 本函式只負責故障分級。
+// 🔴 [2026-09-17 agent-ai-db 實查 motor_api err_name()] 健康值有兩個：`0`（未使能／無錯）與 **`0x1`**（達妙協定 1＝使能中，真機現在就印 `err=0x1`）；
+//    fake_robot 印 `NONE`。故障是帶名字的 `8:OVER_VOLT` `9:UNDER_VOLT` `A:OVER_CURRENT` `B:MOS_OVERTEMP` `C:COIL_OVERTEMP` `D:CAN_LOST` `E:OVERLOAD`，
+//    其他未知碼印 `0x??` —— 一律當故障並把原文顯示出來（不再有「未分類」這一級）。
+//    ⚠️ 使能狀態仍一律看 `en=`，不要從 `err` 反推（PARK 後讀到的 err 是凍結值）。本函式只負責故障分級。
+var ARM_ERR_NAME = {'8':'過壓', '9':'欠壓', 'A':'過流', 'B':'MOS 過溫', 'C':'線圈過溫', 'D':'CAN 斷線', 'E':'過載'};
 function armErr(e){
-  if (e === '0') return {cls:'on',  note:''};
-  if (/^[89ABCDE]:/.test(e)) return {cls:'bad', note:' · 故障 ' + e};
-  return {cls:'unv', note:' · err=' + e + '（狀態碼，未分類）'};
+  if (e === '0' || e === '0x1' || e === 'NONE') return {cls:'on', note:''};
+  var m = /^([89A-E]):(\w+)/.exec(e);
+  return {cls:'bad', note:' · 🔴 故障 ' + e + (m && ARM_ERR_NAME[m[1]] ? '（' + ARM_ERR_NAME[m[1]] + '）' : '')};
 }
 
 // 解析 `[M1] k=v k=v … | [M2] k=v …`。
@@ -4881,7 +4909,7 @@ function armToolText(){
 }
 function paintArmTool(){
   var r = armToolText();
-  ['rd-tool','mis-tool'].forEach(function(id){
+  ['mis-tool'].forEach(function(id){
     var e = document.getElementById(id); if (!e) return;
     e.textContent = r.t;
     e.className = 'rd ' + (!armTool.at ? '' : (r.stale ? 'unv' : (armTool.tool === 'between' ? 'unv' : 'on')));
@@ -4892,63 +4920,52 @@ function paintArmTool(){
 // 任務執行中每 5 s 讀一次（那時手臂是使能的，值才有意義）；閒置時維持「按讀取才更新」的既有設計。
 setInterval(function(){ if (mis.running && conn.arm && typeof armStatus === 'function') armStatus(); }, 5000);
 setInterval(paintArmTool, 1000);
+// [2026-09-17 重做] 壓上狀態：壓上成功（OK／WARN／stopped=distance）⇒ contact=true，開始每 1 s 讀 STATUS 畫「目前」；
+// 收回／PARK／ERR ⇒ false，停輪詢。真值仍以手臂回報為準（wall_mm 收回時是負數，只在 contact 時顯示）。
+var armContact = {on:false, at:0};
+function armSetContact(on){
+  armContact.on = !!on; armContact.at = Date.now();
+  var tag = document.getElementById('arm-contact');
+  if (tag){ tag.textContent = on ? '壓上中' : '未壓上'; tag.style.background = on ? 'var(--warn-soft)' : 'var(--idle-soft)'; tag.style.color = on ? 'var(--warn)' : 'var(--ink2)'; }
+  var ap = document.getElementById('af-apply'); if (ap) ap.disabled = !on;
+  if (!on){ txt('rd-arm-now', '—'); txt('rd-arm-age', ''); }
+}
+setInterval(function(){ if (armContact.on && conn.arm && typeof armStatus === 'function') armStatus(); }, 1000);
+// STATUS `[M1]`：tau=目前力、wall_mm=估測牆距（收回時負數 ⇒ 沒壓上就不顯示牆距）、en=0 ⇒ 凍結快取
+function armPaintNow(m1){
+  var el = document.getElementById('rd-arm-now'); if (!el || !m1) return;
+  if (!armContact.on){ el.textContent = '—'; el.className = 'rd'; txt('rd-arm-age', ''); return; }   // 收回後不顯示（閒置時 STATUS 是凍結快取）
+  var tau = parseFloat(m1.tau), wall = parseFloat(m1.wall_mm);
+  var t = '力 ' + (isFinite(tau) ? tau.toFixed(2) : '?') + ' N·m';
+  if (armContact.on && isFinite(wall) && wall > 0) t += ' · 估測牆距 ' + wall.toFixed(0) + ' mm';
+  else if (armContact.on && isFinite(wall)) t += ' · 牆距 —（未接觸）';
+  if (m1.moving === '1') t += ' · 移動中';
+  var st = armErr(m1.err === undefined ? '0' : m1.err);
+  if (m1.en === '0'){ el.textContent = t + ' · 🔴 凍結（en=0，馬達失能）'; el.className = 'rd unv'; }
+  else { el.textContent = t + st.note; el.className = 'rd ' + st.cls; }
+  txt('rd-arm-age', new Date().toTimeString().slice(0, 8));
+}
 function armStatus(){
   return armSend('STATUS').then(function(l){
     var m1 = armSeg(l, 'M1'), m2 = armSeg(l, 'M2');
-    var e1 = document.getElementById('rd-m1');
-    var e2 = document.getElementById('rd-m2');
-    var ea = document.getElementById('rd-armage');
-    if (!m1 || m1.pos === undefined){
-      if (e1){ e1.textContent = l.slice(0, 34); e1.className = 'rd unv'; }
-      if (ea) ea.textContent = '解析失敗';
-      return l;
-    }
-    // 🔴🔴 `en=0` ⇒ 這顆馬達不再送 CAN frame，**pos / tau / err 全部是凍結的舊值**。
-    //    整組數字都不是現況，所以標成「凍結」而不是照常顯示 —— 顯示一個看起來正常
-    //    的舊值，比顯示「不知道」危險得多（PARK 之後最常踩）。
-    armPaintSeg(e1, m1, 'M1');
-    armPaintSeg(e2, m2, 'M2');
+    if (!m1 || m1.pos === undefined){ var e = document.getElementById('rd-arm-now'); if (e){ e.textContent = '解析失敗：' + l.slice(0, 34); e.className = 'rd unv'; } return l; }
+    armPaintNow(m1);
     if (m2){ armTool = {tool: m2.tool || null, en: m2.en, at: Date.now()}; paintArmTool(); }
-    if (ea) ea.textContent = '讀取於 ' + new Date().toTimeString().slice(0, 8);
     return l;
   });
 }
-// 🔴 [2026-09-16] STATUS 的兩段**不一定在同一行到達**：橋接是 line-buffered，
-//    假機器（與真機的部分路徑）會把 `[M1]` 與 `[M2]` 拆成兩則 ⇒ 只解析回覆那一行會永遠讀不到 M2
-//    （`rd-m2` 空著、`tool=` 讀不到）。所以繪圖抽成這支，`[M2]` 單獨飄來時也走同一條路。
-function armPaintSeg(el, seg, label){
-      if (!el || !seg) return;
-      var en = seg.en;                       // '1' / '0' / undefined（舊版 binary 沒有這欄）
-      var st = armErr(seg.err === undefined ? '0' : seg.err);
-      var th = parseFloat(seg.pos), tau = parseFloat(seg.tau);
-      var txt = 'θ ' + (isFinite(th) ? th.toFixed(4) : '?');
-      if (label === 'M1' && isFinite(tau)) txt += ' · τ ' + tau.toFixed(2) + ' Nm';
-      if (seg.moving === '1') txt += ' · 移動中';
-      if (en === '0'){
-        el.textContent = txt + ' · 🔴 凍結（en=0）';
-        el.className = 'rd unv';             // 不給綠色：這不是「正常」，是「不知道」
-        el.title = '馬達已失能，不再送 CAN frame ⇒ 上面的 pos / tau / err 全是最後一次的舊值。';
-      } else {
-        el.textContent = txt + st.note + (en === undefined ? ' · en 未回報' : '');
-        el.className = 'rd ' + (en === undefined ? 'unv' : st.cls);
-        el.title = '';
-      }
-    }
-document.getElementById('arm-read').addEventListener('click', armStatus);
-// `[M2] …` 單獨到達時（見上方註解）照樣更新工具與 M2 那一列
+// 🔴 [2026-09-16] STATUS 的兩段**不一定在同一行到達**：橋接是 line-buffered，假機器（與真機的部分路徑）
+//    會把 `[M1]` 與 `[M2]` 拆成兩則 ⇒ `[M2]` 單獨飄來時也要更新工具。
 function armApplyM2Line(line){
   if (String(line).indexOf('[M2]') < 0) return;
   var m2 = armSeg(line, 'M2'); if (!m2) return;
-  armPaintSeg(document.getElementById('rd-m2'), m2, 'M2');
   armTool = {tool: m2.tool || null, en: m2.en, at: Date.now()};
   paintArmTool();
 }
 
-// ---- DEPLOY_F：力控貼合 ----
-// 回覆格式（2026-09-04 實機原文）：
-//   OK   tau=15.38 target=15.0 theta=0.6212 cmd=0.8701 contact=0.5900 kp_eff=71.6 iters=1
-//   WARN <同樣欄位> (未收斂：N 次迭代後仍差 X.XX Nm)
-//   ERR DEPLOY_F: no_wall — ... ／ obstacle — ... ／ cannot reach ... Nm — ...
+// ---- 壓上／套用／收回（2026-09-17 重做，走本體）----
+// 回覆格式：`OK tau=2.39 target=3.0 theta=… cmd=… contact=… kp_eff=… iters=… ms=…`／`WARN …`（壓上了但沒收斂到 ±1）／
+//          `OK stopped=distance tau=… theta=…`（距離先到，停在那裡、接受當下壓力，不算失敗）／`ERR …`
 // 📌 尾巴括號裡是中文散文，不是 k=v，通用的 fields() 抓不到也不該抓 —— 直接原樣顯示。
 // ---- 危險操作解鎖（頁面級，2026-09-11）----
 // 手臂互鎖的通用版。理由同：NO_CONFIRM() 在 kiosk 可能被自動接受，不能當閘門。
@@ -4971,111 +4988,83 @@ function paintDangerArm(){}
 function confirmOnce(msg){ return confirm(msg); }
 var NO_CONFIRM = function(){ return true; };
 
-// ---- 手臂武裝互鎖（2026-09-11 per user，事故後）----
-// 🔴 這不是 confirm 的替代品，是**不依賴 confirm** 的獨立閘門：
-//    ① 三顆按鈕 `disabled` —— 幽靈點擊落在 disabled 上什麼都不會發生
-//    ② handler 第一行 `armGate()` —— 就算 DOM 被動、disabled 被拔，指令也不送
-//    ③ 送出一次立刻上鎖、60 秒逾時上鎖、狀態不存 —— 重整／換分頁都回到上鎖
-// [2026-09-15 下午② per user] 手臂 60 s 互鎖一併拿掉（同一個「解鎖窗」概念）。DEPLOY_F / DEPLOY / INIT 直接按。
-function armArmed(){ return true; }
-function armDisarm(reason){}
-function armGate(what){ return true; }
-function paintArmArm(){ ['af-go','ad-go','arm-init'].forEach(function(id){ var b = document.getElementById(id); if (b) b.disabled = false; }); }
-paintArmArm();
-
+// ⚪ 手臂 60 s 武裝互鎖（09-11）09-15 拿掉、09-17 手臂卡重做後連 no-op 殘骸也清掉；歷史見 changelog。
+var ARM_NM_MAX = 7;   // per user 防呆：壓上與套用都不超過 7 N·m（本體與手臂端也擋 `ERR target_nm_exceeds_max_7`）
+function armNmOk(v){ if (!(v >= 0.5 && v <= ARM_NM_MAX)){ alert('力道請填 0.5~' + ARM_NM_MAX + ' N·m（防呆上限 7）'); return false; } return true; }
+function armCmd(cmd, ms){ log('→ [washrobot] ' + cmd, 'w'); return send(WR, cmd, ms || 150000); }
+// 壓上／套用共用的結果字串
+function armResultText(l, what){
+  if (/^ERR/.test(l)){
+    var why = /exceeds_max_7|exceeds max 7/.test(l) ? '超過 7 N·m 防呆上限'
+            : /not_in_contact/.test(l) ? '未壓在牆上（先按「壓上」）'
+            : /no_wall/.test(l)   ? '未接觸到牆面（tau 負值＝重力前饋，非故障）'
+            : /obstacle/.test(l)  ? '接觸點比任何真實玻璃都近，疑似橫桿或異物'
+            : /cannot reach/.test(l) ? '角度上限內達不到這個壓力'
+            : '失敗';
+    return {ok:false, cls:'bad', t:'🔴 ' + what + '失敗：' + why + ' · ' + l.replace(/^ERR (DEPLOY_F|SETFORCE):\s*/, '').slice(0, 80)};
+  }
+  var f = fields(l), tau = num(f, 'tau'), tgt = num(f, 'target'), wall = num(f, 'wall_mm');
+  var ts = new Date().toTimeString().slice(0, 8);
+  if (/stopped=distance/.test(l))
+    return {ok:true, cls:'unv', t:'⚠️ 距離先到，停在 ' + (f.theta !== undefined ? 'θ ' + f.theta : '上限') + '、力 ' + (tau === null ? '?' : tau.toFixed(2)) + ' N·m（目標 ' + (tgt === null ? '?' : tgt) + '）' + ' ' + ts};
+  var conv = /^OK/.test(l);
+  var tail = /\(([^)]*未收斂[^)]*)\)/.exec(l);
+  return {ok:true, cls: conv ? 'on' : 'unv',
+          t: (conv ? '✅ ' : '⚠️ ') + what + '：力 ' + (tau === null ? '?' : tau.toFixed(2)) + ' / 目標 ' + (tgt === null ? '?' : tgt) + ' N·m' +
+             (wall !== null ? ' · 牆距 ' + wall.toFixed(0) + ' mm' : '') + (f.iters !== undefined ? ' · 迭代 ' + f.iters : '') +
+             (conv ? '' : ' · 未收斂' + (tail ? '（' + tail[1] + '）' : '')) + ' ' + ts};
+}
 document.getElementById('af-go').addEventListener('click', function(){
-  if (!armGate('DEPLOY_F')) return;
-  var nm   = parseFloat(document.getElementById('af-nm').value);
-  var slot = document.getElementById('af-slot').value;
-  if (!(nm >= 2 && nm <= 20)) { alert('目標壓力請填 2~20 Nm'); return; }
-  if (!NO_CONFIRM('這會把手臂壓上玻璃：\n\nDEPLOY_F ' + nm + ' ' + slot +
-               '\n\n手臂會自己收斂到這個壓力。壓著期間持續施力，\n' +
-               '達妙馬達長時間受力會觸發過熱／過流鎖存（只能斷電解除），\n' +
-               '所以量完請按 PARK 卸力。\n\n確定送出？')) return;
-
-  armDisarm('已送出 DEPLOY_F');   // 一次一發：送出即上鎖
-  setVerif('armf', 'pend', '收斂中…');
-  document.getElementById('rd-afdet').textContent = '—';
-  armSend('DEPLOY_F', nm + ' ' + slot).then(function(l){
-    var det = document.getElementById('rd-afdet');
-    if (/^ERR/.test(l)){
-      // 🔴 no_wall 的 tau 是負的（懸空時由重力前饋主導，約 −6.9 Nm）——
-      //    那代表「沒碰到東西」，不是扭力異常。所以紅點表示的是**指令沒達成**，
-      //    明細用中性色說明原因，不要讓人以為馬達壞了。
-      var why = /no_wall/.test(l)   ? '未接觸到牆面（tau 負值＝重力前饋，非故障）'
-              : /obstacle/.test(l)  ? '接觸點比任何真實玻璃都近，疑似橫桿或異物'
-              : /cannot reach/.test(l) ? '角度上限內達不到這個壓力'
-              : '失敗';
-      setVerif('armf', 'bad', why);
-      if (det) det.textContent = l.replace(/^ERR DEPLOY_F:\s*/, '').slice(0, 90);
-      return;
-    }
-    var f = fields(l);
-    var tau = num(f, 'tau'), tgt = num(f, 'target');
-    var conv = /^OK/.test(l);
-    setVerif('armf', conv ? 'ok' : 'unv',
-      (tau === null ? '?' : tau.toFixed(2)) + ' / 目標 ' +
-      (tgt === null ? '?' : tgt.toFixed(1)) + ' Nm' + (conv ? '' : ' · 未收斂'));
-    if (det){
-      var bits = [];
-      if (f.theta   !== undefined) bits.push('θ ' + f.theta);
-      if (f.cmd     !== undefined) bits.push('cmd ' + f.cmd);
-      if (f.contact !== undefined) bits.push('接觸 ' + f.contact);
-      if (f.kp_eff  !== undefined) bits.push('kp_eff ' + f.kp_eff);
-      if (f.iters   !== undefined) bits.push('迭代 ' + f.iters);
-      // 未收斂時把尾巴那句中文原樣帶出來（它不是 k=v，parser 抓不到）
-      var tail = /\(([^)]*未收斂[^)]*)\)/.exec(l);
-      det.textContent = bits.join(' · ') + (tail ? '　—　' + tail[1] : '');
-    }
+  var nm = parseFloat(document.getElementById('af-nm').value);
+  var dv = document.getElementById('af-dist').value.trim(), dist = dv === '' ? null : parseInt(dv, 10);
+  if (!armNmOk(nm)) return;
+  if (dist !== null && !(dist >= 122 && dist <= 444)){ alert('距離上限請填 122~444 mm，或留空＝不限'); return; }
+  if (!NO_CONFIRM('壓上：arm_deploy_f ' + nm + ' RIGHT' + (dist !== null ? ' ' + dist : '') + '\n\n手臂會自己收斂到這個壓力（距離先到就停在那裡）。壓著期間持續施力，量完記得收回。\n\n確定？')) return;
+  var det = document.getElementById('rd-afdet'); det.textContent = '壓上中…（尋觸最長 ~45 s）'; det.className = 'rd railsrc pend';
+  var b = document.getElementById('af-go'); b.disabled = true;
+  armCmd('arm_deploy_f ' + nm + ' RIGHT' + (dist !== null ? ' ' + dist : '')).then(function(l){
+    b.disabled = false;
+    var r = armResultText(l, '壓上');
+    det.textContent = r.t; det.className = 'rd railsrc ' + r.cls;
+    log((r.ok ? '✅ ' : '🔴 ') + 'arm_deploy_f → ' + l.slice(0, 90), r.ok ? 'g' : 'e');
+    armSetContact(r.ok);
+    if (r.ok){ var n2 = document.getElementById('af-nm2'); if (n2) n2.value = nm; }
     armStatus();
   });
 });
-
-// ---- DEPLOY：開迴路（保留作 A/B 對照，per 上游「刻意不改 DEPLOY，兩條路徑並行」）----
-document.getElementById('ad-go').addEventListener('click', function(){
-  if (!armGate('DEPLOY')) return;
-  var mm   = parseFloat(document.getElementById('ad-mm').value);
-  var slot = document.getElementById('af-slot').value;
-  if (!(mm >= 440 && mm <= 620)) { alert('牆距請填 440~620 mm'); return; }
-  if (!NO_CONFIRM('這會把手臂壓上玻璃（開迴路，壓力不受控）：\n\nDEPLOY ' + mm + ' ' + slot +
-               '\n\n🔴 壓力＝這個值與真實牆距的差，而真實牆距隨高度變。\n' +
-               '換了高度沿用同一個數字，壓力就會跟著跑掉。\n\n確定送出？')) return;
-  armDisarm('已送出 DEPLOY');
-  setVerif('armf', 'pend', '壓上中…');
-  document.getElementById('rd-afdet').textContent = '—';
-  armSend('DEPLOY', mm + ' ' + slot).then(function(l){
-    // 🔴 壓在玻璃上時 DEPLOY 本來就回 `ERR ... did not converge`（位置到不了目標）。
-    //    所以這裡**不以回傳字串定成敗**，一律回頭讀 STATUS 用姿態判斷。
-    setVerif('armf', 'unv', '開迴路 · 請看下方 M1 實測');
-    var det = document.getElementById('rd-afdet');
-    if (det) det.textContent = l.slice(0, 90);
+document.getElementById('af-apply').addEventListener('click', function(){
+  var nm = parseFloat(document.getElementById('af-nm2').value);
+  if (!armNmOk(nm)) return;
+  var det = document.getElementById('rd-afdet'); det.textContent = '套用 ' + nm + ' N·m…'; det.className = 'rd railsrc pend';
+  armCmd('arm_force ' + nm, 30000).then(function(l){
+    var r = armResultText(l, '套用');
+    det.textContent = r.t; det.className = 'rd railsrc ' + r.cls;
+    log((r.ok ? '✅ ' : '🔴 ') + 'arm_force ' + nm + ' → ' + l.slice(0, 90), r.ok ? 'g' : 'e');
+    if (!r.ok && /not_in_contact/.test(l)) armSetContact(false);
     armStatus();
   });
 });
-
-// 同 craneStopAction：Manual 的 `arm-park` 與 Mission 的 `m-arm-park` 共用。
+document.getElementById('arm-retract').addEventListener('click', function(){
+  var det = document.getElementById('rd-afdet'); det.textContent = '收回中…'; det.className = 'rd railsrc pend';
+  armCmd('arm_retract', 60000).then(function(l){
+    var ok = /^OK/.test(l);
+    det.textContent = (ok ? '✅ 已收回 ' : '🔴 收回：' + l.slice(0, 60) + ' ') + new Date().toTimeString().slice(0, 8); det.className = 'rd railsrc ' + (ok ? 'on' : 'bad');
+    log((ok ? '✅ ' : '🔴 ') + 'arm_retract → ' + l.slice(0, 60), ok ? 'g' : 'e');
+    armSetContact(false);
+    armStatus();
+  });
+});
+// 同 craneStopAction：Mission 的 `m-arm-park`（Manual 手臂卡 09-17 起沒有 PARK；卸力用「收回」）。// 同 craneStopAction：Manual 的 `arm-park` 與 Mission 的 `m-arm-park` 共用。
 function armParkAction(){
   return armSend('PARK').then(function(l){
-    setVerif('armf', /^ERR/.test(l) ? 'bad' : 'unv', /^ERR/.test(l) ? l.slice(0, 40) : '已收手臂 · 卸力');
+    log((/^ERR/.test(l) ? '🔴 PARK：' : '✅ PARK 已收手臂 · 卸力 → ') + l.slice(0, 60), /^ERR/.test(l) ? 'e' : 'g');
+    if (typeof armSetContact === 'function') armSetContact(false);
     armStatus();
   });
 }
-['arm-park', 'm-arm-park', 'lock-park'].forEach(function(id){
+['m-arm-park', 'lock-park'].forEach(function(id){
   var b = document.getElementById(id);
   if (b) b.addEventListener('click', armParkAction);
-});
-
-document.getElementById('arm-init').addEventListener('click', function(){
-  if (!armGate('INIT')) return;
-  if (!NO_CONFIRM('INIT 會使能兩顆馬達並校正原點。\n\n' +
-               '🔴 手臂若不在自由位置（例如正壓著玻璃），\n' +
-               '原點會被定義在錯的地方，之後所有角度都跟著錯。\n\n確定送出？')) return;
-  armDisarm('已送出 INIT');
-  setVerif('armf', 'pend', 'INIT 中…');
-  armSend('INIT').then(function(l){
-    setVerif('armf', /^ERR/.test(l) ? 'bad' : 'ok', l.slice(0, 40));
-    armStatus();
-  });
 });
 
 //=========== Manual：繼電器（事件委派，因為列是動態產生的）===========
@@ -5097,7 +5086,6 @@ document.getElementById('relaygrp').addEventListener('click', function(ev){
   //   按下標著「CH2 幫浦 A」的開關會去關掉 **B**。按鈕的標籤會說謊。
   //   ⇒ 兩列都改送顯式的單顆指令 `pump a|b on|off`（dispatcher :349，a→ch2 b→ch3）。
   //   ⚠️ 這道指令**本體 build 之後才存在**；舊版本體會回 `ERR expected_on_or_off`。
-  var vk = (ch === '2' || ch === '3') ? 'pump' : (ch === '1' ? 'valve' : null);
   // [2026-09-10] CH4 走語意指令 `water_pump`，不用 `relay 4`。
   //   ⚠️ **這一格的通道搬過兩次**（6 → 14 → 4）。`relay 4` 綁的是「第 4 號通道」，
   //   `water_pump` 綁的是「噴水加壓馬達不管它在第幾號」—— 下次再搬時，前者會靜默
@@ -5108,7 +5096,7 @@ document.getElementById('relaygrp').addEventListener('click', function(ev){
           : ch === '4' ? ('water_pump ' + (want ? 'on' : 'off'))
           : ch === '5' ? ('brush ' + (want ? 'on' : 'off'))
           : ('relay ' + ch + ' ' + (want ? 'on' : 'off'));
-  fire(WR, cmd, vk, 'ch' + ch);
+  fire(WR, cmd, null, 'ch' + ch);
 });
 
 // ⚪ [2026-09-11 per user] raw command 的兩個 handler 隨 markup 一起移除。
@@ -5167,39 +5155,22 @@ var PRE_ITEMS = [
      if (wallReady()) return {ok:true, v:'牆高 ' + wall.cm + ' cm' + (typeof wallAtText === 'function' ? ' · ' + wallAtText() : '') + syncTxt};
      return {ok:false, v: wall.cm > 0 ? '牆高 ' + wall.cm + ' cm 但缺 ① 地面歸零記錄' : '尚未量'};
    }},
-  // 🔴 [2026-09-15 晚 per user] **資訊列，不擋開始**（`info:true`）。硬體事實：ZDT 是磁編碼器＋電池，
-  //    零點跨斷電保留 ⇒ 不需要每次開機重歸；要不要歸零由使用者決定。而 `zdt_homed_at` 只記
-  //    「這個行程有沒有做過」、重啟歸 0 —— 拿它當紅燈會逼人每次重做一件不必做的事。
-  {k:'zdt', n:'③ 推桿歸零', s:'資訊列 · 不擋開始 · 磁編碼器＋電池保留零點，通常不需要每次做 · 要做隨時可按', btn:'zdt_home feet',
-   info:true,
-   run:function(){ flowZdtHome(); },
-   state:function(){
-     var wr = last.wr; if (!wr) return {ok:null, v:'等待本體…'};
-     var t = +wr.zdt_homed_at || 0;
-     return {ok:null, info:true, v: t > 0 ? ('上次歸零 ' + ago(t)) : '本次程式啟動後未歸零（磁編碼器保留零點，通常不需要）'};
-   }},
+  // ⚪ [2026-09-17 per user] 「③ 推桿歸零」資訊列**整個移除**（09-15 起就只是不擋開始的資訊列；歸零在 Manual 吸盤推桿卡做：當前位置歸零／自動歸零）。
   // ⚪ [2026-09-15 晚 per user] **④ init（幫浦）已從前置移除**：腳本自己處理 ——
   //    起跑時若 A/B 皆 OFF 就自己 `arm_attached off → init → arm_attached on`（不動手臂）並驗繼電器，
   //    回程前與收尾自動 `pump off`（只關它自己開的那顆）。`flowInit()` 保留給 Manual／需要時手動用。
-  // 🔴 [2026-09-16 per user] 手臂**開機即待命**（`fcv-arm` 啟動 → STARTUP → 自動接 INIT）⇒ 不再是必要前置。
-  //    留成資訊列：STARTUP 失敗時不會接 INIT（位置不明時撞停點更危險），那種情況 `arm_ready=0`，這一行就是唯一的徵兆。
-  {k:'arm', n:'手臂（資訊）', s:'開機即待命：服務啟動後自動 STARTUP → INIT · arm_ready=0 表示沒接上（STARTUP 失敗）· 按鈕＝重跑 INIT', btn:'重跑 arm_init',
-   info:true,
-   run:function(){ flowArmInit(); },
-   state:function(){
-     var wr = last.wr; if (!wr) return {ok:null, info:true, v:'等待本體…'};
-     if (wr.arm_ready === undefined) return {ok:null, info:true, v:'本體未回 arm_ready'};
-     return {ok:null, info:true, v: wr.arm_ready === '1' ? '已待命（arm_ready=1）' : '🔴 arm_ready=0 —— STARTUP 失敗或手臂未使能，按「重跑 arm_init」'};
-   }},
-  {k:'water', n:'③ 水位', s:'water_full=1 · 補水＝water_inlet on → 滿再 +20 s → off（上限 180 s，同腳本 ensure_water_full）', btn:'補水',
+  // ⚪ [2026-09-17 per user] 「手臂（資訊）」列也移除：手臂程式一開就自動 INIT；腳本起跑自己檢查 `arm_ready=1`、不符拒跑並印原因
+  //    ⇒ GUI 不用擋也不用提示。前置只剩四項必要：① 地面歸零 ② 牆高 ③ 水位 ④ 起點。（Manual 手臂卡仍有 INIT 鈕。）
+  // [2026-09-17 per user] 兩顆水位計：低（有水／空箱）＝門檻，高（滿／未滿）＝補水的停止點（本體到高水位自動關閥）。
+  {k:'water', n:'③ 水位', s:'低水位有水＝過 · 高水位滿＝本體自動關閥 · 補水＝water_inlet on → 高水位滿自動關（上限 180 s）', btn:'補水',
    run:function(){ preWaterFill(); },
    state:function(){
      if (pre.busy === 'water') return {ok:null, v: pre.busyText || '補水中…'};
-     // 來源是 `water_level` 指令（15 s 輪詢 + 補水後補一次），**不是 status** —— 真機 status 沒有這個欄位
+     // 來源：`water_level` 指令（15 s 輪詢 + 補水後補一次）＋ status 的 water_low/water_high 快取（有就併）
      if (!waterLv.at) return {ok:null, v:'等待 water_level…'};
-     if (waterLv.full === null) return {ok:null, v:'水位讀不到（' + waterLv.err + '）'};
+     if (waterLv.full === null && waterLv.high === null) return {ok:null, v:'水位讀不到（' + (waterLv.err || '兩顆都 ?') + '）'};
      var inlet = last.wr && last.wr.water_inlet === '1';
-     return {ok: waterLv.full, v: (waterLv.full ? '滿' : '不滿') + (inlet ? ' · 進水閥開著' : '') + ' · ' + ago(waterLv.at / 1000)};
+     return {ok: waterLv.full === true, v: waterText() + (inlet ? ' · 進水閥開著' : '') + ' · ' + ago(waterLv.at / 1000)};
    }},
   {k:'top', n:'④ 起點', s:'吊機高度 |L| 與牆高差 ≤ ' + PRE_TOP_TOL_CM + ' cm · 回起點＝本體 crane_goto <牆高>', btn:'回起點',
    run:function(){ preGoto(); },
@@ -5301,20 +5272,6 @@ function preSyncWallToCrane(){
   });
 }
 
-function flowZdtHome(){
-  if (!dangerGate('推桿歸零 zdt_home')) return false;
-  if (!NO_CONFIRM('zdt_home feet：4 支推桿會往收回方向撞硬限位（100 rpm）直到堵轉，然後定為 0。\n\n附近沒有人手在推桿上？確定？')) return false;
-  dangerDisarm('已送出 zdt_home');
-  var rd = flowRd('zdt'); if (rd){ rd.dataset.busy = '1'; rd.textContent = '進行中…'; }
-  return send(WR, 'zdt_home feet', 180000).then(function(l){
-    if (rd) delete rd.dataset.busy;
-    var bad = (l.match(/s\d=(?!homed)[a-z_]+/g) || []);
-    var ok = /^OK/.test(l) && !bad.length;
-    if (ok) log('✅ zdt_home feet 完成：' + l, 'g'); else log('🔴 zdt_home：' + l, 'e');
-    setTimeout(pollFast, 300);
-    return ok;
-  });
-}
 // ④ init：照簡報 arm_attached off → init → arm_attached on（init 不去碰手臂，手臂由 ⑤ 自己 INIT）。
 function flowInit(){
   if (!dangerGate('本體 init')) return false;
@@ -5332,48 +5289,33 @@ function flowInit(){
     return ok;
   });
 }
-// ⑤ 手臂：本體 arm_init（本體代轉手臂 INIT，成功後 status arm_ready=1）。
-function flowArmInit(){
-  if (!dangerGate('手臂 INIT')) return false;
-  if (!NO_CONFIRM('arm_init：手臂會使能並做 INIT（大臂會動）。\n\n手臂周圍淨空？確定？')) return false;
-  dangerDisarm('已送出 arm_init');
-  var rd = flowRd('arm'); if (rd){ rd.dataset.busy = '1'; rd.textContent = 'INIT 中…'; }
-  return send(WR, 'arm_init', 120000).then(function(l){
-    if (rd) delete rd.dataset.busy;
-    var ok = /^OK/.test(l);
-    log((ok ? '✅ ' : '🔴 ') + 'arm_init → ' + l, ok ? 'g' : 'e');
-    setTimeout(pollFast, 500);
-    return ok;
-  });
-}
-// ⑥ 補水：同腳本 ensure_water_full —— water_inlet on → 每 2 s 讀 water_level，滿了再 +20 s 給餘量 → off；上限 180 s。
-var PRE_WATER_FILL_S = 180, PRE_WATER_TOPUP_S = 20;
+// ③ 補水（2026-09-17 改）：water_inlet on → 每 2 s 讀 water_level → **高水位=1 本體自動關閥**（GUI 也補送 off，冪等）；上限 180 s。
+//    已滿時 `water_inlet on` 回 `OK skipped water_high=1`——直接算完成。
+//    ⚪ 09-15 的「低位滿了再 +20 s 給餘量」拿掉：滿的定義現在是高水位那顆，不再用時間猜。
+var PRE_WATER_FILL_S = 180;
 function preWaterFill(){
   if (pre.busy) { alert('前置動作進行中（' + pre.busy + '）'); return; }
-  if (!NO_CONFIRM('補水：開進水閥 → 水滿再灌 ' + PRE_WATER_TOPUP_S + ' s → 關閥（上限 ' + PRE_WATER_FILL_S + ' s）。\n\n確定？')) return;
+  if (!NO_CONFIRM('補水：開進水閥 → 高水位滿時本體自動關閥（上限 ' + PRE_WATER_FILL_S + ' s）。\n\n確定？')) return;
   pre.busy = 'water'; pre.busyText = '開閥…';
-  var t0 = Date.now(), full = false;
+  var t0 = Date.now();
   function done(msg, ok){
     return fire(WR, 'water_inlet off', null, null).then(function(l){
       pre.busy = null; pre.busyText = '';
       log((ok ? '✅ ' : '🔴 ') + '補水：' + msg + ' · 關閥 → ' + l, ok ? 'g' : 'e');
-      setTimeout(pollFast, 300); setTimeout(pollWaterLevel, 400);   // ⑥ 的來源是 water_level，不等 15 s 那輪
+      setTimeout(pollFast, 300); setTimeout(pollWaterLevel, 400);   // ③ 的來源是 water_level，不等 15 s 那輪
     });
   }
   fire(WR, 'water_inlet on', null, null).then(function(l){
+    if (/^OK skipped water_high=1/.test(l)){ waterLv.high = true; paintWaterLamps(); return done('高水位已滿，本體沒開閥', true); }
     if (!/^OK/.test(l)) { pre.busy = null; log('🔴 進水閥打不開：' + l, 'e'); return; }
     var n = 0;
     (function tick(){
       if (n++ > PRE_WATER_FILL_S / 2 + 2) return done('逾時 ' + PRE_WATER_FILL_S + ' s 仍未滿', false);   // 有界（CLAUDE.md）
       var el = Math.round((Date.now() - t0) / 1000);
-      pre.busyText = '補水中 ' + el + ' s…';
+      pre.busyText = '補水中 ' + el + ' s… ' + waterText();
       send(WR, 'water_level', 8000).then(function(wl){
         paintWaterLevel(wl);
-        if (/water_full=1/.test(wl)){
-          pre.busyText = '水滿（' + el + ' s），再灌 ' + PRE_WATER_TOPUP_S + ' s 給餘量…';
-          setTimeout(function(){ done('水滿 ' + el + ' s + 餘量 ' + PRE_WATER_TOPUP_S + ' s', true); }, PRE_WATER_TOPUP_S * 1000);
-          return;
-        }
+        if (waterLv.high === true) return done('高水位滿 ' + el + ' s（本體自動關閥）', true);
         if (Date.now() - t0 > PRE_WATER_FILL_S * 1000) return done('逾時 ' + PRE_WATER_FILL_S + ' s 仍未滿', false);
         setTimeout(tick, 2000);
       });
@@ -5595,7 +5537,7 @@ tabs.forEach(function(t){
 window.addEventListener('hashchange', function(){
   showTab((location.hash || '').replace(/^#/, ''));
 });
-// 開頁時套用網址上的分頁；沒有或無效就維持 HTML 裡的預設（Mission）。
+// 開頁時套用網址上的分頁；沒有或無效就維持 HTML 裡的預設（Dashboard，09-17 起）。
 showTab((location.hash || '').replace(/^#/, ''));
 
 //=========== boot ===========
@@ -5631,12 +5573,12 @@ setInterval(paint, 1000);
 // [2026-09-10] 版號寫在啟動那行，讓人一眼看得出瀏覽器拿到的是不是新版
 // （這個頁面是單一檔，改完不換檔名，快取沒清就會靜默停在舊版）。
 // ⚠️ 舊文案「server.js 未改動」已不成立 —— Mission 那批改過 server.js，拿掉。
-var CONSOLE_VER = 'v3-2026.09.16-1948';   // 唯一版號來源：scripts/deploy_web.sh 部署時 sed 這一行
+var CONSOLE_VER = 'v3-2026.09.17-1549';   // 唯一版號來源：scripts/deploy_web.sh 部署時 sed 這一行
 txt('ver-tag', CONSOLE_VER);   // 頂欄版號與這行同源，不再各寫各的
 log('console v3 啟動 —— 版本 ' + CONSOLE_VER + '（本體 mission 指令族 + SAFE + 作業流程頁；不 spawn 腳本）');
 // [v3] 無頭測試鉤（jsdom + fake_robot 端對端）。整支腳本包在 IIFE 裡，沒有這個鉤子測試碰不到 send()。
 // 🔴 只讀／送指令用，不是給頁面內部呼叫的 API；不要在別處依賴它。
-window.__v3 = {send: send, fire: fire, last: last, conn: conn, logs: function(){ return LOGBUF.slice(); }, onDetachEvt: onDetachEvt, paintEstopState: paintEstopState, wrStateText: wrStateText, wrMoving: function(st){ return WR_MOVING.test(st); }, armStatus: armStatus, armTool: function(){ return armTool; }, paintArmTool: paintArmTool, armApplyM2Line: armApplyM2Line, cupsState: cupsState, isSafe: function(){ return isSafe(); }, onHoldGuardEvt: onHoldGuardEvt, misParams: misParams, misValidate: misValidate, preMissing: preMissing, onMissionMsg: onMissionMsg, wsRef: function(){ return ws; }, setBackend: function(b){ MISSION_BACKEND = b; misBackendApply(); misPaint(); }, backend: function(){ return MISSION_BACKEND; },
+window.__v3 = {send: send, fire: fire, armErr: armErr, last: last, conn: conn, logs: function(){ return LOGBUF.slice(); }, onDetachEvt: onDetachEvt, paintEstopState: paintEstopState, wrStateText: wrStateText, wrMoving: function(st){ return WR_MOVING.test(st); }, armStatus: armStatus, armTool: function(){ return armTool; }, paintArmTool: paintArmTool, armApplyM2Line: armApplyM2Line, cupsState: cupsState, isSafe: function(){ return isSafe(); }, onHoldGuardEvt: onHoldGuardEvt, misParams: misParams, misValidate: misValidate, preMissing: preMissing, onMissionMsg: onMissionMsg, wsRef: function(){ return ws; }, setBackend: function(b){ MISSION_BACKEND = b; misBackendApply(); misPaint(); }, backend: function(){ return MISSION_BACKEND; },
                mis: function(){ return mis; }, wall: function(){ return wall; }, misPaint: misPaint,
                onMissionEvt: onMissionEvt, onSafeEvt: onSafeEvt};
 

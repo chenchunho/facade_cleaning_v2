@@ -27,6 +27,7 @@ round-trip.  Real safety logic, timing and error paths are NOT modelled.
   test hooks (NOT real protocol): `sim roll <deg>` / `sim tension_valid 0` / `sim top <cm>` / `sim noseal` / `sim safe [src]`
 """
 import argparse
+import math
 import collections
 import datetime as dt
 import os
@@ -65,6 +66,10 @@ class Sim:
         self.pause_reason = 'none'    # [2026-09-16] none|user|error|balance_ask
         self.flow = 'none'            # [2026-09-16] none|return_home
         self.hold_guard = 1           # [2026-09-15] set_hold_guard on|off (hold-mode tension protection)
+        # [2026-09-17 AI-2, for agent-ai-db] tension thresholds are settable on the real crane (set_tension_max_kg /
+        # set_tension_diff_max_kg / set_retract_tension_stop_kg, persisted in crane_settings.txt); status must follow so the
+        # GUI check can verify the round trip. Defaults = real crane compile defaults (agent-ai-db 09-17), not the old fake 80/25/50.
+        self.tension_max_kg = 100; self.tension_diff_max_kg = 50; self.retract_tension_stop_kg = 75   # [2026-09-17] = real crane defaults (TENSION_MAX/DIFF/RETRACT_STOP _DEFAULT)
         self.level_auto = 1           # [2026-09-15] set_level_auto on|off (auto level reference from IMU)
         self.level_diff = 0
         self.motion_hz = 30
@@ -82,7 +87,11 @@ class Sim:
         self.rail_running = 0
         self.zdt = {s: {'pos': 0, 'en': 1} for s in (5, 6, 7, 8)}
         self.pres = {5: -2.1, 6: -1.8, 7: -2.4, 8: -2.0}   # kPa, ~0 = not sealed
+        self.pusher_rpm = 400; self.pusher_rpm_retract = 400   # [2026-09-17] set_pusher_rpm
+        self.zdt_pwr = [1, 1, 1, 1]   # [2026-09-17] commanded driver-EN per cup 5..8 (real body: zdt_pwr=)
+        self.zdt_skip = set()         # [2026-09-17] cups excluded from group cmds (zdt_disable); status zdt_skip=
         self.water_full = 0
+        self.water_high = 0        # [2026-09-17] high-water sensor (slave 14)
         self.crane_attached = 'on'
         self.arm_attached = 'on'
         # arm
@@ -146,8 +155,8 @@ class Sim:
         return (f'OK length_left={s.len_l:.1f} length_right={s.len_r:.1f} length_middle=ERR'
                 f' tension_left={s.ten_l:.1f} tension_right={s.ten_r:.1f} tension_valid=1'
                 f' up_left=0 up_right=0 down_left=0 down_right=0'
-                f' up_stop_total_kg=130 hold_guard={s.hold_guard} tension_max_kg=80 tension_diff_max_kg=25 length_diff_max_cm=10'
-                f' retract_tension_stop_kg=50 dsz_left_scale=-0.0205816 dsz_right_scale=-0.0236364'
+                f' hold_guard={s.hold_guard} tension_max_kg={s.tension_max_kg:g} tension_diff_max_kg={s.tension_diff_max_kg:g} length_diff_max_cm=10'
+                f' retract_tension_stop_kg={s.retract_tension_stop_kg:g} dsz_left_scale=-0.0205816 dsz_right_scale=-0.0236364'
                 f' meter_left_scale=1 meter_right_scale=1 meter_middle_scale=1'
                 f' home_ground_cm={s.home_ground} wall_height_cm={s.wall_height} hold_hz=20 motion_hz={s.motion_hz} middle_hz=30'
                 f' balance_enabled=1 balance_kp=2.0 balance_cap_ratio=0.5 balance_deadband=0.5'
@@ -173,14 +182,14 @@ class Sim:
                 f' crane_estop_connected=1 crane_estop_down_ms=0 crane_idle_ms=300 crane_idle_ms_max=900'
                 f' crane_idle_ms_max_motion=600 crane_wd_warn_ms=3000 crane_wd_abort_ms=8000'
                 f' arm_attached={s.arm_attached} obstacle_detect=off follower_mode=imu first_step=right'
-                f' step_in_progress=0 p_err=0 {cups} {seal} {zdt}'
+                f' step_in_progress=0 zdt_pwr={"".join(str(v) for v in s.zdt_pwr)} zdt_skip={",".join(str(x) for x in sorted(s.zdt_skip)) or "-"} p_err=0 {cups} {seal} {zdt}'
                 f' roll={s.imu_roll:.2f} pitch=0.10 ax=0.01 ay=0.00 az=0.99 raw_x=0 raw_y=0 raw_z=0'
                 f' n_accel=100 n_angle=100 imu_guard=on'
                 f' active={s.pump_active} pump=on base=A accum_min=12 auto_rotate=30'
-                f' rail_cm={s.rail_cm:.1f} water_inlet={s.water_inlet} estop={s.estop}'
+                f' rail_cm={s.rail_cm:.1f} water_inlet={s.water_inlet} water_low={s.water_full} water_high={s.water_high} estop={s.estop}'
                 # [2026-09-15 AI-2] water_full is NOT in the real body status (only the `water_level`
                 # command answers it) — deliberately absent so the GUI cannot pass by reading status.
-                f' pusher_rpm=400 pusher_rpm_retract=400'   # [2026-09-15] 編譯期預設,GUI 的 RPM 欄位提示用
+                f' pusher_rpm={s.pusher_rpm} pusher_rpm_retract={s.pusher_rpm_retract}'   # [2026-09-17] 共用執行期值(set_pusher_rpm)
                 # [2026-09-14 階段 1 as built] dev_gw2x live; dev_zdt/pqw/dm2j/xkc/qx are the
                 # cached result of the last `selfcheck` (real probe, not on the 2 Hz path);
                 # dev_jc100/dev_imu/dev_arm live. selfcheck_age_s=-1 means never probed.
@@ -210,7 +219,8 @@ class Sim:
     def arm_status(self):
         def one(tag, m):
             extra = f' init_done={self.arm_init_done}' if tag == 'M1' else f' tool={SIM._m2_tool(m["pos"])}'
-            return (f'[{tag}] pos={m["pos"]:.4f} vel={m["vel"]:.4f} tau={m["tau"]:.4f} hold={m["hold"]}'
+            wall = f' wall_mm={490*math.sin(m["pos"]-0.38)+121:.0f}' if tag == 'M1' else ''   # [2026-09-17] real: θ 幾何式
+            return (f'[{tag}] pos={m["pos"]:.4f} vel={m["vel"]:.4f} tau={m["tau"]:.4f}{wall} hold={m["hold"]}'
                     f' moving={m["moving"]} err=NONE en={m["en"]} settle_cnt=0{extra}')
         return one('M1', self.m1) + '\n' + one('M2', self.m2) + '\n'
 
@@ -497,10 +507,17 @@ def wr_dispatch(line, bcast):
         if c == 'brush': s.relay[4] = 1 if a[:1] != ['off'] else 0; return f'OK ch5={s.relay[4]}\n', True
         if c == 'water_pump': s.relay[3] = 1 if a[:1] != ['off'] else 0; return f'OK ch4={s.relay[3]}\n', True
         if c == 'water_inlet':   # [2026-09-15 AI-2, for agent-ai-db] body relays crane inlet; tank fills ~3 s after on (Mission 前置 ⑥ 補水)
+            if a[:1] == ['on'] and s.water_high == 1: return 'OK skipped water_high=1\n', True   # [2026-09-17] real body refuses when full
             s.water_inlet = 1 if a[:1] == ['on'] else 0
-            if s.water_inlet: threading.Timer(3.0, lambda: setattr(s, 'water_full', 1)).start()
+            if s.water_inlet:
+                threading.Timer(3.0, lambda: setattr(s, 'water_full', 1)).start()
+                def _hi():   # [2026-09-17] high mark after ~8 s → body closes the valve itself + EVT
+                    if s.water_inlet:
+                        s.water_high = 1; s.water_inlet = 0
+                        _bcast('washrobot', 'EVT water_inlet_auto_close reason=high_level')
+                threading.Timer(8.0, _hi).start()
             return f'OK water_inlet={s.water_inlet}\n', True
-        if c == 'water_level': return f'OK water_full={s.water_full} rssi=4000\n', True
+        if c == 'water_level': return f'OK water_full={s.water_full} rssi=4000 water_high={s.water_high} rssi_high=300\n', True   # [2026-09-17] 2nd sensor (slave 14)
         if c == 'pwm':
             if a[:1] == ['status']: return s.pwm_status(), True
             if a[:1] == ['set'] and len(a) >= 3:
@@ -520,12 +537,47 @@ def wr_dispatch(line, bcast):
             for k in s.zdt: s.zdt[k]['pos'] = 0
             if c == 'zdt_home': s.zdt_homed_at = int(time.time())
             return 'OK homed=5,6,7,8\n', True
-        if c in ('zdt_enable', 'zdt_disable', 'zdt_release_stall', 'zdt_power'):
+        if c == 'arm_force':   # [2026-09-17] live force change (≤7 Nm), needs an active deploy
+            try: nm = float(a[0])
+            except (ValueError, IndexError): return 'ERR usage:arm_force_<target_nm>\n', True
+            if nm <= 0: return 'ERR invalid_target_nm\n', True
+            if nm > 7: return 'ERR target_nm_exceeds_max_7\n', True
+            if s.deploy_target is None: return 'ERR SETFORCE: not_in_contact (tau=0.0 < touch) — use DEPLOY_F first\n', True
+            s.deploy_target = nm
+            return f'OK tau={nm:.2f} target={nm:.1f} theta={s.m1["pos"]:.4f} cmd={s.m1["pos"]:.4f} wall_mm=230 kp_eff=60.0 iters=1 ms=1200\n', True
+        if c == 'arm_slot':   # [2026-09-17] body passthrough → arm `M2 LR_SLOT <slot>`
+            if a[:1] and a[0] in ('LEFT', 'CENTER', 'RIGHT'):
+                return arm_dispatch('M2 LR_SLOT ' + a[0], lambda l: _bcast('arm', l))[0], True
+            return 'ERR usage:arm_slot_<LEFT|CENTER|RIGHT>\n', True
+        if c == 'set_pusher_rpm':   # [2026-09-17] shared runtime RPM: <extend> [retract], 0=keep, 50..1000
+            try: e = int(a[0]); r = int(a[1]) if len(a) > 1 else 0
+            except (ValueError, IndexError): return 'ERR usage:set_pusher_rpm_<extend>_[retract]\n', True
+            if any(v != 0 and not 50 <= v <= 1000 for v in (e, r)): return 'ERR range:50..1000 (0=keep)\n', True
+            if e: s.pusher_rpm = e
+            if r: s.pusher_rpm_retract = r
+            _bcast('washrobot', f'EVT pusher_rpm {s.pusher_rpm} {s.pusher_rpm_retract}')
+            return f'OK pusher_rpm={s.pusher_rpm} pusher_rpm_retract={s.pusher_rpm_retract}\n', True
+        if c == 'zdt_power':   # [2026-09-17] mirrors dispatcher: <5..8|all> <on|off>; status zdt_pwr= follows
+            if len(a) < 2 or a[1] not in ('on', 'off'): return 'ERR usage:zdt_power_<5..8|all>_<on|off>\n', True
+            on = 1 if a[1] == 'on' else 0
+            if a[0] == 'all':
+                s.zdt_pwr = [on] * 4; return f'OK zdt_power all={a[1]}\n', True
+            if a[0] in ('5', '6', '7', '8'):
+                s.zdt_pwr[int(a[0]) - 5] = on; return 'OK\n', True
+            return 'ERR usage:zdt_power_<5..8|all>_<on|off>\n', True
+        if c in ('zdt_enable', 'zdt_disable') and a[:1] and a[0] in ('5', '6', '7', '8'):
+            (s.zdt_skip.discard if c == 'zdt_enable' else s.zdt_skip.add)(int(a[0])); return 'OK\n', True
+        if c in ('zdt_enable', 'zdt_disable', 'zdt_release_stall'):
             return 'OK\n', True
         if c == 'rail_sweep':
             if a[:1] == ['status']: return f'OK running={s.rail_running} pos={s.rail_cm:.1f}\n', True
             s.rail_running = 1; return 'OK rail sweep started\n', True
         if c in ('rail', 'rail_jog', 'rail_pos', 'rail_zero', 'rail_enable', 'rail_cfg_soft_enable'):
+            if c == 'rail' and a:   # [2026-09-17] real body: -130..130 (zero can be mid-travel), negative allowed
+                try: t = float(a[0])
+                except ValueError: return 'ERR usage:rail_<cm>\n', True
+                if not -130 <= t <= 130: return 'ERR rail_target_out_of_range (-130..130 cm)\n', True
+                s.rail_cm = t; return f'OK rail_move target={t:.1f} pos={t:.1f}\n', True
             if c == 'rail_pos' and a and a[0].replace('.', '', 1).isdigit(): s.rail_cm = float(a[0])
             if c == 'rail_zero': s.rail_cm = 0.0
             return f'OK rail_cm={s.rail_cm:.1f}\n', True
@@ -550,7 +602,14 @@ def wr_dispatch(line, bcast):
         if c == 'arm_deploy_f' and a:
             try: s.deploy_target = float(a[0])
             except ValueError: s.deploy_target = 8.0
+            if s.deploy_target > 7: s.deploy_target = None; return 'ERR target_nm_exceeds_max_7\n', True
+            # [2026-09-17] optional 3rd token dist_mm (122..444): fake treats < 260 mm as "distance first"
+            dist = int(a[2]) if len(a) > 2 and a[2].isdigit() else 0
+            if dist and not 122 <= dist <= 444: return 'ERR dist_mm_range (122..444)\n', True
             s.m1['en'] = s.m2['en'] = 1; s.m1['moving'] = 1
+            if dist and dist < 260:
+                s.deploy_target = 1.0
+                return f'OK stopped=distance tau=1.00 target={float(a[0]):.1f} theta=0.480 cmd=0.480 contact=0.480 kp_eff=0.0 iters=0 ms=2100\n', True
             return f'OK tau={s.deploy_target:.2f} theta={s.m1["pos"]:.3f} iters=3 kp_eff=60\n', True
         if c in ('arm_park', 'arm_retract'):
             s.deploy_target = None; s.m1['tau'] = 0.0; s.m1['pos'] = 0.40; s.m1['moving'] = 0
@@ -664,6 +723,11 @@ def cr_dispatch(line, bcast):
             try: s.motion_hz = int(a[0])
             except ValueError: pass
             return f'OK motion_hz={s.motion_hz}\n', True
+        if c in ('set_tension_max_kg', 'set_tension_diff_max_kg', 'set_retract_tension_stop_kg') and a:   # [2026-09-17 AI-2] status follows
+            try: v = float(a[0])
+            except ValueError: return f'ERR usage:{c}_<kg>\n', True
+            if v <= 0: return 'ERR range:>0\n', True
+            setattr(s, c[4:], v); return f'OK {c[4:]}={v:g}\n', True
         if c.startswith('set_') or c in ('roll_correct', 'align_lengths', 'fine_adjust', 'roll_trim_ms',
                                           'side_measured', 'dual_vfd_sync_start', 'meter_cal', 'dszl_zero'):
             return 'OK\n', True

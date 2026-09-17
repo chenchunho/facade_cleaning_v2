@@ -1,5 +1,81 @@
 # Work Log
 
+## 2026-09-17 下午:手臂原則落地、急停收腳重送、距離上限/即時力道、張力門檻合併、警報不再拖 Idle 進 paused、rail 負值、第二顆水位計
+
+### 決策(per user)
+- **手臂原則**:上電就緒＝滾筒槽+使能;急停只把手臂拉回滾筒;整個上電期間**不失能,除非校正**(「免得機器在空中手臂亂跑」)。
+- 手臂 Manual 卡只留:壓上/收回、力道、距離上限;壓上後即時顯示力與估測牆距,可改力道「套用」;**防呆 ≤ 7 N·m**。
+- 刮刀做完回滾筒(預設工具)。Mission 加「任務結束回頂端」勾(`return_top=0|1`)。Dashboard 加 Mission 小卡(右下、一般尺寸)。
+- `up_stop_total_kg`(▲ 手拉總和上限)**併入** `retract_tension_stop_kg`(單側,自動收繩軟停 + ▲ 手拉停)。GUI 張力卡**不要**即時值,只要左右繩差門檻可設。
+- Manual 上滑台可設負值(−130..130,0=歸零時位置)。Mission 前置 ③ 推桿歸零、手臂(資訊)兩列移除;最上面狀態卡移除;Manual 本體開關機移除。
+- 第二顆 XKC 水位計(高水位,slave 14):**高水位到就關閥**;低水位語意不變(有水才可噴)。
+
+### 本體 / 手臂 / 吊機(皆已部署,真機驗過)
+- **急停收腳 FAKE-DONE 重送一次**:11:36 急停時四支 ZDT 同時「到位」卻停在 ~1160°、電流 ~500 mA(堵轉是 2–3 A)
+  ⇒ 同步啟動廣播被 .20 匯流排掉包(同瞬間 PQW 回讀 size=0),`estop=partial` 留 Error、腳半伸。現在對沒到位的重送絕對 0 一次。
+- **失能路徑全清**:`missionStop` ② `arm_park` → `arm_retract`;本體 6 處作業路徑 PARK → 收回保持使能(`ensure_arm_parked_after_rope_`、
+  arm_clean_sweep abort/round end、cleanup、M2 verify retry);`emergency_stop` 不再 `arm_calibrated_=false`;`emergency_detach_` 收臂後 `arm_slot RIGHT`。
+  PARK 只剩 Manual `arm_park`(校正用)。
+- 新指令:`arm_slot LEFT|CENTER|RIGHT`(腳本刮刀後回滾筒);`arm_deploy_f <nm> <slot> [dist_mm]`(122..444,θ_max 由 `490·sin(θ−0.38)+121` 反推,
+  距離先到回 `OK stopped=distance`);`arm_force <nm>`(手臂 `M1 SETFORCE`,Step 6/7 抽成 `force_converge_()` 共用,已壓上時只收斂不重尋觸);
+  手臂 STATUS `[M1]` 加 `wall_mm=`;**7 N·m 上限**本體+手臂兩層(`DEPLOY_F_MAX_NM`/`ARM_FORCE_MAX_NM`)。
+  🔴 踩坑:距離上限第一版把 >444 **夾成 1.10 而不是拒絕**,測 500 時手臂真的壓了一次牆(未吸附、吊著,壓到 2.1 N·m 收斂無事)。改拒絕。
+- **吊機警報不再把 Idle 拖進 paused**:▲ 手拉觸發 `tension_total_limit`(137 > 130)→ 本體 `paused(error)` → `crane_goto` 全拒 ⇒「按放到地面不會動」。
+  改:沒有流程在跑(非 Running 且 step_in_progress=0)只記錄 + EVT,狀態不動;`reset` 也接受 paused(error)。
+- **`up_stop_total_kg` 移除**:hold_loop 改 `max(L,R) >= retract_tension_stop_kg` → `EVT tension_retract_stop left= right= threshold=`(本體 handler 同步改名);
+  status/持久化/setter 全拿掉,Pi 上 `crane_settings.txt` 舊行手動刪。
+- `rail`/`rail_sweep`/jog 守衛 −130..130(`ARM_RAIL_TRAVEL_MIN_CM`)。
+- **第二顆水位計**:出廠 9600/位址 1 在 115200 匯流排隱形 → 用網關 `.22` web(`port.cgi` 改鮑率 + `manage.cgi?reset=1` 重啟,admin 預設帳號)暫切 9600,
+  對位址 1 寫 0x0004=14、0x0005=0x0D(**位址改完要隔 ≥1 s 再寫鮑率**,第一次太快沒吃到),切回 115200 → 14 回 `output=0 rssi=269 baud=0x0D`。
+  本體:`lvl_high_`(slave 14);`water_level` 加 `water_high= rssi_high=`;status `water_low= water_high=`(watchdog 執行緒快取);
+  watchdog 閥開時 2 s 一輪,**high=1 → 關閥 + `EVT water_inlet_auto_close reason=high_level`**;已滿送 on 回 `OK skipped water_high=1`。
+  腳本:高水位已滿不補;閥由本體關,180 s 計時降為保險。
+- 📌 拉到頂端停在 135 ← `retract_tension_stop_kg=75` 軟停(滑台偏一邊右繩 76 kg);`crane_goto` 軟停回 `OK … err=-96` GUI 當成功 → 🟡 待改 `WARN short_by=`。
+  建議 75 → 85(user 未拍板)。
+
+### 觀察
+- 手臂壓上「小拉起來再靠回」:第一次測試 `vacuum on` 少群組參數、實際**沒吸附**,3 N·m 一壓整台被推晃;正確吸附後(四顆 −64~−69)
+  `arm_deploy_f 3 RIGHT` 5.9 s、四顆壓力不動、M1 位置單調、無退回 ⇒ 現象不存在。
+- 吊機 Pi 今天**兩次上電沒自己起來**(user 手動重開才起);本體沒事。要看它的電源。
+- 維修後計米器 L=−253/R=−251 對不上牆高 231,跑任務前要地面歸零。
+
+### GUI(AI-2,皆已部署 :8080,最後 v3-2026.09.17-1549)
+0959 Mission 重排 → 1011 推桿卡 → 1037 單支被裁根因 → 1058 共用值 → 1123 return_top+閃爍+Dashboard Mission 卡 → 1132 小卡右下 →
+1211/1215 手臂卡+err 健康值 → 1339 手臂鈕不被擠+本體開關機移除 → 1406 張力合併+本體區重排 → 1422 rail 負值 → 1448/1510 張力卡撤即時值+Mission 狀態卡移除 →
+1549 兩顆水位計。踩坑:`.grp overflow:hidden` + nowrap 把按鈕擠出卡片(推桿卡、手臂卡各一次)。
+
+## 2026-09-17 上午:GUI 重排三輪(AI-2)、推桿契約、**Manual/Mission 共用值模型 + 持久化**(per user 拍板)
+
+### 決策(per user)
+- **Manual 與 Mission 共用同一份機器狀態**(真值在本體/吊機;Manual 調什麼 Mission 就用什麼),**Mission 起跑時把安全項強制開啟**。
+  否決了我原提的「Mission 自己一份參數 + 從 Manual 帶入」(太複雜)。計畫 `.claude/plans/mission_manual_isolation.md`。
+- 推桿 RPM 要在 Mission 可設、預設 400 → 做成**共用執行期值** `set_pusher_rpm`,兩頁互通。
+- 「張力門檻也做」→ 五個門檻**持久化**(本來重啟就回編譯預設)。
+- 群組「納入/排除」鈕 → 改每支一個勾(驅動本體 `zdt_disable`,真值在本體,status `zdt_skip=`);Mission 前置 ③ 推桿歸零、手臂(資訊)兩列移除。
+
+### 本體 / 吊機 / 腳本(已部署,真機驗過)
+- 本體:`zdt_power all on|off`;status `zdt_pwr=1111`(指令狀態非回讀)、`zdt_skip=-|7|5,7`;`set_pusher_rpm <伸> [收]`(50..1000,0=keep,EVT `pusher_rpm`),
+  `pusher_rpm=`/`pusher_rpm_retract=` 改為執行期值,所有 rpm<=0 的推桿路徑解析到它(預設參數 `PUSHER_RPM` → 0)。
+- 持久化:本體 `~/run/body_settings.txt`(set_pusher_rpm)、吊機 `~/run/crane_settings.txt`(tension_max/diff/retract_stop/length_diff/up_stop_total),
+  程式在 `set_*` 時寫一行 `set_* 值`,unit `ExecStartPost` 逐行用 crcmd.py 回放。真機驗:吊機設 77 → 重啟 → 77;本體 420/390 → 重啟 → 420/390。
+  hold_guard / level_auto **刻意不持久化**(重啟回 on)。
+- 🔴 踩坑:**systemd unit 檔裡 `%s` 是 specifier**(展開成 `/bin/bash`),`printf '%s\n'` 在 ExecStartPost 裡變成 `printf '/bin/bash\n'` ⇒ 回放靜默失敗;
+  要嘛 `%%`,要嘛用 `echo`。另:程式在 `set_*` 時會**重寫**設定檔,回放迴圈要先 `L=$(cat …)` 快照再逐行送,不能邊讀邊送。
+- 腳本 `cycle_test.py` 起跑:強制 `set_hold_guard on`/`set_level_auto on`/`crane_attached on`/`zdt_power all on`(任一失敗拒跑);
+  已吸附(任一顆 ≤ −40)或 `arm_ready≠1` 拒跑;log 頭印**共用值快照**(zdt_skip/RPM/五門檻/level_auto/k/hold_guard);`FCV_PREFLIGHT_ONLY=1` 只檢查不起跑(真機驗過)。
+  新 `sfield()`(`field()` 只吃數字,`zdt_skip=-`/`arm_ready=1` 要字串版)。
+- fake_robot 鏡像:zdt_power all、zdt_pwr、zdt_skip(隨 enable/disable)、set_pusher_rpm。
+
+### GUI(AI-2,皆已部署 :8080)
+- 0959 Mission 重排(側欄 Dashboard 在前、參數五列、右欄 存檔/開始⇄停止/緊急脫離、四卡移除、腳本輸出+每步時間搬 Dashboard;server.js 加 `missionSave` 存檔不起跑)。
+- 1011 推桿卡五點(RPM 顯示現值、當前位置歸零/自動歸零、失能/使能列、勾選框)。
+- 1037 單支按不到根因:11 欄 grid 一列 >700 px、卡 300–450 px、`.grp overflow:hidden` 裁掉右邊 ⇒ 推桿卡吃滿整列 + 每支一列可折行;參數五列骨架統一;前置剩 ①②③④。
+- 交接單 `ai2-shared-values.md`(Manual RPM 改送 set_pusher_rpm、Mission 共用值唯讀行、拒跑醒目)進行中。
+
+### 待完成
+- 🟡 AI-2 共用值三件 → 併 commit
+- 🟡 本體 `set_setting` 22 鍵與吊機 balance/hz 家族**未持久化**(同一機制可擴,等需要)
+
 ## 2026-09-17 早:開機檢查、SOFTWARE.md 對齊、`Linux_test/` 退役 → `scripts/cycle_test.py`
 
 - **開機檢查**:吊機這次**第一次上電就自己起來**(up 1 min:fcv-crane/fcv-web-v3 active、ExecStartPost 補回牆高 244/motion_hz 30、

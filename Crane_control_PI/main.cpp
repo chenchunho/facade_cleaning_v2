@@ -62,7 +62,7 @@
 //   up|down on|off                    # hold-to-pull 雙繩同時
 //   up_left|up_right on|off           # hold 個別
 //   down_left|down_right on|off
-//   set_up_stop_total_kg <kg>         # hold-mode 收繩 L+R 總和門檻
+//   (set_up_stop_total_kg 已於 2026-09-17 併入 set_retract_tension_stop_kg —— 單側門檻同時管自動收繩軟停與 ▲ 手拉停)
 //   set_hold_guard on|off             # hold-mode 張力保護總開關（off = 只警示不停，同緊急收繩；2026-09-15 per user）
 //   set_tension_max_kg <kg>           # motion_rope 單側過載硬警報
 //   set_tension_diff_max_kg <kg>      # motion_rope 左右張力差硬警報
@@ -595,19 +595,8 @@ static constexpr double TENSION_DIFF_MAX_KG_DEFAULT = 50.0;  // L/R imbalance th
 //   ——本次常數化就是為了消除那個「重開就擋住收繩」的陷阱。
 static constexpr double RETRACT_TENSION_STOP_KG_DEFAULT = 75.0;
 
-// Hold-mode total tension threshold (sum of left+right). When any UP hold is
-// active and total exceeds this, hold_loop calls hold_all_off + EVT.
-// [2026-08-28 per user] 50 → 70 kg。
-//
-// 🔴 [2026-09-01] 70 → 130 kg —— 與 RETRACT_TENSION_STOP 同一個原因（刻度校正，
-//   見上）。**舊值 70 現在低於整機自重 94 kg，一按 UP hold 就會立刻 hold_all_off。**
-//   新值取自實測：水平懸吊總和 94.3 kg → 130 留約 38% 餘裕。
-//   仍低於「兩條繩各自收到 RETRACT_TENSION_STOP_KG_DEFAULT(75) 時的總和 150 kg」，
-//   所以手動 UP hold 承受同等張力時仍會先觸發 hold_all_off ——
-//   兩者的相對關係與 08-28 當時一致，只是整組換算到校正後的單位。
-//   兩者路徑不同（本值只在 UP hold 的 hold_loop 生效，RETRACT_TENSION_STOP 在
-//   motion_rope 的 retract），不會互相觸發。
-static constexpr double UP_STOP_TOTAL_KG_DEFAULT = 130.0;
+// [2026-09-17 per user] The separate hold-mode total threshold (UP_STOP_TOTAL_KG 130)
+// was merged into RETRACT_TENSION_STOP_KG (per side) — see hold_loop.
 static constexpr int    HOLD_LOOP_ACTIVE_MS      = 50;     // poll period when any hold flag set
 static constexpr int    HOLD_LOOP_IDLE_MS        = 200;    // poll period when no hold flags (just refresh tension cache)
 
@@ -817,8 +806,7 @@ static std::atomic<bool> g_vfd_right_fault {false};
 static constexpr int        METER_POLL_MS_IDLE   = 250;
 static constexpr int        METER_POLL_MS_MOTION = 100;   // 150→100 (2026-05-15 physical-separation): cli_M now dedicated to SD76 only (no SE3 cross-traffic), so faster polling has plenty of bus headroom. Cuts cache lag worst-case from 150ms to 100ms → smaller stop overshoot.
 
-// Total UP threshold (atomic for runtime adjustment via set_up_stop_total_kg)
-static std::atomic<double> g_up_stop_total_kg {UP_STOP_TOTAL_KG_DEFAULT};
+// (2026-09-17: the separate hold-mode total threshold was merged into g_retract_tension_stop_kg)
 // [2026-09-15 per user] Master switch for the hold-mode (up/down on|off) tension
 // protection in hold_loop. ON (default): total-UP threshold + per-side
 // low/high/diff stop the hold (hold_all_off + EVT). OFF: the same checks only
@@ -2450,12 +2438,18 @@ static void hold_loop() {
                 // Total threshold (only when UP active — DOWN releases tension)
                 const bool up_active = hold_up_left.load() || hold_up_right.load();
                 if (up_active) {
-                    const double total = l + r;
-                    if (total > g_up_stop_total_kg.load()) {
+                    // [2026-09-17 per user] Merged with the auto-retract soft stop: ONE
+                    // per-side "rope taut" threshold (retract_tension_stop_kg) for both
+                    // the manual ▲ pull and motion_rope's retract. The old separate
+                    // total-of-both (up_stop_total_kg=130) tripped on the acceleration
+                    // spike (137) while neither side was anywhere near taut, and a
+                    // per-side limit also catches the one-sided case a total hides.
+                    const double stop_kg = g_retract_tension_stop_kg.load();
+                    if (std::max(l, r) >= stop_kg) {
                         hold_all_off();
                         std::ostringstream oss;
-                        oss << "EVT tension_total_limit total=" << total
-                            << " threshold=" << g_up_stop_total_kg.load() << "\n";
+                        oss << "EVT tension_retract_stop left=" << l << " right=" << r
+                            << " threshold=" << stop_kg << "\n";
                         broadcast_evt(oss.str());
                         std::this_thread::sleep_for(std::chrono::milliseconds(HOLD_LOOP_ACTIVE_MS));
                         continue;
@@ -4188,7 +4182,6 @@ static std::string cmd_status() {
     oss << " up_right="        << (hold_up_right.load()   ? 1 : 0);
     oss << " down_left="       << (hold_down_left.load()  ? 1 : 0);
     oss << " down_right="      << (hold_down_right.load() ? 1 : 0);
-    oss << " up_stop_total_kg="<< g_up_stop_total_kg.load();
     oss << " hold_guard="       << (g_hold_guard_enabled.load() ? 1 : 0);   // [2026-09-15] set_hold_guard
     oss << " tension_max_kg="  << g_tension_max_kg.load();
     oss << " tension_diff_max_kg=" << g_tension_diff_max_kg.load();
@@ -4637,16 +4630,29 @@ static std::string cmd_set_hold_guard(const std::string& mode) {
     return std::string("OK hold_guard=") + (on ? "1" : "0") + "\n";
 }
 
-static std::string cmd_set_up_stop_total_kg(double kg) {
-    if (kg <= 0 || kg > 500) return "ERR threshold_out_of_range\n";
-    g_up_stop_total_kg.store(kg);
-    std::cout << "[crane] up_stop_total_kg = " << kg << "\n";
-    return "OK\n";
+// [2026-09-17 per user] The five tension / rope-difference thresholds are the
+// values Manual and Mission share (single truth here), and until today they
+// evaporated on every restart while wall_height / home_ground / motion_hz were
+// re-sent by the unit's ExecStartPost. Persist them the same way: one
+// `set_*` line per threshold in ~/run/crane_settings.txt, replayed verbatim
+// through crcmd.py at boot. Best effort — a write failure is logged, never fatal.
+// hold_guard / level_auto are deliberately NOT here: they reset to ON.
+static void persist_crane_settings() {
+    const char* home = std::getenv("HOME");
+    const std::string path = std::string(home ? home : "/home/user") + "/run/crane_settings.txt";
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (!f) { std::cerr << "[settings] cannot write " << path << "\n"; return; }
+    std::fprintf(f, "set_tension_max_kg %.3f\n",          g_tension_max_kg.load());
+    std::fprintf(f, "set_tension_diff_max_kg %.3f\n",     g_tension_diff_max_kg.load());
+    std::fprintf(f, "set_retract_tension_stop_kg %.3f\n", g_retract_tension_stop_kg.load());
+    std::fprintf(f, "set_length_diff_max_cm %.3f\n",      g_length_diff_max_cm.load());
+    std::fclose(f);
 }
 
 static std::string cmd_set_tension_max_kg(double kg) {
     if (kg <= 0 || kg > 500) return "ERR threshold_out_of_range\n";
     g_tension_max_kg.store(kg);
+    persist_crane_settings();
     std::cout << "[crane] tension_max_kg = " << kg << "\n";
     return "OK\n";
 }
@@ -4654,6 +4660,7 @@ static std::string cmd_set_tension_max_kg(double kg) {
 static std::string cmd_set_tension_diff_max_kg(double kg) {
     if (kg <= 0 || kg > 500) return "ERR threshold_out_of_range\n";
     g_tension_diff_max_kg.store(kg);
+    persist_crane_settings();
     std::cout << "[crane] tension_diff_max_kg = " << kg << "\n";
     return "OK\n";
 }
@@ -4665,6 +4672,7 @@ static std::string cmd_set_length_diff_max_cm(double cm) {
     if (cm <= BALANCE_DEADBAND_DEFAULT || cm > 200)
         return "ERR threshold_out_of_range\n";
     g_length_diff_max_cm.store(cm);
+    persist_crane_settings();
     std::cout << "[crane] length_diff_max_cm = " << cm << "\n";
     return "OK\n";
 }
@@ -4672,6 +4680,7 @@ static std::string cmd_set_length_diff_max_cm(double cm) {
 static std::string cmd_set_retract_tension_stop_kg(double kg) {
     if (kg <= 0 || kg > 500) return "ERR threshold_out_of_range\n";
     g_retract_tension_stop_kg.store(kg);
+    persist_crane_settings();
     std::cout << "[crane] retract_tension_stop_kg = " << kg << "\n";
     return "OK\n";
 }
@@ -5268,11 +5277,6 @@ static std::string dispatch(const std::string& line) {
         std::string m; iss >> m;
         if (iss.fail()) return "ERR usage:set_hold_guard_<on|off>\n";
         return cmd_set_hold_guard(m);
-    }
-    if (cmd == "set_up_stop_total_kg") {
-        double kg = 0; iss >> kg;
-        if (iss.fail()) return "ERR usage:set_up_stop_total_kg_<kg>\n";
-        return cmd_set_up_stop_total_kg(kg);
     }
     if (cmd == "set_tension_max_kg") {
         double kg = 0; iss >> kg;

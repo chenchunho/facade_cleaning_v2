@@ -203,6 +203,12 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
     if (cmd == "arm_init")   return robot.cmd_arm_init();
     if (cmd == "arm_park")    return robot.cmd_arm_park();
     if (cmd == "arm_retract") return robot.cmd_arm_retract();   // [2026-09-11] 收 M1 不失能
+    if (cmd == "arm_force") {              // [2026-09-17] live force change while pressed: arm_force <nm> (≤7)
+        double nm = 0; iss >> nm;
+        if (iss.fail()) return "ERR usage:arm_force_<target_nm>\n";
+        return robot.cmd_arm_force(nm);
+    }
+    if (cmd == "arm_slot") { std::string sl; iss >> sl; return robot.cmd_arm_slot(sl); }   // [2026-09-17] M2 tool slot
     if (cmd == "arm_status")  return robot.cmd_arm_status();
     if (cmd == "arm_deploy") {
         int wall_mm = 0;
@@ -219,8 +225,9 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
         double target_nm = 0.0;
         std::string slot;
         iss >> target_nm >> slot;
-        if (iss.fail()) return "ERR usage:arm_deploy_f_<target_nm>_<LEFT|CENTER|RIGHT>\n";
-        return robot.cmd_arm_deploy_f(target_nm, slot);
+        if (iss.fail()) return "ERR usage:arm_deploy_f_<target_nm>_<LEFT|CENTER|RIGHT>_[dist_mm]\n";
+        int dist_mm = 0; iss >> dist_mm;            // [2026-09-17] optional distance limit (mm), 0 = none
+        return robot.cmd_arm_deploy_f(target_nm, slot, dist_mm);
     }
     if (cmd == "arm_clean_sweep") {
         int wall_mm = 0;
@@ -506,15 +513,36 @@ std::string dispatch(WashRobot& robot, const std::string& line) {
                  + ".." + std::to_string(WashRobot::CUP_SLAVE_LAST) + ">\n";
         return robot.cmd_zdt_enable(s);
     }
+    if (cmd == "set_pusher_rpm") {         // [2026-09-17] shared runtime RPM: set_pusher_rpm <extend> [retract]
+        int e = 0, r = 0; iss >> e;
+        if (iss.fail()) return "ERR usage:set_pusher_rpm_<extend>_[retract]\n";
+        iss >> r;
+        return robot.cmd_set_pusher_rpm(e, r);
+    }
     if (cmd == "zdt_power") {
-        int s = 0; std::string v;
-        iss >> s >> v;
-        if (iss.fail() || s < WashRobot::CUP_SLAVE_FIRST || s > WashRobot::CUP_SLAVE_LAST)
-            return "ERR usage:zdt_power_<" + std::to_string(WashRobot::CUP_SLAVE_FIRST)
-                 + ".." + std::to_string(WashRobot::CUP_SLAVE_LAST) + ">_<on|off>\n";
-        if (v == "on")  return robot.cmd_zdt_power(s, true);
-        if (v == "off") return robot.cmd_zdt_power(s, false);
-        return "ERR expected_on_or_off\n";
+        // [2026-09-17 per user] `zdt_power all on|off` — Manual needs one button for
+        // "全部失能 / 全部使能" next to the per-slave ones. Runs the four slaves in
+        // order and reports which (if any) failed; the rest are still switched.
+        std::string tok, v;
+        iss >> tok >> v;
+        const std::string usage = "ERR usage:zdt_power_<" + std::to_string(WashRobot::CUP_SLAVE_FIRST)
+                 + ".." + std::to_string(WashRobot::CUP_SLAVE_LAST) + "|all>_<on|off>\n";
+        if (iss.fail() || tok.empty()) return usage;
+        if (v != "on" && v != "off") return "ERR expected_on_or_off\n";
+        const bool on = (v == "on");
+        if (tok == "all") {
+            std::string failed;
+            for (int s = WashRobot::CUP_SLAVE_FIRST; s <= WashRobot::CUP_SLAVE_LAST; ++s) {
+                const std::string r = robot.cmd_zdt_power(s, on);
+                if (r.rfind("OK", 0) != 0) failed += (failed.empty() ? "" : ",") + std::to_string(s);
+            }
+            if (!failed.empty()) return "ERR zdt_power_fail slaves=" + failed + "\n";
+            return std::string("OK zdt_power all=") + (on ? "on" : "off") + "\n";
+        }
+        int s = 0;
+        try { s = std::stoi(tok); } catch (...) { return usage; }
+        if (s < WashRobot::CUP_SLAVE_FIRST || s > WashRobot::CUP_SLAVE_LAST) return usage;
+        return robot.cmd_zdt_power(s, on);
     }
     if (cmd == "zdt_home") {
         std::string g; iss >> g;

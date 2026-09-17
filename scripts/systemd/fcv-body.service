@@ -11,6 +11,8 @@ Environment=FCV_EP_CRANE_HOST=192.168.5.25
 ExecStart=/bin/sh -c "mkfifo -m 600 /home/nexuni/run/body.in 2>/dev/null; exec 3<> /home/nexuni/run/body.in; exec stdbuf -oL -eL ./facade_cleaning_v2.out <&3"
 # 🔴 停止走 SIGTERM,**不送 console 的 exit**:exit 會跑 cmd_shutdown 關掉所有繼電器,
 #    腳吸著時等於當場失去真空。要那種乾淨關機請自己 `echo exit > ~/run/body.in`。
+# [2026-09-17] 共用執行期值(目前:推桿 RPM)由程式在 set_* 時寫 ~/run/body_settings.txt,開機等 :5001 起來後逐行回放。
+ExecStartPost=/bin/sh -c "for i in $(seq 1 30); do ss -ltn | grep -q ':5001' && break; sleep 2; done; cd /home/nexuni/run; if [ -f body_settings.txt ]; then L=$(cat body_settings.txt); echo \"$L\" | while read -r l; do [ -n \"$l\" ] && python3 crcmd.py 127.0.0.1:5001 \"$l\"; done; fi"
 KillSignal=SIGTERM
 Restart=on-failure
 RestartSec=5

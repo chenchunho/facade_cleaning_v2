@@ -2523,6 +2523,15 @@ std::string DamiaoAPI::dispatch(const std::string& line)
 	std::getline(iss, rest);
 	ltrim(rest);
 
+	// [2026-09-17 per user] `M1 SETFORCE <nm>` — live force change while pressed (no
+	// re-seek). Handled here, not in dispatch_motor, because it is a sequence over
+	// the force loop (like DEPLOY_F), not a single-motor primitive.
+	if (slot == &m1_) {
+		std::istringstream r2(rest); std::string sub; r2 >> sub;
+		for (auto& c : sub) c = static_cast<char>(::toupper(c));
+		if (sub == "SETFORCE") { std::string arg; std::getline(r2, arg); return cmd_force_adjust_sequence(arg); }
+	}
+
 	return dispatch_motor(*slot, rest);
 }
 
@@ -3039,6 +3048,66 @@ bool DamiaoAPI::press_hold_step_(float theta_cmd, int settle_ms,
 //  🔴 為什麼這樣就不需要 wall_mm：整條路徑沒有用到任何「牆在哪」的假設，
 //     只用馬達回報的 tau。牆變遠變近，收斂到的 theta 跟著變，壓力不變。
 // ============================================================
+
+// [2026-09-17] Step 6 + 7 of DEPLOY_F, shared with SETFORCE. See header.
+std::string DamiaoAPI::force_converge_(float target_nm, float th_max, int kp_idx,
+                                       float& theta_cmd, float& pos, float& tau,
+                                       float& kp_eff, int& iters_done, bool& converged)
+{
+	(void)kp_idx;
+	float last_cmd   = theta_cmd;
+	float last_tau   = tau;
+	converged = false;
+	// [2026-09-04 per facade web gui session] 迭代次數要出現在**回覆**裡，不能只在 stdout ——
+	// server.js 只橋接 TCP，stdout 永遠到不了 GUI，少了這個欄位 GUI 在結構上就不可能顯示收斂過程。
+	// 📌 目前實測恆為 1（一步就進容差）。**這正是它便宜的地方：哪天不是 1，
+	//    就是幾何或等效剛度變了的最早訊號** —— 而那正是力控要盯的東西。
+	iters_done = 0;
+	for (int it = 0; it < DEPLOY_F_ITER_MAX; ++it) {
+		float need = target_nm - tau;
+		if (std::abs(need) <= DEPLOY_F_TOL_NM) { converged = true; break; }
+		float next = theta_cmd + need / kp_eff;
+		if (next > th_max) {
+			std::ostringstream e;
+			e << std::fixed << std::setprecision(4)
+			  << "ERR DEPLOY_F: cannot reach " << std::setprecision(1) << target_nm
+			  << " Nm — 需要 theta=" << std::setprecision(4) << next
+			  << " 超過上限 " << th_max << "（tau 停在 "
+			  << std::setprecision(2) << tau << "）";
+			std::cerr << "[DEPLOY_F] " << e.str() << "\n";
+			return e.str();
+		}
+		if (!press_hold_step_(next, DEPLOY_F_RELAX_MS, pos, tau))
+			return "ERR DEPLOY_F: press failed (M1 not enabled?)";
+		++iters_done;
+		// 用這一步實際量到的斜率取代猜測（分母太小就不更新，避免雜訊放大）。
+		float d_cmd = next - last_cmd;
+		float d_tau = tau  - last_tau;
+		if (std::abs(d_cmd) > 1e-4f && d_tau > 0.1f) {
+			float k = d_tau / d_cmd;
+			if (k > 10.0f && k < 300.0f) kp_eff = k;   // 合理範圍才採信
+		}
+		std::cout << std::fixed << std::setprecision(4)
+		          << "[DEPLOY_F] iter " << it << " cmd=" << next
+		          << " pos=" << pos << " tau=" << std::setprecision(2) << tau
+		          << " kp_eff=" << std::setprecision(1) << kp_eff << "\n";
+		last_cmd  = next;
+		last_tau  = tau;
+		theta_cmd = next;
+	}
+
+	// ---- Step 7: 鬆弛複驗 -----------------------------------------------------
+	// 迭代裡已經每步等 RELAX_MS，這裡再等一次是為了抓「收斂之後才發生」的鬆弛。
+	std::this_thread::sleep_for(std::chrono::milliseconds(DEPLOY_F_FINAL_MS));
+	{
+		std::lock_guard<std::mutex> lk(motor_mutex_);
+		pos = m1_.motor->Get_Position();
+		tau = m1_.motor->Get_tau();
+	}
+	converged = (std::abs(target_nm - tau) <= DEPLOY_F_TOL_NM);
+	return "";
+}
+
 std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 {
 	float target_nm = DEPLOY_F_TARGET_NM;
@@ -3047,10 +3116,19 @@ std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 	std::string slot_str;
 	std::istringstream ps(params);
 	if (!(ps >> target_nm >> slot_str))
-		return "ERR usage: DEPLOY_F <target_nm> <LEFT|CENTER|RIGHT> [theta_min] [theta_max]";
+		return "ERR usage: DEPLOY_F <target_nm> <LEFT|CENTER|RIGHT> [theta_min] [theta_max] [hold_at_max]";
 	for (auto& c : slot_str) c = static_cast<char>(::toupper(c));
 	ps >> th_min >> th_max;
+	// [2026-09-17 per user] Distance-limit mode (design 2026-09-10, option A):
+	// pressure and distance are two limits, whichever comes first wins. With
+	// `hold_at_max` the caller says "theta_max is my distance budget": reaching it
+	// without contact is NOT a no_wall error any more — the arm stops there, keeps
+	// holding, accepts whatever tau it has, and answers `OK stopped=distance …`.
+	// Without the token, behaviour is unchanged (no_wall = ERR).
+	bool hold_at_max = false;
+	{ std::string tok; if (ps >> tok && tok == "hold_at_max") hold_at_max = true; }
 	if (target_nm <= 0.0f) return "ERR DEPLOY_F: target_nm must be > 0";
+	if (target_nm > DEPLOY_F_MAX_NM) return "ERR DEPLOY_F: target_nm exceeds max " + std::to_string((int)DEPLOY_F_MAX_NM) + " Nm";
 	if (th_min >= th_max)  return "ERR DEPLOY_F: theta_min must be < theta_max";
 
 	int m2_slot_idx;
@@ -3140,6 +3218,20 @@ std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 	//   改採**降低下壓力道(TARGET 8/COARSE 6)低力刷過**,刷到橫桿也無傷。
 	//   只保留守衛 A(no_wall,牆太遠/沒玻璃)與 Step6 的 cannot_reach。
 	// ---- 守衛 A：找不到牆 -----------------------------------------------------
+	if (!touched && hold_at_max) {
+		// Distance limit reached first: stay put (press_hold_step_ already left the
+		// hold at the last commanded theta) and report it as a normal outcome.
+		std::ostringstream o;
+		o << std::fixed
+		  << "OK stopped=distance tau=" << std::setprecision(2) << tau
+		  << " target=" << std::setprecision(1) << target_nm
+		  << std::setprecision(4) << " theta=" << pos << " cmd=" << (theta_cmd - DEPLOY_F_COARSE_STEP)
+		  << " contact=" << pos << " kp_eff=0.0 iters=0"
+		  << " ms=" << (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+		         std::chrono::steady_clock::now() - t_begin).count();
+		std::cout << "[DEPLOY_F] " << o.str() << " (距離上限 " << th_max << " 先到,停在原地不算失敗)\n";
+		return o.str();
+	}
 	if (!touched) {
 		std::ostringstream e;
 		e << std::fixed << std::setprecision(4)
@@ -3195,56 +3287,12 @@ std::string DamiaoAPI::cmd_deploy_force_sequence(const std::string& params)
 	}
 	std::cout << std::fixed << std::setprecision(2)
 	          << "[DEPLOY_F] relaxed tau=" << tau << " (before secant)\n";
-	float last_cmd   = theta_cmd;
-	float last_tau   = tau;
 	bool  converged  = false;
-	// [2026-09-04 per facade web gui session] 迭代次數要出現在**回覆**裡，不能只在 stdout ——
-	// server.js 只橋接 TCP，stdout 永遠到不了 GUI，少了這個欄位 GUI 在結構上就不可能顯示收斂過程。
-	// 📌 目前實測恆為 1（一步就進容差）。**這正是它便宜的地方：哪天不是 1，
-	//    就是幾何或等效剛度變了的最早訊號** —— 而那正是力控要盯的東西。
 	int   iters_done = 0;
-	for (int it = 0; it < DEPLOY_F_ITER_MAX; ++it) {
-		float need = target_nm - tau;
-		if (std::abs(need) <= DEPLOY_F_TOL_NM) { converged = true; break; }
-		float next = theta_cmd + need / kp_eff;
-		if (next > th_max) {
-			std::ostringstream e;
-			e << std::fixed << std::setprecision(4)
-			  << "ERR DEPLOY_F: cannot reach " << std::setprecision(1) << target_nm
-			  << " Nm — 需要 theta=" << std::setprecision(4) << next
-			  << " 超過上限 " << th_max << "（tau 停在 "
-			  << std::setprecision(2) << tau << "）";
-			std::cerr << "[DEPLOY_F] " << e.str() << "\n";
-			return e.str();
-		}
-		if (!press_hold_step_(next, DEPLOY_F_RELAX_MS, pos, tau))
-			return "ERR DEPLOY_F: press failed (M1 not enabled?)";
-		++iters_done;
-		// 用這一步實際量到的斜率取代猜測（分母太小就不更新，避免雜訊放大）。
-		float d_cmd = next - last_cmd;
-		float d_tau = tau  - last_tau;
-		if (std::abs(d_cmd) > 1e-4f && d_tau > 0.1f) {
-			float k = d_tau / d_cmd;
-			if (k > 10.0f && k < 300.0f) kp_eff = k;   // 合理範圍才採信
-		}
-		std::cout << std::fixed << std::setprecision(4)
-		          << "[DEPLOY_F] iter " << it << " cmd=" << next
-		          << " pos=" << pos << " tau=" << std::setprecision(2) << tau
-		          << " kp_eff=" << std::setprecision(1) << kp_eff << "\n";
-		last_cmd  = next;
-		last_tau  = tau;
-		theta_cmd = next;
-	}
-
-	// ---- Step 7: 鬆弛複驗 -----------------------------------------------------
-	// 迭代裡已經每步等 RELAX_MS，這裡再等一次是為了抓「收斂之後才發生」的鬆弛。
-	std::this_thread::sleep_for(std::chrono::milliseconds(DEPLOY_F_FINAL_MS));
 	{
-		std::lock_guard<std::mutex> lk(motor_mutex_);
-		pos = m1_.motor->Get_Position();
-		tau = m1_.motor->Get_tau();
+		const std::string cerr_ = force_converge_(target_nm, th_max, kp_idx, theta_cmd, pos, tau, kp_eff, iters_done, converged);
+		if (!cerr_.empty()) return cerr_;
 	}
-	converged = (std::abs(target_nm - tau) <= DEPLOY_F_TOL_NM);
 
 	std::ostringstream oss;
 	oss << std::fixed
@@ -3481,6 +3529,51 @@ std::string DamiaoAPI::startup_then_init()
 	return st + " | INIT:" + in;
 }
 
+
+// [2026-09-17 per user] M1 SETFORCE <nm> — see header. Manual 手臂卡「即時修改力道 → 套用」。
+std::string DamiaoAPI::cmd_force_adjust_sequence(const std::string& params)
+{
+	float target_nm = 0.0f;
+	std::istringstream ps(params);
+	if (!(ps >> target_nm)) return "ERR usage: M1 SETFORCE <target_nm>";
+	if (target_nm <= 0.0f) return "ERR SETFORCE: target_nm must be > 0";
+	if (target_nm > DEPLOY_F_MAX_NM) return "ERR SETFORCE: target_nm exceeds max " + std::to_string((int)DEPLOY_F_MAX_NM) + " Nm";
+	if (!m1_.enabled) return "ERR SETFORCE: M1 not enabled";
+	const auto t_begin = std::chrono::steady_clock::now();
+	float pos = 0.0f, tau = 0.0f;
+	{
+		std::lock_guard<std::mutex> lk(motor_mutex_);
+		pos = m1_.motor->Get_Position();
+		tau = m1_.motor->Get_tau();
+	}
+	// Must already be pressing: below the touch threshold there is no contact to converge on.
+	if (tau < DEPLOY_F_TOUCH_NM * 0.5f)
+		return "ERR SETFORCE: not_in_contact (tau=" + std::to_string(tau).substr(0, 5) + " < touch) — use DEPLOY_F first";
+	float theta_cmd = m1_.hold_pos;
+	const float th_max = DEPLOY_F_THETA_MAX;
+	// kp_eff from the tool currently selected (same cache DEPLOY_F uses)
+	float m2pos = 0.0f;
+	{ std::lock_guard<std::mutex> lk(motor_mutex_); m2pos = m2_.motor->Get_Position(); }
+	const std::string tool = m2_tool_name(m2pos);
+	const int kp_idx = (tool == "squeegee") ? 0 : (tool == "roller" ? 2 : 1);
+	float kp_eff = deploy_f_kp_eff_cache_[kp_idx];
+	bool converged = false; int iters_done = 0;
+	std::cout << std::fixed << std::setprecision(2) << "[SETFORCE] " << tau << " → " << target_nm << " Nm from cmd=" << std::setprecision(4) << theta_cmd << "\n";
+	const std::string err = force_converge_(target_nm, th_max, kp_idx, theta_cmd, pos, tau, kp_eff, iters_done, converged);
+	if (!err.empty()) return err;
+	std::ostringstream oss;
+	oss << std::fixed << (converged ? "OK" : "WARN")
+	    << " tau=" << std::setprecision(2) << tau
+	    << " target=" << std::setprecision(1) << target_nm
+	    << std::setprecision(4) << " theta=" << pos << " cmd=" << theta_cmd
+	    << " wall_mm=" << std::setprecision(0) << wall_mm_from_theta(pos)
+	    << " kp_eff=" << std::setprecision(1) << kp_eff << " iters=" << iters_done
+	    << " ms=" << (int)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_begin).count();
+	if (converged && kp_eff > 10.0f && kp_eff < 300.0f) deploy_f_kp_eff_cache_[kp_idx] = kp_eff;
+	std::cout << "[SETFORCE] " << oss.str() << "\n";
+	return oss.str();
+}
+
 std::string DamiaoAPI::cmd_status_sequence()
 {
 	float pos_1, vel_1, tau_1;
@@ -3502,6 +3595,7 @@ std::string DamiaoAPI::cmd_status_sequence()
 	}
 	oss << std::fixed << std::setprecision(4)
 		<< "[M1] pos=" << pos_1 << " vel=" << vel_1 << " tau=" << tau_1
+		<< " wall_mm=" << std::setprecision(0) << wall_mm_from_theta(pos_1) << std::setprecision(4)   // [2026-09-17] 估測機身-玻璃距離(θ 幾何式)
 		<< " hold=" << (m1_.hold_en.load() ? 1 : 0)
 		<< " moving=" << (m1_.move_act.load() ? 1 : 0)
 		<< " err=" << err_name(err_1)

@@ -307,6 +307,48 @@ function numArg(v, lo, hi, asInt) {
     return asInt ? String(Math.round(n)) : String(n);
 }
 
+// [2026-09-17 AI-2, for agent-ai-db] GUI「存檔」鈕:把一組參數存成預設但**不起跑**(草圖右欄第一顆)。
+// 在此之前 mission_params.json 只在 spawn 成功後才寫 ⇒ 想先調好參數、下次直接用,得先跑一趟。
+// 驗證與 missionStart 同一套規則(範圍/格式),但不看牆高(牆高不是參數,起跑時才要)。
+// 存進去的形狀與 missionStart 的 missionDefaultsSave 相同,多一個 saved:1 讓 GUI 分得出「存的」與「跑過的」。
+// ⚠️ 這裡把 start 的驗證抄了一份(~15 行);要合併成一支 missionValidate() 請自便,我沒動 missionStart。
+function missionSave(p, reply) {
+    const cycles = numArg(p.cycles,    1,   999, true);
+    const steps  = numArg(p.steps,     1,    99, true);
+    const stepCm = numArg(p.step_cm,   1,   200, true);
+    const roll   = numArg(p.roll_trip, 0.5,  45, false);
+    const diff   = numArg(p.diff_trip, 0.5, 100, false);
+    const railCm = numArg(p.rail_cm,   0,   999, true);
+    const bad = [];
+    if (cycles === null) bad.push('cycles(1~999)');
+    if (steps  === null) bad.push('steps(1~99)');
+    if (stepCm === null) bad.push('step_cm(1~200)');
+    if (roll   === null) bad.push('roll_trip(0.5~45)');
+    if (diff   === null) bad.push('diff_trip(0.5~100)');
+    if (railCm === null) bad.push('rail_cm(0~999)');
+    if (p.fan  !== undefined && p.fan  !== '' && !/^(move|all)(:(5|6|7|8|9|10))?$/.test(String(p.fan))) bad.push('fan(move[:5-10]|all[:5-10])');
+    if (p.rail !== undefined && p.rail !== '') {
+        const r = String(p.rail), m = /^(\d{1,3})-(\d{1,3})$/.exec(r);
+        if (!(r === 'off' || /^(0|100)$/.test(r) || (m && +m[1] <= 130 && +m[2] <= 130 && m[1] !== m[2]))) bad.push('rail(<起>-<迄> 0..130, 起≠迄 | off)');
+    }
+    const armNm = (p.arm_nm !== undefined && p.arm_nm !== '') ? numArg(p.arm_nm, 1, 15, false) : undefined;
+    if (armNm === null) bad.push('arm_nm(1~15)');
+    if (bad.length) return reply({ ok: false, err: 'bad_params', detail: bad });
+    missionDefaultsSave({
+        cycles: Number(cycles), steps: Number(steps), step_cm: Number(stepCm),
+        roll_trip: Number(roll), diff_trip: Number(diff), rail_cm: Number(railCm),
+        fan: (p.fan === undefined || p.fan === '') ? null : String(p.fan),
+        rail: (p.rail === undefined || p.rail === '') ? null : String(p.rail),
+        arm_nm: (armNm === undefined) ? null : Number(armNm),
+        dry: (p.dry === 1 || p.dry === '1' || p.dry === true) ? 1 : 0,
+        return_top: (p.return_top === 0 || p.return_top === '0' || p.return_top === false) ? 0 : 1,
+        saved: 1,
+        at: new Date().toISOString()
+    });
+    console.log('[mission] defaults saved by GUI: ' + JSON.stringify(missionDefaults));
+    reply({ ok: true, defaults: missionDefaults });
+}
+
 function missionStart(p, reply) {
     // ④ 單一實例：已經在跑就拒絕，並回報正在跑的那組參數。
     if (mission.proc)
@@ -346,6 +388,9 @@ function missionStart(p, reply) {
         const okRail = r === 'off' || /^(0|100)$/.test(r) || (m && +m[1] <= 130 && +m[2] <= 130 && m[1] !== m[2]);
         if (okRail) kv.push('rail=' + r); else bad.push('rail(<起>-<迄> 0..130, 起≠迄 | off)');
     }
+    // [2026-09-17 per user] 任務結束要不要回頂端(GUI 勾勾)。只有明確關掉才送 return_top=0,腳本預設 1。
+    const returnTop = !(p.return_top === 0 || p.return_top === '0' || p.return_top === false);
+    if (!returnTop) kv.push('return_top=0');
     // 壓力 / 乾掃走環境變數（腳本既有介面）：arm_nm 1~15、dry=1。
     const armNm = (p.arm_nm !== undefined && p.arm_nm !== '') ? numArg(p.arm_nm, 1, 15, false) : undefined;
     if (armNm === null) bad.push('arm_nm(1~15)');
@@ -378,6 +423,7 @@ function missionStart(p, reply) {
         rail: (p.rail === undefined || p.rail === '') ? null : String(p.rail),
         arm_nm: (armNm === undefined) ? null : Number(armNm),
         dry: (p.dry === 1 || p.dry === '1' || p.dry === true) ? 1 : 0,
+        return_top: (p.return_top === 0 || p.return_top === '0' || p.return_top === false) ? 0 : 1,
         at: new Date().toISOString()
     });
     mission.args      = { cycles, steps, step_cm: stepCm, roll_trip: roll, diff_trip: diff,
@@ -499,8 +545,11 @@ function missionStop(reply) {
     // 步驟 ②：本體 arm_park —— **手臂卸力的 backstop**。
     //   即使 python 卡死收不到 SIGINT、或 cleanup 跑不完，手臂也保證會被收回。
     //   重複卸力是 no-op；不卸力的代價是馬達鎖存後只能斷電。
-    const armOk = washrobot.send('arm_park');
-    missionPush(`[web] STOP ②：本體 arm_park（手臂卸力）` +
+    // [2026-09-17 per user] arm_retract, not arm_park: 急停/停止時手臂要收回,但**馬達不能失能**
+    //   (09-11 規則「只要機器上電 arm 都應該使能——失能手臂會亂跑」)。arm_retract 同樣把 M1 收離
+    //   玻璃卸掉持續施力(過熱疑慮解掉),但保持通電;之後也不必重跑 INIT。
+    const armOk = washrobot.send('arm_retract');
+    missionPush(`[web] STOP ②：本體 arm_retract（手臂收回、保持使能）` +
                 (armOk ? ' 已送出' : ' —— 🔴 送不出去，本體橋接未連線'));
 
     // 步驟 ③：SIGINT 讓腳本跑自己的 cleanup（風扇關、motion_hz 還原、再 arm_park 一次）。
@@ -594,6 +643,7 @@ wss.on('connection', (ws) => {
             if (msg.mission === 'pause')    return missionPause(reply);      // [2026-09-15]
             if (msg.mission === 'continue') return missionContinue(reply);   // [2026-09-15]
             if (msg.mission === 'state')  return reply({ ok: true, state: missionSnapshot() });
+            if (msg.mission === 'save')   return missionSave(msg.params || {}, reply);     // [2026-09-17 AI-2] GUI 存檔鈕
             return reply({ ok: false, err: 'unknown_mission_action' });
         }
 

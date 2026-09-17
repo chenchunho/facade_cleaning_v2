@@ -251,6 +251,8 @@ bool WashRobot::init() {
     // physical absence (and PausedOnError per design).
     lvl_.init(cli_22_, XKC_SLAVE, dbg);
     std::cout << "[OK] XKC water level slave " << XKC_SLAVE << " (sensor presence not probed)\n";
+    lvl_high_.init(cli_22_, XKC_HIGH_SLAVE, dbg);
+    std::cout << "[OK] XKC high-water slave " << XKC_HIGH_SLAVE << " (sensor presence not probed)\n";
 
     // QX-DO24 PWM output (slave 6, same bus). Mode B init does no probe, so a
     // missing module is only discovered on the first pwm command — that's fine
@@ -1073,14 +1075,29 @@ std::string WashRobot::cmd_arm_deploy(int wall_mm, const std::string& slot) {
 //   在這裡再套一次舊的幾何檢查等於把剛拆掉的假設又裝回來。
 // ⚠️ 回傳保留 motor_api 的原字串（OK tau=... / ERR ... no_wall / obstacle），
 //   呼叫端要判讀就看它，不要只看 OK/ERR 前綴。
-std::string WashRobot::cmd_arm_deploy_f(double target_nm, const std::string& slot) {
+std::string WashRobot::cmd_arm_deploy_f(double target_nm, const std::string& slot, int dist_mm) {
     if (target_nm <= 0.0) return "ERR invalid_target_nm\n";
+    if (target_nm > ARM_FORCE_MAX_NM) return "ERR target_nm_exceeds_max_7\n";   // [2026-09-17 per user] 防呆
     std::string s = slot;
     for (auto& c : s) c = (char)std::toupper((unsigned char)c);
     if (s != "LEFT" && s != "CENTER" && s != "RIGHT")
         return "ERR invalid_slot (LEFT|CENTER|RIGHT)\n";
     std::ostringstream oss;
     oss << "DEPLOY_F " << target_nm << " " << s;
+    // [2026-09-17 per user] Manual 手臂卡「壓上距離」: 壓力/距離雙上限,先到先停。
+    // 距離(機身到玻璃,mm)用 motor_api 的實測幾何 `mm = 490·sin(θ−0.38)+121` 反推成 θ_max
+    // (motor_api main_api.h 2026-09-02 三點擬合;M1 上限 θ=1.10 ⇒ 最遠 444 mm),
+    // 送 `DEPLOY_F nm slot θ_min θ_max hold_at_max`。0 = 不限距離(舊行為)。
+    if (dist_mm > 0) {
+        const double sin_arg = (dist_mm - 121.0) / 490.0;
+        if (sin_arg <= 0.0 || sin_arg >= 1.0) return "ERR dist_mm_range (122..444)\n";
+        double th_max = std::asin(sin_arg) + 0.38;
+        // 🔴 Beyond the M1 hard limit the "limit" would be no limit at all — reject,
+        //    don't clamp (first test: 500 mm clamped to 1.10 and did a full press).
+        if (th_max > 1.10) return "ERR dist_mm_range (122..444)\n";
+        if (th_max <= 0.570) return "ERR dist_mm_too_close (θ_max ≤ θ_min 0.570)\n";
+        oss << " 0.570 " << std::fixed << std::setprecision(4) << th_max << " hold_at_max";
+    }
 
     // 與 cmd_arm_deploy 同一個理由：PARK 會停用馬達，不先 ENABLE 就會靜默失敗。
     arm_cmd_("M1 ENABLE", 5);
@@ -1107,6 +1124,31 @@ std::string WashRobot::cmd_arm_park() {
 // 為什麼要有:PARK 會失能,而 per user「失能只在校正位置時,其他狀態都不該失能」——
 // 失能時手臂會因無保持力而亂跑/漂。清潔流程每組合之間收手臂用這個,不用 PARK。
 // 走 M1 MOVETO 0(非同步),送出後等 M1 回到 ~0(moving=0)才回,好讓呼叫端知道收妥。
+// [2026-09-17 per user] Tool-slot passthrough. After the squeegee pass the script
+// puts M2 back on the roller (the standby / default tool) so a mission never
+// ends with the squeegee out; motor_api's LR_SLOT already refuses while M1 is
+// still on the glass, so no extra guard here.
+// [2026-09-17 per user] Manual 手臂卡「即時修改力道 → 套用」:已壓在牆上時只跑收斂,不重新尋觸。
+std::string WashRobot::cmd_arm_force(double target_nm) {
+    if (target_nm <= 0.0) return "ERR invalid_target_nm\n";
+    if (target_nm > ARM_FORCE_MAX_NM) return "ERR target_nm_exceeds_max_7\n";
+    std::ostringstream oss; oss << "M1 SETFORCE " << target_nm;
+    std::cout << "[arm] " << oss.str() << "\n";
+    std::string r = arm_cmd_(oss.str(), 30);
+    if (r.empty()) return "ERR arm_no_reply\n";
+    if (r.back() != '\n') r.push_back('\n');
+    return r;
+}
+
+std::string WashRobot::cmd_arm_slot(const std::string& slot) {
+    if (slot != "LEFT" && slot != "CENTER" && slot != "RIGHT") return "ERR usage:arm_slot_<LEFT|CENTER|RIGHT>\n";
+    std::cout << "[arm] SLOT " << slot << "\n";
+    std::string r = arm_cmd_("M2 LR_SLOT " + slot, 30);
+    if (r.empty()) return "ERR arm_no_reply\n";
+    if (r.back() != '\n') r.push_back('\n');
+    return r;
+}
+
 std::string WashRobot::cmd_arm_retract() {
     std::cout << "[arm] RETRACT (M1->0, keep enabled)\n";
     std::string r = arm_cmd_("M1 MOVETO 0", 30);
@@ -1864,15 +1906,20 @@ bool WashRobot::verify_arm_m2_at_slot_(const std::string& slot) {
     return fail;
 }
 
+// [2026-09-17 per user] "Stow" = M1 back to 0, motors STAY ENABLED. The arm is
+// ready (roller slot, enabled) from power-up, an emergency only pulls it back to
+// that state, and nothing in operation may de-energise it — a de-energised arm
+// swings freely while the machine hangs in the air. The only place PARK
+// (home + disable) is still legitimate is calibration, via the manual
+// `arm_park` command. Every former operational PARK below now goes through
+// cmd_arm_retract().
 bool WashRobot::ensure_arm_parked_after_rope_(const std::string& ctx) {
     if (!ARM_ROPE_PROTECTION) return false;
-    if (arm_stow_state_.load() == ArmStowState::Parked) return false;   // already parked
-    std::cout << "[arm_protect] " << ctx << " — PARK\n";
-    if (arm_cmd_("PARK", 30).rfind("OK", 0) != 0) {
-        std::cerr << "[arm_protect] PARK failed — non-fatal, arm may still be deployed\n";
-        return true;   // log only, don't block flow (retract already done)
+    std::cout << "[arm_protect] " << ctx << " — RETRACT (M1 → 0, keep enabled)\n";
+    if (cmd_arm_retract().rfind("OK", 0) != 0) {
+        std::cerr << "[arm_protect] retract failed — non-fatal, arm may still be deployed\n";
+        return true;   // log only, don't block flow
     }
-    arm_stow_state_.store(ArmStowState::Parked);
     return false;
 }
 
@@ -2014,7 +2061,7 @@ std::string WashRobot::do_arm_clean_sweep_(int wall_mm, int rounds) {
             //   08-28 政策：「沒開過時關它是 no-op，開著沒關才是問題」）。
             //   原本 gate 在 deployed —— DEPLOY RIGHT 失敗時滾筒會一直轉沒人關。
             pqw_.controlRelay(CH_BRUSH, false);
-            if (init_ok) arm_cmd_("PARK", 30);
+            if (init_ok) cmd_arm_retract();   // [2026-09-17] was PARK — keep enabled
             return "ERR aborted\n";
         }
 
@@ -2039,7 +2086,7 @@ std::string WashRobot::do_arm_clean_sweep_(int wall_mm, int rounds) {
                                DM2J_ARM_STEP_SWEEP_EST_MS);
 
         if (deployed) {
-            arm_cmd_("PARK", 30);
+            cmd_arm_retract();   // [2026-09-17] was PARK — keep enabled
         }
         std::cout << "[arm_clean_sweep] round " << (r + 1) << "/" << rounds << " done\n";
     }
@@ -2094,9 +2141,9 @@ std::string WashRobot::do_arm_clean_sweep_continuous_(int wall_mm,
         });
         // [2026-05-29] PARK timeout 30s → 10s (fast fail when motor_api 沒回覆,
         // 避免 cleanup 卡 30s × 2 attempts = 60s)。
-        std::string r = arm_cmd_("PARK", 10);
+        std::string r = arm_cmd_("M1 MOVETO 0", 10);   // [2026-09-17] was PARK — keep enabled
         if (r.rfind("OK", 0) == 0) {
-            arm_stow_state_.store(ArmStowState::Parked);
+            arm_stow_state_.store(ArmStowState::Unknown);
         } else if (!arm_sweep_obstacle_pending_.load()) {
             // PARK 也沒回覆 → 跟 sweep 期間 DEPLOY no_reply 同樣處理：
             // 設 flag 讓 main thread pause + 問 user 要不要收回 slide。
@@ -2351,8 +2398,8 @@ std::string WashRobot::do_arm_clean_sweep_continuous_(int wall_mm,
                     std::cerr << "[arm_m2_verify] DEPLOY " << m2_slot
                               << " attempt " << attempt << "/" << MAX_DEPLOY_ATTEMPTS
                               << " — " << last_fail << " — retrying\n";
-                    // PARK 釋放 M2 + 500ms 讓 passive 馬達 settle、re-init
-                    arm_cmd_("PARK", 10);
+                    // [2026-09-17] was PARK(釋放 M2 + settle);改成收 M1 不失能 —— 失能的手臂在空中會亂跑
+                    arm_cmd_("M1 MOVETO 0", 10);
                     sleep_ms_(500);
                 } else {
                     std::cerr << "[arm_m2_verify] DEPLOY " << m2_slot
@@ -2451,7 +2498,7 @@ std::string WashRobot::do_arm_clean_sweep_continuous_(int wall_mm,
 
 // Crane EVT line dispatcher. Called from crane_cmd_ when an EVT line is drained
 // from the RPC channel. Records safety-critical alarms (tension_alarm /
-// tension_total_limit) into atomic flag for watchdog to escalate to PausedOnError.
+// tension_retract_stop) into atomic flag for watchdog to escalate to PausedOnError.
 // [2026-09-09] Split out of handle_crane_evt_ so a background reader can record
 // alarms without paying the full handler's cost.
 //
@@ -2468,13 +2515,13 @@ std::string WashRobot::do_arm_clean_sweep_continuous_(int wall_mm,
 // So: record-only here (atomics + one short mutex), no printing, no broadcast.
 // Safe to call from any thread.
 //
-// Returns true if a tension_total_limit was suppressed by balance calibration,
+// Returns true if a tension_retract_stop was suppressed by balance calibration,
 // so the full handler can log that without re-testing the same condition.
 bool WashRobot::record_crane_evt_(const std::string& line) {
     bool suppressed = false;
     if (line.find("tension_alarm") != std::string::npos ||
-        line.find("tension_total_limit") != std::string::npos) {
-        // [2026-06-02 v7, per Sadie bench] Suppress tension_total_limit during
+        line.find("tension_retract_stop") != std::string::npos) {
+        // [2026-06-02 v7, per Sadie bench] Suppress tension_retract_stop during
         // balance calibration. During cal (especially after Phase 2/3 cup
         // release) all robot weight transfers to ropes, easily pushing
         // total tension >50kg even at normal load. Letting this fire causes
@@ -2482,12 +2529,12 @@ bool WashRobot::record_crane_evt_(const std::string& line) {
         // which corrupts the post-cal state machine. tension_alarm (per-side
         // peak) still fires — only the total-sum gate is suppressed.
         if (balance_cal_running_.load() &&
-            line.find("tension_total_limit") != std::string::npos) {
+            line.find("tension_retract_stop") != std::string::npos) {
             suppressed = true;
         } else {
             std::lock_guard<std::mutex> lk(crane_alarm_mtx_);
-            if (line.find("tension_total_limit") != std::string::npos)
-                crane_alarm_kind_ = "tension_total_limit";
+            if (line.find("tension_retract_stop") != std::string::npos)
+                crane_alarm_kind_ = "tension_retract_stop";
             else
                 crane_alarm_kind_ = "tension_alarm";
             crane_alarm_detail_ = line;
@@ -2784,7 +2831,7 @@ void WashRobot::crane_watchdog_loop_() {
         }
 
         // Crane safety alarm (set by handle_crane_evt_ when EVT tension_alarm
-        // / tension_total_limit drained from any crane_cmd_'s recv stream).
+        // / tension_retract_stop drained from any crane_cmd_'s recv stream).
         // Per Q3=(a) 2026-05-07 design: escalate to PausedOnError so operator
         // must inspect before next motion.
         if (crane_alarm_pending_.exchange(false)) {
@@ -2793,6 +2840,21 @@ void WashRobot::crane_watchdog_loop_() {
                 std::lock_guard<std::mutex> lk(crane_alarm_mtx_);
                 kind   = crane_alarm_kind_;
                 detail = crane_alarm_detail_;
+            }
+            // [2026-09-17 per user] Only pause when there is something to pause.
+            // A crane tension alarm while the body is Idle/Ready (e.g. the operator
+            // pulling with Manual ▲ tripped up_stop_total_kg — the crane already
+            // did hold_all_off) used to drop the body into Paused(error), and from
+            // there crane_goto is refused ⇒ "按放到地面不會動" with no obvious cause
+            // until someone finds `reset`. With no flow running the alarm is
+            // information, not a state change: log + EVT, state untouched.
+            const State cur_st = state_.load();
+            const bool flowing = (cur_st == State::Running) || step_in_progress_.load();
+            if (!flowing) {
+                std::cout << "[crane_watchdog] CRANE ALARM " << kind
+                          << " while " << state_name(cur_st) << " (no flow) — logged only. Detail: " << detail << "\n";
+                evt_("crane_alarm kind=" + kind + " state=" + state_name(cur_st) + " action=none");
+                continue;
             }
             std::cout << "[crane_watchdog] CRANE ALARM " << kind
                       << " — entering PausedOnError. Detail: " << detail << "\n";
@@ -3224,6 +3286,7 @@ bool WashRobot::zdt_wait_motion_done_(int slave, int timeout_ms, bool defer_stal
 }
 
 bool WashRobot::pusher_move_(int slave, int pulse, int rpm, int acc, bool defer_stall_release) {
+    if (rpm <= 0) rpm = pusher_rpm_extend_();
     if (Z_(slave).motion_control_pos_mode_nowait(0, acc, rpm, pulse, 1, 0, 1)) {
         std::cout << "[pusher_move ZDT:" << slave << "] pos_mode_nowait FAIL"
                   << " (pulse=" << pulse << " rpm=" << rpm << " acc=" << acc
@@ -3330,6 +3393,7 @@ bool WashRobot::zdt_wait_motion_done_many_(const std::vector<int>& slaves, int t
 // (end zdt_wait_motion_done_many_)
 
 bool WashRobot::pusher_move_many_(const std::vector<int>& slaves, int pulse, int rpm, int acc, bool defer_stall_release) {
+    if (rpm <= 0) rpm = pusher_rpm_extend_();
     // [2026-07-15] zdt_bus_mtx_ — see declaration comment (WASH_ROBOT.h).
     std::lock_guard<std::mutex> zdt_lk(zdt_bus_mtx_);
 
@@ -3520,7 +3584,7 @@ bool WashRobot::pusher_move_many_(const std::vector<int>& slaves, int pulse, int
 // Returns true (error) on any stall during stage 2 wait, or timeout.
 bool WashRobot::pusher_two_stage_retract_(const std::vector<int>& slaves, int rpm) {
     if (slaves.empty()) return false;
-    if (rpm <= 0) rpm = PUSHER_RPM_RETRACT_FULL;   // 0/未給 = 沿用常數(既有呼叫端行為不變)
+    if (rpm <= 0) rpm = pusher_rpm_retract_();   // 0/未給 = 共用執行期值(set_pusher_rpm)
 
     // [2026-07-15] zdt_bus_mtx_ — see declaration comment (WASH_ROBOT.h).
     std::lock_guard<std::mutex> zdt_lk(zdt_bus_mtx_);
@@ -3641,18 +3705,36 @@ bool WashRobot::pusher_two_stage_retract_(const std::vector<int>& slaves, int rp
     // RETRACT_VERIFY_TOL_DEG = 50° (~500 pulse ≈ 0.15cm pusher slack); normal end
     // positions seen in feet retract are < 1° (e.g. 0.4° / -0.1° / 0.07° / 0.09°).
     constexpr double RETRACT_VERIFY_TOL_DEG = 50.0;
-    for (int s : slaves) {
-        if (Z_(s).get_system_status()) {
-            std::cout << "[2stage_retract ZDT:" << s
-                      << "] post-wait status read fail — can't verify, fail-safe abort\n";
-            return true;
+    // [2026-09-17 per user] FAKE-DONE has a second cause besides a stall: the
+    // synchronised start never reached the motors (the .20 bus dropped the
+    // broadcast — 11:36 today the PQW readback on the same bus returned size=0 at
+    // that very instant) and wait_many read a stale "not moving" as done. All four
+    // sat at ~1160° with ~500 mA (a stall shows 2–3 A) and emergency_detach gave
+    // up with the feet half out. Re-issue the retract ONCE for the slaves that are
+    // off target: absolute target 0 is idempotent, the cups are already released,
+    // and a real stall will simply stall again and be reported as such.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        std::vector<int> off;
+        for (int s : slaves) {
+            if (Z_(s).get_system_status()) {
+                std::cout << "[2stage_retract ZDT:" << s
+                          << "] post-wait status read fail — can't verify, fail-safe abort\n";
+                return true;
+            }
+            const double pos = Z_(s).status.real_pos;
+            if (std::abs(pos) > RETRACT_VERIFY_TOL_DEG) {
+                std::cout << "[2stage_retract ZDT:" << s
+                          << "] FAKE-DONE detected: pos=" << pos
+                          << "° (expected ≈0, tol=±" << RETRACT_VERIFY_TOL_DEG << "°)"
+                          << (attempt == 0 ? " — re-issuing retract once (sync-start may have been lost)\n"
+                                           : " — still off target after retry, fail\n");
+                off.push_back(s);
+            }
         }
-        const double pos = Z_(s).status.real_pos;
-        if (std::abs(pos) > RETRACT_VERIFY_TOL_DEG) {
-            std::cout << "[2stage_retract ZDT:" << s
-                      << "] FAKE-DONE detected: pos=" << pos
-                      << "° (expected ≈0, tol=±" << RETRACT_VERIFY_TOL_DEG
-                      << "°) — pusher likely stalled, fail\n";
+        if (off.empty()) break;
+        if (attempt == 1) return true;
+        if (pusher_move_many_(off, 0, rpm, PUSHER_ACC_RETRACT)) {
+            std::cout << "[2stage_retract] retry retract FAILED (stall/timeout)\n";
             return true;
         }
     }
@@ -3682,6 +3764,7 @@ bool WashRobot::pusher_extend_with_disable_seal_(const std::vector<int>& slaves,
                                                    bool stop_on_first_seal,
                                                    int max_iters,
                                                    const std::vector<int>* stop_group_ids) {
+    if (fast_rpm <= 0) fast_rpm = pusher_rpm_extend_();
     if (any_obstacle_out) *any_obstacle_out = false;   // default-clear so caller doesn't need to pre-init
     if (slaves.empty()) return false;
     if (slaves.size() != target_pulses.size()) {
@@ -4494,7 +4577,7 @@ bool WashRobot::smart_extend_subset_(const std::string& group, const std::vector
         extend_pulses[i] = feet_target_capped_(s);
     }
 
-    const int extend_rpm = PUSHER_RPM;
+    const int extend_rpm = pusher_rpm_extend_();
     const int extend_acc = PUSHER_ACC;
 
     std::cout << "[smart_extend] " << group << " slaves={";
@@ -4816,7 +4899,7 @@ void WashRobot::feet_topup_unsealed_(const std::string& group) {
     // top-up gives up after 2 pushes so the group-switch gap stays short — an
     // unsealed cup just retries next step (side still anchored by the sealed one).
     bool obstacle = false;
-    if (pusher_extend_with_disable_seal_(unsealed, targets, PUSHER_RPM, PUSHER_ACC,
+    if (pusher_extend_with_disable_seal_(unsealed, targets, pusher_rpm_extend_(), PUSHER_ACC,
                                          &obstacle, /*stop_on_first_seal=*/false, /*max_iters=*/2)) {
         std::cout << "[topup] " << group << " extend hard-fail — leave unsealed, proceed\n";
     }

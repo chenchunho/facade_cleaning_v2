@@ -68,6 +68,7 @@ async function bringUp() {
     if (!ok) throw new Error('fake_robot did not come up (see tmp/gui_v3_check/fake_robot.log)');
   }
   try { fs.unlinkSync(path.join(RUN, 'run', 'wall_height.json')); } catch (_) {}   // server wall memory must be fresh too (①②⑦ read it)
+  try { fs.unlinkSync(path.join(RUN, 'run', 'mission_params.json')); } catch (_) {}  // 09-17: 存檔 check writes it; a stale one would also pre-fill the form
   let port = 8090; while (!(await portFree(port))) port++;
   const w = spawn('node', ['server.js'], {
     cwd: WEB,
@@ -115,7 +116,18 @@ async function secBoot(P) {
   await sleep(3500);
   chk('page boots with 0 jsdom errors', P.errors.length, 0);
   chk('all four connection dots up', ['c-ws', 'c-wr', 'c-cr', 'c-ar'].map(id => P.w.document.getElementById(id).className), ['up', 'up', 'up', 'up']);
-  chk('default tab = Mission; tabs = Mission/Dashboard/Manual/Setting (01 作業流程 merged, 09-15)', [P.q('.pane.on').dataset.pane, Array.from(P.w.document.querySelectorAll('[role=tab]')).map(b => b.dataset.p).join(',')], ['mission', 'mission,dashboard,manual,setting']);
+  chk('default tab = Dashboard; tabs = Dashboard/Mission/Manual/Setting (09-17 per user)', [P.q('.pane.on').dataset.pane, Array.from(P.w.document.querySelectorAll('[role=tab]')).map(b => b.dataset.p).join(',')], ['dashboard', 'dashboard,mission,manual,setting']);
+  // [2026-09-17 relayout] 四張卡離開 Mission；腳本輸出 + 每步時間 + 任務細節搬到 Dashboard
+  chk('Mission no longer has 即時監看/致動器回讀/吸盤 p5–p8/單步時間基準', ['mon-age', 'verif', 'm-cups', 'm-seal', 'sp', 'g-diff'].map(id => P.w.document.getElementById(id)).every(e => e === null), true);
+  { const dash = P.w.document.querySelector('.pane[data-pane="dashboard"]');
+    chk('Dashboard holds 腳本輸出, 每步時間 and the 任務執行 detail rows', ['mis-out', 'mis-table', 'mis-sub', 'mis-tool', 'mis-detach'].map(id => dash.contains(P.w.document.getElementById(id))).join(','), 'true,true,true,true,true'); }
+  { const mp = P.w.document.querySelectorAll('#mp-body > .ctl');
+    chk('參數設定 = 5 rows in sketch order', Array.from(mp).map(r => r.querySelector('.cl').firstChild.textContent.trim()).join('|'), '單步距離 / 步數 / 週期數|風扇|滑台|手臂壓力 / 乾掃|中止門檻');
+    chk('[現場 09-17] all 5 rows share one skeleton (.ctl.mp + .mpc, controls right-aligned, inputs same width)', [Array.from(mp).every(r => r.classList.contains('mp') && r.querySelector(':scope > .mpc')), Array.from(P.w.document.querySelectorAll('#mp-body .numin')).map(e => P.w.getComputedStyle(e).width).filter((v, i, a) => a.indexOf(v) === i).length, P.w.getComputedStyle(mp[0].querySelector('.mpc')).justifyContent], [true, 1, 'flex-end']);
+    const pane = P.w.document.querySelector('.pane[data-pane="mission"]');
+    chk('left column = 前置 summary → 共用值 (09-17) → 參數設定', Array.from(pane.querySelector('.mis-left').children).map(e => e.id).join(','), 'pre-card,ms-card,mp-card');
+    chk('right column = 存檔 / 開始⇄停止作業 / 緊急脫離, estop red + gap', [Array.from(pane.querySelectorAll('.mis-btns button')).map(b => b.id).join(','), P.w.getComputedStyle(P.w.document.getElementById('wr-estop')).backgroundColor !== '', !!pane.querySelector('.mis-btns .estop-gap')], ['mp-save,mis-start,mis-stop,wr-estop', true, true]);
+    chk('idle: 開始 shown, 停止作業 hidden (one slot)', [P.shown('mis-start'), P.shown('mis-stop')], [true, false]); }
   chk('script backend is the default; body-only controls hidden', [P.w.__v3.backend(), P.w.document.getElementById('mis-pause').hidden, P.w.document.getElementById('mis-out').closest('.grp').hidden], ['script', true, false]);
   chk('CONSOLE_VER is a v3 build', /^v3-/.test(P.txt('ver-tag')), true);
   chk('test hook present', typeof P.w.__v3, 'object');
@@ -162,11 +174,11 @@ async function secPre(P, port) {
   await waitFor(() => lamp('water') === '未完成', 20);   // the boot-time water_level lands within ~1.5 s
   // [2026-09-15 晚] ④ init（幫浦）已離開前置：腳本起跑時自己 init、回程前自己 pump off ⇒ 六項
   // [2026-09-16] 手臂開機即待命 ⇒ 由必要項降為資訊列；必要項剩四：① 地面歸零 ② 牆高 ③ 水位 ④ 起點
-  chk('fresh fake: four required 未完成, 推桿歸零/手臂 are info rows, start disabled', [['zero','wall','water','top'].map(lamp).join(','), lamp('zdt'), lamp('arm'), w.document.getElementById('mis-start').disabled, miss().length], ['未完成,未完成,未完成,未完成', '參考', '參考', true, 4]);
+  chk('fresh fake: four required 未完成, no info rows left (推桿歸零/手臂 rows removed 09-17), start disabled', [['zero','wall','water','top'].map(lamp).join(','), w.document.getElementById('flow-lamp-zdt'), w.document.getElementById('flow-lamp-arm'), w.document.getElementById('mis-start').disabled, miss().length], ['未完成,未完成,未完成,未完成', null, null, true, 4]);
   chk('init is no longer a precheck item; 一鍵前置 is gone', [w.document.getElementById('flow-lamp-init'), w.document.getElementById('pre-runall')], [null, null]);
   chk('top-bar chip counts only the required four', txt('flow-stage'), '前置 0/4');
   chk('手臂 info row shows 已待命 while the fake reports arm_ready=1 after arm_init', true, true);
-  chk('09-15 pm: no 危險操作 button, no arm 60 s unlock; 急停 sits in the Mission control bar', [w.document.getElementById('danger-arm'), w.document.getElementById('arm-arm').hidden, w.document.getElementById('mbar').contains(w.document.getElementById('wr-estop')), w.document.getElementById('arm-init').disabled], [null, true, true, false]);
+  chk('09-15 pm: no 危險操作 button, no arm unlock/INIT rows (09-17 arm card redo); 急停 sits in the Mission right column', [w.document.getElementById('danger-arm'), w.document.getElementById('arm-arm'), w.document.querySelector('.mis-btns').contains(w.document.getElementById('wr-estop')), w.document.getElementById('arm-init')], [null, null, true, null]);
   const nConf = () => w.__confirms.length;
   const c0 = nConf();
   flowRun('zero'); await waitFor(() => lamp('zero') === 'OK' && /已歸零（/.test(txt('flow-zero-rd')), 30);
@@ -178,24 +190,20 @@ async function secPre(P, port) {
   await waitFor(() => lamp('wall') === 'OK' && /吊機已同步/.test(txt('flow-wall-rd')), 15);
   chk('② wall via server → OK and pushed to crane set_wall_height (status wall_height_cm=120)', [lamp('wall'), w.__v3.last.cr.wall_height_cm], ['OK', '120']);
   chk('⑦ 起點: at ground vs 牆高 120 → 未完成 with 差 shown', [lamp('top'), /差 -120/.test(txt('flow-top-rd'))], ['未完成', true]);
-  // 一鍵前置 ③→④→⑤ runs straight through (09-15 pm: no gates, no confirms on these three)
-  const c1 = nConf();
-  flowRun('arm'); await waitFor(() => /已待命/.test(txt('flow-arm-rd')), 40);
-  chk('「重跑 arm_init」仍可按 → arm_ready=1 → 已待命（但不是門檻）', [/已待命/.test(txt('flow-arm-rd')), lamp('arm'), miss().some(x => /手臂/.test(x))], [true, '參考', false]);
-  chk('no confirm for 重跑 arm_init', nConf() - c1, 0);
-  // ③ 推桿歸零：資訊列 —— 不擋開始、不計入 n/5、按鈕仍可按
-  chk('③ shows the "not usually needed" hint while 未歸零', /磁編碼器保留零點/.test(txt('flow-zdt-rd')), true);
-  chk('③ is not in the missing list even though it never ran', miss().some(x => /推桿/.test(x)), false);
-  flowRun('zdt'); await waitFor(() => /上次歸零/.test(txt('flow-zdt-rd')), 40);
-  chk('③ button still works and then shows 上次歸零 <time>', [/上次歸零 \d+ 秒前/.test(txt('flow-zdt-rd')), lamp('zdt')], [true, '參考']);
+  chk('手臂 is not a precheck any more (script checks arm_ready itself)', miss().some(x => /手臂/.test(x)), false);
+  // [2026-09-17 per user] 推桿歸零 info row is gone from 前置 (歸零 lives in Manual: 當前位置歸零／自動歸零)
+  chk('前置 = the four required only: zero, wall, water, top', Array.from(w.document.querySelectorAll('#pre-root .flowitem')).map(e => e.dataset.k).join(','), 'zero,wall,water,top');
+  // [2026-09-17 per user] 兩顆水位計：低（有水/空箱）＝門檻、高（滿/未滿）＝補水停止點（本體自動關閥 + EVT）。fake：on 後 3 s 低=1、8 s 高=1 + EVT
+  chk('③ before filling: 低 空箱 · 高 未滿 shown on both Dashboard lamps and the 前置 row', [txt('wl-state'), txt('wl-high'), w.document.getElementById('wl-low-lamp').className, /低 空箱 · 高 未滿/.test(txt('flow-water-rd')), txt('wl-tag')], ['空箱', '未滿', 'wl-lamp off', true, '需補水']);
   flowRun('water'); await waitFor(() => /補水中/.test(txt('flow-water-rd')), 10);
-  chk('⑥ 補水 → water_inlet on, progress shown', /補水中/.test(txt('flow-water-rd')), true);
-  await waitFor(() => /餘量/.test(txt('flow-water-rd')), 40);
-  chk('⑥ tank full → top-up phase (+20 s) before closing the valve', /餘量/.test(txt('flow-water-rd')), true);
-  await waitFor(() => lamp('water') === 'OK', 260);
-  chk('⑥ valve closed, water_full=1 → OK', lamp('water'), 'OK');
-  // 09-15 真機: body status has no water_full — ⑥ must come from the `water_level` command, never from status
-  chk('⑥ source is the water_level command, not status', [w.__v3.last.wr.water_full, /滿(?: · 進水閥開著)? · \d+ 秒前/.test(txt('flow-water-rd'))], [undefined, true]);
+  chk('③ 補水 → water_inlet on, progress shown with both lamps', /補水中 \d+ s… 低 (空箱|有水) · 高 未滿/.test(txt('flow-water-rd')), true);
+  await waitFor(() => lamp('water') === 'OK' && /低 有水 · 高 滿/.test(txt('flow-water-rd')), 200);
+  chk('③ high mark → body auto-closes (EVT water_inlet_auto_close logged) → 低 有水 · 高 滿 → OK', [lamp('water'), /低 有水 · 高 滿 · \d+ 秒前/.test(txt('flow-water-rd')), w.__v3.logs().some(l => /高水位滿，本體已自動關進水閥/.test(l)), w.__v3.logs().some(l => /補水：高水位滿/.test(l))], ['OK', true, true, true]);
+  chk('③ Dashboard: 低 有水 (green) · 高 滿 (green) · tag 滿（自動關閥） · RSSI 低/高', [txt('wl-state'), txt('wl-high'), w.document.getElementById('wl-high-lamp').className, txt('wl-tag'), /^\d+ \/ \d+$/.test(txt('wl-rssi'))], ['有水', '滿', 'wl-lamp on', '滿（自動關閥）', true]);
+  chk('③ status water_low/water_high cache is merged (body keeps them fresh while the valve is open)', [w.__v3.last.wr.water_low, w.__v3.last.wr.water_high], ['1', '1']);
+  { const l0 = w.__v3.logs().length; flowRun('water'); await waitFor(() => w.__v3.logs().some(l => /高水位已滿，本體沒開閥/.test(l)), 30);
+    chk('③ 補水 while already full → water_inlet on replies OK skipped water_high=1 → done without opening', w.__v3.logs().some(l => /高水位已滿，本體沒開閥/.test(l)), true); }
+  chk('進水閥 row says the body auto-closes at the high mark', /高水位滿了本體自動關/.test(w.document.querySelector('#wrelaygrp [data-inlet] .cl').textContent), true);
   // ⑦ 與 Manual 三顆、控制列那顆共用 craneGotoAction；這裡順便驗「移動中…」與結果字串
   flowRun('top'); await waitFor(() => /移動中…/.test(txt('flow-top-rd')) || lamp('top') === 'OK', 20);
   await waitFor(() => lamp('top') === 'OK', 200);
@@ -267,14 +275,34 @@ async function secScript(P) {
   arm(); click('mis-start'); await sleep(300);
   wsObj.send = realSend;
   const m = sent.find(x => x.mission === 'start');
-  chk('開始 → {mission:"start", params:{…}} with every field, rail_cm fixed 100', [!!m, m && m.params.step_cm, m && m.params.fan, m && m.params.rail, m && m.params.arm_nm, m && m.params.dry, m && m.params.rail_cm], [true, 40, 'all:6', 'off', 4, 1, 100]);
+  chk('開始 → {mission:"start", params:{…}} with every field, rail_cm fixed 100, return_top 1 by default', [!!m, m && m.params.step_cm, m && m.params.fan, m && m.params.rail, m && m.params.arm_nm, m && m.params.dry, m && m.params.rail_cm, m && m.params.return_top], [true, 40, 'all:6', 'off', 4, 1, 100, 1]);
+  // [2026-09-17 per user] 任務結束回頂端：預設勾；不勾 → params.return_top=0、等效指令尾巴 return_top=0、摘要標「結束停最低點」
+  chk('回頂端 checkbox in row 1, checked, cli has no return_top', [w.document.querySelector('#mp-body > .ctl:first-child #mp-rtop') !== null, w.document.getElementById('mp-rtop').checked, /return_top/.test(txt('mis-cli'))], [true, true, false]);
+  w.document.getElementById('mp-rtop').checked = false; w.document.getElementById('mp-rtop').dispatchEvent(new w.Event('input', {bubbles:true}));
+  chk('unchecked → return_top:0, cli ends with return_top=0, summary says 結束停最低點', [w.__v3.misParams().return_top, /return_top=0$/.test(txt('mis-cli')), /結束停最低點/.test(txt('mp-sum'))], [0, true, true]);
+  w.document.getElementById('mp-rtop').checked = true; w.document.getElementById('mp-rtop').dispatchEvent(new w.Event('input', {bubbles:true}));
   // server.js side of the protocol, fed as the page would receive it
-  w.__v3.onMissionMsg({src:'mission', ack:'start', ok:true, running:{running:true, args:{cycles:2, steps:5, step_cm:40}}});
-  w.__v3.onMissionMsg({src:'mission', state:{running:true, args:{steps:5}}});
+  { const dash = w.document.querySelector('.pane[data-pane="dashboard"] .man'); const kids = Array.from(dash.children).filter(e => e.classList.contains('grp'));
+    const i = kids.findIndex(e => e.id === 'd-mis-card');
+    chk('[09-17 追加] Dashboard Mission 卡 = 一般小卡、在小卡群最後（張力之後、任務執行之前）、釘最後一欄', [i > 0 && /張力/.test(kids[i - 1].textContent), /任務執行/.test(kids[i + 1].textContent), w.document.getElementById('d-mis-card').style.gridColumn], [true, true, '-2/-1']); }
+  { const sec = w.document.querySelector('.pane[data-pane="manual"] .man'); const kids = Array.from(sec.children);
+    const from = kids.findIndex(e => e.classList.contains('man-sec') && /本體/.test(e.textContent));
+    const heads = kids.slice(from + 1).filter(e => e.classList.contains('grp')).map(e => e.querySelector('header').firstChild.textContent.trim().split(' ')[0]);
+    chk('[09-17] Manual 本體區依現場操作順序：吸盤推桿(吃滿) → 手臂 → 上滑台 → 水路(PQW) → 風扇', [heads.join(','), kids.slice(from + 1).find(e => e.classList.contains('grp')).style.gridColumn], ['吸盤推桿,手臂,上滑台,水路,風扇', '1/-1']); }
+  chk('[09-17 per user] Mission 狀態列的狀態字（閒置/本體/週期/步/高度/吸住）不顯示，按鈕（暫停⇄繼續/⤒/STOP/PARK）留著', [['mis-state','rd-wrstate','mis-cyc','mis-step','mis-h','mis-nseal'].every(id => !!w.document.getElementById(id).closest('[hidden]') && w.getComputedStyle(w.document.getElementById(id).closest('[hidden]')).display === 'none'), ['mis-pc','mbar-top','m-crane-stop','m-arm-park'].every(id => shown(id) || w.document.getElementById(id).hidden === false)], [true, true]);
+  chk('[09-17] Manual 本體開關機 card gone (init/shutdown); body state text still computed (hidden, feeds nothing visible now)', [w.document.getElementById('wr-init'), w.document.getElementById('wr-shutdown'), /^本體 /.test(txt('rd-wrstate'))], [null, null, true]);
+  chk('[09-17] idle: Dashboard Mission 卡 shows the form params, 開始 mirrored, no blink', [shown('d-mis-start'), shown('d-mis-stop'), /下一趟/.test(txt('d-mis-src')), /2 週期 × 5 步 × 40 cm .* fan=all:6 .* 結束回頂/.test(txt("d-mis-params")), w.document.getElementById('wr-estop').classList.contains('blink')], [true, false, true, true, false]);
+  w.__v3.onMissionMsg({src:'mission', ack:'start', ok:true, running:{running:true, args:{cycles:2, steps:5, step_cm:40, roll_trip:6, diff_trip:8, top_cm:120, kv:['fan=all:6','rail=off']}, env:{FCV_ARM_NM:'4', FCV_DRY:'1'}}});
+  w.__v3.onMissionMsg({src:'mission', state:{running:true, args:{cycles:2, steps:5, step_cm:40, roll_trip:6, diff_trip:8, top_cm:120, kv:['fan=all:6','rail=off']}, env:{FCV_ARM_NM:'4', FCV_DRY:'1'}}});
+  chk('[09-17] running: both 緊急脫離 blink + enabled; Dashboard mirrors 停止作業, params = server args', [w.document.getElementById('wr-estop').classList.contains('blink'), w.document.getElementById('d-estop').classList.contains('blink'), w.document.getElementById('wr-estop').disabled, shown('d-mis-stop'), shown('d-mis-start'), w.document.getElementById('d-mis-stop').disabled, /執行中/.test(txt('d-mis-src')), /2 週期 × 5 步 × 40 cm · 門檻 roll 6° \/ 左右差 8 cm · fan=all:6 rail=off · 頂 120 cm · 手臂 4 N·m · 乾掃 · 結束回頂/.test(txt('d-mis-params')), txt('d-mis-state')], [true, true, false, true, false, false, true, true, '執行中']);
+  { const o = w.__v3.wsRef(); const rs = o.send; const got = []; o.send = (d) => { const j = JSON.parse(d); if (j.mission) got.push(j); else rs.call(o, d); };
+    click('d-mis-stop'); await sleep(50); o.send = rs;
+    chk('Dashboard 停止作業 mirror → same handler → {mission:"stop"}', got.map(x => x.mission).join(','), 'stop'); }
   chk('ack ok + state.running → 執行中, 中止 enabled', [txt('mis-state'), w.document.getElementById('mis-stop').disabled], ['執行中', false]);
+  chk('running: the slot flips to 停止作業, 開始 hidden', [shown('mis-stop'), shown('mis-start')], [true, false]);
   chk('no 通訊紀錄 panel; log() keeps an in-memory ring', [w.document.getElementById('log'), w.__v3.logs().length > 0], [null, true]);
-  chk('sticky control bar holds 開始/中止/急停 + STOP/PARK, and is sticky', [w.document.getElementById('mbar').contains(w.document.getElementById('mis-start')), w.document.getElementById('mbar').contains(w.document.getElementById('wr-estop')), w.document.getElementById('mbar').contains(w.document.getElementById('m-arm-park')), w.getComputedStyle(w.document.getElementById('mbar')).position], [true, true, true, 'sticky']);
-  chk('control row = 開始 / 暫停⇄繼續 / 停止作業 │ 緊急脫離 (script mode)', [w.document.getElementById('mis-pc').hidden, w.document.getElementById('mis-pc').disabled, w.document.getElementById('mis-pc').textContent, w.document.getElementById('wr-estop').textContent], [false, false, '⏸ 暫停', '🔴 緊急脫離']);
+  chk('sticky status bar holds 狀態/週期/步/高度 + 暫停⇄繼續 + STOP/PARK, and is sticky (09-17: 開始/停止/急停 moved to the right column)', [['mis-state','mis-cyc','mis-step','mis-h','mis-pc','m-crane-stop','m-arm-park'].every(id => w.document.getElementById('mbar').contains(w.document.getElementById(id))), w.document.getElementById('mbar').contains(w.document.getElementById('mis-start')), w.getComputedStyle(w.document.getElementById('mbar')).position], [true, false, 'sticky']);
+  chk('暫停⇄繼續 in the bar; 停止作業 / 緊急脫離 wording unchanged (script mode)', [w.document.getElementById('mis-pc').hidden, w.document.getElementById('mis-pc').disabled, w.document.getElementById('mis-pc').textContent, txt('mis-stop'), w.document.getElementById('wr-estop').textContent], [false, false, '⏸ 暫停', '停止作業', '🔴 緊急脫離']);
   { const o = w.__v3.wsRef(); const rs = o.send; const got = []; o.send = (d) => { const j = JSON.parse(d); if (j.mission) got.push(j); else rs.call(o, d); };
     click('mis-pc'); w.__v3.onMissionMsg({src:'mission', state:{running:true, paused:true}}); click('mis-pc'); o.send = rs;
     chk('暫停 → {mission:"pause"}; state.paused → button reads 繼續 → {mission:"continue"}; 暫停中 shown', [got.map(x => x.mission).join(','), txt('mis-state')], ['pause,continue', '暫停中']);
@@ -322,14 +350,28 @@ async function secScript(P) {
   w.__v3.onDetachEvt('EVT emergency_detach done');
   chk('EVT emergency_detach done → ✅', /已收回/.test(txt('mis-detach')), true);
   // 參數記憶：server 的 mission state 帶 defaults（上次成功起跑那組），開頁第一筆套用
-  w.__v3.onMissionMsg({src:'mission', state:{running:false, defaults:{cycles:3, steps:7, step_cm:35, roll_trip:5, diff_trip:9, arm_nm:6, fan:'all:8', rail:'20-100', dry:1, at:'2026-09-15T10:00:00.000Z'}}});
+  w.__v3.onMissionMsg({src:'mission', state:{running:false, defaults:{cycles:3, steps:7, step_cm:35, roll_trip:5, diff_trip:9, arm_nm:6, fan:'all:8', rail:'20-100', dry:1, return_top:0, at:'2026-09-15T10:00:00.000Z'}}});
   await sleep(100);
   { const d = w.__v3.misParams();
-    chk('mission state.defaults → 參數欄帶入上次那組', [d.cycles, d.steps, d.step_cm, d.roll_trip, d.diff_trip, d.arm_nm, d.fan, d.rail, d.dry], [3, 7, 35, 5, 9, 6, 'all:8', '20-100', 1]);
+    chk('mission state.defaults → 參數欄帶入上次那組（含 return_top）', [d.cycles, d.steps, d.step_cm, d.roll_trip, d.diff_trip, d.arm_nm, d.fan, d.rail, d.dry, d.return_top], [3, 7, 35, 5, 9, 6, 'all:8', '20-100', 1, 0]);
+    w.document.getElementById('mp-rtop').checked = true;
     chk('摘要旁顯示上次起跑時間', /上次起跑/.test(txt('mp-last')), true); }
   w.__v3.onMissionMsg({src:'mission', state:{running:false, defaults:{cycles:9, steps:9, step_cm:99}}});
   await sleep(100);
   chk('第二筆 defaults 不再覆蓋（人可能正在打字）', w.__v3.misParams().cycles, 3);
+  // [2026-09-17] 存檔鈕：{mission:'save', params} → server.js 驗證後寫 mission_params.json（不起跑），ack 帶 defaults
+  { const before = w.__v3.logs().length;
+    w.document.getElementById('mp-cycles').value = '4'; w.document.getElementById('mp-armnm').value = '5.5';
+    click('mp-save');
+    await waitFor(() => w.__v3.logs().slice(before).some(l => /參數已存為預設|存檔失敗/.test(l)), 30);
+    const saved = w.__v3.logs().slice(before).find(l => /參數已存為預設/.test(l)) || '';
+    chk('存檔 → server ack ok, defaults echo the form (cycles 4, arm_nm 5.5, saved:1, return_top:1)', [/"cycles":4/.test(saved), /"arm_nm":5.5/.test(saved), /"saved":1/.test(saved), /"return_top":1/.test(saved), /^已存 /.test(txt('mp-last'))], [true, true, true, true, true]);
+    let onDisk = null; try { onDisk = JSON.parse(fs.readFileSync(path.join(RUN, 'run', 'mission_params.json'), 'utf8')); } catch (e) {}
+    chk('存檔 landed in <HOME>/run/mission_params.json', onDisk && onDisk.cycles === 4 && onDisk.saved === 1, true);
+    w.document.getElementById('mp-cycles').value = '999999';
+    click('mp-save'); await sleep(50);
+    chk('存檔 with a bad value is refused client-side (alert), nothing sent', /參數不合法/.test(w.__alerts.slice(-1)[0] || ''), true);
+    w.document.getElementById('mp-cycles').value = '3'; }
   chk('state.running=false exit 0 → 閒置, Manual unlocked, banner gone', [txt('mis-state'), w.document.querySelector('.pane[data-pane="manual"]').classList.contains('mlock'), shown('manbar')], ['閒置', false, false]);
   w.document.getElementById('mp-steps').value = '1'; w.document.getElementById('mp-dry').checked = false; w.document.getElementById('mp-fan').value = 'move'; w.document.getElementById('mp-fanpct').value = '7'; w.document.getElementById('mp-rail').value = '0-100'; w.document.getElementById('mp-armnm').value = '3';
 }
@@ -405,7 +447,7 @@ async function secSafe(P) {
 
 async function secHold(P) {
   console.log('\n[hold] 2026-09-15 — hold-mode tension guard on/off (crane set_hold_guard), fan/rail mission params');
-  const { w, txt, arm, click } = P;
+  const { w, txt, arm, click, shown } = P;
   const card = () => w.document.querySelector('.ropegrid').closest('.grp');   // red frame lands on the ▲▼ card, switch lives in the tension card (09-15 pm)
   const warn = () => w.document.getElementById('hg-warn');
   const logHas = (re) => w.__v3.logs().some(l => re.test(l));
@@ -421,20 +463,50 @@ async function secHold(P) {
   chk('crane status now carries hold_guard=0', /\bhold_guard=0\b/.test(st), true);
   // [2026-09-16 per user] 目前工具：來源是手臂 STATUS 的 `tool=`（角度反推），en=0 要標快取
   // 🔴 STATUS 的 [M2] 是**另一則訊息**（line-buffered）⇒ 等它飄到，不是等 armStatus() 的回傳值
-  await w.__v3.armStatus(); await waitFor(() => txt('rd-tool') !== '—', 20);
-  chk('[M2] 單獨到達也會更新 M2 與工具（不是只解析回覆那一行）', txt('rd-m2') !== '—', true);
-  // 角度是前面幾節跑完的結果（滾筒或刮刀都合法）⇒ 只驗「是四種之一、兩處同源、使能中不標快取」
-  chk('工具顯示中文，兩處同源（Manual + Mission）；手臂使能中 ⇒ 不標快取', [['滾筒','刮刀','置中','轉換中'].includes(txt('rd-tool')), txt('rd-tool') === txt('mis-tool'), w.__v3.armTool().en], [true, true, '1']);
+  await w.__v3.armStatus(); await waitFor(() => txt('mis-tool') !== '—', 20);
+  chk('[M2] 單獨到達也會更新工具（不是只解析回覆那一行）（09-17 起 Manual 不再有 M1/M2/工具列，只剩 Dashboard 任務卡的 tool=）', [txt('mis-tool') !== '—', w.document.getElementById('rd-tool'), w.document.getElementById('rd-m2')], [true, null, null]);
+  // 角度是前面幾節跑完的結果（滾筒或刮刀都合法）⇒ 只驗「是四種之一、使能中不標快取」
+  chk('工具顯示中文；手臂使能中 ⇒ 不標快取', [['滾筒','刮刀','置中','轉換中'].includes(txt('mis-tool')), w.__v3.armTool().en], [true, '1']);
   // en=0 時 M2 不再送 CAN frame ⇒ tool 是凍結的舊值，必須標出來、且不給綠
-  const toolNow = txt('rd-tool');
+  const toolNow = txt('mis-tool');
   w.__v3.armTool().en = '0'; w.__v3.paintArmTool();
-  chk('en=0 → 標「未使能，快取」且不給綠', [txt('rd-tool'), w.document.getElementById('rd-tool').className.includes('unv')], [toolNow + '（未使能，快取）', true]);
+  chk('en=0 → 標「未使能，快取」且不給綠', [txt('mis-tool'), w.document.getElementById('mis-tool').className.includes('unv')], [toolNow + '（未使能，快取）', true]);
   w.__v3.armTool().en = '1'; w.__v3.paintArmTool();
   w.__v3.armTool().tool = 'squeegee'; w.__v3.paintArmTool();
-  chk('squeegee → 刮刀', txt('rd-tool'), '刮刀');
+  chk('squeegee → 刮刀', txt('mis-tool'), '刮刀');
   w.__v3.armTool().tool = 'between'; w.__v3.paintArmTool();
-  chk('between → 轉換中，且不給綠（它是「不知道在哪」）', [txt('rd-tool'), w.document.getElementById('rd-tool').className.includes('unv')], ['轉換中', true]);
+  chk('between → 轉換中，且不給綠（它是「不知道在哪」）', [txt('mis-tool'), w.document.getElementById('mis-tool').className.includes('unv')], ['轉換中', true]);
   await w.__v3.armStatus();
+  // [2026-09-17 per user] 手臂卡重做：力道／距離上限、壓上／收回、目前力+牆距、力道→套用；>7 防呆；走本體 arm_deploy_f / arm_force / arm_retract
+  { const det = () => txt('rd-afdet'), g = (id) => w.document.getElementById(id);
+    chk('手臂卡只剩 力道/距離/壓上/收回/目前/套用；套用未壓上時灰；舊列（路徑/M1/M2/工具槽/DEPLOY/PARK/INIT）都不在', [['af-nm','af-dist','af-go','arm-retract','rd-arm-now','af-nm2','af-apply'].every(id => !!g(id)), g('af-apply').disabled, ['arm-path','af-slot','ad-go','arm-park','arm-init','arm-read'].every(id => g(id) === null), txt('arm-contact')], [true, true, true, '未壓上']);
+    g('af-nm').value = '8'; g('af-go').click(); await sleep(50);
+    chk('壓上 8 N·m → 前端防呆 alert，不送', /防呆上限 7/.test(w.__alerts.slice(-1)[0] || ''), true);
+    g('af-nm').value = '3'; g('af-dist').value = ''; g('af-go').click();
+    await waitFor(() => /^✅ 壓上/.test(det()), 30);
+    chk('[現場 09-17] 壓上/收回 在自己那列（.arm-btns，鈕 flex:none）；結果文字獨立一列且可換行（white-space normal），不再擠按鈕', [g('af-go').parentElement.classList.contains('arm-btns'), g('arm-retract').parentElement === g('af-go').parentElement, g('rd-afdet').closest('.arm-result') !== null, w.getComputedStyle(g('rd-afdet')).whiteSpace, w.getComputedStyle(g('af-go')).flex.split(' ')[0]], [true, true, true, 'normal', '0']);
+    chk('壓上 3 → arm_deploy_f 3 RIGHT → OK → 壓上中、套用 enabled、目前列開始讀 tau', [w.__v3.logs().some(l => /arm_deploy_f 3 RIGHT$/.test(l)), txt('arm-contact'), g('af-apply').disabled, /力 3\.00 \/ 目標/.test(det())], [true, '壓上中', false, true]);
+    await waitFor(() => /力 [\d.]+ N·m/.test(txt('rd-arm-now')), 30);
+    chk('目前：力 N·m · 估測牆距 mm（STATUS [M1] tau= / wall_mm=，壓上後才顯示牆距）', /力 [\d.]+ N·m · 估測牆距 \d+ mm/.test(txt('rd-arm-now')), true);
+    g('af-nm2').value = '5'; g('af-apply').click();
+    await waitFor(() => /^✅ 套用/.test(det()), 30);
+    chk('套用 5 → arm_force 5 → OK tau=5.00 wall_mm=230 → 顯示力 5.00 · 牆距 230', [w.__v3.logs().some(l => /arm_force 5 →/.test(l)), /力 5\.00 \/ 目標 5.* 牆距 230 mm/.test(det())], [true, true]);
+    g('af-nm2').value = '8'; g('af-apply').click(); await sleep(50);
+    chk('套用 8 → 前端防呆 alert', /防呆上限 7/.test(w.__alerts.slice(-1)[0] || ''), true);
+    g('arm-retract').click();
+    await waitFor(() => /^✅ 已收回/.test(det()), 30);
+    chk('收回 → arm_retract → OK → 未壓上、套用灰、目前列清空', [txt('arm-contact'), g('af-apply').disabled, txt('rd-arm-now')], ['未壓上', true, '—']);
+    g('af-apply').disabled = false; g('af-nm2').value = '3'; g('af-apply').click();   // 模擬 disabled 被拔掉硬按
+    await waitFor(() => /^🔴 套用失敗/.test(det()), 30);
+    chk('未壓上硬送 arm_force → ERR not_in_contact → 人話提示「先按壓上」', /未壓在牆上（先按「壓上」）/.test(det()), true);
+    g('af-nm').value = '3'; g('af-dist').value = '200'; g('af-go').click();
+    await waitFor(() => /距離先到/.test(det()), 30);
+    chk('壓上 3 RIGHT 200 → OK stopped=distance → 「距離先到，停在 …、力 1.00」，仍算壓上', [w.__v3.logs().some(l => /arm_deploy_f 3 RIGHT 200$/.test(l)), /距離先到，停在 θ 0\.480、力 1\.00 N·m/.test(det()), txt('arm-contact')], [true, true, '壓上中']);
+    g('af-dist').value = '100'; g('af-go').click(); await sleep(50);
+    chk('距離 100 mm（<122）→ 前端擋', /122~444/.test(w.__alerts.slice(-1)[0] || ''), true);
+    g('arm-retract').click(); await waitFor(() => /^✅ 已收回/.test(det()), 30); g('af-dist').value = '';
+    // err= 分級（agent-ai-db 09-17 實查 motor_api err_name()）：0 / 0x1 / NONE 健康；具名碼故障（附中文）；未知 0x?? 也當故障
+    chk('armErr：0 / 0x1 / NONE 健康；B:MOS_OVERTEMP 故障+中文；0x7 未知碼也故障', [['0','0x1','NONE'].map(x => w.__v3.armErr(x).cls).join(','), w.__v3.armErr('B:MOS_OVERTEMP').note, w.__v3.armErr('0x7').cls], ['on,on,on', ' · 🔴 故障 B:MOS_OVERTEMP（MOS 過溫）', 'bad']); }
   // [2026-09-16 契約] 本體 6 狀態：paused 一定要連原因顯示（三種暫停的出口不同），running+flow 標回程
   const S = w.__v3.last.wr;
   const saved = {state:S.state, pause_reason:S.pause_reason, flow:S.flow};
@@ -448,17 +520,95 @@ async function secHold(P) {
   chk('running + flow=return_home 標出回程', /回程/.test(w.__v3.wrStateText(S)), true);
   chk('fast-poll 只認 running（舊的 balancing/returning_home/calibrating 已消失）', ['running','paused','balancing','returning_home','calibrating','idle'].map(x => w.__v3.wrMoving(x)).join(','), 'true,false,false,false,false,false');
   Object.assign(S, saved);
-  // [2026-09-15 晚 per user] 吸盤推桿 RPM：0/空白＝用本體預設，預設值由 status 填進 placeholder（不寫死）
+  // [2026-09-17 per user] 吸盤推桿卡：RPM 欄直接顯示本體預設（伸／收各一格，value 不是 placeholder）
   const wrSt = await w.__v3.send('washrobot', 'status', 8000);
   const defRpm = (/\bpusher_rpm=(\d+)/.exec(wrSt) || [])[1], defRet = (/\bpusher_rpm_retract=(\d+)/.exec(wrSt) || [])[1];
-  await waitFor(() => /rpm/.test(txt('rd-prpm')), 20);
-  chk('推桿 RPM 預設值顯示，且取自 status 不是寫死', [txt('rd-prpm'), txt('rd-prpm-ret')], ['伸／尋封 ' + defRpm + ' rpm', '收 ' + defRet + ' rpm']);
-  chk('每個 RPM 欄的 placeholder 標出預設，value 仍留空（空白＝不帶第三參數）', [Array.from(w.document.querySelectorAll('input.zrpm')).every(e => e.placeholder === '預設 ' + defRpm), Array.from(w.document.querySelectorAll('input.zrpm')).every(e => e.value === '')], [true, true]);
+  const val = (id) => w.document.getElementById(id).value;
+  // [2026-09-17 per user 共用值] RPM = 本體共用執行期值（set_pusher_rpm）；Manual 兩格 + Mission 共用值列兩格顯示同一個值
+  await waitFor(() => val('rpm-all') === defRpm && val('ms-rpm-ret') === defRet, 20);
+  chk('RPM 四格（Manual 伸/收 + Mission 伸/收）＝ status pusher_rpm / pusher_rpm_retract；單支列沒有自己的 rpm 欄', [val('rpm-all'), val('rpm-all-ret'), val('ms-rpm-ext'), val('ms-rpm-ret'), w.document.getElementById('zrpm-6')], [defRpm, defRet, defRpm, defRet, null]);
+  { w.document.getElementById('rpm-all').value = '650'; w.document.getElementById('rpm-all').dispatchEvent(new w.Event('input', {bubbles:true}));
+    await sleep(1300);
+    chk('人改到一半的 RPM 欄不被 status 蓋回', val('rpm-all'), '650');
+    w.document.getElementById('rpm-all').dispatchEvent(new w.Event('change', {bubbles:true}));
+    await waitFor(() => /✅ 共用值/.test(txt('rd-prpm')), 30);
+    await waitFor(() => val('ms-rpm-ext') === '650', 30);
+    const wrSt2 = await w.__v3.send('washrobot', 'status', 8000);
+    chk('change → set_pusher_rpm 650 <收> → OK pusher_rpm=650；status 跟著變；Mission 那格同步 650；EVT pusher_rpm 進 log', [w.__v3.logs().some(l => new RegExp('set_pusher_rpm 650 ' + defRet).test(l)), /\bpusher_rpm=650\b/.test(wrSt2), val('ms-rpm-ext'), /650/.test(txt('rd-prpm')), w.__v3.logs().some(l => /EVT pusher_rpm 650/.test(l) || /推桿共用 RPM 改為 伸 650/.test(l))], [true, true, '650', true, true]);
+    w.document.querySelector('[data-zret="6"]').click(); w.document.querySelector('[data-zraw="6"]').click(); w.document.querySelector('[data-praw="all"]').click(); await sleep(100);
+    const sentL = w.__v3.logs().slice(-10).join('\n');   // ⚠️ LOGBUF is a 300-entry ring — slice(fromLength) is empty once it is full
+    chk('單次指令不再帶 rpm（本體用共用值）', [/zdt_pusher 6 retract$/m.test(sentL), /zdt_pusher 6 extend_raw 10$/m.test(sentL), /pusher all extend_raw 10$/m.test(sentL)], [true, true, true]);
+    // 從 Mission 那格改回去：同一支指令、Manual 跟著變
+    w.document.getElementById('ms-rpm-ext').value = defRpm; w.document.getElementById('ms-rpm-ext').dispatchEvent(new w.Event('change', {bubbles:true}));
+    await waitFor(() => val('rpm-all') === defRpm, 30);
+    chk('Mission 那格改回 → set_pusher_rpm → Manual 兩格同步', [val('rpm-all'), /✅ 共用值/.test(txt('ms-rpm-rd'))], [defRpm, true]);
+    w.document.getElementById('rpm-all').value = '20'; w.document.getElementById('rpm-all').dispatchEvent(new w.Event('change', {bubbles:true})); await sleep(50);
+    chk('壞值 20 在 GUI 端擋下（alert）', /RPM 允許 50~1000/.test(w.__alerts.slice(-1)[0] || ''), true);
+    w.document.getElementById('rpm-all').value = defRpm; delete w.document.getElementById('rpm-all').dataset.user; }
+  chk('歸零兩顆改名：當前位置歸零 / 自動歸零；手動 ①② 流程已拆掉', [/當前位置歸零/.test(txt('zdt-zero')), txt('zdt-home'), w.document.getElementById('zdt-rz'), w.document.getElementById('zdt-rz-cancel')], [true, '自動歸零（撞限位）', null, null]);
+  // 失能／使能（zdt_power，真斷電）：狀態由 status zdt_pwr= 畫（指令狀態）
+  await waitFor(() => txt('zpw-5') === '使能', 20);
+  chk('zdt_pwr=1111 → 四支顯示 使能；每支與全部各有 失能/使能 鈕', [['5','6','7','8'].map(x => txt('zpw-' + x)).join(','), w.document.querySelectorAll('[data-zpow]').length], ['使能,使能,使能,使能', 10]);
+  { const row = (x) => w.document.querySelector('.zrow[data-zs="' + x + '"]');
+    chk('[現場 09-17] 單支區＝每支一列(.zrow, flex-wrap)：勾·標籤·cm·伸raw·尋封伸·收·狀態·失能·使能 全在同一列；卡片吃滿整列', [['5','6','7','8'].every(x => row(x) && ['input.zinc', '#zband-' + x, '#zcm-' + x, '[data-zraw]', '[data-zret]', '#zpw-' + x, '[data-zpow][data-on="0"]', '[data-zpow][data-on="1"]'].every(sel => row(x).querySelector(sel))), w.getComputedStyle(row('5')).flexWrap, w.getComputedStyle(w.document.getElementById('zdtsingle')).display, w.document.getElementById('zdtsingle').closest('.grp').style.gridColumn], [true, 'wrap', 'flex', '1/-1']); }
+  w.document.querySelector('[data-zpow="all"][data-on="0"]').click();
+  await waitFor(() => txt('zpw-7') !== '使能', 30);
+  chk('全部失能 → OK zdt_power all=off，status zdt_pwr=0000 → 四支顯示 失能（可手推）', [w.__v3.logs().some(l => /OK zdt_power all=off/.test(l)), txt('zpw-5'), /✅ 全部失能/.test(txt('rd-zdtpower'))], [true, '失能（可手推）', true]);
+  w.document.querySelector('[data-zpow="6"][data-on="1"]').click();
+  await waitFor(() => txt('zpw-6') === '使能', 30);
+  chk('單支 6 使能 → 只有 s6 回 使能；使能鈕 title 提醒先歸零', [['5','6','7','8'].map(x => txt('zpw-' + x)).join(','), /當前位置歸零/.test(w.document.querySelector('[data-zpow="6"][data-on="1"]').title)], ['失能（可手推）,使能,失能（可手推）,失能（可手推）', true]);
+  w.document.querySelector('[data-zpow="all"][data-on="1"]').click();
+  await waitFor(() => ['5','6','7','8'].every(x => txt('zpw-' + x) === '使能'), 30);
+  chk('全部使能 → 回 1111', ['5','6','7','8'].map(x => txt('zpw-' + x)).join(','), '使能,使能,使能,使能');
+  // 整組包含／跳過（zdt_enable/zdt_disable，不斷電）：checkbox 顯示以 status zdt_skip= 為準
+  { const cb = (x) => w.document.querySelector('input.zinc[data-zinc="' + x + '"]');
+    chk('群組 納入/排除 兩顆鈕已移除，改成四個勾（預設全勾）；解堵轉保留', [w.document.querySelectorAll('input.zinc').length, ['5','6','7','8'].every(x => cb(x).checked), !!w.document.querySelector('[data-cmd="washrobot|zdt_release_stall"]'), w.document.querySelector('[data-cmd="washrobot|zdt_enable"]')], [4, true, true, null]);
+    cb('7').checked = false; cb('7').dispatchEvent(new w.Event('change', {bubbles:true}));
+    await waitFor(() => w.document.getElementById('zband-7').classList.contains('skip'), 30);
+    chk('取消勾 s7 → zdt_disable 7；status zdt_skip=7 → 標籤刪除線 + 提示，框保持未勾', [w.__v3.logs().some(l => /zdt_disable 7/.test(l)), cb('7').checked, /跳過 s7/.test(txt('rd-zdtskip'))], [true, false, true]);
+    chk('Mission 共用值卡：zdt_skip=7 → 整張標黃、寫「推桿 7 被 Manual 排除」', [w.document.getElementById('ms-card').classList.contains('ms-warn'), /推桿 7 被 Manual 排除/.test(txt('ms-skip')), /排除了推桿 7/.test(txt('ms-tag'))], [true, true, true]);
+    cb('7').checked = true; cb('7').dispatchEvent(new w.Event('change', {bubbles:true}));
+    await waitFor(() => !w.document.getElementById('zband-7').classList.contains('skip'), 30);
+    chk('再勾回 → zdt_enable 7；zdt_skip=- → 四支包含', [w.__v3.logs().some(l => /zdt_enable 7/.test(l)), txt('rd-zdtskip')], [true, '整組指令包含 4 支']);
+    chk('共用值卡回白：含入 5,6,7,8；吊機門檻列讀 status（tension_max_kg 等）', [w.document.getElementById('ms-card').classList.contains('ms-warn'), txt('ms-skip'), /單側上限 \d+ \/ 左右差 \d+ \/ 收繩上限\(軟停\+手拉停\) \d+ kg · 繩長差 \d+ cm · level_auto (on|off) · 張力保護 (on|off)/.test(txt('ms-crane'))], [false, '含入 5,6,7,8（跳過 —）', true]); }
+  // ③ 拒跑：腳本輸出的「🔴 … 不跑。」抄到 Mission 狀態列（紅）並進 log
+  { const bk = w.__v3.backend(); w.__v3.setBackend('script');   // body mode re-derives running from status every second; the refuse banner is a script-mode thing
+    w.__v3.onMissionMsg({src:'mission', line:'🔴 arm_ready=0 —— 手臂未待命(STARTUP/INIT 失敗?看 fcv-arm log),不跑。'});
+    await sleep(50);
+    chk('腳本 🔴 不跑 行 → #mis-why 紅色顯示 + log 🔴🔴', [shown('mis-why'), /腳本拒跑：🔴 arm_ready=0/.test(txt('mis-why')), w.document.getElementById('mis-why').classList.contains('refuse'), w.__v3.logs().some(l => /🔴🔴 腳本拒跑/.test(l))], [true, true, true, true]);
+    w.__v3.onMissionMsg({src:'mission', state:{running:true}}); await sleep(50);
+    chk('下一趟起跑（running）→ 拒跑訊息讓位', /腳本拒跑/.test(txt('mis-why')), false);
+    w.__v3.onMissionMsg({src:'mission', state:{running:false, exit:{code:0}}}); w.__v3.setBackend(bk); }
   // the fake never emits manual_tension_warn (it has no hold-mode tension model) — feed the real wire line
-  w.__v3.onHoldGuardEvt('EVT manual_tension_warn kind=total_limit left=70.5 right=66.0 note=not_stopping_operator_decides');
-  chk('EVT manual_tension_warn → kind/left/right shown in red, not stopping', /total_limit.*70\.5.*66\.0/.test(warn().textContent), true);
+  w.__v3.onHoldGuardEvt('EVT manual_tension_warn kind=retract_stop left=70.5 right=66.0 note=not_stopping_operator_decides');
+  chk('EVT manual_tension_warn → kind/left/right shown in red, not stopping', /retract_stop.*70\.5.*66\.0/.test(warn().textContent), true);
   w.__v3.onHoldGuardEvt('EVT manual_tension_clear');
-  chk('EVT manual_tension_clear → back to the generic OFF warning', [/已關閉/.test(warn().textContent), /total_limit/.test(warn().textContent)], [true, false]);
+  chk('EVT manual_tension_clear → back to the generic OFF warning', [/已關閉/.test(warn().textContent), /retract_stop/.test(warn().textContent)], [true, false]);
+  // [2026-09-17 契約] up_stop_total_kg 移除；▲ 手拉停止改用 retract_tension_stop_kg（單側）；EVT tension_total_limit → tension_retract_stop
+  { const st2 = await w.__v3.send('crane', 'status', 8000);
+    chk('crane status 已無 up_stop_total_kg；GUI 沒有它的設定格／Setting 列／共用值字樣', [/up_stop_total_kg/.test(st2), w.document.querySelector('[data-set="set_up_stop_total_kg"]'), w.document.getElementById('st-ust'), /上行總重停|總和/.test(txt('ms-crane'))], [false, null, null, false]);
+    chk('retract_tension_stop_kg 標籤講清楚是同一個門檻管兩件事（自動收繩軟停 + ▲ 手拉停止）', [/收繩張力上限（單側）/.test(w.document.querySelector('[data-set="set_retract_tension_stop_kg"]').previousElementSibling.textContent), /自動收繩軟停 \+ ▲ 手拉停止/.test(w.document.querySelector('[data-set="set_retract_tension_stop_kg"]').previousElementSibling.textContent), /收繩上限\(軟停\+手拉停\)/.test(txt('ms-crane'))], [true, true, true]);
+    // [2026-09-17 per user 更正] 即時值那三格撤掉；只要「左右繩差上限」可設定（格 + 套用 → set_tension_diff_max_kg）
+    { const inp = w.document.querySelector('[data-set="set_tension_diff_max_kg"]'); const diff0 = w.__v3.last.cr.tension_diff_max_kg;
+      chk('張力保護卡：左右繩差上限（kg）一格 + 套用，標籤講清楚；即時值三格不在', [!!inp, /左右繩差上限（kg）/.test(inp.previousElementSibling.textContent), !!w.document.querySelector('[data-setgo="set_tension_diff_max_kg"]'), w.document.getElementById('ts-max-live'), w.document.getElementById('ts-diff-live')], [true, true, true, null, null]);
+      inp.value = '33'; w.document.querySelector('[data-setgo="set_tension_diff_max_kg"]').click();
+      await waitFor(() => w.__v3.last.cr && w.__v3.last.cr.tension_diff_max_kg === '33', 40);   // fake 的 set_tension_* 09-17 起會反映到 status（AI-2 patch）
+      chk('套用 33 → set_tension_diff_max_kg 33 → 吊機 status tension_diff_max_kg=33', [w.__v3.logs().some(l => /set_tension_diff_max_kg 33/.test(l)), w.__v3.last.cr.tension_diff_max_kg], [true, '33']);
+      // restore whatever the fake booted with (agent-ai-db keeps the fake defaults = real crane compile defaults; don't hard-code them here)
+      inp.value = diff0; w.document.querySelector('[data-setgo="set_tension_diff_max_kg"]').click(); await waitFor(() => w.__v3.last.cr.tension_diff_max_kg === diff0, 30);
+      chk('left/right diff threshold restored to the fake default', w.__v3.last.cr.tension_diff_max_kg, diff0); }
+    // [2026-09-17 per user] 上滑台可設負值（本體守衛 −130..130）
+    { const rl = w.__v3.logs().length;
+      chk('上滑台輸入框 min −130；守衛預設 −130–130；快捷多一顆 → −50', [w.document.getElementById('rail-cm').min, w.document.getElementById('rs-from').min, w.document.getElementById('rail-gmin').min, txt('rd-railguard'), !!w.document.querySelector('[data-railq="-50"]')], ['-130', '-130', '-130', '-130 – 130 cm', true]);
+      w.document.getElementById('rail-cm').value = '-40'; click('rail-go'); await sleep(100);
+      chk('移動到 −40 → rail -40 送出（負值不被 GUI 擋）', w.__v3.logs().slice(-6).some(l => /\] rail -40\b/.test(l)), true);
+      w.document.getElementById('rail-cm').value = '50'; }
+    chk('張力條：Dashboard 兩條、Manual 三條（總和那條拿掉），橘點名字含 手拉停', [w.document.querySelectorAll('#d-tenbars .mrow').length, w.document.querySelectorAll('#m-tenbars .mrow').length, /手拉停/.test(w.document.getElementById('m-tenbars').innerHTML)], [2, 3, true]);
+    // 新 EVT 名字：餵進 ws.onmessage（fake 沒有 hold 張力模型，不會自己發）→ 按住狀態清除 + log
+    let released = 0; const orig = w.__craneReleaseAll; w.__craneReleaseAll = () => { released++; };
+    w.__v3.wsRef().onmessage({data: JSON.stringify({src:'crane', line:'EVT tension_retract_stop left=80.1 right=60.0 threshold=75'})});
+    w.__craneReleaseAll = orig;
+    chk('EVT tension_retract_stop → 清除按住狀態 + 🔴 log（吃新名字）', [released, w.__v3.logs().some(l => /EVT tension_retract_stop left=80\.1.*已自動停止/.test(l))], [1, true]); }
   click('hg-on'); await waitFor(() => txt('hg-rd') === '啟用中', 30);
   chk('ON (no gate needed) → 啟用中, warning gone, card normal', [txt('hg-rd'), warn().hidden, card().classList.contains('hg-off')], ['啟用中', true, false]);
   const bad = await w.__v3.send('crane', 'set_hold_guard x', 8000);

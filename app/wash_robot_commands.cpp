@@ -406,8 +406,8 @@ std::string WashRobot::cmd_rail_move(double target_cm, int rpm, int acc, int dec
     State cur = state_.load();
     // [2026-09-15 per user] Error 放行 —— 急停後 Manual 仍要能操作(見 WASH_ROBOT.h state_violation_ 上方)。
 
-    if (target_cm < 0.0 || target_cm > ARM_RAIL_TRAVEL_MAX_CM)
-        return "ERR rail_target_out_of_range (0.0.." + std::to_string((int)ARM_RAIL_TRAVEL_MAX_CM) + " cm)\n";
+    if (target_cm < ARM_RAIL_TRAVEL_MIN_CM || target_cm > ARM_RAIL_TRAVEL_MAX_CM)
+        return "ERR rail_target_out_of_range (" + std::to_string((int)ARM_RAIL_TRAVEL_MIN_CM) + ".." + std::to_string((int)ARM_RAIL_TRAVEL_MAX_CM) + " cm)\n";
     // 上限 500：08-28 實測 500 RPM 累積失步 0.2~0.3mm/橫越，已不可用；再高沒有意義。
     // 常用值 250（ARM_SWEEP_RPM）。⚠️ 不要在這裡「搜尋可用 RPM 上限」——
     // 08-31 per user 已拍板否決，開迴路下該值只對當下負載成立，由現場自行調整。
@@ -520,7 +520,7 @@ std::string WashRobot::cmd_rail_jog(const std::string& dir, int rpm) {
             D_(DM2J_ARM).jog_stop(); rail_jog_dir_.store(0);
             return "OK rail_jog at_fwd_limit pos=" + std::to_string(pos) + "\n";
         }
-        if (d < 0 && pos <= RAIL_JOG_LIMIT_MARGIN_CM) {
+        if (d < 0 && pos <= ARM_RAIL_TRAVEL_MIN_CM + RAIL_JOG_LIMIT_MARGIN_CM) {
             D_(DM2J_ARM).jog_stop(); rail_jog_dir_.store(0);
             return "OK rail_jog at_rev_limit pos=" + std::to_string(pos) + "\n";
         }
@@ -555,7 +555,7 @@ void WashRobot::rail_jog_monitor_loop_() {
         double pos = 0.0;
         if (!D_(DM2J_ARM).read_position_cm(pos)) {
             if ((d > 0 && pos >= ARM_RAIL_TRAVEL_MAX_CM - RAIL_JOG_LIMIT_MARGIN_CM) ||
-                (d < 0 && pos <= RAIL_JOG_LIMIT_MARGIN_CM)) {
+                (d < 0 && pos <= ARM_RAIL_TRAVEL_MIN_CM + RAIL_JOG_LIMIT_MARGIN_CM)) {
                 D_(DM2J_ARM).jog_stop();
                 rail_jog_dir_.store(0);
                 evt_("rail_jog_limit pos=" + std::to_string(pos));
@@ -595,9 +595,9 @@ void WashRobot::rail_sweep_run_(double from, double to, int rpm) {
 std::string WashRobot::cmd_rail_sweep_start(double from_cm, double to_cm, int rpm) {
     State cur = state_.load();
     // [2026-09-15 per user] Error 放行 —— 急停後 Manual 仍要能操作(見 WASH_ROBOT.h state_violation_ 上方)。
-    if (from_cm < 0.0 || from_cm > ARM_RAIL_TRAVEL_MAX_CM ||
-        to_cm   < 0.0 || to_cm   > ARM_RAIL_TRAVEL_MAX_CM)
-        return "ERR rail_sweep_out_of_range (0.0.." + std::to_string((int)ARM_RAIL_TRAVEL_MAX_CM) + " cm)\n";
+    if (from_cm < ARM_RAIL_TRAVEL_MIN_CM || from_cm > ARM_RAIL_TRAVEL_MAX_CM ||
+        to_cm   < ARM_RAIL_TRAVEL_MIN_CM || to_cm   > ARM_RAIL_TRAVEL_MAX_CM)
+        return "ERR rail_sweep_out_of_range (" + std::to_string((int)ARM_RAIL_TRAVEL_MIN_CM) + ".." + std::to_string((int)ARM_RAIL_TRAVEL_MAX_CM) + " cm)\n";
     if (rail_sweep_running_.exchange(true)) return "ERR sweep_in_progress\n";
     rail_sweep_stop_.store(false);
     rail_sweep_from_.store((int)from_cm);
@@ -1815,7 +1815,7 @@ std::string WashRobot::do_cross_obstacle_(bool up) {
                         Z_(s).release_stall_flag();
                         // sync=0 → immediate execution, no trigger; moves concurrently
                         // with the two-stage retract fired below.
-                        bad = Z_(s).motion_control_pos_mode_nowait(0, PUSHER_ACC, PUSHER_RPM, tgt2x(s),
+                        bad = Z_(s).motion_control_pos_mode_nowait(0, PUSHER_ACC, pusher_rpm_extend_(), tgt2x(s),
                                                                    /*abs*/1, /*sync*/0, /*retry*/1) || bad;
                     }
                     return bad;
@@ -2055,7 +2055,7 @@ void WashRobot::do_step_sync_rail_sweep_(const char* tag, bool init_ok, bool for
         // [2026-08-28] 同下方 PARK 的理由：abort 收尾也改吃 init_ok。
         // CH_BRUSH 無條件關 —— 沒開過時關它是 no-op，開著沒關才是問題。
         pqw_.controlRelay(CH_BRUSH, false);
-        if (init_ok) arm_cmd_("PARK", 30);
+        if (init_ok) cmd_arm_retract();   // [2026-09-17] was PARK — keep enabled
         return;
     }
 
@@ -2097,7 +2097,7 @@ void WashRobot::do_step_sync_rail_sweep_(const char* tag, bool init_ok, bool for
     // 的手臂是冪等 no-op，多送一次無害；漏送才是實質危險。
     // 仍以 init_ok 為條件：手臂整個不通時 arm_cmd_ 會白等 30s timeout。
     if (init_ok) {
-        arm_cmd_("PARK", 30);
+        cmd_arm_retract();   // [2026-09-17] was PARK — M1 → 0 but keep enabled (per user: 空中不失能)
     }
     // [2026-08-28] 訊息必須反映實際發生的事。原本無條件印 "rail sweep done"，
     // 於是上滑台三次寫入全滅（DM2J 掛在錯的 gateway）時 log 仍看起來一切正常。
@@ -3800,9 +3800,9 @@ std::string WashRobot::cmd_emergency_stop() {
     }
     // [2026-05-28] Invalidate arm calibration: emergency_stop may have left arm
     // in an unknown state (mid-motion abort). Next cmd_init must re-INIT.
-    if (arm_calibrated_.exchange(false)) {
-        std::cout << "[emergency_stop] arm_calibrated_ → false (re-INIT required)\n";
-    }
+    // [2026-09-17 per user] Do NOT invalidate arm calibration any more: the detach
+    // only retracts M1 and puts M2 back on the roller, motors stay enabled and
+    // calibrated. (Before: arm_calibrated_ → false forced a full re-INIT next time.)
     // [2026-06-09] Force-close water inlet — emergency_stop may have killed a
     // sweep mid-water-fill, leaving the valve armed open. set_water_inlet_ has
     // its own retry; ignore failure here (watchdog will retry later).
@@ -3862,6 +3862,9 @@ void WashRobot::emergency_detach_() {
         } else {
             const std::string r = cmd_arm_retract();      // blocks ≤ ~8 s, waits arm_mtx_ if a DEPLOY is in flight
             step_ok(r.rfind("OK", 0) != 0, "arm_retract");
+            // [2026-09-17 per user] and back to the standby tool (roller) — "急停只是把手臂拉回滾筒狀態"
+            const std::string rs = cmd_arm_slot("RIGHT");
+            if (rs.rfind("OK", 0) != 0) std::cout << "[emergency_detach] arm_slot RIGHT: " << rs;
         }
     }
     if (PWM_ENABLED) step_ok(!pwm_.setPWM_Duty(0, PWM_STEP_OFF_DUTY_PCT), "fan_stop");
@@ -4035,6 +4038,18 @@ std::string WashRobot::cmd_status() {
     //    ⚠️ 但**它涵蓋不到 `cycle_test`** —— 那支不走 `step_*`，全程 idle（見待辦表）。
     //    不要因為多了這個欄位就以為腳本鎖的問題解決了。
     oss << " step_in_progress=" << (step_in_progress_.load() ? 1 : 0);
+    {   // [2026-09-17] commanded driver-EN per cup, slave 5..8 order (see zdt_power_cmd_)
+        oss << " zdt_pwr=";
+        for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s) oss << zdt_power_cmd_[s - 1].load();
+        // [2026-09-17 per user] which cups are EXCLUDED from group commands
+        // (zdt_disable). The GUI shows this as per-cup checkboxes; the truth
+        // lives here, not in the browser. "-" = none excluded.
+        oss << " zdt_skip=";
+        bool any = false;
+        for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s)
+            if (disabled_zdt_slaves_.count(s)) { oss << (any ? "," : "") << s; any = true; }
+        if (!any) oss << "-";
+    }
     oss << std::fixed << std::setprecision(1);
     for (int s = CUP_SLAVE_FIRST; s <= CUP_SLAVE_LAST; ++s)
         oss << " p" << s << "=" << cached_pressure_[s - 1].load();
@@ -4092,8 +4107,12 @@ std::string WashRobot::cmd_status() {
     {   // [2026-09-15 per user] 推桿的**編譯期預設轉速**,給 GUI 的 RPM 欄位當提示用。
         // GUI 那個欄位填 0 = 「沿用預設」,但畫面上只看得到 0,沒人知道預設是多少
         // (今天就從 600→400、500→330→400 動過三次)。把實際值講出來。
-        oss << " pusher_rpm=" << PUSHER_RPM
-            << " pusher_rpm_retract=" << PUSHER_RPM_RETRACT_FULL;
+        oss << " pusher_rpm=" << pusher_rpm_extend_()
+            << " pusher_rpm_retract=" << pusher_rpm_retract_();
+    }
+    {   // [2026-09-17] cached XKC readings (watchdog thread refreshes; -1 = unreadable → "?")
+        auto w = [](int v)->std::string { return v < 0 ? "?" : std::to_string(v); };
+        oss << " water_low=" << w(water_low_cached_.load()) << " water_high=" << w(water_high_cached_.load());
     }
     {   // [2026-09-15] 急停收回的結果:0=沒跑過 1=收回中 2=完成(已回 Idle) 3=部分失敗(留 Error)
         static const char* kEstop[4] = { "none", "detaching", "done", "partial" };
@@ -4907,11 +4926,31 @@ bool WashRobot::set_water_inlet_(bool on) {
 //   - GUI user forgot to press OFF
 // Stops on stop_ flag. Polls every 10s (cheap — only acts when overdue).
 void WashRobot::water_inlet_watchdog_loop_() {
+    // [2026-09-17 per user] This loop is also the "high water → close valve" rule.
+    // Tick 2 s while the valve is open (the fill has to stop within seconds of
+    // the high sensor tripping), 10 s otherwise (just keeps the cached readings
+    // for `status` fresh). Readings are cached for status so the 1 Hz status
+    // refresh does not add XKC traffic to the .22 bus.
+    int idle_ticks = 0;
     while (water_inlet_watchdog_running_.load()) {
-        std::this_thread::sleep_for(std::chrono::seconds(10));
+        std::this_thread::sleep_for(std::chrono::seconds(2));
         if (!water_inlet_watchdog_running_.load()) break;
         const int64_t ts = water_inlet_open_ts_ms_.load();
-        if (ts == 0) continue;   // disarmed (valve closed)
+        const bool valve_open = (ts != 0);
+        if (!valve_open && (++idle_ticks % 5) != 0) continue;   // closed: refresh every 10 s
+        uint16_t lo = 0, lo_rssi = 0, hi = 0, hi_rssi = 0;
+        const bool lo_ok = !lvl_.read_state(lo, lo_rssi);
+        const bool hi_ok = !lvl_high_.read_state(hi, hi_rssi);
+        water_low_cached_.store(lo_ok ? (int)lo : -1);
+        water_high_cached_.store(hi_ok ? (int)hi : -1);
+        if (!valve_open) continue;
+        if (hi_ok && hi == 1) {
+            std::cout << "[water_inlet_watchdog] HIGH water reached (slave " << XKC_HIGH_SLAVE
+                      << " output=1) — closing inlet valve\n";
+            evt_("water_inlet_auto_close reason=high_level");
+            set_water_inlet_(false);
+            continue;
+        }
         const int64_t now = now_ms_();
         const int64_t open_ms = now - ts;
         if (open_ms <= WATER_INLET_OPEN_MAX_MS) continue;
@@ -4928,6 +4967,15 @@ void WashRobot::water_inlet_watchdog_loop_() {
 std::string WashRobot::cmd_water_inlet(bool on) {
     State cur = state_.load();
     // [2026-09-15 per user] Error 放行 —— 急停後 Manual 仍要能操作(見 WASH_ROBOT.h state_violation_ 上方)。
+    // [2026-09-17 per user] Tank already at the high mark → do not open at all.
+    if (on) {
+        uint16_t hi = 0, r = 0;
+        if (!lvl_high_.read_state(hi, r) && hi == 1) {
+            water_high_cached_.store(1);
+            std::cout << "[water_inlet] on refused — high water already reached\n";
+            return "OK skipped water_high=1\n";
+        }
+    }
     if (set_water_inlet_(on)) return "ERR water_inlet_fail\n";
     return "OK\n";
 }
@@ -4943,8 +4991,19 @@ std::string WashRobot::cmd_water_level() {
         if (i < 2) sleep_ms_(100);
     }
     if (!ok) return "ERR xkc_unreachable\n";
+    // [2026-09-17] second sensor (high mark). Unreachable high sensor is reported
+    // as `?`, not as an error: the low sensor alone still answers the old question.
+    uint16_t hi = 0, hi_rssi = 0; bool hi_ok = false;
+    for (int i = 0; i < 3; ++i) {
+        if (!lvl_high_.read_state(hi, hi_rssi)) { hi_ok = true; break; }
+        if (i < 2) sleep_ms_(100);
+    }
+    water_low_cached_.store((int)out);
+    water_high_cached_.store(hi_ok ? (int)hi : -1);
     std::ostringstream oss;
-    oss << "OK water_full=" << out << " rssi=" << rssi << "\n";
+    oss << "OK water_full=" << out << " rssi=" << rssi
+        << " water_high=" << (hi_ok ? std::to_string(hi) : std::string("?"))
+        << " rssi_high=" << (hi_ok ? std::to_string(hi_rssi) : std::string("?")) << "\n";
     return oss.str();
 }
 
@@ -5044,7 +5103,7 @@ std::string WashRobot::cmd_pusher(const std::string& group, const std::string& p
             auto& grp = kv.second;
             std::cout << "[pusher extend_raw] pulse=" << pulse
                       << " (" << (pulse / 3000.0) << "cm) slaves=" << grp.size() << "\n";
-            const int use_rpm = (rpm > 0) ? rpm : PUSHER_RPM;
+            const int use_rpm = (rpm > 0) ? rpm : pusher_rpm_extend_();
             if (try_or_pause_([this, pulse, &grp, use_rpm]() { return pusher_move_many_(grp, pulse, use_rpm); },
                               "manual_pusher_" + group + "_extend_raw")) return on_abort();
         }
@@ -5156,7 +5215,7 @@ std::string WashRobot::cmd_zdt_pusher(int slave, const std::string& action, doub
         std::cout << "[zdt_pusher] slave " << slave << " extend_raw pulse=" << pulse
                   << " (" << (pulse / CUP_PULSE_PER_CM) << "cm)\n";
         std::vector<int> single = {slave};
-        if (pusher_move_many_(single, pulse, (rpm > 0) ? rpm : PUSHER_RPM))
+        if (pusher_move_many_(single, pulse, (rpm > 0) ? rpm : pusher_rpm_extend_()))
             return "ERR pusher_move_fail\n";
         return "OK\n";
     }
@@ -5212,9 +5271,37 @@ std::string WashRobot::cmd_zdt_power(int slave, bool on) {
     if (on) Z_(slave).release_stall_flag();   // clear any latched stall before re-enable
     if (Z_(slave).motion_control_driver_EN(on))
         return std::string("ERR zdt_power_fail slave=") + std::to_string(slave) + "\n";
+    zdt_power_cmd_[slave - 1].store(on ? 1 : 0);
     std::cout << "[zdt_power] slave " << slave << " driver EN "
               << (on ? "ON" : "OFF (torque off — hand-push OK)") << "\n";
     return "OK\n";
+}
+
+// [2026-09-17 per user] Shared runtime pusher RPM — see pusher_rpm_ext_ in the header.
+std::string WashRobot::cmd_set_pusher_rpm(int ext, int ret) {
+    auto ok = [](int v) { return v == 0 || (v >= 50 && v <= 1000); };
+    if (!ok(ext) || !ok(ret)) return "ERR range:50..1000 (0=keep)\n";
+    if (ext > 0) pusher_rpm_ext_.store(ext);
+    if (ret > 0) pusher_rpm_ret_.store(ret);
+    persist_body_settings_();
+    std::ostringstream oss;
+    oss << "OK pusher_rpm=" << pusher_rpm_extend_() << " pusher_rpm_retract=" << pusher_rpm_retract_() << "\n";
+    std::cout << "[set_pusher_rpm] " << oss.str();
+    evt_("pusher_rpm " + std::to_string(pusher_rpm_extend_()) + " " + std::to_string(pusher_rpm_retract_()));
+    return oss.str();
+}
+
+// [2026-09-17] Body-side runtime settings that must survive a restart. Written as
+// one line per `set_*` command so the unit's ExecStartPost can replay the file
+// verbatim through crcmd.py (no JSON parser needed on either side). Best effort:
+// a write failure is logged, never fatal.
+void WashRobot::persist_body_settings_() {
+    const char* home = std::getenv("HOME");
+    const std::string path = std::string(home ? home : "/home/nexuni") + "/run/body_settings.txt";
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (!f) { std::cerr << "[settings] cannot write " << path << "\n"; return; }
+    std::fprintf(f, "set_pusher_rpm %d %d\n", pusher_rpm_extend_(), pusher_rpm_retract_());
+    std::fclose(f);
 }
 
 // [2026-09-11 per user] AUTO ZDT re-home by driving into the retracted hard-stop.
@@ -5426,11 +5513,18 @@ std::string WashRobot::cmd_return_home(int descent_cm) {
 
 std::string WashRobot::cmd_reset() {
     State cur = state_.load();
-    if (cur != State::Error) return state_violation_(cur);
+    // [2026-09-17 per user] Also accept Paused(error): after a crane alarm parked
+    // the body in Paused with no flow to continue, `reset` used to answer
+    // state_violation and the only way out was a restart. (Paused(user) and
+    // Paused(balance_ask) belong to a running flow — those still go through
+    // resume/continue/skip.)
+    const bool paused_err = (cur == State::Paused && pause_reason_.load() == (int)PauseReason::Error);
+    if (cur != State::Error && !paused_err) return state_violation_(cur);
     abort_flag       = false;
     pause_flag       = false;
     motion_active_   = false;
     imu_ask_pending_ = false;
+    pause_reason_.store((int)PauseReason::None);
     set_state_(State::Idle);
     return "OK reset\n";
 }

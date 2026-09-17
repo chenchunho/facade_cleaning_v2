@@ -6,8 +6,20 @@
 > 保留「原因 / 決策(尤其被否決的)/ 驗證結論」。原則 ≤40 行,驗證表可超。
 > (原 2026-04 的「# 修改日誌」格式範本已由本說明取代。)
 
-## 索引(全部 133 條,新的在上)
+## 索引(全部 145 條,新的在上)
 
+- `[2026-09-17v3l]` v3：第二顆水位計（高水位）——Dashboard／前置 ③ 兩顆各一燈、補水改到高水位自動關閥、吃 `EVT water_inlet_auto_close`（`v3-2026.09.17-1549`）→ (本檔)
+- `[2026-09-17v3k]` v3（本地，未部署——Pi 斷電維修）：張力卡即時值三格撤掉、左右繩差上限標籤；Mission 狀態列狀態字移除；fake `set_tension_*` 反映到 status（`v3-2026.09.17-1448`）→ (本檔)
+- `[2026-09-17v3j]` v3：上滑台可設負值（−130..130）；張力保護卡門檻旁顯示即時值（左/右/上限、左右差/門檻、最大側/收繩上限）（`v3-2026.09.17-1422`）→ (本檔)
+- `[2026-09-17v3i]` v3：`up_stop_total_kg` 退場（GUI 12 處）、收繩張力上限標籤講清楚、吃 `EVT tension_retract_stop`；Manual 本體區依操作順序重排（`v3-2026.09.17-1406`）→ (本檔)
+- `[2026-09-17v3h]` v3 現場修正：手臂卡結果文字擠掉「收回」（安全）→ 鈕獨立一列；Manual 本體開關機卡移除，本體 state 搬 Mission 狀態列（`v3-2026.09.17-1339`）→ (本檔)
+- `[2026-09-17v3g]` v3：Manual 手臂卡重做——力道/距離上限、壓上/收回、目前力+估測牆距、力道→套用（`arm_deploy_f`/`arm_force`/`arm_retract`，≤7 N·m 防呆）（`v3-2026.09.17-1211`）→ (本檔)
+- `[2026-09-17v3f]` v3：「任務結束回頂端」勾（return_top）、執行中緊急脫離閃爍、Dashboard Mission 卡（三顆鏡像鈕 + 目前參數）（`v3-2026.09.17-1123`）→ (本檔)
+- `[2026-09-17v3e]` v3 共用值：推桿 RPM 改 `set_pusher_rpm` 共用值（指令不帶 rpm）、Mission「共用值」卡（zdt_skip 標黃）、腳本拒跑行醒目（`v3-2026.09.17-1058`）→ (本檔)
+- `[2026-09-17v3d]` v3 現場修正：推桿單支區每支一列（原 11 欄 grid 被卡片裁掉 ⇒ 按不到）、參數卡五列對齊、前置移除 推桿歸零／手臂 兩列（`v3-2026.09.17-1037`）→ (本檔)
+- `[2026-09-17v3c]` v3：Manual 吸盤推桿卡整理——RPM 顯示預設值、失能/使能（zdt_power）、整組包含勾（zdt_skip）、歸零兩顆改名（`v3-2026.09.17-1011`）→ (本檔)
+- `[2026-09-17v3b]` v3：側欄 Dashboard 優先、Mission 照草圖重排（參數卡五列 + 右欄三顆鈕）、四卡移除、兩卡搬 Dashboard、存檔鈕（`v3-2026.09.17-0959`）→ (本檔)
+- `[2026-09-17v3]` v3：`cycle_test.py` 路徑跟著搬到 `scripts/`（顯示字串 + 2 處註解，`v3-2026.09.17-0934`）→ (本檔)
 - `[2026-09-16v3c]` v3：v1 退役收尾 —— 頂欄「v2」連結拿掉、check_console ② 4 個寫入點清零（`v3-2026.09.16-1948`，:8080）→ (本檔)
 - `[2026-09-16v3]` v3：本體狀態機收斂成 6 個 —— `WR_MOVING` 與暫停原因顯示對齊 → (本檔)
 - `[2026-09-15v3b]` v3：01 作業流程併入 Mission、啟動改走 server.js 起 cycle_test、危險閘門取消、通訊紀錄移除 → (本檔)
@@ -144,7 +156,182 @@
 
 ---
 
-## 當月全文(2026-09,85 條)
+## 當月全文(2026-09,97 條)
+
+## [2026-09-17v3l] v3：高水位計（slave 14）（`v3-2026.09.17-1549`）
+
+契約新增 per user（本體已部署、fake 鏡像）：`water_level` 多回 `water_high=0|1|?` `rssi_high=`；status 多 `water_low=`／`water_high=`（本體快取，閥開著時每 2 s）；
+高水位=1 本體自動關閥 + `EVT water_inlet_auto_close reason=high_level`；已滿時 `water_inlet on` 回 `OK skipped water_high=1`。
+
+- `waterLv` 變 `{full(低), high(高), at, err}`；`paintWaterLevel` 解析兩顆，`waterFromStatus()` 每筆 status 把 `water_low/high` 併進來（比指令新）；`?` → null。
+- Dashboard 水箱水位：兩顆各一燈（低 有水／空箱、高 滿／未滿；讀不到紅）+ RSSI 低/高；tag：需補水／有水·未滿／滿（自動關閥）／讀不到。
+- 前置 ③：門檻仍是「低水位有水」；顯示 `低 有水 · 高 滿`。**補水改成補到高水位**：on → 每 2 s 讀 → `high=1`（本體自動關）→ GUI 補送 off（冪等）→ 完成；
+  `OK skipped water_high=1` 直接算完成。09-15 的「低位滿再 +20 s 餘量」拿掉——滿的定義現在是高水位那顆，不再用時間猜。
+- `EVT water_inlet_auto_close` → log 💧 一行、高燈亮、閥狀態歸 0、補 pollFast／pollWaterLevel。進水閥（ZS-DIO CH4）說明加「高水位滿了本體自動關 · 已滿時 on 會被跳過」。
+
+驗證：`check_console` 全綠；`gui_v3_check` **200/200**（fake：補水前 低空箱·高未滿 → on → 3 s 低有水 → 8 s 高滿 + EVT → OK；status 快取併入；已滿再補 → skipped；閥說明）；
+`gui_offline.sh report` 0；三方 md5 一致（吊機 Pi 上線後直接部署）。未 commit。
+
+## [2026-09-17v3k] v3：張力卡即時值撤回 + Mission 狀態字移除（本地 `v3-2026.09.17-1448` → Pi 上電後 agent-ai-db 推上去蓋成 `v3-2026.09.17-1510`，三方 md5 41802232 一致）
+
+⚠️ 兩台 Pi 斷電維修中，per agent-ai-db 本地改好不部署，上電後由他們統一部署。版號用 `deploy_web.sh --dry-run` 蓋（stamp + syntax gate，不 scp）。
+
+- per user **更正**（上一則轉錯）：v3j 加的三格即時值（左/右/上限、左右差/門檻、最大側/收繩上限）**撤掉**，`#tenset` 回三欄；
+  user 要的只有「左右繩差上限 `tension_diff_max_kg` 可設定」——那格 09-04 起就在，標籤改「左右繩差上限（kg）｜左 − 右｜超過就停 · 吊機會持久化」。
+  上滑台負值那半（v3j）保留。
+- per user：Mission 頁 sticky 列最上面那排狀態字（閒置 · 本體 ready · 週期 · 步 · 高度 · 吸住）移除——Dashboard Mission 小卡已有。
+  按鈕（暫停⇄繼續／⤒／STOP／PARK）留著。📌 那六個 id 留在一個 `hidden` 容器裡：misPaint／onMissionEvt 仍寫它們，Dashboard 鏡像從 `mis-state`／`mis-h` 抄字，
+  check 也用 `mis-state` 當判準——拆 id 得重寫一圈、收益零。
+- `harness/fake_robot.py`（`[2026-09-17 AI-2, for agent-ai-db]` 標記）：`set_tension_max_kg`／`set_tension_diff_max_kg`／`set_retract_tension_stop_kg`
+  之前落在 `set_*` 通吃回 OK、status 不動 ⇒ 沒辦法驗「套用 → status 跟著變」；改成存進狀態、status 帶出（預設值＝原本寫死的 80/25/50）。
+
+驗證：`check_console` 全綠；`gui_v3_check` **196/196**（左右繩差 套用 33 → status 33 → 改回預設；狀態字六個 id 都在 hidden 容器、按鈕仍在）；`gui_offline.sh report` 0。未 commit、未部署。
+- 追加：agent-ai-db 把 fake 三個張力預設改成真機編譯預設 100/50/75（harness 要跟真機一致）；check 改成讀 fake 開機值再還原，不寫死數字（197/197）。
+  ⚠️ 伏筆：`② 最高點設定 refused at ground` 那條 check 今天首次偶發失敗一次（重跑即過）——判準是 `w.__alerts.some(/太小/)`，疑似 alert 時序；再發就要改成 waitFor。
+
+## [2026-09-17v3j] v3：上滑台負值 + 張力保護卡即時值（`v3-2026.09.17-1422`）
+
+per user 兩件（本體守衛 −130..130 已由 agent-ai-db 部署；fake 鏡像）。
+
+- 上滑台：移動到／區間起迄／行程守衛的輸入框 min 改 −130；`RAIL_HARD`／`railGuard` 預設 −130..130（0＝rail_zero 當時的位置，可在行程中間歸零）；
+  快捷多一顆「→ −50」。⚠️ 行程守衛記在瀏覽器 localStorage：之前存過 0–130 的瀏覽器會沿用舊守衛，要負值請在卡上把下限改成 −130 再套用。
+  Mission 參數的 `rail=<起>-<迄>` 仍是 0~130（那是 cycle_test 的清潔段行程，這次沒動）。
+- 張力保護卡 `#tenset` 改四欄「標籤 | 即時值 | 門檻格 | 套用」：單側「左 58.6 / 右 40.6 / 上限 100」、左右差「左右差 18.0 kg / 門檻 50」（`set_tension_diff_max_kg` 本來就可設）、
+  收繩「最大側 58.6 kg / 上限 75」；超標標紅、未超標綠。即時值＝status `tension_left − tension_right`。
+
+驗證：`check_console` 全綠；`gui_v3_check` **194/194**（三列即時值格式、輸入框 min、守衛預設、`rail -40` 送出不被擋）；`gui_offline.sh report` 0；三方 md5 一致。未 commit。
+
+## [2026-09-17v3i] v3：up_stop_total_kg 退場 + 收繩上限標籤 + Manual 本體區重排（`v3-2026.09.17-1406`）
+
+契約變更 per user（agent-ai-db 部署吊機＋本體＋fake＋腳本）：`up_stop_total_kg` 移除（`set_up_stop_total_kg` → `ERR unknown_cmd`、status 無此欄）；
+▲ 手拉停止改用 `retract_tension_stop_kg`（單側，任一側 ≥ 就 hold_all_off），與自動收繩軟停同一個值；
+`EVT tension_total_limit total=… threshold=…` 改名 `EVT tension_retract_stop left=… right=… threshold=…`。
+
+- GUI 12 處 `up_stop_total`／`tension_total_limit` 清掉：Manual 張力保護卡的「總和上限」設定格、Setting 參數表那列（`st-ust`）、門檻回填、
+  張力條的「總和」那條（Dashboard 兩條、Manual 三條）、抬頭徽章「先撞到哪一道」少掉總和那道、共用值卡字樣。
+- `retract_tension_stop_kg` 標籤改「**收繩張力上限（單側）**：自動收繩軟停 + ▲ 手拉停止 · 任一側 ≥ 就停」（user 之前看不懂「收繩停止」）；
+  張力條橘點改名「收繩上限（軟停/手拉停）」；共用值卡寫「收繩上限(軟停+手拉停)」。
+- EVT 路由改收 `tension_retract_stop`（舊名 `tension_total_limit` 暫時一併收，新舊吊機交錯時不漏）。
+- per user：Manual「洗窗機本體」區依**現場操作順序**重排：① 吸盤推桿（吃滿一列）→ ② 手臂 → ③ 上滑台 → ④ 水路（PQW 繼電器，標題加「水路」）→ 風扇；
+  Manual 卡片按鈕統一 min-height 36。📌 交接單的「⑤ 繼電器表與狀態（relay_status、壓力、本體 state）」目前沒有獨立的卡：relay 回讀就在 PQW 卡、
+  壓力在 Dashboard 吸盤真空度、本體 state 在 Mission 狀態列 —— 沒有另造一張，要的話再說。
+
+驗證：`check_console` 全綠；`gui_v3_check` **191/191**（status 無 up_stop_total_kg／GUI 無其設定格與列、標籤字樣、張力條 2/3 條、餵 `EVT tension_retract_stop` 進 ws.onmessage → 按住狀態清除 + log、本體區順序）；
+`gui_offline.sh report` 0；三方 md5 一致。未 commit。
+
+## [2026-09-17v3h] v3 現場修正：手臂卡「收回」被擠掉（安全）+ 本體開關機卡移除（`v3-2026.09.17-1339`）
+
+- 🔴 **現場 per user**：手臂卡按「壓上」後結果文字一長（「壓上：力 5.71 / 目標 … 牆距 … 迭代 …」），把同一列的「收回」擠出卡片 ⇒ **壓在牆上收不回**。
+  根因與早上推桿卡同型：`.ctl` 是 `1fr auto auto`、`.rd` nowrap、`.grp{overflow:hidden}`。改：壓上／收回兩顆鈕自己一列（`.arm-btns`，`flex:none`，永遠可見）、
+  結果文字獨立一列 `.arm-result`（`white-space:normal`，可換行）。📌 這是今天第二次「文字把按鈕擠出 overflow:hidden 的卡片」——凡是會變長的結果字串，不要跟按鈕同一列。
+- per user：Manual「本體開關機」（init／shutdown）整張移除——systemd 自啟、腳本自己 init 幫浦，shutdown 那顆「按錯就掉下來」沒有留下的理由。
+  原本那張卡上的本體 state（含暫停原因，09-16 契約）搬到 Mission 狀態列 `#rd-wrstate`（「本體 暫停中（使用者）」），不丟。
+
+驗證：`check_console` 全綠；`gui_v3_check` **186/186**；`gui_offline.sh report` 0；三方 md5 一致。未 commit。
+📌 jsdom 無版面：check 驗的是「鈕在自己那列、flex:none、結果列 white-space normal」這些結構事實；會不會再擠只有真瀏覽器看得到。
+
+## [2026-09-17v3g] v3：Manual「手臂」卡重做（`v3-2026.09.17-1211`）
+
+per user 2026-09-17（交接單 `handoff/ai2-manual-arm-card.md`）：「手臂小卡只會有壓上、收回、壓上距離跟力道」「壓上後顯示目前的力跟估測牆距，可即時改力道按套用」「防呆不超過 7 NM」。
+契約（本體 `arm_deploy_f <nm> <slot> [dist_mm]`、`arm_force <nm>`、`arm_retract`、`ERR target_nm_exceeds_max_7`、手臂 STATUS `[M1] wall_mm=`）由 agent-ai-db 部署到真機。
+
+- 卡片只剩四列：力道／距離上限（≤7 N·m；122~444 mm 空白＝不限，先到先停）、壓上／收回（壓上一律 RIGHT）、目前（`tau=` 力 · `wall_mm=` 估測牆距，
+  壓上後每 1 s 讀 STATUS、收回後停並清空——閒置時 STATUS 是凍結快取）、力道→套用（`arm_force`，未壓上時灰）。
+- 前端防呆 >7 與距離範圍都擋（alert 不送）；`OK stopped=distance` 顯示「⚠️ 距離先到，停在 θ…、力 …」仍算壓上；`WARN` 算壓上（黃）；
+  `ERR not_in_contact`／`exceeds_max_7`／`no_wall`／`obstacle` 各有一句人話。
+- 拿掉：解鎖列、路徑選擇（STATUS／PARK 固定直連 :9527；壓上／套用／收回走本體）、M1／M2 讀取列、目前工具列（Dashboard 任務卡仍有 `tool=`）、
+  工具槽、開迴路 DEPLOY、PARK（Mission 狀態列仍有）、INIT（開機自動）。`armPaintSeg`／互鎖 no-op 殘骸一併刪；`armErr` 接受 fake 的 `err=NONE`。
+
+驗證：`check_console` 全綠；`gui_v3_check` **183/183**（fake：壓上 8 擋、壓上 3 → OK → 壓上中／套用可按／目前列 力+牆距、套用 5 → tau=5.00 wall_mm=230、套用 8 擋、
+收回 → 未壓上、未壓上硬送 arm_force → not_in_contact 人話、`3 RIGHT 200` → stopped=distance、距離 100 擋）；`gui_offline.sh report` 0；三方 md5 一致。未 commit。
+- 追加（`v3-2026.09.17-1215`）agent-ai-db 實查 motor_api `err_name()`：健康值 `0`／**`0x1`**（達妙 1＝使能中，真機現在就印這個）／`NONE`（fake）；
+  故障是具名碼 `8:OVER_VOLT`…`E:OVERLOAD`（GUI 附中文：過壓／欠壓／過流／MOS 過溫／線圈過溫／CAN 斷線／過載）；其他 `0x??` 一律當故障顯示原文。
+  09-04 那個「三級（0／具名／未分類）」作廢——`0x1` 之前會被標成「狀態碼，未分類」的黃字，真機每次讀都會看到。184/184。
+
+## [2026-09-17v3f] v3：return_top 勾、緊急脫離閃爍、Dashboard Mission 卡（`v3-2026.09.17-1123`）
+
+per user 2026-09-17（agent-ai-db 轉述三件）。契約（server.js `return_top`、腳本 `return_top=0`）由他們部署。
+
+- 參數設定第一列尾巴加勾「任務結束回頂端」（`#mp-rtop`，預設勾）。不勾 ⇒ `params.return_top=0`、等效指令與本體模式尾巴多 `return_top=0`（勾著不顯示）、摘要／確認視窗標「結束停最低點」；defaults 帶入 `return_top`；存檔一起存。
+- 執行中 `.estop` 加 `blink`（1 s 呼吸光暈，`prefers-reduced-motion` 退成靜態光暈），永遠 enabled；二次確認照舊。
+- Dashboard 第一張「Mission」卡：開始／停止作業／緊急脫離三顆是 Mission 頁本尊的**鏡像**（`data-mirror` → 轉去 `.click()` 本尊：同一支 handler、同一個確認；disabled／同一格切換／閃爍由 misPaint 從本尊抄），
+  右側 週期／步／高度／吸住 + 目前參數：執行中＝server 的 `mission.args`＋`env`（週期×步×cm、門檻、kv、頂、手臂/乾掃、回頂）、閒置＝Mission 表單那組（＝defaults 帶入後）。
+  `onMissionMsg` 多存 `mis.args`／`mis.env`。
+- 追加（`v3-2026.09.17-1132`）per user：這張卡改成**一般小卡大小、放右下**——排在小卡群最後（張力之後），`grid-column:-2/-1` 釘在最後一欄（欄數隨寬度變也一樣）；三顆鈕一列（44px 高）、下面週期/步/高度與參數。173/173。
+
+驗證：`check_console` 全綠；`gui_v3_check` **172/172**；`gui_offline.sh report` 0；三方 md5 一致。未 commit。
+
+## [2026-09-17v3e] v3 共用值：Manual／Mission 共用同一份機器狀態（`v3-2026.09.17-1058`）
+
+per user 2026-09-17（交接單 `handoff/ai2-shared-values.md`；計畫 `plans/mission_manual_isolation.md`）。模型：真值在本體／吊機，Manual 調什麼 Mission 就用什麼，
+起跑時腳本強制安全項；**不做 Mission 自己的一份**。契約（本體 `set_pusher_rpm`、`EVT pusher_rpm`、status 執行期 RPM、settings 檔回放）由 agent-ai-db 部署。
+
+- ① Manual 推桿卡：RPM 收成**兩格共用值**（伸／收），`change` 就送 `set_pusher_rpm <伸> <收>`（另一格送現值＝不改）；OK 後清 `data-user` 讓 status 接手；
+  `EVT pusher_rpm` 來了跟著變。**單次指令（伸 raw／尋封伸／收，整組與單支）不再帶 rpm**。單支列各自的 rpm 欄與 `zdtRpm()`／`ZDT_RPM_ENABLED` 退場
+  （早上 v3c 那版「每支各自 rpm、指令帶 rpm」同日作廢——共用值只有一份，逐支填五遍沒意義）。
+- ② Mission 左欄多一張「共用值」卡（前置 → 共用值 → 參數設定）：推桿含入／跳過（`zdt_skip` 有值整張標黃 +「推桿 7 被 Manual 排除」）、
+  RPM 兩格**可改**（同一支 `set_pusher_rpm`，兩頁互通）、吊機五門檻 + level_auto + 張力保護（唯讀，讀吊機 status）、起跑強制項一行（zdt_pwr≠1111 時附註）。
+- ③ 腳本輸出的「🔴 … 不跑。」行抄到 Mission 狀態列 `#mis-why`（紅、粗）+ log `🔴🔴 腳本拒跑`；下一次起跑或 running 時讓位。
+
+驗證：`check_console` 全綠；`gui_v3_check` **167/167**（fake：change → `set_pusher_rpm 650 400` → status `pusher_rpm=650` → Mission 格同步 → 從 Mission 改回 → Manual 同步；
+單次指令行尾無 rpm；`zdt_disable 7` → 共用值卡標黃 → 勾回回白；拒跑行 → 紅 banner）；`gui_offline.sh report` 0；三方 md5 一致。
+📌 check 踩坑：[mission] 段之後 backend 留在 body，body 模式每秒由 status 重推 `mis.running` ⇒ 拒跑 banner 的「running 讓位」在 body 模式驗不到，該段先切 script 再切回。未 commit。
+
+## [2026-09-17v3d] v3 現場修正：推桿單支區重排、參數卡對齊、前置剩四項（`v3-2026.09.17-1037`）
+
+user 現場回報（agent-ai-db 轉述）：「manual 吸盤推桿單支按鈕按不到」+ 三件跟著上。
+
+- 🔴 **根因**：單支區是 11 欄 grid（勾·標籤·cm·rpm伸·rpm收·三顆鈕…），平板密度下一列 >700px，卡片只有 300–450px 而 `.grp{overflow:hidden}`
+  把右邊的按鈕整個裁掉 ⇒ 看不到也點不到（09-16 之前 8 欄就已經很勉強，09-17 加了 3 欄才爆）。
+  改法：卡片 `grid-column:1/-1` 吃滿整列；每支一列 `.zrow`（flex-wrap，可折行，列間虛線）；失能／使能併進該支那列（勾 · 標籤 · cm · rpm 伸 · rpm 收 │ 伸 raw · 尋封伸 · 收 │ 狀態 · 失能 · 使能）；按了整列反白 0.6 s。
+  📌 jsdom 無版面，check 只能驗結構（每支一列、flex-wrap、卡片 1/-1）—— 「會不會被裁掉」這類事只有真瀏覽器看得到。
+- 參數設定五列統一骨架 `.ctl.mp` + `.mpc`（控制項靠右、輸入框同寬 76px、每格前帶小字標籤）；之前 `.ctl`／`.ctl.stack` 混用所以沒對齊。
+- 前置移除「③ 推桿歸零」與「手臂（資訊）」兩列（歸零在 Manual 做；手臂開機自動 INIT、腳本起跑自查 `arm_ready=1`）⇒ 剩 ① 地面歸零 ② 牆高 ③ 水位 ④ 起點。`flowZdtHome`／`flowArmInit` 一併刪。
+
+驗證：`check_console` 全綠；`gui_v3_check` **160/160**；`gui_offline.sh report` 0；三方 md5 一致。未 commit。
+
+## [2026-09-17v3c] v3：Manual「吸盤推桿」卡整理（`v3-2026.09.17-1011`）
+
+per user 2026-09-17（agent-ai-db 交接單 `handoff/ai2-manual-pusher-card.md`，第 5 點同日拍板改勾選框）。契約由他們先部署（body + fake）：`zdt_power <5..8|all> on|off`、status `zdt_pwr=1111`、`zdt_skip=-|7|5,7`。
+
+**改了什麼**（`index.html`）
+- RPM 欄改成**伸／收各一格**、value 直接顯示本體預設（status `pusher_rpm`／`pusher_rpm_retract`；09-15 那版只填 placeholder，理由是別把預設凍進指令——per user 反轉：要看得到數字，送預設值與不帶參數對本體等價）。
+  人改過的欄（`data-user`）或正在打字的欄不被 status 蓋回。「RPM 預設值」列拿掉。伸 raw／尋封伸用伸那格、收用收那格。
+- 「歸零」→「當前位置歸零」（雙重確認照舊）；「重歸零（24V 跳電後）」→「自動歸零」只留 `zdt_home all`；①②／取消的手動流程 IIFE 整段刪。
+- 新增「失能／使能」列：單支 5/6/7/8 各一組 + 全部（`zdt_power`，真斷電）；狀態讀 `zdt_pwr=`（標明指令狀態）；失能要確認；使能鈕 title 提醒「手推過先當前位置歸零」。
+- 「納入／排除群組」兩顆鈕移除 → 每支前面一個勾「整組指令包含這支」，勾／取消立刻送 `zdt_enable/zdt_disable <s>`；顯示以 status `zdt_skip=` 為準（送出後到下一筆 status 前不蓋回），沒勾的標籤刪除線 +「整組跳過」。`pusher all` 照送不拆。`解堵轉` 保留在單支區下。
+
+**驗證**：`check_console` 全綠；`gui_v3_check` **161/161**（+9：RPM value/不蓋回/各自那格、改名、zdt_power 全部/單支/狀態、勾選 zdt_skip 往返）；`gui_offline.sh report` 0；三方 md5 一致。
+⚠️ 踩坑（check）：`LOGBUF` 是 300 筆 ring，`logs().slice(fromLength)` 在 ring 滿了之後永遠是空的——單跑 `--only hold` 過、全跑就掛。改看 `slice(-8)`。未 commit。
+
+## [2026-09-17v3b] v3：側欄順序、Mission 重排（草圖）、四卡移除、兩卡搬 Dashboard、存檔鈕（`v3-2026.09.17-0959`）
+
+per user 2026-09-17 早（agent-ai-db 交接單 `handoff/ai2-mission-relayout.md` + 草圖 `.png`）。純 GUI；契約只多一支 `{mission:'save'}`（見下）。
+
+**改了什麼**
+- 側欄 Dashboard → Mission → Manual → Setting，預設開 Dashboard（執行細節都搬過去了，開頁先看機器）。
+- Mission：sticky 狀態列留「狀態 chip · 週期/步/高度/吸住 · 暫停⇄繼續 · ⤒ / STOP 吊機 / PARK 手臂」；
+  下方 `.mis-grid` 兩欄——左：前置一行摘要卡（`#pre-card`，標題就是摘要，點開才展開）+ **參數設定五列**
+  （單步距離/步數/週期數 · 風扇 · 滑台 · 手臂壓力/乾掃 · 中止門檻；頂端高度列拿掉，等效指令縮成一行小字）；
+  右：**存檔 / 開始⇄停止作業（同一格，依 running 只露一顆）/ 🔴 緊急脫離**（紅、隔開、confirmOnce 照舊）。
+- 移除四張卡 + 它們的寫入點：即時監看（`m-roll`/sparkline `rollHist`/`m-diff`/`m-tdiff`/`mon-age`、`bar()`）、
+  致動器·指令↔回讀（`setVerif`/`paintPumpVerif` 與全部呼叫點；`fire()` 第 3 參數留位不用）、吸盤 p5–p8（`m-cups`/`m-seal`）、單步時間基準（純靜態）。
+  對應 CSS（`.spark`/`.cups`/`.cup`/`.verif`/`.vf`/`.gauge`）一併刪。
+- 搬 Dashboard：任務執行細節列（子步驟/等真空/目前工具/清潔/跳過/急停脫離/最近事件）、腳本輸出、每步時間；id 全沿用。
+- `.estop` 選擇器由 `.top .estop` 放寬——這顆 09-15 搬離頂欄後其實一直沒套到紅色。
+- **存檔**：`{mission:'save', params}` → `server.js` 新增 `missionSave()`（`[2026-09-17 AI-2, for agent-ai-db]` 標記；驗證抄 start 那套、不 spawn、
+  存進 `mission_params.json` 多 `saved:1`），ack 帶 defaults → `#mp-last` 顯示「已存 時間」。🔴 **Pi 上的 server.js 由 agent-ai-db 部署**，在那之前真機按存檔只會 log 一行、沒有 ack。
+
+**驗證**：`check_console` ①②③④ ✅；`gui_v3_check` **152/152**（+10：分頁順序、四卡不在、Dashboard 持有三卡、五列順序、右欄三鈕、單格切換、存檔 ack + 檔案落地 + 壞值擋下）；
+`gui_offline.sh report` 0 not modelled；三方 md5 `c97e5d1a…` 一致。
+📌 「假機器跑 start → 停止作業 → 緊急脫離」：check 的 [mission] 段從按鈕真起本體模式任務並停止、[stop] 段走 STOP ⑤ 橫幅與緊急脫離；腳本模式的 start 在 check 裡只驗 WS payload（不真的對 fake 起 cycle_test）。未 commit。
+
+## [2026-09-17v3] v3：`cycle_test.py` 路徑跟著搬到 `scripts/`（`v3-2026.09.17-0934`）
+
+per user（agent-ai-db 轉述）`Linux_test/` 退役、`cycle_test.py` 搬到 `scripts/`，server.js MISSION_PY 已改。
+GUI 只有顯示層跟著改：`index.html` 的「等效指令」字串（:3638）與兩處註解（:34、:3873）`Linux_test/` → `scripts/`；
+`gui_v3_check.js` 的 regex 只比對 `cycle_test.py …`，不需動。
+驗證：`gui_v3_check` 142/142；三方 md5 `687bdb37…` 一致（:8080）。未 commit。
 
 ## [2026-09-16v3c] v3：v1 退役收尾 —— 「v2」連結拿掉、check_console ② 清零（`v3-2026.09.16-1948`，改到 :8080）
 
