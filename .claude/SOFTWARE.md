@@ -9,6 +9,8 @@
 > 行數與吊機 §3.2 區段行號**逐項命中**;修正了 7 項(指令數、v1 死碼分類、驅動清單、
 > `start_*.sh` 未版控、public_v2 單檔、cli_C 註解已修、cmd_ 計數語意)。
 > 🔴 **再次改動這些數字前請重跑比對,不要憑印象改。**
+> 📌 **2026-09-17 對齊 09-16 清樹**:§1 拓樸(v1/v2 GUI 退役、v3 :8080、systemd 自啟)、§1.1 目錄表(frame_capture/bench/tmux launcher/DY_500 移除)、§8 樹狀圖。
+>    行數類數字(server.js 544 行、驅動 16 支…)**未重驗**,09-16 刪了 19k 行後多半已過期。
 
 ---
 
@@ -19,7 +21,7 @@
 
 ```
                  ┌──────── Web GUI  web_backend/server.js (Node) ────────┐
-                 │  :8080 v1(public/,停機)   :8081 console v3(public_v3/,唯一主控台)│
+                 │  :8080 console v3(public_v3/,唯一主控台;v1/v2 已退役 09-16)      │
                  │  純 TCP↔WebSocket 橋接,不含業務邏輯                            │
                  └──────┬───────────────────┬───────────────────┬─────────┘
                         │                   │                   │
@@ -36,9 +38,9 @@
    │ 硬體層(USR 閘道 6 + 水閥 .32、X518、IMU、Damiao、電源)→ 見 **HARDWARE.md** §2–§5      │
    └───────────────────────────────────────────────────────────────────────────────┘
 
-   編排/上機測試:Linux_test/cycle_test.py(full / arm / mission 模式,走 TCP 打三程序)
-   離線測試:    harness/(fake_bus / fake_serial 假匯流排 + 回放比對)
-   相機(停用):  frame_capture/(Python 管線)+ user_lib/FrameAnalyzer(本體內樁)
+   編排/上機測試:Linux_test/cycle_test.py(full / arm / crane 模式,走 TCP 打三程序;server.js Mission 起跑的就是它)
+   離線測試:    harness/(fake_robot 假端點 + gui_v3_check / fake_bus 假匯流排 + 回放比對)
+   (相機管線 frame_capture/ 2026-09-16 已自樹移除;user_lib/FrameAnalyzer 仍在本體 build 內,為樁)
 ```
 
 📌 **硬體邊界 = 軟體邊界**(per user 2026-09-13,`HARDWARE.md` §0):吊機與本體兩箱之間**只共用 220V 進線與隧道通訊**,
@@ -54,14 +56,15 @@
 | 手臂 | 本體 Pi | 9527 | `cleaning_arm/main.cpp` | `cd cleaning_arm && ./motor_api`(FIFO) |
 | Web | 吊機 Pi | 8080/8081 | `web_backend/server.js` | `~/run/start_web.sh <tag>` |
 
-🔴 **啟動用 FIFO**:各程序 stdin 接 `~/run/<tag>_in` FIFO(`sleep infinity` 撐開),本機 console
-只認 `exit/quit/status`,**其餘指令一律走 TCP**。本體 `exit` 會跑 `cmd_shutdown` → **關全部繼電器**。
-tmux 未安裝,`wr.sh` 不可用,用 `scripts/bench/launch.sh` 或 start_*.sh。
+🟢 **2026-09-16 起四支程序都是 systemd 開機自啟**(吊機 `fcv-crane`/`fcv-web-v3` system unit;本體 `fcv-arm`/`fcv-body` user unit + linger),
+unit 副本與重灌步驟在 `scripts/systemd/`;更新程式用 `scripts/deploy.sh`。stdin 由 unit 內 `exec 3<> fifo` 撐開(console 讀到 EOF 會退出),
+本機 console 只認 `exit/quit/status`,**其餘指令一律走 TCP**。本體 `exit` 會跑 `cmd_shutdown` → **關全部繼電器**;unit 停止用 SIGTERM 不送 exit。
 
 🔴 **`start_body.sh` / `start_crane.sh` / `start_web.sh` 不在 repo 裡**(2026-09-12 確認),只活在兩台
 Pi 的 `~/run/`。**啟動參數沒有版控** —— 包含害過人的 `HOME_GROUND` 預設 256(頂零舊慣例,地歸零要
 傳 0,見 §3.3)、寫死的隧道 IP、佈署路徑 `.../web/`。Pi 的 SD 卡掛掉這些就沒了 → 見 §8。
-repo 內 `scripts/` 只有 build/bench/`crcmd.py`/`cams.sh`/`link_probe.sh`/`crane.sh`/`wr.sh`。
+📌 2026-09-16 起 systemd unit 已把啟動參數(IP、埠、`PUBLIC_DIR`、吊機 ExecStartPost 補送的 home_ground/motion_hz/wall_height)收進版控副本 `scripts/systemd/`;
+`start_*.sh` 從此只是歷史。repo 內 `scripts/` = `deploy.sh`/`deploy_web.sh`/`crcmd.py`/`link_probe.sh`/`build/`/`systemd/`(tmux launcher 與 bench 09-16 移除)。
 
 ### 1.2 通訊協定
 
@@ -247,13 +250,13 @@ pivot)。已移除細掃/th_min/剛度守衛。8 Nm 雙工具 + 滑台 0–100�
 |---|---|
 | `web_backend/` | GUI 橋接(`server.js` 544 行)。🆕 **2026-09-14:v2 與 v3 整合成一個 —— `public_v3/` 是唯一主控台**(v2 退役,git 歷史 `feebc03`)。v3 = v2 全部功能 + 作業流程頁(兩道閘門)+ Mission 純按鈕吃 `EVT mission` + SAFE 橫幅/解除 + Manual 在 SAFE 上鎖;刻意拿掉跑腳本看 stdout 那條路。仍是**單檔 `index.html`(~320 KB)**;安全閘門(手臂武裝互鎖、危險操作 60 s)沿用。v1 `public/` 已停機。⚠️ 本機目錄 `web_backend/`,**Pi 上佈署為 `.../web/`**(start_web.sh 寫死,`PUBLIC_DIR` 要改指 `public_v3`) |
 | `Linux_test/` | `cycle_test.py`(full/arm/mission;`FCV_WROBOT_HOST`/`FCV_CRANE_HOST`/`FCV_TOP_CM`/`FCV_ARM_NM`;高度帶 `FCV_SKIP_BANDS` opt-in 已放棄)+ 各上機腳本 |
-| `user_lib/` | **16 支成對驅動**(.cpp+.h)+ 2 個純 header(`SerialPort.h`、`damiao.h`)。清單:ZDT、JC100、SD76、SE3、MH300、CLV900、DSZL_107、PQW、ZS-DIO、QX_DO24、DM2J、WT901、XKC、DY_500、FrameAnalyzer、**DIHOOL_control**。🔴 `DIHOOL_control` **全樹 0 引用 = 死驅動**;`DY_500` 只被 `WASH_ROBOT.h` include(使用者確認硬體沒用)→ 兩者都進 §8 |
+| `user_lib/` | **15 支成對驅動**(.cpp+.h)+ 2 個純 header(`SerialPort.h`、`damiao.h`)。本體 8:ZDT、JC100、PQW、QX_DO24、DM2J、WT901、XKC、FrameAnalyzer(樁);吊機 6:SE3、MH300、CLV900、DSZL_107、SD76、ZS-DIO;手臂:damiao.h。**每一支都在 build 清單裡**(`DIHOOL_control` 09-12、`DY_500` 09-16 已移除) |
 | `transport/` | TCP_client / TCP_server / Serial_port |
 | `common/` | endpoints.h(端點覆寫)、log_utils、profile |
-| `harness/` | 假匯流排回放測試(不上機驗驅動/流程) |
-| `frame_capture/` | 相機障礙偵測 Python 管線(**停用**,橫桿未來備案) |
-| `doc/` | 各硬體裝置手冊摘要 |
-| `scripts/` | build(`build_body.sh`/`build_crane.sh`)、bench(launch)、`crcmd.py`(吊機 TCP 客戶端) |
+| `harness/` | 離線驗證:`fake_robot.py`(三個假端點,GUI 開發)、`gui_offline.sh`/`gui_v3_check.js`(GUI 回歸)、`fake_bus`/`build.sh`/`prove_noop.sh`(重構等價比對)、`hostile_crane.py` |
+| ~~`frame_capture/`~~ | ⚰️ 2026-09-16 移除(相機路線 09-01 作廢;git `44bcb13` 之前仍有) |
+| `doc/` | 各硬體裝置**原廠手冊 PDF**(gitignore,49 MB);摘要在 `.claude/summaries/` |
+| `scripts/` | `deploy.sh`(開發期部署 7 目標)、`deploy_web.sh`(GUI 版號+三方 md5)、`crcmd.py`(line protocol 客戶端,兩台都能打)、`link_probe.sh`、`build/`(建置腳本權威版)、`systemd/`(4 個 unit 副本) |
 
 ---
 
@@ -322,11 +325,11 @@ facade_cleaning_v2/
 ├── command/dispatcher.{h,cpp}     本體指令分派
 ├── Crane_control_PI/main.cpp      吊機(單體)
 ├── cleaning_arm/{main.cpp,main_api.{h,cpp},damiao.cfg,damiao_config.h,compile.sh}
-├── web_backend/{server.js,public/(v1 停機),public_v3/}
+├── web_backend/{server.js,public_v3/,tools/check_console.js}   (v1 public/ 09-16 移除)
 ├── Linux_test/cycle_test.py …     編排/上機測試
 ├── user_lib/                       裝置驅動
 ├── transport/ common/ config/ mechanism/
-├── harness/ frame_capture/ doc/ scripts/
+├── harness/ doc/(gitignore) scripts/{deploy.sh,deploy_web.sh,crcmd.py,link_probe.sh,build/,systemd/}
 └── .claude/                        Claude 工作區 / 專案權威文件(2026-09-12 整理)
     ├── SOFTWARE.md  motion_flow.md  runbook.md  per_program_cautions.md  (權威)
     ├── work_log.md(進度+待辦總表)  changelog.md(變更日誌)
