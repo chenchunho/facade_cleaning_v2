@@ -201,7 +201,10 @@ bool WashRobot::init() {
     const double rail_travel = profile::num("axis_profile", "ARM_RAIL_TRAVEL_MAX_CM",
                                             ARM_RAIL_TRAVEL_MAX_CM);
     D_(DM2J_ARM).set_lead_cm_per_rev(rail_lead);
-    D_(DM2J_ARM).set_travel_limit_cm(0.0, rail_travel);
+    // [2026-09-17 per user「指定位置 −3 cm 不會動」] Driver-level guard must match the app-level
+    // window (−travel..+travel): the 09-17 negative-rail change only widened cmd_rail_move, so the
+    // driver still rejected every negative target ("PR_move_cm_nowait -3.000 cm REJECTED").
+    D_(DM2J_ARM).set_travel_limit_cm(-rail_travel, rail_travel);
     // ⚠️ [2026-08-31] 「presence not probed」不是隨手加的免責聲明，是**事實陳述**：
     //    本 driver 的 init() 不做任何匯流排交易（只綁 client、設 slave 號），所以這行 [OK]
     //    只證明「軟體物件建好了」，**不證明裝置在線**。裝置實體拔掉一樣會印 [OK]。
@@ -213,7 +216,7 @@ bool WashRobot::init() {
     //       一次匯流排抖動就開不了機。要加的話得比照 PQW 帶重試，是獨立的決定。
     std::cout << "[OK] DM2J arm rail (slave " << DM2J_ARM << " @ cli_20_)"
               << " lead=" << rail_lead << " cm/rev"
-              << " travel<=" << rail_travel << " cm"
+              << " travel=±" << rail_travel << " cm"
               << " (presence not probed)\n";
 
     // ZDT slave 5..8 on cli_20_ ([v2] 4 cups: right{5,7} / left{6,8}，2026-08-28 修正)

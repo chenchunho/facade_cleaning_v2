@@ -147,6 +147,14 @@ release_feet_center → free_hang_settle(3 s)→ balancing(IMU 閉環,連續 mot
 🔴 **v2 重做時預期走 IMU + 吊機差動**(與 level-match 共用感測器),**不是照抄 v1**
 —— v1 靠解開 body 真空讓機體自由懸掛,v2 沒有 body 吸盤分組。
 
+### 2.6 同一個限制有兩層:指令層守衛 + 驅動層守衛(2026-09-17)
+
+上滑台行程守衛在**兩個地方**:`cmd_rail_move` 的 `ARM_RAIL_TRAVEL_MIN/MAX_CM`(指令層,回 `ERR rail_target_out_of_range`)
+與 `DM2J_RS570::set_travel_limit_cm()`(驅動層,只 `LOG_ERR … REJECTED`、指令回覆只剩 `ERR rail_move_command_failed`)。
+09-17 上午「上滑台可設負值」只放寬指令層,驅動層開機仍設 `[0,130]` ⇒ 負數全被擋,GUI 看不出原因,要到 Pi 上翻 log 才知道。
+- 🔴 改任何「範圍」之前先 `grep` 這個範圍的**所有**出現點(指令層 / 驅動層 / GUI 軟限位 / fake),三層一起改。
+- 驅動層的拒絕**要能從指令回覆看出來**——現在仍只在 log(🟡 待改:`ERR rail_move_command_failed` 後面帶原因)。
+
 ---
 
 ## 3. 方法論教訓(吃過虧才學到的)

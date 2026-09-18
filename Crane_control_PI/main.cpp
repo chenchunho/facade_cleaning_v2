@@ -239,7 +239,7 @@ static constexpr int DSZL_CH_LEFT        = 2;   // [2026-09-01 per user] CH2 = �
 //   readAllStatus 都對只有 4 路的模組讀 8 個線圈，而它照樣回答越界的那 4 路
 //   —— 與本體那顆 PQW 同日發現的「越界不報錯、編造回覆」是同一類。
 static constexpr int ZS_WATER_SLAVE     = 1;   // on USR_W (.32) 獨佔網段 — 專屬匯流排不會撞號
-static constexpr int CH_WATER_INLET     = 4;   // CH4 = ball valve (tank refill from rooftop)
+static int CH_WATER_INLET = [](){ const char* v = std::getenv("FCV_WATER_INLET_CH"); return (v && *v) ? std::atoi(v) : 4; }();   // [2026-09-18] env FCV_WATER_INLET_CH(預設 CH4;official=CH1)
 static constexpr int ZS_WATER_TOTAL_CH  = 4;   // 🔴 4-channel ZS-DIO board（原誤記為 8）
 
 // Motion tunables (motion_flow.md §6)
@@ -615,9 +615,26 @@ static constexpr int    HOLD_LOOP_IDLE_MS        = 200;    // poll period when n
 // getting L's replies because USR-TCP232-304 broadcasts to all clients (no
 // Modbus-aware routing). 14j reverted to single cli_A (frame contamination
 // at init). Final answer: physical bus separation — only way to be sure.
+// [2026-09-18] Config-driven device map —— 讓測試機／正式機共用同一顆 binary。
+// 每台一份 drop-in 用 env 覆蓋(計米器可拆到第二條匯流排 USR_M2、slave 可覆蓋);
+// **預設值 = 測試機現況**,不設任何 env 時行為與改動前完全相同。
+namespace cfgmap {
+    inline std::string s(const std::string& key, const std::string& def) {
+        const char* v = std::getenv(key.c_str());
+        return (v && *v) ? std::string(v) : def;
+    }
+    inline int i(const std::string& key, int def) {
+        const char* v = std::getenv(key.c_str());
+        if (!v || !*v) return def;
+        char* e = nullptr; long n = std::strtol(v, &e, 10);
+        return (e != v && *e == '\0') ? (int)n : def;
+    }
+    inline std::string upper(std::string x) { for (auto& c : x) c = (char)std::toupper((unsigned char)c); return x; }
+}
 static TCP_client         cli_A;       // .30 — SE3 left only  (+ future CLV900 if installed)
 static TCP_client         cli_B;       // .31 — SE3 right only
 static TCP_client         cli_M;       // .34 — SD76 meters (sensing bus, both meters share)
+static TCP_client         cli_M2;      // [2026-09-18] 第二條計米器匯流排(config-driven;FCV_EP_USR_M2_HOST 沒設就不連 → 測試機不受影響)
 static TCP_client         cli_W;       // .32 — ZS-DIO water relay (獨佔，見 USR_W_IP 的說明)
 static TCP_client         cli_C;       // .32 — X518 left tension  (direct TCP :502)
 // 🔴 [2026-09-01] cli_D 已無使用者：X518 從兩台（.32/.33）改為一台（.33 兩通道），
@@ -1102,8 +1119,8 @@ static std::atomic<double> g_balance_hz_max_offset    {BALANCE_HZ_MAX_OFFSET_DEF
 // 在兩側各自量到的方向一致，三方佐證收斂）。
 static constexpr double DSZL_SCALE_RIGHT = -0.0236364;   // CH1，4.16kg → raw -176
 static constexpr double DSZL_SCALE_LEFT  = -0.0205816;   // CH2，4.16kg → raw -202.1
-static std::atomic<double> g_dsz_left_scale  {DSZL_SCALE_LEFT};
-static std::atomic<double> g_dsz_right_scale {DSZL_SCALE_RIGHT};
+static std::atomic<double> g_dsz_left_scale  { [](){ const char* v = std::getenv("FCV_DSZL_SCALE_LEFT");  return (v && *v) ? std::atof(v) : DSZL_SCALE_LEFT;  }() };   // [2026-09-18] env 覆蓋初值(official 這顆 X518 方向相反,drop-in 給正值)
+static std::atomic<double> g_dsz_right_scale { [](){ const char* v = std::getenv("FCV_DSZL_SCALE_RIGHT"); return (v && *v) ? std::atof(v) : DSZL_SCALE_RIGHT; }() };   // [2026-09-18] env 覆蓋初值
 
 // SD76 length meter calibration — device-side (SD76 EEPROM via SCAL/DP regs).
 // Driver: SD76_length_meters::scaleByRatio() / readScale() / writeScale().
@@ -1162,6 +1179,7 @@ static std::atomic<int32_t> g_meter_middle_cal_baseline {METER_CAL_UNSET};
 static std::atomic<bool> g_gw_a_ok           {false};   // USR_A .30 — SE3 left
 static std::atomic<bool> g_gw_b_ok           {false};   // USR_B .31 — SE3 right
 static std::atomic<bool> g_gw_m_ok           {false};   // USR_M .34 — SD76 meters
+static std::atomic<bool> g_gw_m2_ok          {false};   // [2026-09-18] USR_M2 — 第二條計米器匯流排(config-driven,預設不連)
 static std::atomic<bool> g_gw_c_ok           {false};   // 🔴 註解過期修正 [2026-09-10]：
                                                         //   實際連的是 .33（2026-09-01 兩台 X518 併成一台後
                                                         //   由 cli_C 服務兩個通道），不是 .32
@@ -5605,6 +5623,18 @@ int main() {
                   << " connect failed — all SD76 length feedback disabled" << std::endl;
     }
 
+    // [2026-09-18] 第二條計米器匯流排(config-driven)。只有設了 FCV_EP_USR_M2_HOST 才連
+    //   —— 測試機不設就完全不動作。正式機:SD76 右/中 掛在這條(.32)。
+    if (ep::has_host_override("USR_M2")) {
+        const std::string m2h = ep::host("USR_M2", "");
+        if (cli_M2.connectToServer(m2h, ep::port("USR_M2", USR_PORT))) {
+            g_gw_m2_ok = true;
+            std::cout << "[OK]   USR_M2 (SD76 meters gw2) @ " << m2h << ":" << USR_PORT << std::endl;
+        } else {
+            std::cerr << "[WARN] USR_M2 " << m2h << " connect failed — gw2 meters disabled" << std::endl;
+        }
+    }
+
     // [2026-09-01] 單一台 X518、單一條連線服務兩側。ep 覆蓋鍵沿用 "DSZL_L"
     // （harness 的等價測試以鍵名綁定，改鍵名會破壞既有基線）。
     // 🔴 cli_D 不再用於 DSZL —— 連上與否直接決定**兩側**張力，g_gw_d_ok 一併退役。
@@ -5664,39 +5694,37 @@ int main() {
         std::cerr << "[WARN] USR_B down — skipping SE3 right init" << std::endl;
     }
 
-    // ---- USR_M (.34) — SD76 meters (sensing bus) ----
-    if (g_gw_m_ok.load()) {
-        if (!meter_left.init(cli_M, METER_LEFT_SLAVE, drv_dbg)) {
-            g_dev_meter_left = true;
-            // SD76 may be in paused state from previous session (e.g. Linux_test
-            // menu 9 'p' command) — paused state persists in flash, won't auto-
-            // count even after reset. Always resume on init so meter_loop sees
-            // live counts (otherwise length stays at last paused value, motion
-            // appears to "only move 2cm" for 30cm of physical rope motion).
-            meter_left.resumeMeter();
-            std::cout << "[OK]   SD76 left      USR_M slave " << METER_LEFT_SLAVE << " (resumed)" << std::endl;
+    // ---- SD76 meters (config-driven client + slave) ----------------------
+    // [2026-09-18] 每顆計米器掛哪條匯流排、哪個 slave,由 env 決定:
+    //   FCV_METER_<LEFT|RIGHT|MIDDLE>_GW  = "M"(預設,cli_M/.34) | "M2"(cli_M2/第二條)
+    //   FCV_METER_<...>_SLAVE             = 站號(預設 左1/右2/中4 = 測試機)
+    //   FCV_METER_MIDDLE_ENABLE           = 1 才 init 中繩計米器(預設 0 = 測試機未裝)
+    // 不設任何 env ⇒ 三顆全在 cli_M、左1右2、中略過 = 改動前行為。
+    // 🔴 維持「一條匯流排一個 client」(cli_M / cli_M2),不給每顆錶各開連線 —— 避免
+    //   USR 透明網關對所有連線廣播造成的 frame 污染(見檔頭 frame contamination 說明)。
+    auto init_meter = [&](SD76_length_meters& m, const char* who, int def_slave,
+                          std::atomic<bool>& okflag, bool enable) {
+        const std::string U = cfgmap::upper(who);
+        if (!enable) { std::cout << "[SKIP] SD76 " << who << " — disabled by config" << std::endl; return; }
+        const bool on_m2 = (cfgmap::s("FCV_METER_" + U + "_GW", "M") == "M2");
+        TCP_client&  cli    = on_m2 ? cli_M2 : cli_M;
+        const bool   gw_up  = on_m2 ? g_gw_m2_ok.load() : g_gw_m_ok.load();
+        const int    slave  = cfgmap::i("FCV_METER_" + U + "_SLAVE", def_slave);
+        const char*  gwname = on_m2 ? "USR_M2" : "USR_M";
+        if (!gw_up) { std::cerr << "[WARN] SD76 " << who << " — " << gwname << " down, skipped" << std::endl; return; }
+        if (!m.init(cli, slave, drv_dbg)) {
+            okflag = true;
+            // SD76 may persist a paused state in flash → always resume so meter_loop sees live counts.
+            m.resumeMeter();
+            std::cout << "[OK]   SD76 " << who << " " << gwname << " slave " << slave << " (resumed)" << std::endl;
         } else {
-            std::cerr << "[WARN] SD76 left init failed — left auto-distance disabled" << std::endl;
+            std::cerr << "[WARN] SD76 " << who << " init failed — " << gwname << " slave " << slave << std::endl;
         }
-        if (!meter_right.init(cli_M, METER_RIGHT_SLAVE, drv_dbg)) {
-            g_dev_meter_right = true;
-            meter_right.resumeMeter();
-            std::cout << "[OK]   SD76 right     USR_M slave " << METER_RIGHT_SLAVE << " (resumed)" << std::endl;
-        } else {
-            std::cerr << "[WARN] SD76 right init failed — right auto-distance disabled" << std::endl;
-        }
-        // SD76 middle conduit meter intentionally NOT initialized (2026-05-14):
-        // hardware not yet installed. Skipping keeps g_dev_meter_middle = false.
-        // Re-enable when middle conduit is wired up by restoring the init call.
-        std::cout << "[SKIP] SD76 middle    — hardware not installed (init skipped)" << std::endl;
-        // if (!meter_middle.init(cli_M, METER_MIDDLE_SLAVE, false)) {
-        //     g_dev_meter_middle = true;
-        //     meter_middle.resumeMeter();
-        // }
-
-    } else {
-        std::cerr << "[WARN] USR_M down — skipping SD76 meters init" << std::endl;
-    }
+    };
+    init_meter(meter_left,   "left",   METER_LEFT_SLAVE,   g_dev_meter_left,   true);
+    init_meter(meter_right,  "right",  METER_RIGHT_SLAVE,  g_dev_meter_right,  true);
+    init_meter(meter_middle, "middle", METER_MIDDLE_SLAVE, g_dev_meter_middle,
+               cfgmap::i("FCV_METER_MIDDLE_ENABLE", 0) != 0);
 
     // ---- USR_W (.32): ZS-DIO 水閥繼電器，獨佔一條網段 ----
     // [2026-09-10] 從 cli_M 搬出來。理由見 USR_W_IP 上方的說明（與 SD76 共存會互相干擾）。

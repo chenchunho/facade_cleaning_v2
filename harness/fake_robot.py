@@ -53,7 +53,10 @@ class Sim:
     """One shared world: crane rope lengths drive body height; arm tau converges."""
 
     def __init__(self):
-        self.lock = threading.Lock()
+        # [2026-09-17] RLock, not Lock: wr_dispatch('arm_slot') calls arm_dispatch() while already
+        # holding s.lock (body passthrough → arm) ⇒ a plain Lock deadlocks the whole fake
+        # (first exercised today by the Manual arm-card tool-switch check).
+        self.lock = threading.RLock()
         # crane (ground-zero convention: 0 at ground, negative going up)
         self.len_l = -120.0
         self.len_r = -120.0
@@ -69,7 +72,8 @@ class Sim:
         # [2026-09-17 AI-2, for agent-ai-db] tension thresholds are settable on the real crane (set_tension_max_kg /
         # set_tension_diff_max_kg / set_retract_tension_stop_kg, persisted in crane_settings.txt); status must follow so the
         # GUI check can verify the round trip. Defaults = real crane compile defaults (agent-ai-db 09-17), not the old fake 80/25/50.
-        self.tension_max_kg = 100; self.tension_diff_max_kg = 50; self.retract_tension_stop_kg = 75   # [2026-09-17] = real crane defaults (TENSION_MAX/DIFF/RETRACT_STOP _DEFAULT)
+        self.tension_max_kg = 100; self.tension_diff_max_kg = 50; self.retract_tension_stop_kg = 75
+        self.length_diff_max_cm = 10   # [2026-09-17 AI-2, for agent-ai-db] set_length_diff_max_cm <cm> (>1, <=200), persisted on the real crane   # [2026-09-17] = real crane defaults (TENSION_MAX/DIFF/RETRACT_STOP _DEFAULT)
         self.level_auto = 1           # [2026-09-15] set_level_auto on|off (auto level reference from IMU)
         self.level_diff = 0
         self.motion_hz = 30
@@ -155,7 +159,7 @@ class Sim:
         return (f'OK length_left={s.len_l:.1f} length_right={s.len_r:.1f} length_middle=ERR'
                 f' tension_left={s.ten_l:.1f} tension_right={s.ten_r:.1f} tension_valid=1'
                 f' up_left=0 up_right=0 down_left=0 down_right=0'
-                f' hold_guard={s.hold_guard} tension_max_kg={s.tension_max_kg:g} tension_diff_max_kg={s.tension_diff_max_kg:g} length_diff_max_cm=10'
+                f' hold_guard={s.hold_guard} tension_max_kg={s.tension_max_kg:g} tension_diff_max_kg={s.tension_diff_max_kg:g} length_diff_max_cm={s.length_diff_max_cm:g}'
                 f' retract_tension_stop_kg={s.retract_tension_stop_kg:g} dsz_left_scale=-0.0205816 dsz_right_scale=-0.0236364'
                 f' meter_left_scale=1 meter_right_scale=1 meter_middle_scale=1'
                 f' home_ground_cm={s.home_ground} wall_height_cm={s.wall_height} hold_hz=20 motion_hz={s.motion_hz} middle_hz=30'
@@ -210,6 +214,7 @@ class Sim:
 
     # [2026-09-16] 真機 STATUS 的 [M2] 段有 `tool=`(由 M2 角度反推,±0.09 rad):
     #   滾筒 0.8558 / 刮刀 0.1913 / center 0 / 其餘 between。
+    M2_SLOT_RAD = {'RIGHT': 0.8558, 'LEFT': 0.1913, 'CENTER': 0.0}   # main_api.h M2_SLOT_*_RAD（滾筒／刮刀／置中）
     @staticmethod
     def _m2_tool(pos):
         for name, ref in (('roller', 0.8558), ('squeegee', 0.1913), ('center', 0.0)):
@@ -607,6 +612,7 @@ def wr_dispatch(line, bcast):
             dist = int(a[2]) if len(a) > 2 and a[2].isdigit() else 0
             if dist and not 122 <= dist <= 444: return 'ERR dist_mm_range (122..444)\n', True
             s.m1['en'] = s.m2['en'] = 1; s.m1['moving'] = 1
+            if len(a) > 1 and a[1].upper() in SIM.M2_SLOT_RAD: s.m2['pos'] = SIM.M2_SLOT_RAD[a[1].upper()]   # slot ⇒ tool= follows (real: prepare_touch_slot_)
             if dist and dist < 260:
                 s.deploy_target = 1.0
                 return f'OK stopped=distance tau=1.00 target={float(a[0]):.1f} theta=0.480 cmd=0.480 contact=0.480 kp_eff=0.0 iters=0 ms=2100\n', True
@@ -723,6 +729,11 @@ def cr_dispatch(line, bcast):
             try: s.motion_hz = int(a[0])
             except ValueError: pass
             return f'OK motion_hz={s.motion_hz}\n', True
+        if c == 'set_length_diff_max_cm' and a:   # [2026-09-17 AI-2] real crane: >1 and <=200, persisted; status follows
+            try: v = float(a[0])
+            except ValueError: return 'ERR usage:set_length_diff_max_cm_<cm>\n', True
+            if not (1 < v <= 200): return 'ERR range:>1..200\n', True
+            s.length_diff_max_cm = v; return f'OK length_diff_max_cm={v:g}\n', True
         if c in ('set_tension_max_kg', 'set_tension_diff_max_kg', 'set_retract_tension_stop_kg') and a:   # [2026-09-17 AI-2] status follows
             try: v = float(a[0])
             except ValueError: return f'ERR usage:{c}_<kg>\n', True
@@ -749,6 +760,8 @@ def arm_dispatch(line, bcast):
             try: s.deploy_target = float(a[0])
             except ValueError: s.deploy_target = 8.0
             s.m1['en'] = s.m2['en'] = 1; s.m1['moving'] = 1
+            # real: prepare_touch_slot_() turns M2 to the requested slot before seeking ⇒ tool= follows
+            if len(a) > 1 and a[1].upper() in SIM.M2_SLOT_RAD: s.m2['pos'] = SIM.M2_SLOT_RAD[a[1].upper()]
             return f'OK tau={s.deploy_target:.2f} theta={s.m1["pos"]:.3f} iters=3 kp_eff=60\n', True
         if c == 'DEPLOY':
             s.m1['pos'] = 0.60; return 'OK deployed\n', True
@@ -760,6 +773,13 @@ def arm_dispatch(line, bcast):
             sub = a[0].upper()
             if sub == 'ENABLE': m['en'] = 1
             elif sub == 'DISABLE': m['en'] = 0
+            elif sub == 'LR_SLOT' and c == 'M2':   # [2026-09-17] Manual 手臂卡「切換工具」→ body arm_slot → here
+                # real (main_api.cpp LR_SLOT): refuses while M1 is still on the glass; else turns M2 and answers OK slot=<X>
+                slot = (a[1].upper() if len(a) > 1 else '')
+                if slot not in SIM.M2_SLOT_RAD: return 'ERR usage: LR_SLOT <LEFT|CENTER|RIGHT> [speed_rad_s]\n', True
+                if s.deploy_target is not None: return f'ERR LR_SLOT refused: M1 未離開玻璃 (pos={s.m1["pos"]:.3f})\n', True
+                s.m2['pos'] = SIM.M2_SLOT_RAD[slot]
+                return f'OK slot={slot} pos={s.m2["pos"]:.4f}\n', True
             return 'OK\n', True
     # real arm (main_api.cpp:3890) answers exactly this; web_backend's `ping` keepalive hits it every time
     return f'ERR unknown command: {c}\n', False

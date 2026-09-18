@@ -6,8 +6,12 @@
 > 保留「原因 / 決策(尤其被否決的)/ 驗證結論」。原則 ≤40 行,驗證表可超。
 > (原 2026-04 的「# 修改日誌」格式範本已由本說明取代。)
 
-## 索引(全部 145 條,新的在上)
+## 索引(全部 149 條,新的在上)
 
+- `[2026-09-18a]` **裝置對應 config-driven**:計米器可拆兩條匯流排(`cli_M2`)、slave/水閥通道/張力 scale 全部 env 可覆蓋;GUI 水閥通道改由後端動態判定 ⇒ **測試機與正式機共用同一份原始碼**(`v3-2026.09.18-2326`)→ (本檔)
+- `[2026-09-17v3o]` v3：張力條「總和」給一條 bar——刻度＝參考 2×單側上限、中性色、不是門檻（`v3-2026.09.17-1842`）→ (本檔)
+- `[2026-09-17v3n]` v3：Manual 本體區推桿卡墊底＋卡內兩欄、手臂卡工具切換（seg 亮＝STATUS tool=）＋全 stack 重排、張力條加「總和」讀值；fake RLock（`v3-2026.09.17-1752`）→ (本檔)
+- `[2026-09-17v3m]` v3：張力保護卡第四個門檻「左右繩長差上限（cm）」`set_length_diff_max_cm`（`v3-2026.09.17-1606`）→ (本檔)
 - `[2026-09-17v3l]` v3：第二顆水位計（高水位）——Dashboard／前置 ③ 兩顆各一燈、補水改到高水位自動關閥、吃 `EVT water_inlet_auto_close`（`v3-2026.09.17-1549`）→ (本檔)
 - `[2026-09-17v3k]` v3（本地，未部署——Pi 斷電維修）：張力卡即時值三格撤掉、左右繩差上限標籤；Mission 狀態列狀態字移除；fake `set_tension_*` 反映到 status（`v3-2026.09.17-1448`）→ (本檔)
 - `[2026-09-17v3j]` v3：上滑台可設負值（−130..130）；張力保護卡門檻旁顯示即時值（左/右/上限、左右差/門檻、最大側/收繩上限）（`v3-2026.09.17-1422`）→ (本檔)
@@ -156,7 +160,57 @@
 
 ---
 
-## 當月全文(2026-09,97 條)
+## 當月全文(2026-09,98 條)
+
+## [2026-09-18a] 裝置對應 config-driven —— 一顆 binary 兩台共用(`v3-2026.09.18-2326`)
+
+per user:測試機 `raspberry-cran` 與正式機 `official-crane` 並存,**程式共用一份**(否決維護兩套)。
+official 的 485 佈線刻意與測試機不同(計米器拆 `.34`+`.32`、ZS-DIO 獨立 `.35`、水閥在 CH1),
+所以把「裝置↔匯流排↔站號」從編譯期常數搬到 **env 覆蓋**,**預設值 = 測試機**(不設 env 時行為逐位元不變)。
+
+- `Crane_control_PI/main.cpp`
+  - 新增第二條計米器匯流排 `cli_M2` + `FCV_EP_USR_M2_HOST`(沒設就不連 → 測試機零影響)。
+  - 三顆 SD76 的 client 與站號改吃 env:`FCV_METER_<LEFT|RIGHT|MIDDLE>_GW`(`M`/`M2`)、`_SLAVE`、`FCV_METER_MIDDLE_ENABLE`。
+    🔴 **維持「一條匯流排一個 client」**,不給每顆錶各開連線 —— 避開 USR 透明網關對所有連線廣播造成的 frame 污染(舊雷)。
+  - `CH_WATER_INLET` → `FCV_WATER_INLET_CH`(預設 4、official=1);`g_dsz_*_scale` 初值 → `FCV_DSZL_SCALE_LEFT/RIGHT`
+    ⇒ **張力校正終於能持久化**(`set_dsz_scale` 是執行期值,每次重啟就被編譯預設洗掉,當天重複踩了三次)。
+- `web_backend/public_v3/index.html`:水閥卡片不再寫死 CH4,改從 `water_status` 的 `wch<N>=water_inlet`
+  動態建卡片(`WATER_INLET_CH` + `buildWRelay()`)⇒ GUI 也兩台共用。
+
+official 的 drop-in 見 `config/official-crane_485.md` 第四節。
+
+驗證(official 實機):SE3 左右、SD76 左(.34/1)右(.32/2)中(.32/1) 全部 `[OK] … (resumed)`、length 有值;
+`ZS-DIO water USR_W slave 1 **CH1** of 4`;張力 1.99/1.97(scale 正值,重啟後仍在);GUI 200。
+測試機不受影響(預設值即原行為),**未在測試機上換 binary**。未 commit。
+
+## [2026-09-17v3o] v3：張力「總和」有條了（`v3-2026.09.17-1842`）
+
+per user「總和的部分還是給他一個 BAR」。`renderTenBars` 的 `info` 列加 `ref`：條的滿刻度＝參考值 `2×tension_max_kg`（兩側都到上限），
+**顏色固定中性、標點灰、文字寫「參考」**，永遠不出現「超過上限」——總和那道保護已併掉，不能畫得像還有。
+驗證：`gui_v3_check` 208/208（第四條有 tbar、含「參考 200 kg」、無「超過上限」）；三方 md5 一致。未 commit。
+
+## [2026-09-17v3n] v3：推桿卡對調＋兩欄、手臂卡切換工具＋重排、張力「總和」讀值回來（`v3-2026.09.17-1752`）
+
+per user 三句（下午）：「吸盤推桿小卡跟下面 4 張小卡對調位置」「順手重新排列吸盤推桿版面」「手臂小卡新增切換工具功能＋重新排版」「張力保護 總和重量怎麼不見了」。
+- Manual 本體區：手臂 → 上滑台 → 水路 → 風扇 → **吸盤推桿（整列，墊底）**。上午排「推桿在最前」是操作順序，但整列卡最高、擺最前把四張半寬卡全推下去。
+- 推桿卡內 `.grp > .zdtcard` 改 grid 兩欄（3fr/2fr，<820px 單欄）：左 `.zmain`＝單支四列＋解堵轉；右 `.zside`＝整組 · 共用 RPM · 全部失能／使能 · 歸零（兩顆併一格）。id／data-* 不變。
+- 手臂卡：**工具列回來**（上午拿掉的工具槽）——seg 滾筒／刮刀，**亮的＝手臂 STATUS `tool=`**（不是上次叫它去哪），按另一顆送本體 `arm_slot RIGHT|LEFT`；
+  壓上中灰＋前端擋（手臂端 `LR_SLOT refused: M1 未離開玻璃`）；**壓上改用亮的那顆當 slot**（原寫死 RIGHT 會把已切到刮刀的 M2 轉回滾筒）；頂欄多「工具 X」tag；
+  手臂連上那一刻讀一次 STATUS（seg 才知道亮哪顆，之後仍按需讀）。版面全改 `.ctl.stack`（半寬卡三欄一定擠）。
+- 張力條（Manual）第四列「總和 L+R kg」純讀值（無條、無門檻）——總和那道保護 09-17 上午已併入收繩上限，AI-2 連讀值一起拿掉了；讀值本身是「吊著多重」，留。
+- `harness/fake_robot.py`：`s.lock` → **RLock**（`wr_dispatch('arm_slot')` 在持鎖下呼叫 `arm_dispatch` ⇒ 死鎖，整台假機器停擺；上午加的 passthrough 今天第一次被測到）；
+  `M2 LR_SLOT` 建模（壓上中拒、回 `OK slot=`）；`DEPLOY_F`／`arm_deploy_f` 的 slot 會轉 M2（tool= 跟著變）。
+
+驗證：`gui_v3_check` **208/208**（新增：本體區順序、推桿卡兩欄、手臂 seg 切刮刀→tool=squeegee→Dashboard 同步、壓上帶 LEFT、壓上中擋切換、收回後切回、張力四列三條）；三方 md5 一致。未 commit。
+
+## [2026-09-17v3m] v3：張力保護卡加 `length_diff_max_cm` 設定（`v3-2026.09.17-1606`）
+
+per user：卡上四個門檻 + 開關。吊機 `set_length_diff_max_cm <cm>`（>1 且 ≤200，持久化；status `length_diff_max_cm=`）由 agent-ai-db 部署。
+- `#tenset` 第四列「左右繩長差上限（cm）｜計米器 L−R｜超過就中止動作」，`data-min=2 data-max=200`（整數 cm；契約是 >1），回填現值；Setting 表那列改標「持久化 · Manual 可設」，
+  註解「沒有設定入口」更正；卡片徽章「重啟就沒了」→「門檻會持久化」（09-17 起吊機 crane_settings.txt 回放）；套用的確認文字同步改。
+- `harness/fake_robot.py`（AI-2 標記）：`set_length_diff_max_cm` 存狀態、status 帶出（之前寫死 10）。
+
+驗證：`check_console` 全綠；`gui_v3_check` **203/203**（套用 15 → status 15 → Setting 表與共用值卡跟著；1 cm 擋；還原）；`gui_offline.sh report` 0；三方 md5 一致。未 commit。
 
 ## [2026-09-17v3l] v3：高水位計（slave 14）（`v3-2026.09.17-1549`）
 

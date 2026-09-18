@@ -288,7 +288,8 @@ async function secScript(P) {
   { const sec = w.document.querySelector('.pane[data-pane="manual"] .man'); const kids = Array.from(sec.children);
     const from = kids.findIndex(e => e.classList.contains('man-sec') && /本體/.test(e.textContent));
     const heads = kids.slice(from + 1).filter(e => e.classList.contains('grp')).map(e => e.querySelector('header').firstChild.textContent.trim().split(' ')[0]);
-    chk('[09-17] Manual 本體區依現場操作順序：吸盤推桿(吃滿) → 手臂 → 上滑台 → 水路(PQW) → 風扇', [heads.join(','), kids.slice(from + 1).find(e => e.classList.contains('grp')).style.gridColumn], ['吸盤推桿,手臂,上滑台,水路,風扇', '1/-1']); }
+    // [09-17 下午 per user「吸盤推桿小卡跟下面 4 張小卡對調」] 上午是推桿在最前；整列卡擺最前把四張半寬卡全推下去，改成墊底。
+    chk('[09-17] Manual 本體區：手臂 → 上滑台 → 水路(PQW) → 風扇 → 吸盤推桿(吃滿、墊底)', [heads.join(','), kids.slice(from + 1).filter(e => e.classList.contains('grp')).pop().style.gridColumn], ['手臂,上滑台,水路,風扇,吸盤推桿', '1/-1']); }
   chk('[09-17 per user] Mission 狀態列的狀態字（閒置/本體/週期/步/高度/吸住）不顯示，按鈕（暫停⇄繼續/⤒/STOP/PARK）留著', [['mis-state','rd-wrstate','mis-cyc','mis-step','mis-h','mis-nseal'].every(id => !!w.document.getElementById(id).closest('[hidden]') && w.getComputedStyle(w.document.getElementById(id).closest('[hidden]')).display === 'none'), ['mis-pc','mbar-top','m-crane-stop','m-arm-park'].every(id => shown(id) || w.document.getElementById(id).hidden === false)], [true, true]);
   chk('[09-17] Manual 本體開關機 card gone (init/shutdown); body state text still computed (hidden, feeds nothing visible now)', [w.document.getElementById('wr-init'), w.document.getElementById('wr-shutdown'), /^本體 /.test(txt('rd-wrstate'))], [null, null, true]);
   chk('[09-17] idle: Dashboard Mission 卡 shows the form params, 開始 mirrored, no blink', [shown('d-mis-start'), shown('d-mis-stop'), /下一趟/.test(txt('d-mis-src')), /2 週期 × 5 步 × 40 cm .* fan=all:6 .* 結束回頂/.test(txt("d-mis-params")), w.document.getElementById('wr-estop').classList.contains('blink')], [true, false, true, true, false]);
@@ -479,13 +480,20 @@ async function secHold(P) {
   await w.__v3.armStatus();
   // [2026-09-17 per user] 手臂卡重做：力道／距離上限、壓上／收回、目前力+牆距、力道→套用；>7 防呆；走本體 arm_deploy_f / arm_force / arm_retract
   { const det = () => txt('rd-afdet'), g = (id) => w.document.getElementById(id);
-    chk('手臂卡只剩 力道/距離/壓上/收回/目前/套用；套用未壓上時灰；舊列（路徑/M1/M2/工具槽/DEPLOY/PARK/INIT）都不在', [['af-nm','af-dist','af-go','arm-retract','rd-arm-now','af-nm2','af-apply'].every(id => !!g(id)), g('af-apply').disabled, ['arm-path','af-slot','ad-go','arm-park','arm-init','arm-read'].every(id => g(id) === null), txt('arm-contact')], [true, true, true, '未壓上']);
+    // [09-17 下午 per user] 工具列回來（seg 滾筒／刮刀，亮＝STATUS tool=）；其餘舊列仍不在
+    chk('手臂卡：工具/力道/距離/壓上/收回/目前/套用；套用未壓上時灰；舊列（路徑/M1/M2/DEPLOY/PARK/INIT）都不在', [['af-tool','rd-arm-tool','arm-tool-tag','af-nm','af-dist','af-go','arm-retract','rd-arm-now','af-nm2','af-apply'].every(id => !!g(id)), g('af-apply').disabled, ['arm-path','af-slot','ad-go','arm-park','arm-init','arm-read'].every(id => g(id) === null), txt('arm-contact')], [true, true, true, '未壓上']);
+    chk('[09-17 重排] 手臂卡每列 .ctl.stack（不再 1fr auto auto 三欄）；seg 亮的＝實際工具（fake 開機滾筒）；頂欄工具 tag', [['af-tool','af-nm','af-go','rd-arm-now','af-apply'].every(id => !!g(id).closest('.ctl.stack')), g('af-tool').querySelector('button.on') && g('af-tool').querySelector('button.on').getAttribute('data-slot'), txt('arm-tool-tag')], [true, 'RIGHT', '工具 滾筒']);
+    g('af-tool').querySelector('[data-slot="LEFT"]').click();
+    await waitFor(() => g('af-tool').querySelector('button.on') && g('af-tool').querySelector('button.on').getAttribute('data-slot') === 'LEFT', 30);
+    chk('按「刮刀」→ arm_slot LEFT → OK slot=LEFT → STATUS tool=squeegee → 亮刮刀、Dashboard 目前工具同步', [w.__v3.logs().some(l => /arm_slot LEFT → OK slot=LEFT/.test(l)), g('af-tool').querySelector('button.on').getAttribute('data-slot'), txt('mis-tool'), txt('arm-tool-tag')], [true, 'LEFT', '刮刀', '工具 刮刀']);
     g('af-nm').value = '8'; g('af-go').click(); await sleep(50);
     chk('壓上 8 N·m → 前端防呆 alert，不送', /防呆上限 7/.test(w.__alerts.slice(-1)[0] || ''), true);
     g('af-nm').value = '3'; g('af-dist').value = ''; g('af-go').click();
     await waitFor(() => /^✅ 壓上/.test(det()), 30);
     chk('[現場 09-17] 壓上/收回 在自己那列（.arm-btns，鈕 flex:none）；結果文字獨立一列且可換行（white-space normal），不再擠按鈕', [g('af-go').parentElement.classList.contains('arm-btns'), g('arm-retract').parentElement === g('af-go').parentElement, g('rd-afdet').closest('.arm-result') !== null, w.getComputedStyle(g('rd-afdet')).whiteSpace, w.getComputedStyle(g('af-go')).flex.split(' ')[0]], [true, true, true, 'normal', '0']);
-    chk('壓上 3 → arm_deploy_f 3 RIGHT → OK → 壓上中、套用 enabled、目前列開始讀 tau', [w.__v3.logs().some(l => /arm_deploy_f 3 RIGHT$/.test(l)), txt('arm-contact'), g('af-apply').disabled, /力 3\.00 \/ 目標/.test(det())], [true, '壓上中', false, true]);
+    chk('壓上 3 → arm_deploy_f 3 LEFT（用亮的那顆工具，不再寫死 RIGHT）→ OK → 壓上中、套用 enabled、目前列開始讀 tau；壓上中工具 seg 灰', [w.__v3.logs().some(l => /arm_deploy_f 3 LEFT$/.test(l)), txt('arm-contact'), g('af-apply').disabled, /力 3\.00 \/ 目標/.test(det()), g('af-tool').querySelector('[data-slot="RIGHT"]').disabled], [true, '壓上中', false, true, true]);
+    g('af-tool').querySelector('[data-slot="RIGHT"]').disabled = false; g('af-tool').querySelector('[data-slot="RIGHT"]').click(); await sleep(300);
+    chk('壓上中硬按滾筒 → 前端擋（alert 先收回），不送 arm_slot RIGHT', [/先按「收回」/.test(w.__alerts.slice(-1)[0] || ''), w.__v3.logs().some(l => /arm_slot RIGHT/.test(l))], [true, false]);
     await waitFor(() => /力 [\d.]+ N·m/.test(txt('rd-arm-now')), 30);
     chk('目前：力 N·m · 估測牆距 mm（STATUS [M1] tau= / wall_mm=，壓上後才顯示牆距）', /力 [\d.]+ N·m · 估測牆距 \d+ mm/.test(txt('rd-arm-now')), true);
     g('af-nm2').value = '5'; g('af-apply').click();
@@ -495,7 +503,10 @@ async function secHold(P) {
     chk('套用 8 → 前端防呆 alert', /防呆上限 7/.test(w.__alerts.slice(-1)[0] || ''), true);
     g('arm-retract').click();
     await waitFor(() => /^✅ 已收回/.test(det()), 30);
-    chk('收回 → arm_retract → OK → 未壓上、套用灰、目前列清空', [txt('arm-contact'), g('af-apply').disabled, txt('rd-arm-now')], ['未壓上', true, '—']);
+    chk('收回 → arm_retract → OK → 未壓上、套用灰、目前列清空、工具 seg 解灰', [txt('arm-contact'), g('af-apply').disabled, txt('rd-arm-now'), g('af-tool').querySelector('[data-slot="RIGHT"]').disabled], ['未壓上', true, '—', false]);
+    g('af-tool').querySelector('[data-slot="RIGHT"]').click();
+    await waitFor(() => g('af-tool').querySelector('button.on') && g('af-tool').querySelector('button.on').getAttribute('data-slot') === 'RIGHT', 30);
+    chk('收回後按「滾筒」→ arm_slot RIGHT → 亮滾筒', [w.__v3.logs().some(l => /arm_slot RIGHT → OK slot=RIGHT/.test(l)), txt('arm-tool-tag')], [true, '工具 滾筒']);
     g('af-apply').disabled = false; g('af-nm2').value = '3'; g('af-apply').click();   // 模擬 disabled 被拔掉硬按
     await waitFor(() => /^🔴 套用失敗/.test(det()), 30);
     chk('未壓上硬送 arm_force → ERR not_in_contact → 人話提示「先按壓上」', /未壓在牆上（先按「壓上」）/.test(det()), true);
@@ -550,7 +561,10 @@ async function secHold(P) {
   await waitFor(() => txt('zpw-5') === '使能', 20);
   chk('zdt_pwr=1111 → 四支顯示 使能；每支與全部各有 失能/使能 鈕', [['5','6','7','8'].map(x => txt('zpw-' + x)).join(','), w.document.querySelectorAll('[data-zpow]').length], ['使能,使能,使能,使能', 10]);
   { const row = (x) => w.document.querySelector('.zrow[data-zs="' + x + '"]');
-    chk('[現場 09-17] 單支區＝每支一列(.zrow, flex-wrap)：勾·標籤·cm·伸raw·尋封伸·收·狀態·失能·使能 全在同一列；卡片吃滿整列', [['5','6','7','8'].every(x => row(x) && ['input.zinc', '#zband-' + x, '#zcm-' + x, '[data-zraw]', '[data-zret]', '#zpw-' + x, '[data-zpow][data-on="0"]', '[data-zpow][data-on="1"]'].every(sel => row(x).querySelector(sel))), w.getComputedStyle(row('5')).flexWrap, w.getComputedStyle(w.document.getElementById('zdtsingle')).display, w.document.getElementById('zdtsingle').closest('.grp').style.gridColumn], [true, 'wrap', 'flex', '1/-1']); }
+    chk('[現場 09-17] 單支區＝每支一列(.zrow, flex-wrap)：勾·標籤·cm·伸raw·尋封伸·收·狀態·失能·使能 全在同一列；卡片吃滿整列', [['5','6','7','8'].every(x => row(x) && ['input.zinc', '#zband-' + x, '#zcm-' + x, '[data-zraw]', '[data-zret]', '#zpw-' + x, '[data-zpow][data-on="0"]', '[data-zpow][data-on="1"]'].every(sel => row(x).querySelector(sel))), w.getComputedStyle(row('5')).flexWrap, w.getComputedStyle(w.document.getElementById('zdtsingle')).display, w.document.getElementById('zdtsingle').closest('.grp').style.gridColumn], [true, 'wrap', 'flex', '1/-1']);
+    // [09-17 per user 順手重排] 卡內兩欄：左 .zmain＝單支＋解堵轉；右 .zside＝整組 · 共用 RPM · 全部失能使能 · 歸零（兩顆併一格）
+    const zc = w.document.querySelector('.zdtcard');
+    chk('[09-17 重排] 吸盤推桿卡兩欄：zmain(單支+解堵轉) / zside(整組·RPM·全部失能使能·歸零兩顆)', [w.getComputedStyle(zc).display, ['#zdtsingle', '[data-cmd="washrobot|zdt_release_stall"]', '#rd-zdtskip'].every(sel => zc.querySelector('.zmain ' + sel)), ['#cm-all', '#rpm-all', '#rpm-all-ret', '[data-zpow="all"]', '#zdt-zero', '#zdt-home'].every(sel => zc.querySelector('.zside ' + sel)), w.document.getElementById('zdt-zero').closest('.ctl') === w.document.getElementById('zdt-home').closest('.ctl')], ['grid', true, true, true]); }
   w.document.querySelector('[data-zpow="all"][data-on="0"]').click();
   await waitFor(() => txt('zpw-7') !== '使能', 30);
   chk('全部失能 → OK zdt_power all=off，status zdt_pwr=0000 → 四支顯示 失能（可手推）', [w.__v3.logs().some(l => /OK zdt_power all=off/.test(l)), txt('zpw-5'), /✅ 全部失能/.test(txt('rd-zdtpower'))], [true, '失能（可手推）', true]);
@@ -596,14 +610,25 @@ async function secHold(P) {
       chk('套用 33 → set_tension_diff_max_kg 33 → 吊機 status tension_diff_max_kg=33', [w.__v3.logs().some(l => /set_tension_diff_max_kg 33/.test(l)), w.__v3.last.cr.tension_diff_max_kg], [true, '33']);
       // restore whatever the fake booted with (agent-ai-db keeps the fake defaults = real crane compile defaults; don't hard-code them here)
       inp.value = diff0; w.document.querySelector('[data-setgo="set_tension_diff_max_kg"]').click(); await waitFor(() => w.__v3.last.cr.tension_diff_max_kg === diff0, 30);
-      chk('left/right diff threshold restored to the fake default', w.__v3.last.cr.tension_diff_max_kg, diff0); }
+      chk('left/right diff threshold restored to the fake default', w.__v3.last.cr.tension_diff_max_kg, diff0);
+      // [2026-09-17 per user] 第四個門檻：左右繩長差上限 length_diff_max_cm（>1..200，吊機持久化）
+      const li = w.document.querySelector('[data-set="set_length_diff_max_cm"]'); const ld0 = w.__v3.last.cr.length_diff_max_cm;
+      chk('張力保護卡第四格：左右繩長差上限（cm），標籤講清楚，預填現值', [!!li, /左右繩長差上限（cm）/.test(li.previousElementSibling.textContent), /計米器 L−R/.test(li.previousElementSibling.textContent), li.value, /持久化/.test(w.document.querySelector('.pane[data-pane="manual"] header .lock, #hg-card header .lock') ? '持久化' : '')], [true, true, true, ld0, true]);
+      li.value = '15'; w.document.querySelector('[data-setgo="set_length_diff_max_cm"]').click();
+      await waitFor(() => w.__v3.last.cr.length_diff_max_cm === '15', 40);
+      chk('套用 15 → set_length_diff_max_cm 15 → status length_diff_max_cm=15；Setting 表與共用值卡跟著', [w.__v3.logs().some(l => /set_length_diff_max_cm 15/.test(l)), w.__v3.last.cr.length_diff_max_cm, txt('st-ldm'), /繩長差 15 cm/.test(txt('ms-crane'))], [true, '15', '15', true]);
+      li.value = '1'; w.document.querySelector('[data-setgo="set_length_diff_max_cm"]').click(); await sleep(50);
+      chk('1 cm 在 GUI 端擋下（允許 2~200）', /允許範圍 2 ~ 200/.test(w.__alerts.slice(-1)[0] || ''), true);
+      li.value = ld0; w.document.querySelector('[data-setgo="set_length_diff_max_cm"]').click(); await waitFor(() => w.__v3.last.cr.length_diff_max_cm === ld0, 40); }
     // [2026-09-17 per user] 上滑台可設負值（本體守衛 −130..130）
     { const rl = w.__v3.logs().length;
       chk('上滑台輸入框 min −130；守衛預設 −130–130；快捷多一顆 → −50', [w.document.getElementById('rail-cm').min, w.document.getElementById('rs-from').min, w.document.getElementById('rail-gmin').min, txt('rd-railguard'), !!w.document.querySelector('[data-railq="-50"]')], ['-130', '-130', '-130', '-130 – 130 cm', true]);
       w.document.getElementById('rail-cm').value = '-40'; click('rail-go'); await sleep(100);
       chk('移動到 −40 → rail -40 送出（負值不被 GUI 擋）', w.__v3.logs().slice(-6).some(l => /\] rail -40\b/.test(l)), true);
       w.document.getElementById('rail-cm').value = '50'; }
-    chk('張力條：Dashboard 兩條、Manual 三條（總和那條拿掉），橘點名字含 手拉停', [w.document.querySelectorAll('#d-tenbars .mrow').length, w.document.querySelectorAll('#m-tenbars .mrow').length, /手拉停/.test(w.document.getElementById('m-tenbars').innerHTML)], [2, 3, true]);
+    // [09-17 下午 per user「總和重量怎麼不見了」] Manual 第四列＝總和純讀值（無條、無門檻）
+    // [同日稍後 per user「總和還是給他一個 BAR」] 第四條有 tbar，刻度＝參考 2×單側上限（200），中性色、無「超過上限」字樣
+    chk('張力條：Dashboard 兩條、Manual 四條（總和：參考 2×單側上限、中性色、無門檻字樣），橘點名字含 手拉停', [w.document.querySelectorAll('#d-tenbars .mrow').length, w.document.querySelectorAll('#m-tenbars .mrow').length, w.document.querySelectorAll('#m-tenbars .tbar').length, /總和[\s\S]*參考 200 kg/.test(w.document.getElementById('m-tenbars').innerHTML), !/總和[\s\S]*超過上限/.test(w.document.getElementById('m-tenbars').innerHTML), /手拉停/.test(w.document.getElementById('m-tenbars').innerHTML)], [2, 4, 4, true, true, true]);
     // 新 EVT 名字：餵進 ws.onmessage（fake 沒有 hold 張力模型，不會自己發）→ 按住狀態清除 + log
     let released = 0; const orig = w.__craneReleaseAll; w.__craneReleaseAll = () => { released++; };
     w.__v3.wsRef().onmessage({data: JSON.stringify({src:'crane', line:'EVT tension_retract_stop left=80.1 right=60.0 threshold=75'})});

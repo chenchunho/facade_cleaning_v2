@@ -1,5 +1,80 @@
 # Work Log
 
+## 2026-09-18:**正式吊機 `official-crane` 從零建置上線**(Pi5 → 可控吊機)+ 一顆 binary 兩台共用(config-driven)
+
+> 一整天都在把**正式環境**建起來。結論:SE3/計米器/張力/水閥全部到位、GUI 可控、開機自啟,
+> 且**測試機(raspberry-cran)與正式機共用同一份原始碼**,差異全靠每台一份 systemd drop-in 的 env。
+
+### 決策(per user)
+- 兩套環境並存:**測試 `raspberry-cran` / 正式 `official-crane`**,程式**共用一份**(否決維護兩套)。
+- official 的 485 佈線**刻意與測試機不同**(見下表),所以把「裝置↔匯流排↔站號」做成**設定檔驅動**。
+- 本體↔吊機的 Fathom-X 隧道改用 **WiFi AP(QWRT)** 取代;吊機側上層路由發 `facade_cleaning_2.4G`。
+- 密碼/帳號:official Pi 維持 `nexuni/123`(不走公網);AP `root/password`。
+
+### official-crane 主機
+- hostname `nexuni` → **`official-crane`**(含 `/etc/hosts` 127.0.1.1)。
+- **eth0 改靜態 `192.168.1.10/24`、gw `192.168.1.1`**(原為 DHCP 恰好租到 .10,不可靠);wlan0 `192.168.5.11` 對外。
+- 關桌面:default target → `multi-user.target`、停 lightdm;**移除 chromium/firefox/LXDE/xorg 全家(釋出 ~944 MB)**;APT 升級 20 項。
+- 裝 **Node.js 20.19 + npm**(唯一缺的;g++14/make/git/python3.13/pyserial 本來就有)。
+- 部署吊機程式與 GUI:原始碼 tar → `~/projects/facade_cleaning_v2`、`build_crane.sh` 編譯、
+  systemd unit 由 `scripts/systemd/` 改寫(`/home/user`→`/home/nexuni`、`User=nexuni`)、
+  **`fcv-crane` / `fcv-web-v3` 皆 enable(開機自啟)**;GUI `http://192.168.5.11:8080`。
+
+### official 裝置位址表(**與測試機不同**,已全部實測)
+| 網關/裝置 | IP:Port | slave | 序列 |
+|---|---|---|---|
+| SE3 左繩 | `.30:4001` | 1 | 115200 **8N2** |
+| SE3 右繩 | `.31:4001` | 1 | 115200 8N2 |
+| SD76 中 / 右 / **MH300** | `.32:4001` | 中1 / 右2 / MH300 🟡未測 | 115200 **8N1** |
+| X518 張力(原生 TCP) | `.33:502` | 1(CH1右/CH2左) | — |
+| SD76 左 | `.34:4001` | 1 | 115200 8N1 |
+| **ZS-DIO 水閥(CH1)** | `.35:4001` | 1 | **9600** 8N1 |
+(測試機是:SD76 三顆全在 .34(左1/右2/中4,中未裝)、ZS-DIO 在 .32、水閥 CH4。)
+
+### 程式改動:config-driven(預設值 = 測試機,測試機零改動)
+- `main.cpp` 新增第二條計米器匯流排 `cli_M2` + `FCV_EP_USR_M2_HOST`(沒設就不連)。
+- 每顆 SD76 的 client 與站號吃 env:`FCV_METER_<LEFT|RIGHT|MIDDLE>_GW`(`M`/`M2`)、`_SLAVE`、`FCV_METER_MIDDLE_ENABLE`。
+  **維持「一條匯流排一個 client」**(不給每顆錶各開連線 → 避開 USR 透明網關廣播造成的 frame 污染舊雷)。
+- `CH_WATER_INLET` → `FCV_WATER_INLET_CH`(預設 4、official=**1**)。
+- `g_dsz_left/right_scale` 初值 → `FCV_DSZL_SCALE_LEFT/RIGHT`(**張力校正因此可持久化**,見下)。
+- GUI:水閥通道**不再寫死 CH4**,改從後端 `water_status` 的 `wch<N>=water_inlet` 動態建卡片 ⇒ 兩台共用同一份 GUI(`v3-2026.09.18-2326`)。
+
+### 校正(全部從測試機搬過來 / 現場兩點校)
+- **SD76 SCAL**:三顆寫成測試機的值(有效低 3 bytes = `000200`;開頭 byte 是各錶狀態旗標、讀取時捨棄)。
+- **SE3 全參數 clone**:`scripts/vfd_se3_clone.py`(SKIP 加上計數器 P.292/296/298/755/757/769/771)。
+  左寫入 25、右 23,**回讀 0 不符**;**斷電重開後複驗只剩 14 個唯讀監視暫存器不同** ⇒ 設定確實存住。
+- **X518 張力兩點校正**:空載 `zero_tension all` → 掛 2kg → `set_dsz_scale`。
+  🔴 **official 這顆 X518 方向與測試機相反**(施力 raw 上升),scale 是**正值** 左 `0.0075758` / 右 `0.008547`
+  (測試機是負值)。校完左 1.99 / 右 1.97。
+
+### 🔴 踩到的坑(都會再犯的那種)
+1. **USR 網關改 baud**:`port.cgi` 必須**帶齊所有欄位**、且要接 `manage.cgi?reset=1` 重啟才落地。
+   少帶欄位 → 回 200 但值沒變(我第一次就這樣被騙)。
+2. **SD76 與 ZS-DIO 不能同一條 RS485**(程式註解記過三次:共線時 SD76 回垃圾或消失)。
+   official 原本把兩者放 .34 ⇒ 必須拆開,最後 ZS-DIO 獨立到 `.35`。
+3. **SE3 改序列參數要斷電重開才套用**。症狀序列很典型:先是 `0xFE` 亂碼(舊 baud 還在講)→ 改了值沒重開 → **完全靜音**。重開後一次就通。
+4. **ZS-DIO 的 baud 被人改過**:出廠 38400、實際在 **9600**。115200/38400 都試過全靜音,最後用「逐一改網關 baud + 重啟 + 探測」的掃描找到。
+   (`0x0032`=站號、`0x0033`=鮑率碼(7=115200)、`0x003D`=校驗,**改完斷電才生效**。)
+5. **X518 只允許 1 條 TCP 連線**:`fcv-crane` 佔著時我另開連線讀 → 回 `Connection refused` 或半截亂碼。要讀原始 counts 得停服務或從 kg/scale 反推。
+6. **`set_dsz_scale` 與 SD76 站號改動都不持久**:每次重啟就回編譯預設/舊值 ⇒ 最後全部用 drop-in env 固化才停止 whack-a-mole。
+7. **X518 IP 改法**:IP 存在參數暫存器,`IPH 0x063E = a*1000+b`、`IPL 0x0640 = c*1000+d`(只吃 FC03/FC16,32 位),寫完 `0x0A20=40` 存 flash,**重上電生效**。把它從 `.32` 搬到 `.33` 就是這樣做的。
+
+### 本體↔吊機 WiFi 橋接(QWRT AP)— **未完成**
+- AP 是 MediaTek 型 OpenWrt(`QWRT`,SSID `QWRT-2.4G`),管理 `192.168.100.1` root/password,LuCI 在 :80。
+- 已設好 client:`wireless.sta`(mode `sta` → `apcli0`)、ssid `facade_cleaning_2.4G`、encryption `none`、network `lan`;
+  **apcli0 已成功關聯**(BSSID `16:49:BC:47:1D:88`,與吊機主路由 `.1` 的 MAC 同源)、`br-lan = ra0 + apcli0 + eth0.1`。
+- 🔴 **但本體 `192.168.1.100` 仍不通** —— WiFi client 是 **3-address**,只能代表自己,
+  後面裝置的 MAC 過不去 ⇒ 要 **WDS/4addr(兩端都開)** 或 relayd,否則透明橋接不成立。
+- AP 管理 IP 還在 `192.168.100.1`(與吊機網段不同),**從吊機網段管不到**;要改成 `192.168.1.250` 之類才方便。
+
+### 待完成
+- 🟡 **本體↔吊機橋接**:QWRT 開 WDS/4addr(或裝 relayd);AP 管理 IP 改 `192.168.1.250` 固定。
+- 🟡 **MH300 中繩絞盤**(`.32`)站號/baud 未測;程式仍寫 CLV900 slave 3 @ USR_A,與 official 佈線不符。
+- 🟡 official 跑任務前要**地面歸零**(計米器現值非零)、`wall_height` 尚未設(goto 目前被擋,安全)。
+- 🟡 `hold_guard` 曾被關過,操作前確認開啟。
+- 🟡 `config/official-crane_485.md` 已隨進度更新,但 MH300 / 橋接兩節待補。
+
+
 ## 2026-09-17 下午:手臂原則落地、急停收腳重送、距離上限/即時力道、張力門檻合併、警報不再拖 Idle 進 paused、rail 負值、第二顆水位計
 
 ### 決策(per user)
@@ -39,7 +114,40 @@
 - 吊機 Pi 今天**兩次上電沒自己起來**(user 手動重開才起);本體沒事。要看它的電源。
 - 維修後計米器 L=−253/R=−251 對不上牆高 231,跑任務前要地面歸零。
 
-### GUI(AI-2,皆已部署 :8080,最後 v3-2026.09.17-1549)
+### 變頻器設定讀出／複製(user「把設定讀出來 可以複製到另外一台機器」)
+- 實查 **Modbus 位址 = P 編號**(P.79→3、P.36→1)。兩台 SE3(.30/.31,slave 1)各 880 個可讀參數全 dump:`config/vfd/se3_{left,right}_2026-09-17.txt`、diff、`README.md`。
+  左右只有 **P.2 下限頻率(左 0.06/右 0)** 是真的設定差,其餘 7 個是計數/監視值。
+- `scripts/vfd_se3_clone.py dump|write [--apply]`:只寫不同的、跳 P.36/P.996–999、逐項回讀驗證、唯讀被拒只記錄。真機驗 dump + dry-run,**未套用**。手冊 PDF 在 user 的 D 槽。
+
+### 上滑台負值第二道守衛(user「指定位置 −3 cm 不會動」,已部署 18:36)
+- 上午只放寬指令層 `cmd_rail_move`(−130..130),**DM2J 驅動層** `set_travel_limit_cm(0, 130)` 沒改 ⇒ 負數全被驅動層擋
+  (`PR_move_cm_nowait -3.000 cm REJECTED — outside travel limit [0.00, 130.00]`,GUI 只看到 `ERR rail_move_command_failed`)。
+  改 `set_travel_limit_cm(−travel, +travel)`;真機 `rail -3` → pos −2.9996、`rail 0` → 0。備份 `facade_cleaning_v2.out.prev-0917-1832`。
+- 🔴 踩坑型:**同一個限制有兩層(指令層/驅動層)**,改一層另一層不會跟著變,而且驅動層拒絕只進 log、指令回覆看不出原因。
+
+### 工具重心對 M1 的影響(per user「先吸附 這個位置量測看看」,已量)
+- 吸附:`vacuum feet on` + `pusher all extend_raw` 之後四顆仍 0 kPa ——**幫浦沒開**(腳本起跑才會 `pump on`);`pump on` 8 s 後 −66/−69/−67/−68。
+  第一次我照腳本順序把風扇拉到 7%(user 問「為什麼風扇啟動」),之後不再動風扇。
+- 單點靜態量(θ 0.30/0.40/0.50 各 5 讀)被靜摩擦吃掉:Δ 1.1/2.2/0.0 無一致趨勢,不能用。M1 從機械止點起步 tau 會衝到 6 N·m,「碰到東西」判定要等 θ>0.15 再看。
+- **雙向慢掃**(0.25↔0.52,0.12 rad/s,3 趟,G=−(T_out+T_in)/2,`scripts/m1_tool_gravity.py sweep`):
+
+  | θ | 滾筒 G | 刮刀 G | 滾筒重複 | Δ刮刀−滾筒 |
+  |---|---|---|---|---|
+  | 0.28 | 1.86 | 1.32 | 1.81 | −0.54 |
+  | 0.40 | 3.81 | 3.39 | 4.10 | −0.42 |
+  | 0.52 | 6.47 | 5.64 | 6.45 | −0.83 |
+
+  九個 bin **全部負**、平均 ≈ −0.5 N·m(滾筒重複散佈 ±0.2~0.5)⇒ 刮刀那側重力矩小約 0.5 N·m(~10%)。摩擦帶 f=0.7~1.9 與 09-02 一致。
+  滾筒實測 G 比模型 `16.09·sin(θ−0.177)` 在 0.52 高約 1 N·m(0.28~0.40 接近)。
+- 結論:同一個 tau 目標,刮刀實際壓玻璃的力少 ~0.5 N·m(目標 5、容差 1、高度差已經 ~8%)——**量得到但不值得分工具補重力**;真要補,最簡單是刮刀目標 +0.5。
+- 收尾狀態:手臂滾筒、M1=0;本體仍吸附(幫浦開、閥開、腳伸)、風扇 5%。
+
+### GUI 下午(我做,v3-2026.09.17-1752,見 changelog v3n)
+- 推桿卡與四張半寬卡對調(推桿墊底)+ 卡內兩欄;手臂卡工具 seg(亮＝STATUS tool=,壓上用亮的那顆)+ 全 stack 重排;張力條「總和」讀值回來(純顯示)。
+- 🔴 踩坑:fake `s.lock` 是 Lock,`arm_slot` passthrough 持鎖再進 `arm_dispatch` ⇒ **死鎖整台假機器**,check 掛到 timeout 才看出來;改 RLock。
+  另:`pkill -f fake_robot.py` 會先殺掉自己這個 shell(exit 144)——用 `ss -ltnp` 取 pid。
+
+### GUI(AI-2,皆已部署 :8080,最後 v3-2026.09.17-1606)
 0959 Mission 重排 → 1011 推桿卡 → 1037 單支被裁根因 → 1058 共用值 → 1123 return_top+閃爍+Dashboard Mission 卡 → 1132 小卡右下 →
 1211/1215 手臂卡+err 健康值 → 1339 手臂鈕不被擠+本體開關機移除 → 1406 張力合併+本體區重排 → 1422 rail 負值 → 1448/1510 張力卡撤即時值+Mission 狀態卡移除 →
 1549 兩顆水位計。踩坑:`.grp overflow:hidden` + nowrap 把按鈕擠出卡片(推桿卡、手臂卡各一次)。
