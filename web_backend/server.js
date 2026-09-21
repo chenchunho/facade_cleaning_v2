@@ -66,6 +66,16 @@ const RECONNECT_MS = 1000;   // 2026-04-29: 3000 → 1000 配合前端 panel-dis
 //   (1) OS-level TCP keepalive on every bridge socket (setKeepAlive)
 //   (2) App-level `ping\n` every BRIDGE_PING_MS from backend itself (not dep. on browser)
 const BRIDGE_PING_MS = 10000;
+// [2026-09-19 official-crane] Dead-peer cutoff for the TCP bridges. The body link
+// runs over a lossy 2.4G WiFi bridge (30-40% loss measured); TCP survives that
+// by exponential backoff, and a stalled connection sat with Send-Q 10 KB,
+// backoff 11, rto 120 s — "connected" per isConnected(), but every GUI status
+// request vanished into the retransmit queue for minutes. The OS keepalive
+// (30 s idle probe) never fires because the socket is never idle. Rule: if
+// nothing has been RECEIVED for BRIDGE_DEAD_MS while we keep pinging, destroy
+// the socket → a fresh connection starts with a fresh RTO instead of waiting
+// out the backoff. 3 missed pings; crane/arm are on wire and never hit this.
+const BRIDGE_DEAD_MS = 3 * BRIDGE_PING_MS;
 
 // WebSocket-level heartbeat (browser ↔ backend).
 // Without this, a backgrounded/inactive tab can keep the ws open while its
@@ -140,7 +150,7 @@ function broadcast(obj) {
 //=========== TCP bridge ===========
 
 function makeBridge(name, ip, port) {
-    const state = { sock: null, connected: false, buf: '', reconnectTimer: null };
+    const state = { sock: null, connected: false, buf: '', reconnectTimer: null, lastRx: 0 };
 
     function scheduleReconnect() {
         // Dedupe: Node sockets fire 'error' AND 'close' for the same failure, and without
@@ -169,11 +179,13 @@ function makeBridge(name, ip, port) {
 
         sock.connect(port, ip, () => {
             state.connected = true;
+            state.lastRx = Date.now();
             console.log(`[${name}] connected ${ip}:${port}`);
             broadcastStatus();
         });
 
         sock.on('data', (chunk) => {
+            state.lastRx = Date.now();
             state.buf += chunk.toString('utf8');
             let idx;
             while ((idx = state.buf.indexOf('\n')) !== -1) {
@@ -212,7 +224,15 @@ function makeBridge(name, ip, port) {
     // App-level keepalive — send `ping\n` every BRIDGE_PING_MS regardless of browser
     // activity. Guarantees the NAT stays open and write-path failures surface fast.
     // ping is idempotent and supported by washrobot / crane-shim.
-    setInterval(() => { send('ping'); }, BRIDGE_PING_MS);
+    setInterval(() => {
+        // Dead-peer check BEFORE the next ping (see BRIDGE_DEAD_MS).
+        if (state.connected && state.sock && Date.now() - state.lastRx > BRIDGE_DEAD_MS) {
+            console.log(`[${name}] no data for ${Math.round((Date.now() - state.lastRx) / 1000)}s — dropping stalled socket`);
+            try { state.sock.destroy(); } catch (e) {}   // 'close' → reconnect
+            return;
+        }
+        send('ping');
+    }, BRIDGE_PING_MS);
 
     connect();
     return { name, send, isConnected: () => state.connected };

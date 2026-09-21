@@ -35,6 +35,19 @@ sudo loginctl enable-linger nexuni     # ← 沒有這行,登出就被殺、開�
 `wall_height_cm`→0(`goto` 直接拒絕)、`motion_hz`→編譯預設。所以 ExecStartPost 等 20 s 後補送一次,
 牆高從 web 存的 `~/run/wall_height.json` 讀。
 
+### 4. official 用 drop-in 蓋值,unit 檔兩台共用(2026-09-19)
+
+`official/` 是正式機三個 drop-in + `wait_devices.sh` 的副本。unit 檔本身在 official 只改了
+`/home/user`→`/home/nexuni`、`User=nexuni`;所有位址/站號/校正值都在 drop-in
+(`fcv-crane` 的 `endpoints.conf` 就是 `config/official-crane_485.md` 的機器可讀版)。
+
+🔴 **`ExecStartPre=wait_devices.sh` 不是裝飾**:官方機 Pi 比 PoE 交換器/USR 網關早 ~40 s 起來,
+沒有這道閘門 fcv-crane 開機就把所有裝置標成 skipped(旗標只在 init 設一次),要人手動 restart。
+腳本**必須是 bash**(`/dev/tcp`),用 `#!/bin/sh` 會每次白等 180 s、service 卡在 activating。
+
+本體那個 drop-in 是 **user** unit(`~/.config/systemd/user/fcv-body.service.d/`),
+原因見第 2 節;沒有它本體會一直敲測試吊機 `.5.25` 的門(unit 檔寫死了 env,有 env 就不探測有線)。
+
 ## 安裝(重灌後)
 
 ```bash
@@ -49,4 +62,16 @@ ssh nexuni@192.168.5.26 'systemctl --user daemon-reload && systemctl --user enab
 ssh nexuni@192.168.5.26 'sudo loginctl enable-linger nexuni'
 ```
 
+```bash
+# official 吊機 192.168.1.10(nexuni/123;先把 unit 檔的 /home/user→/home/nexuni、User=nexuni 改掉)
+scp scripts/systemd/official/wait_devices.sh nexuni@192.168.1.10:~/run/
+scp -r scripts/systemd/official/fcv-crane.service.d scripts/systemd/official/fcv-web-v3.service.d nexuni@192.168.1.10:/tmp/
+ssh nexuni@192.168.1.10 'sudo cp -r /tmp/fcv-*.service.d /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl restart fcv-crane fcv-web-v3'
+# official 本體 192.168.1.100(user service)
+scp -r scripts/systemd/official/fcv-body.service.d nexuni@192.168.1.100:~/.config/systemd/user/
+ssh nexuni@192.168.1.100 'systemctl --user daemon-reload && systemctl --user restart fcv-body'
+```
+
 日常更新程式用 `scripts/deploy.sh <body|arm|crane|server|script|web|status>`,不必碰這裡。
+⚠️ `deploy.sh` 目前只認測試機位址(`.5.25`/`.5.26`);對 official 部署仍是手動 scp(🟡 待做成可選目標)。
+🔴 覆蓋執行中的 binary 用 `cp` 會 **Text file busy** 而且錯誤很容易被吞掉——先 `cp` 到 `.new` 再 `mv -f`。

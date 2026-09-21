@@ -2,6 +2,9 @@
 Description=FCV crane (Crane_control_PI, TCP :5002)
 After=network-online.target
 Wants=network-online.target
+# [2026-09-19] 這兩行屬於 [Unit]:放在 [Service] 會被 systemd 忽略並每次 daemon-reload 印 "Unknown key"(official 的 journal 抓到)
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -14,8 +17,6 @@ ExecStart=/bin/sh -c "mkfifo -m 600 /home/user/run/crane.in 2>/dev/null; exec 3<
 ExecStartPost=/bin/sh -c "sleep 20; cd /home/user/run; W=$(python3 -c 'import json;print(int(json.load(open(\"/home/user/run/wall_height.json\"))[\"cm\"]))' 2>/dev/null || echo 0); python3 crcmd.py 'set_home_ground 0' 'set_motion_hz 30' 'set_roll_correct_hz 30' \"set_wall_height $W\"; if [ -f crane_settings.txt ]; then L=$(cat crane_settings.txt); echo \"$L\" | while read -r l; do [ -n \"$l\" ] && python3 crcmd.py \"$l\"; done; fi"
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=300
-StartLimitBurst=3
 StandardOutput=append:/home/user/run/logs/crane_service.log
 StandardError=append:/home/user/run/logs/crane_service.log
 

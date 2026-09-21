@@ -6,8 +6,9 @@
 > 保留「原因 / 決策(尤其被否決的)/ 驗證結論」。原則 ≤40 行,驗證表可超。
 > (原 2026-04 的「# 修改日誌」格式範本已由本說明取代。)
 
-## 索引(全部 149 條,新的在上)
+## 索引(全部 150 條,新的在上)
 
+- `[2026-09-19a]` **official 上線第二天**:開機競態 `ExecStartPre` 閘門、計米器凍結 RESYNC + 平衡不吃可疑計米、本體↔吊機 WiFi 橋(QWRT)通了 + 兩端 endpoint drop-in、web 橋 dead-peer 看門狗、吸附鎖只認密封(`v3-2026.09.19-1548`)→ (本檔)
 - `[2026-09-18a]` **裝置對應 config-driven**:計米器可拆兩條匯流排(`cli_M2`)、slave/水閥通道/張力 scale 全部 env 可覆蓋;GUI 水閥通道改由後端動態判定 ⇒ **測試機與正式機共用同一份原始碼**(`v3-2026.09.18-2326`)→ (本檔)
 - `[2026-09-17v3o]` v3：張力條「總和」給一條 bar——刻度＝參考 2×單側上限、中性色、不是門檻（`v3-2026.09.17-1842`）→ (本檔)
 - `[2026-09-17v3n]` v3：Manual 本體區推桿卡墊底＋卡內兩欄、手臂卡工具切換（seg 亮＝STATUS tool=）＋全 stack 重排、張力條加「總和」讀值；fake RLock（`v3-2026.09.17-1752`）→ (本檔)
@@ -161,6 +162,30 @@
 ---
 
 ## 當月全文(2026-09,98 條)
+
+## [2026-09-19a] official 上線第二天 —— 開機閘門、計米器 RESYNC、WiFi 橋、endpoint drop-in、web 看門狗(`v3-2026.09.19-1548`)
+
+9/19 白天使用者帶去戶外實測(本體 eth0 + QWRT WiFi 橋 → official-crane);這條是實測前那一夜的全部修正。
+
+- **開機競態**(Pi 上 + `scripts/systemd/official/wait_devices.sh`):Pi 比交換器/USR 早 ~40 s 起來,fcv-crane 把所有裝置標 skipped 直到人手 restart。
+  `ExecStartPre` 等 `.30`/`.34` :4001,上限 180 s。踩坑:`#!/bin/sh` + `/dev/tcp` 永遠失敗、白等 180 s、service 卡 activating → 改 bash。
+- **計米器永久凍結**(`main.cpp` `meter_read_robust`):30 cm/poll 防雜訊規則沒有回頭路,真值一旦與快取差 >30 cm 就永遠被拒(`prev=1616 v1=v2=3387` 十幾分鐘)。
+  official 觸發:3 顆錶串讀一輪 ≈0.5 s,平衡把左推到 62.5 Hz → 每輪 37 cm → 拒 → 凍 → err 越滾越大 → 推更高(自我強化,−103 cm 才被按停)。
+  修:`MeterResync` 連貫被拒 ≥3 筆且 ≥2 s → **RESYNC** 接受;新增 `g_length_*_suspect`,`apply_balance_trim` 見 suspect 就回 base 不修正;
+  `status` 加 `meter_suspect=`。真雜訊(05-14「0」約 1 s)仍擋。
+- **本體↔吊機 WiFi 橋**(`config/qwrt/`):QWRT `apcli0` 進 `br-lan`,MTK 驅動 MAT 讓有線端穿過(09-18「3-address 帶不動」是沒實測的誤判)。
+  AP 固定 `192.168.1.250`(+`.100.1` 備援)、DHCP 關、5 口全 LAN、HT20、關 Block-Ack;hotplug + rc.local 兩層保險;重開機驗證。
+  RF 極差(RSSI −70、Tx PER 83%、30–40% 掉包、一次斷 285 s)→ 調完 3%,但主路由 20 MHz/拉近才是解。
+- **兩端 endpoint drop-in**(`scripts/systemd/official/`):本體 unit 寫死 `FCV_EP_CRANE_HOST=.5.25`(有 env 就不探測有線)、web unit `WROBOT_IP=.5.26`
+  → 各加 drop-in 蓋成 `.1.10`/`.1.100`,GUI 才看得到本體、本體才連得到吊機。
+- **web 橋 dead-peer 看門狗**(`server.js` `BRIDGE_DEAD_MS`=30 s):掉包讓本體→web 的 TCP 卡指數退避(Send-Q 10 KB、rto 120 s),socket「連著」但 GUI 不更新;
+  30 s 沒收到任何資料就 destroy 重連。
+- **GUI 吸附鎖只認密封**(`cupsState().attached = sealed > 0`):`.22` 偶發 JC100 TIMEOUT 一顆讀不到就鎖死 ▲▼;本體 `crane_goto` 硬守衛沒動。
+- 雜項:`fcv-crane.service` 的 `StartLimit*` 搬到 `[Unit]`(原在 `[Service]` 被忽略且每次 reload 印 Unknown key);
+  本體 `.21`(QX-DO24 螺旋槳網關)上電後需 restart fcv-body 旗標才翻 1;`swconfig link:` 不可信;兩台 Pi 沒 NTP。
+
+🟡 待:計米器捲尺校正(左右同指令出繩量差很多)、中錶 DP=0→2(面板)、GUI 畫 `meter_suspect`、`deploy.sh` 認 official、MH300。
+驗證:official 實機全部裝置 `[OK]`、body status 經 GUI 路徑 0.14 s、AP 兩次重開機。測試機未動。未 commit。
 
 ## [2026-09-18a] 裝置對應 config-driven —— 一顆 binary 兩台共用(`v3-2026.09.18-2326`)
 

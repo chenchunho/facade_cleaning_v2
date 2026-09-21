@@ -748,6 +748,13 @@ static std::atomic<int32_t> g_length_middle {0};
 static std::atomic<bool>    g_length_left_valid   {false};
 static std::atomic<bool>    g_length_right_valid  {false};
 static std::atomic<bool>    g_length_middle_valid {false};
+// [2026-09-19] "suspect" = meter_loop is currently REJECTING coherent reads from
+// this SD76 (see meter_read_robust resync logic). Cache is still valid but stale;
+// balance must not trim on it (official-crane 22:46 runaway: frozen left cache →
+// balance pushed L to 62.5 Hz chasing an error that could never close).
+static std::atomic<bool>    g_length_left_suspect   {false};
+static std::atomic<bool>    g_length_right_suspect  {false};
+static std::atomic<bool>    g_length_middle_suspect {false};
 static std::atomic<bool>    g_meter_loop_stop {false};
 static std::thread          g_meter_thread;
 
@@ -1779,6 +1786,20 @@ static void apply_balance_trim(double base_hz_left, double base_hz_right, int di
             }
         }
         if (!g_length_left_valid.load() || !g_length_right_valid.load()){ reset_to_base(); return; }
+        // [2026-09-19] A meter whose coherent reads are being rejected is stale,
+        // not invalid — trimming on it chases an error that cannot close
+        // (official-crane 22:46: L→62.5 Hz, err −103cm). Hold base instead.
+        if (g_length_left_suspect.load() || g_length_right_suspect.load()) {
+            static int64_t last_susp_warn_ms = 0;
+            const int64_t now = steady_now_ms();
+            if (now - last_susp_warn_ms > 2000) {
+                last_susp_warn_ms = now;
+                std::cerr << "[BAL] ⚠ 計米器讀值被拒中（"
+                          << (g_length_left_suspect.load() ? "left" : "right")
+                          << " 快取可能過期）→ 本輪不修正、回 base\n";
+            }
+            reset_to_base(); return;
+        }
         const int32_t l_now = g_length_left .load();
         const int32_t r_now = g_length_right.load();
         const double progL = (double)direction * (double)(l_now - base_left);
@@ -2044,6 +2065,32 @@ constexpr int32_t METER_CONSISTENCY_CM        = 5;    // v1/v2 agreement for "re
 // 0 for ~1s, fooled the double-read consensus into accepting "0", motion_rope
 // declared false reached-target with L=124 actual vs cache=0).
 constexpr int32_t METER_MAX_PHYSICAL_JUMP_CM  = 30;
+// [2026-09-19 official-crane] The 30cm rule had no way back: once the true
+// reading drifted >30cm from the cache, EVERY later read was "sustained
+// corruption" and the cache stayed frozen until zero_meters / restart
+// (log: prev=1616 v1=v2=3387 for 10+ minutes). Trigger on official: 3 meters
+// polled serially over slower gateways → one poll cycle ≈ 0.5s, and balance
+// had pushed the left VFD to 62.5 Hz → 37cm per cycle → rejected → cache
+// frozen → balance error grew → more Hz. Self-reinforcing.
+//
+// Resync rule: if the rejected reads form a COHERENT trajectory (each new
+// v2 within METER_MAX_PHYSICAL_JUMP_CM of the previous rejected v2) for at
+// least METER_RESYNC_MS and METER_RESYNC_MIN_READS reads, accept — the device
+// has been consistently telling us something else, the cache is what's wrong.
+// Genuine corruption (bench 2026-05-14: "0" for ~1s) is shorter than 2s and
+// is still rejected; if a bogus value ever persists >2s we follow it for at
+// most one window and re-follow the real value when it returns — bounded
+// wrong instead of unbounded wrong.
+constexpr int      METER_RESYNC_MIN_READS = 3;
+constexpr uint64_t METER_RESYNC_MS        = 2000;
+
+// Per-meter resync tracker (meter_loop thread only).
+struct MeterResync {
+    int32_t  last_v   = 0;   // last coherent rejected value
+    int      n        = 0;   // consecutive coherent rejections
+    uint64_t since_ms = 0;   // when the current coherent run started
+    void reset() { n = 0; since_ms = 0; }
+};
 
 // Two-stage robust read for one SD76. Returns:
 //   accepted=true + out=new value (caller stores)
@@ -2052,25 +2099,29 @@ struct MeterReadResult {
     bool    accepted;
     int32_t value;
     bool    read_hard_fail;   // both attempts failed → caller marks invalid
+    bool    suspect = false;  // [2026-09-19] coherent reads being rejected — cache stale
 };
 
 static MeterReadResult meter_read_robust(
     SD76_length_meters& meter, std::atomic<int32_t>& cache,
     std::atomic<bool>& valid_flag, const char* tag,
-    int& reject_count, uint64_t& last_log_reset_ms)
+    int& reject_count, uint64_t& last_log_reset_ms, MeterResync& rs)
 {
     int32_t v1 = 0;
     if (meter.readUpperInteger(v1)) {
+        rs.reset();
         return {false, 0, true};   // hard fail
     }
 
     if (!valid_flag.load()) {
+        rs.reset();
         return {true, v1, false};   // first read after invalidation, accept
     }
 
     const int32_t prev  = cache.load();
     const int32_t diff1 = std::abs(v1 - prev);
     if (diff1 <= METER_SMALL_JUMP_CM) {
+        rs.reset();
         return {true, v1, false};   // normal motion / stationary
     }
 
@@ -2096,25 +2147,44 @@ static MeterReadResult meter_read_robust(
         // bench 2026-05-14 saw sustained "0" reading fooling double-read).
         const int32_t diff_to_prev = std::abs(v2 - prev);
         if (diff_to_prev <= METER_MAX_PHYSICAL_JUMP_CM) {
+            rs.reset();
             return {true, v2, false};   // big but plausible — accept
         }
         // Consistent reads but physically impossible — reject as sustained
         // corruption. valid_flag stays true so cache holds last good value.
         const uint64_t now = now_ms();
+        // [2026-09-19] Coherence tracking: does this rejected value continue
+        // the trajectory of the previous rejected one? If yes for long enough,
+        // the device is right and the cache is wrong → resync.
+        if (rs.n > 0 && std::abs(v2 - rs.last_v) <= METER_MAX_PHYSICAL_JUMP_CM) {
+            rs.n++;
+        } else {
+            rs.n = 1; rs.since_ms = now;
+        }
+        rs.last_v = v2;
+        if (rs.n >= METER_RESYNC_MIN_READS && now - rs.since_ms >= METER_RESYNC_MS) {
+            std::cout << "[meter] " << tag << " RESYNC cache " << prev << " → " << v2
+                      << " (" << rs.n << " coherent reads over " << (now - rs.since_ms)
+                      << "ms kept getting rejected — device is consistent, cache was stale)\n";
+            rs.reset();
+            reject_count = 0;
+            return {true, v2, false};
+        }
         if (now - last_log_reset_ms > 60000) { last_log_reset_ms = now; reject_count = 0; }
         if (reject_count++ < 3) {
             std::cout << "[meter] " << tag << " sustained corruption rejected: prev="
                       << prev << " v1=v2=" << v2
                       << " (jump=" << diff_to_prev << "cm > " << METER_MAX_PHYSICAL_JUMP_CM
-                      << "cm physical limit)\n";
+                      << "cm physical limit; coherent run " << rs.n << ")\n";
         }
-        return {false, 0, false};
+        return {false, 0, false, true};
     }
 
     // v1 and v2 disagree → one is single-frame corruption.
     // If v2 looks reasonable vs prev, take it (likely v1 was the bad one).
     // Otherwise reject both.
     const int32_t diff2 = std::abs(v2 - prev);
+    rs.reset();   // incoherent pair — not a trajectory, restart the resync window
     if (diff2 <= METER_SMALL_JUMP_CM) {
         return {true, v2, false};
     }
@@ -2174,25 +2244,30 @@ static void meter_loop() {
     // 判準之一，換順序就不再等價（而且真機上會改變 bus 上的交易次序）。
     // 📌 這才是這層的實際收益：「忘記替另一側也做一次」從結構上變成不可能。
     RopeAxis* axes[2] = { &rope_left, &rope_right };
+    std::atomic<bool>* susp[2] = { &g_length_left_suspect, &g_length_right_suspect };
     int       rej[2]  = { 0, 0 };
     uint64_t  last[2] = { 0, 0 };
+    MeterResync rs[2];
     int m_rej = 0;
     uint64_t m_last_log = 0;
+    MeterResync m_rs;
     while (!g_meter_loop_stop.load()) {
         for (int i = 0; i < 2; ++i) {
             RopeAxis& a = *axes[i];
             if (!a.dev_meter.load()) continue;
             auto r = meter_read_robust(a.meter, a.length, a.length_valid,
-                                       a.name, rej[i], last[i]);
+                                       a.name, rej[i], last[i], rs[i]);
             if (r.read_hard_fail) a.length_valid.store(false);
             else if (r.accepted)  { a.length.store(r.value); a.length_valid.store(true); }
             // else: reject, keep cache + valid
+            susp[i]->store(r.suspect);
         }
         if (g_dev_meter_middle.load()) {
             auto r = meter_read_robust(meter_middle, g_length_middle, g_length_middle_valid,
-                                       "middle", m_rej, m_last_log);
+                                       "middle", m_rej, m_last_log, m_rs);
             if (r.read_hard_fail) g_length_middle_valid.store(false);
             else if (r.accepted)  { g_length_middle.store(r.value); g_length_middle_valid.store(true); }
+            g_length_middle_suspect.store(r.suspect);
         }
         // Motion-aware poll rate: when motors are running, slow down to avoid
         // contending with SE3 / CLV900 writes on the same TCP_client mutex.
@@ -4158,6 +4233,7 @@ static std::string cmd_home_status() {
     oss << " left="      << (lok ? std::to_string(l) : std::string("ERR"));
     oss << " right="     << (rok ? std::to_string(r) : std::string("ERR"));
     oss << " middle="    << (mok ? std::to_string(m) : std::string("ERR"));
+    oss << " suspect="   << (g_length_left_suspect.load() ? "L" : "") << (g_length_right_suspect.load() ? "R" : "") << (g_length_middle_suspect.load() ? "M" : "");
     oss << " remaining=" << remaining;
     oss << "\n";
     return oss.str();
@@ -4193,6 +4269,8 @@ static std::string cmd_status() {
     oss << " length_left="     << (lok ? std::to_string(l) : std::string("ERR"));
     oss << " length_right="    << (rok ? std::to_string(r) : std::string("ERR"));
     oss << " length_middle="   << (mok ? std::to_string(m) : std::string("ERR"));
+    // [2026-09-19] which meters are currently having coherent reads rejected (cache stale)
+    oss << " meter_suspect="   << (g_length_left_suspect.load() ? "L" : "") << (g_length_right_suspect.load() ? "R" : "") << (g_length_middle_suspect.load() ? "M" : "");
     oss << " tension_left="    << (tvalid ? std::to_string(tl) : std::string("ERR"));
     oss << " tension_right="   << (tvalid ? std::to_string(tr) : std::string("ERR"));
     oss << " tension_valid="   << (tvalid ? 1 : 0);

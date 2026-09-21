@@ -1,0 +1,19 @@
+# /etc/rc.local  (QWRT AP, 192.168.1.250)
+# Put your custom commands here that should be executed once
+# [2026-09-19] Fallback for the apcli0 bridge (see /etc/hotplug.d/net/50-apcli-bridge):
+# bounded wait, then make sure apcli0 is in br-lan.
+(
+  i=0
+  while [ $i -lt 30 ]; do
+    if [ -d /sys/class/net/apcli0 ]; then
+      brctl addif br-lan apcli0 2>/dev/null
+      # [2026-09-19] lossy link (RSSI -70, Tx PER 83%): no Block-Ack/AMPDU → dups 291→107 per 30 pings, loss 6.7%→3.3%
+      iwpriv ra0 set HT_AutoBA=0; iwpriv ra0 set HT_BADecline=1
+      logger -t apcli-bridge "apcli0 added to br-lan (rc.local after ${i}x2s)"
+      exit 0
+    fi
+    i=$((i+1)); sleep 2
+  done
+  logger -t apcli-bridge "apcli0 never appeared (60s) — bridge NOT set"
+) &
+exit 0

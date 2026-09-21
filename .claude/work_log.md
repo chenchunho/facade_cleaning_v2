@@ -1,5 +1,56 @@
 # Work Log
 
+## 2026-09-19:official 開機競態修正 + 計米器「永久凍結」修正(resync)+ 平衡不吃可疑計米
+
+### 已完成
+- **開機競態**:斷電重開後 `fcv-crane` 在開機 43 s 就起來,交換器/USR 網關還沒好 → 全部裝置被停用直到手動重啟。
+  修法:drop-in 加 `ExecStartPre=/home/nexuni/run/wait_devices.sh`(等 `.30:4001` 與 `.34:4001`,上限 180 s,逾時放行)。
+  ⚠️ 踩坑:腳本用 `#!/bin/sh` 但 `/dev/tcp` 是 **bash 專有** → dash 下永遠失敗、白等 180 s 讓 service 卡 `activating`。改 `#!/bin/bash` 後 0.005 s 放行。
+  🟡 這支腳本目前**只在 Pi 上**(`~/run/wait_devices.sh`),尚未鏡射進 repo `scripts/`。
+- **計米器永久凍結**(`main.cpp` `meter_read_robust`):30 cm/poll 的防雜訊規則沒有回頭路 —— 真實值一旦跟快取差 >30 cm,之後每次讀都被當「sustained corruption」,
+  快取凍在舊值直到 `zero_meters`/重啟(official log:`prev=1616 v1=v2=3387` 持續 10 分鐘以上,GUI 顯示 1616/2496 實際 3387/5021)。
+  official 觸發條件:3 顆錶串讀、網關慢 → 一輪 ≈0.5 s;平衡把左推到 62.5 Hz → 每輪 37 cm → 被拒 → 凍結 → err 越滾越大 → 推更高 Hz(自我強化,err 到 -103 cm 才被按停)。
+  修法:`MeterResync` 追蹤「被拒但彼此連貫(相鄰差 ≤30 cm)」的讀值,連續 ≥3 筆且 ≥2 s → **RESYNC** 接受(log `[meter] X RESYNC cache a → b`)。
+  真雜訊(05-14 實測「0」約 1 s)仍被拒;若假值持續 >2 s 最多跟錯一個視窗、真值回來再跟回 —— 有界錯而非無界錯。
+- **平衡守衛**:新增 `g_length_*_suspect`(被拒中=快取過期),`apply_balance_trim` 見到 suspect 就 `reset_to_base()` 不修正(2 s 一則 `[BAL] ⚠`)。
+  `status` 新欄 `meter_suspect=` (L/R/M 組合)、`home_status` 新欄 `suspect=`。GUI 尚未顯示。
+- 已部署 official(`crane_control_PI.out` md5 `b755b403…`,舊檔留 `.bak-0918`),restart 後 L=3284 R=4890 為真實值。
+  ⚠️ 踩坑:`cp` 覆蓋執行中的 binary 會 **Text file busy**(靜默失敗過一次),要 `cp 到 .new` 再 `mv -f`。
+
+- **GUI「本體有連線但不更新」**:根因是 WiFi 橋 RF 極差(RSSI −70、**Tx PER 83%**、本體→吊機 30–40% 掉包 + 大量重複包;01:23–01:28 斷 285 s)。
+  本體→web 的 TCP 卡在指數退避(Send-Q 10 KB、backoff 11、rto 120 s)—— socket「連著」但每個 status 都進重傳佇列。
+  兩層處置:① `web_backend/server.js` makeBridge 加 **dead-peer 看門狗**(`BRIDGE_DEAD_MS`=30 s 沒收到任何資料就 destroy → 新連線新 RTO),已部署 official,status 0.14 s 回;
+  ② QWRT 改 **HT20** + 關 Block-Ack/AMPDU(`HT_AutoBA=0 HT_BADecline=1`,寫進 rc.local):掉包 6.7%→3.3%、重複包 291→107/30 發。
+  🔴 **RF 沒改善前不要跑任務**(控制通道走這條)。要 user 做:主路由 `facade_cleaning_2.4G` 改 20 MHz、拉近/對準;長期換 5 GHz 或有線。
+
+- **GUI 吸附鎖改「只有密封才鎖」**(per user):`cupsState().attached = sealed > 0`,讀不到的那顆不再鎖 ▲▼/拉到…(official `.22` 偶發 JC100 TIMEOUT 就鎖死全部)。
+  提示文字仍列讀不到顆數;本體 `crane_goto` 硬守衛沒動(自動流程仍把讀不到當吸附)。版號 `v3-2026.09.19-1548`,已部署 official。
+
+- **09-21 程式整理**(per user,機器離線):Pi 上才有的東西鏡射進 repo —— `scripts/systemd/official/`(三個 drop-in + `wait_devices.sh`)、
+  `config/qwrt/`(hotplug + rc.local + 重建 README);`fcv-crane.service` `StartLimit*` 搬回 `[Unit]`;systemd README 加 official 安裝段;
+  changelog `[2026-09-19a]`(150 條)、pitfalls §2.7/§2.8 + 兩條方法論;上層索引已同步。`gui_v3_check` **208/208**、`main.cpp` 語法綠、`server.js` `node --check` 綠。
+
+### 觀察(待實測定案)
+- 🟡 **左右繩同指令出繩量差很多**(平衡未介入的早段:左 +8 cm 時右 +18 cm;之後每段右都多)。可能右 SD76 計數模式(1x/2x)或滾輪不同 —— 這批只 clone 了 SCAL,面板其他參數沒對。**要捲尺實測**(各放 100 cm → `cal_zero`/`cal_set`)。
+- 🟡 **中錶 DP=0**(左右 DP=2):`raw_scal=200 raw_dp=0` → 解析度 1 m。要從面板改:`00-16≠3 → DP=2 → 00-16=3`。
+- 本體上線檢查:吊機網段掃到新主機 **`192.168.1.122`**(MAC `98:28:a6` Compal,ping 0.4 ms、22/80 全關)—— 疑為 QWRT 的 apcli0 以 WAN 身分向主路由租到的位址(OpenWrt wan zone 預設擋 input);本體 `192.168.1.100` 仍不可達。
+- official 掛了約 105 kg(張力左 51.7 / 右 53.9 kg)。
+
+- **本體↔吊機 WiFi 橋接通了(重開機驗證)**:QWRT `apcli0` 進 `br-lan`,MTK 驅動 MAT 讓有線端穿過;AP 固定 `192.168.1.250`(+`192.168.100.1` fallback)、DHCP 關。
+  🔴 `wireless.sta.network='lan'` 不會自動 addif → hotplug + rc.local 兩層保險。09-18「3-address 帶不動」是沒實測的誤判。
+  詳見 `config/official-crane_485.md` 第七節。
+- QWRT **5 口全改 LAN**(WAN VLAN 刪除),重開機驗證持久。本體 `washrobot 192.168.1.100` 從吊機 ping 通、本體→吊機 `:5002` OK。
+  ⚠️ `swconfig link:` 回報不可信(本體 0.5 ms 通但顯示 link down)。吊機→本體 RTT 7–50 ms,偶爾 ~1 s。
+- **GUI 沒偵測到本體 / 本體連不到吊機** —— 兩邊 unit 檔都還寫著 bench WiFi 位址:
+  本體 `fcv-body` `FCV_EP_CRANE_HOST=192.168.5.25`(有 env 就不探測有線)、吊機 `fcv-web-v3` `WROBOT_IP=192.168.5.26`。
+  各加一個 drop-in 覆蓋(本體→`192.168.1.10`、web→`192.168.1.100`),restart 後 `crane_peer_fresh=1`、estop 通道通、web `[washrobot] connected`。
+  本體 `.21`(QX-DO24 螺旋槳 PWM 網關)一開始 ARP 無回應 → user 上電後 ping 通、序列設定正確(115200 8N1);**裝置旗標只在 init 設一次**,restart fcv-body 後 `dev_gw21=1 dev_qx=1`、`pwm status` OK(ch3 由 ERR 變 11,ch4 50/1000 殘留照舊)。
+
+### 待完成
+- 🟡 `deploy.sh` 目前只認測試機位址,對 official 仍手動 scp → 做成可選目標。
+- 🟡 GUI 顯示 `meter_suspect`。
+- 🟡 計米器捲尺校正、右/中錶面板參數(計數模式、DP)比對。
+
 ## 2026-09-18:**正式吊機 `official-crane` 從零建置上線**(Pi5 → 可控吊機)+ 一顆 binary 兩台共用(config-driven)
 
 > 一整天都在把**正式環境**建起來。結論:SE3/計米器/張力/水閥全部到位、GUI 可控、開機自啟,

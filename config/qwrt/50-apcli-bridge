@@ -1,0 +1,10 @@
+#!/bin/sh
+# /etc/hotplug.d/net/50-apcli-bridge  (QWRT AP, 192.168.1.250)
+# [2026-09-19] Body<->crane WiFi bridge: put the STA interface (apcli0) into br-lan.
+# wireless.sta.network=lan does NOT do this on this MTK build; the driver MAT
+# (MAC translation) then lets wired LAN hosts traverse the 3-address client link.
+[ "$ACTION" = "add" ] && [ "$INTERFACE" = "apcli0" ] && {
+	sleep 2
+	brctl addif br-lan apcli0 2>/dev/null
+	logger -t apcli-bridge "apcli0 added to br-lan (hotplug)"
+}

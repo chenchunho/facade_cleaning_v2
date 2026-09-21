@@ -1,7 +1,7 @@
 # official-crane — 裝置位址 / 485 配置(2026-09-18 全部實測完成)
 
 > 正式吊機 Pi(`official-crane`,Pi5)。**eth0 靜態 `192.168.1.10/24`、gw `192.168.1.1`**(裝置專網);
-> wlan0 `192.168.5.11`(office,GUI 從這裡開 `http://192.168.5.11:8080`)。
+> wlan0 目前 DOWN(09-18 重開後);GUI 走 `http://192.168.1.10:8080`。
 > 🔴 **佈線與測試機 `raspberry-cran` 不同**,但**程式共用同一份原始碼** —— 差異全部由
 > `/etc/systemd/system/fcv-crane.service.d/endpoints.conf` 的 env 決定(見第四節)。
 
@@ -103,16 +103,45 @@ Environment=FCV_DSZL_SCALE_RIGHT=0.008547
 | 服務 | 說明 |
 |---|---|
 | `fcv-crane` | 吊機主程式,TCP `:5002`;**enabled(開機自啟)** |
-| `fcv-web-v3` | GUI `:8080`(`http://192.168.5.11:8080`);**enabled** |
+| `fcv-web-v3` | GUI `:8080`(`http://192.168.1.10:8080`);**enabled**;drop-in `fcv-web-v3.service.d/endpoints.conf` → `WROBOT_IP=192.168.1.100`(unit 檔仍是 bench 的 .26) |
+| 本體 `fcv-body`(user service @ washrobot) | drop-in `~/.config/systemd/user/fcv-body.service.d/endpoints.conf` → `FCV_EP_CRANE_HOST=192.168.1.10`(unit 檔寫死 bench WiFi `.25`,有 env 覆蓋時**不做有線探測**,所以必須覆蓋) |
 
 unit 由 `scripts/systemd/` 改寫:路徑 `/home/user` → `/home/nexuni`、`User=nexuni`。
+三個 drop-in + `wait_devices.sh` 的副本在 **`scripts/systemd/official/`**(權威版在機器上)。
+
+🔴 **開機競態**:Pi 比 PoE 交換器/USR 網關早 ~40 s 起來,fcv-crane 若先啟動會把所有裝置標成 skipped
+(旗標只在 init 設一次)→ `ExecStartPre=/home/nexuni/run/wait_devices.sh` 等 `.30`/`.34` 的 :4001,
+上限 180 s。腳本必須是 **bash**(`/dev/tcp` 是 bash 專有;`#!/bin/sh` 會白等滿 180 s)。
 
 ## 六、待完成
 
+- 🟡 **兩台 Pi 都沒有 NTP**(裝置專網不出公網):時鐘各漂十幾小時,log 時間對不上。可讓主路由/吊機 Pi 當 NTP 源。
+
 - 🟡 **MH300 中繩絞盤**(`.32`)站號/baud 未測;程式仍寫 CLV900 slave 3 @ USR_A,與 official 佈線不符。
-- 🟡 **本體↔吊機 WiFi 橋接未通**:QWRT AP(`192.168.100.1`,root/password)的 `apcli0` 已關聯
-  `facade_cleaning_2.4G`、也進了 `br-lan`,但 **WiFi client 是 3-address、帶不動後面裝置的 MAC**
-  ⇒ 需 **WDS/4addr(兩端)** 或 relayd。本體 `192.168.1.100` 目前從吊機網段仍不可達。
-- 🟡 AP 管理 IP 仍在 `192.168.100.1`(與吊機網段不同,管不到)→ 建議改 `192.168.1.250` 固定。
-- 🟡 跑任務前需**地面歸零**;`wall_height` 未設(goto 會被擋,安全)。
+- ✅ **本體↔吊機 WiFi 橋接已通(2026-09-19,重開機驗證過)**:見第七節。
+- ✅ 本體 `washrobot` `192.168.1.100`(eth0 靜態)已從吊機 ping 通、本體→吊機 `:5002` 可連(2026-09-19)。
+- 🟡 跑任務前需**地面歸零**;`wall_height` 未設(goto 會被擋,安全)。(09-19 戶外實測已跑過,狀態以現場為準)
 - 🟡 `hold_guard` 曾被關過,操作前確認開啟。
+
+## 七、本體↔吊機 WiFi 橋(QWRT,2026-09-19 完成)
+
+| 項目 | 值 |
+|---|---|
+| 機型 / 韌體 | Q-WRT 25.06,MT7628(`ra0`=AP、`apcli0`=client),kernel 4.4 |
+| 管理 IP | **`192.168.1.250`**(主)+ `192.168.100.1`(fallback alias `lanfb`);root/password |
+| 上連 | `apcli0` → `facade_cleaning_2.4G`(主路由 IMSG2F4T-W `192.168.1.1`,開放無加密) |
+| 模式 | **L2 橋接**:`apcli0` 進 `br-lan`,靠 MediaTek 驅動內建 **MAT(MAC 轉譯)** 讓有線端裝置穿過 3-address client 連線 |
+| DHCP | QWRT 的 DHCP **關閉**(`dhcp.lan.ignore=1`),LAN 端裝置直接向主路由租 `192.168.1.x` |
+| 交換器 | **5 個實體口全部 LAN**(`switch_vlan[0].ports='0 1 2 3 4 6t'`,WAN VLAN 刪除、`wan` proto=none),本體插哪個口都行 |
+| 本體 | `washrobot` `192.168.1.100`(eth0 靜態),SSH `nexuni@`;吊機→本體 RTT 7–50 ms、偶爾飆到 ~1 s(2.4G,要留意) |
+
+⚠️ `swconfig … link:` 這台回報的 link 狀態**不可信**(本體明明 ping 得到 0.5 ms,卻只顯示筆電那口 up)。
+
+🔴 **踩坑**:`wireless.sta.network='lan'` 在這個 MTK build **不會**把 `apcli0` 加進 `br-lan`(`brctl show` 只有 ra0/eth0.1),
+所以做了兩層保險:`/etc/hotplug.d/net/50-apcli-bridge`(apcli0 出現時 addif)+ `/etc/rc.local`(有上限 60 s 的等待迴圈)。
+重開機 log 兩條都會出現 `apcli-bridge: apcli0 added to br-lan`。
+
+驗證方法:筆電插 QWRT LAN 口拔插網路線 → 拿到主路由發的 `192.168.1.x`(實測 `.11`)且能 SSH `192.168.1.10` ⇒ 橋接成立。
+AP 自己 ping 吊機 RTT 20–80 ms(2.4G)。
+
+09-18 的「3-address 帶不動」判斷是**沒實測就下的結論**——驅動有 MAT 就能過,別再繞去 WDS/relayd。
