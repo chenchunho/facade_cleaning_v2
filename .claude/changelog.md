@@ -6,8 +6,9 @@
 > 保留「原因 / 決策(尤其被否決的)/ 驗證結論」。原則 ≤40 行,驗證表可超。
 > (原 2026-04 的「# 修改日誌」格式範本已由本說明取代。)
 
-## 索引(全部 150 條,新的在上)
+## 索引(全部 151 條,新的在上)
 
+- `[2026-09-21a]` 離線日:`deploy.sh` `FCV_TARGET=official` + `prep-official`、GUI 畫 `meter_suspect`、`goto` 張力軟停 `stopped=tension_stop short_by=`(OK 前綴保留)+ GUI ⚠️、`DM2J::last_error()` → rail 拒絕帶原因、`ntp_probe.sh` → (本檔)
 - `[2026-09-19a]` **official 上線第二天**:開機競態 `ExecStartPre` 閘門、計米器凍結 RESYNC + 平衡不吃可疑計米、本體↔吊機 WiFi 橋(QWRT)通了 + 兩端 endpoint drop-in、web 橋 dead-peer 看門狗、吸附鎖只認密封(`v3-2026.09.19-1548`)→ (本檔)
 - `[2026-09-18a]` **裝置對應 config-driven**:計米器可拆兩條匯流排(`cli_M2`)、slave/水閥通道/張力 scale 全部 env 可覆蓋;GUI 水閥通道改由後端動態判定 ⇒ **測試機與正式機共用同一份原始碼**(`v3-2026.09.18-2326`)→ (本檔)
 - `[2026-09-17v3o]` v3：張力條「總和」給一條 bar——刻度＝參考 2×單側上限、中性色、不是門檻（`v3-2026.09.17-1842`）→ (本檔)
@@ -162,6 +163,20 @@
 ---
 
 ## 當月全文(2026-09,98 條)
+
+## [2026-09-21a] 離線日 —— deploy 認 official、meter_suspect 上 GUI、goto 軟停講清楚、rail 拒絕帶原因(未在真機驗證)
+
+- `scripts/deploy.sh`:`FCV_TARGET=official` 切位址(吊機 `.1.10`/本體 `.1.100`)、`web` 的 `PI` 跟著切、`sudo -n`、新目標 `prep-official`(ssh key + sudo -n 檢查)。
+  前置(user):兩台 `ssh-copy-id`、official 吊機 sudoers 只放行 `systemctl restart fcv-crane|fcv-web-v3`。
+- `web_backend/public_v3/index.html`:`meter_suspect=L/R/M` → Manual L/R 標紅 + tooltip、Dashboard `d-susp-row`(平常隱藏;`.wf[hidden]{display:none}` 因 flex 蓋 hidden);
+  `gotoResultText` 認 `stopped=tension_stop` → 「⚠️ 張力先到…」,log ⚠️(`gotoIsShort`)。
+- `Crane_control_PI/main.cpp` `cmd_goto`:`motion_rope` 回 `OK tension_reached` 時追加 `stopped=tension_stop short_by=N retract_tension_stop_kg=K`。
+  決策:**保留 OK 前綴**(所有消費端把非 OK 當失敗、動作是安全完成);09-15 提的「回 WARN」否決。
+- `user_lib/DM2J_RS570.{h,cpp}`:累加式 `last_error()`(`travel_limit target=… range=[…]` / `modbus_write_failed`),三個 `PR_move_cm*` 進場清空;
+  `app/wash_robot_commands.cpp` `cmd_rail_move` → `ERR rail_move_command_failed reason=…`。
+- `harness/fake_robot.py`:`meter_suspect=` 欄、`fake_meter_suspect`、`fake_goto_short`;`gui_v3_check.js` +4 條(**212/212**)。
+- `scripts/systemd/official/ntp_probe.sh`:只探測(路由器 NTP / 公網 / 兩台時差)。
+驗證:harness 212/212、check_console 全過、三個 TU `-fsyntax-only` 綠;**未上真機**。未 commit。
 
 ## [2026-09-19a] official 上線第二天 —— 開機閘門、計米器 RESYNC、WiFi 橋、endpoint drop-in、web 看門狗(`v3-2026.09.19-1548`)
 

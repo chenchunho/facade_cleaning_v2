@@ -52,6 +52,12 @@ public:
 	// 指令，驅動器、應用層、log 三邊都沒有任何抗議。
 	// lo == hi 表示停用。
 	void set_travel_limit_cm(double lo_cm, double hi_cm);
+	// [2026-09-21] Why the last PR_move_cm* call returned true, as a wire-safe token
+	// ("travel_limit target=-3.000 range=[0.00,130.00]" / "modbus_write_failed" / "").
+	// Additive: the bool contract is unchanged. Motivation: the travel guard only
+	// ever LOG_ERR'd, so the app could only answer "ERR rail_move_command_failed"
+	// and the operator had to ssh into the Pi to learn why (pitfalls §2.6).
+	const std::string& last_error() const { return last_error_; }
 
 	// [2026-08-28] void → bool (false = OK, per CLAUDE.md). These three swallowed
 	// the writeMulti/writeSingle result, which made every layer above them blind:
@@ -122,6 +128,7 @@ private:
 	double  lead_cm_per_rev_ = 1.0;
 	double  travel_lo_cm_    = 0.0;
 	double  travel_hi_cm_    = 0.0;   // lo == hi → 停用
+	std::string last_error_;          // see last_error()
 
 	int     cm_to_pulse_(double cm, uint16_t ppr) const;
 	double  pulse_to_cm_(int32_t pulse, uint16_t ppr) const;

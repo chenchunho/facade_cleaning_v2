@@ -69,6 +69,8 @@ class Sim:
         self.pause_reason = 'none'    # [2026-09-16] none|user|error|balance_ask
         self.flow = 'none'            # [2026-09-16] none|return_home
         self.hold_guard = 1           # [2026-09-15] set_hold_guard on|off (hold-mode tension protection)
+        self.meter_suspect = ''       # [2026-09-21] L/R/M subset — meter_loop rejecting coherent reads (cache stale)
+        self.goto_short_cm = 0        # [2026-09-21] harness knob: next retract goto stops this many cm early on tension (0 = off)
         # [2026-09-17 AI-2, for agent-ai-db] tension thresholds are settable on the real crane (set_tension_max_kg /
         # set_tension_diff_max_kg / set_retract_tension_stop_kg, persisted in crane_settings.txt); status must follow so the
         # GUI check can verify the round trip. Defaults = real crane compile defaults (agent-ai-db 09-17), not the old fake 80/25/50.
@@ -156,7 +158,7 @@ class Sim:
     # ---- reply builders (formats copied from the C++ side) ----
     def crane_status(self):
         s = self
-        return (f'OK length_left={s.len_l:.1f} length_right={s.len_r:.1f} length_middle=ERR'
+        return (f'OK length_left={s.len_l:.1f} length_right={s.len_r:.1f} length_middle=ERR meter_suspect={s.meter_suspect}'
                 f' tension_left={s.ten_l:.1f} tension_right={s.ten_r:.1f} tension_valid=1'
                 f' up_left=0 up_right=0 down_left=0 down_right=0'
                 f' hold_guard={s.hold_guard} tension_max_kg={s.tension_max_kg:g} tension_diff_max_kg={s.tension_diff_max_kg:g} length_diff_max_cm={s.length_diff_max_cm:g}'
@@ -693,6 +695,9 @@ def cr_dispatch(line, bcast):
             try: s.level_diff = int(float(a[0]))
             except ValueError: return 'ERR usage\n', True
             return ('OK note=level_auto_on_will_override\n' if s.level_auto else 'OK\n'), True
+        if c == 'fake_meter_suspect':   # harness-only: fake_meter_suspect [L][R][M] ('' = clear)
+            s.meter_suspect = ''.join(ch for ch in (a[0] if a else '') if ch in 'LRM')
+            return f'OK meter_suspect={s.meter_suspect}\n', True
         if c == 'set_hold_guard':
             if not a or a[0] not in ('on', 'off'): return 'ERR expected_on_or_off\n', True
             new = 1 if a[0] == 'on' else 0
@@ -716,9 +721,18 @@ def cr_dispatch(line, bcast):
             if min(hL, hR) <= tgt <= max(hL, hR): return f'OK goto already_there target={tgt} from={hL}/{hR}\n', True
             here = max(hL, hR) if tgt > max(hL, hR) else min(hL, hR); delta = tgt - here   # pessimistic side per direction
             verb = 'retract' if delta > 0 else 'pay_out'
-            s.moving = ('both', s.len_l - delta, time.time())   # up = length more negative
+            # [2026-09-21] retract soft stop on tension: C++ appends stopped=tension_stop short_by=N (OK prefix kept)
+            short = s.goto_short_cm if (verb == 'retract' and s.goto_short_cm > 0) else 0
+            s.goto_short_cm = 0
+            delta_eff = delta - short
+            s.moving = ('both', s.len_l - delta_eff, time.time())   # up = length more negative
             threading.Timer(0.3, lambda: bcast(f'EVT motion_progress cmd={verb} cm={abs(delta)}\n')).start()
-            return f'OK goto target={tgt} from={here} (L={hL} R={hR}) {verb}={abs(delta)} now={tgt} err=0\n', True
+            tail = f' stopped=tension_stop short_by={short} retract_tension_stop_kg={s.retract_tension_stop_kg:g}' if short else ''
+            return f'OK goto target={tgt} from={here} (L={hL} R={hR}) {verb}={abs(delta)} now={tgt - short} err={-short}{tail}\n', True
+        if c == 'fake_goto_short' and a:   # harness-only: next retract goto stops <cm> short on tension
+            try: s.goto_short_cm = max(0, int(float(a[0])))
+            except ValueError: return 'ERR usage\n', True
+            return f'OK goto_short_cm={s.goto_short_cm}\n', True
         if c == 'set_imu_roll' and a:
             try: s.imu_roll = float(a[0])
             except ValueError: pass

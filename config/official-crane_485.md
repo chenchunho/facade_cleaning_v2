@@ -115,7 +115,7 @@ unit 由 `scripts/systemd/` 改寫:路徑 `/home/user` → `/home/nexuni`、`Use
 
 ## 六、待完成
 
-- 🟡 **兩台 Pi 都沒有 NTP**(裝置專網不出公網):時鐘各漂十幾小時,log 時間對不上。可讓主路由/吊機 Pi 當 NTP 源。
+- 🟡 **兩台 Pi 都沒有 NTP**(裝置專網不出公網):時鐘各漂十幾小時,log 時間對不上。先跑 `scripts/systemd/official/ntp_probe.sh` 決定裝法(路由器 NTP → 零安裝;公網 → 預設 pool;都沒有 → 吊機 chrony local stratum 10,要離線帶 .deb)。
 
 - 🟡 **MH300 中繩絞盤**(`.32`)站號/baud 未測;程式仍寫 CLV900 slave 3 @ USR_A,與 official 佈線不符。
 - ✅ **本體↔吊機 WiFi 橋接已通(2026-09-19,重開機驗證過)**:見第七節。

@@ -9,6 +9,16 @@
 #   ./scripts/deploy.sh script  # scripts/cycle_test.py → 兩台 Pi(無服務,不必重啟;09-17 由 Linux_test/ 搬來)
 #   ./scripts/deploy.sh status  # 四支服務狀態 + 機器現況
 #
+#   FCV_TARGET=official ./scripts/deploy.sh <同上>   # [2026-09-21] 正式機:吊機 nexuni@192.168.1.10、本體 nexuni@192.168.1.100
+#   ./scripts/deploy.sh prep-official                # 一次性:檢查 official 的 ssh key + sudo -n(見下)
+#
+# 🔴 official 與測試機的差別只有三件,全部由 FCV_TARGET 切:
+#   1. 位址(上面兩個);2. 吊機 sudo:測試機 user 有 NOPASSWD,official 的 nexuni 沒有 → 本腳本一律 `sudo -n`,
+#      第一次用之前請在 official 上放一行 sudoers(只放行 restart 這兩支服務,不是整個 NOPASSWD):
+#        echo 'nexuni ALL=(root) NOPASSWD: /usr/bin/systemctl restart fcv-crane, /usr/bin/systemctl restart fcv-web-v3' | sudo tee /etc/sudoers.d/fcv-deploy
+#   3. ssh key:official 兩台都還沒裝(09-19 是用密碼+paramiko 做的)→ `ssh-copy-id nexuni@192.168.1.10` / `…@192.168.1.100`。
+#   裝置位址/站號/校正值**不在這裡**,在 Pi 上的 systemd drop-in(副本 scripts/systemd/official/),部署程式不會動到它們。
+#
 # 每個目標一律做完整五步:同步原始碼 → Pi 上編譯 → **備份現役 binary** → 換檔 → 重啟服務 → 驗證啟動訊息。
 #
 # 🔴 為什麼要備份:`compile.sh` / `build_*.sh` 的產物與現役檔同名或會被直接覆蓋,
@@ -24,8 +34,12 @@
 #      壓牆中重啟等於當場卸力收回,確定沒有壓著再按。
 set -uo pipefail
 
-BODY=nexuni@192.168.5.26
-CRANE=user@192.168.5.25
+case "${FCV_TARGET:-test}" in
+    test)     BODY=nexuni@192.168.5.26;  CRANE=user@192.168.5.25;    TARGET_LABEL="測試機" ;;
+    official) BODY=nexuni@192.168.1.100; CRANE=nexuni@192.168.1.10;  TARGET_LABEL="正式機 official" ;;
+    *) echo "🔴 FCV_TARGET 只認 test / official(得到 '$FCV_TARGET')" >&2; exit 2 ;;
+esac
+SUDO="sudo -n"   # 兩台都走 -n:沒 NOPASSWD 就明確失敗,不會卡在密碼提示(見檔頭第 2 點)
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAMP="$(date +%m%d-%H%M)"
 SSH="ssh -o ConnectTimeout=8"
@@ -91,7 +105,7 @@ deploy_crane() {
     scp -q "$REPO"/scripts/build/build_crane.sh "$CRANE":~/run/build_crane.sh || die "scp build_crane.sh 失敗"   # 同上,副本要跟著 repo
     $SSH "$CRANE" 'bash ~/run/build_crane.sh 2>&1 | tail -2' </dev/null | /bin/grep -q crane_drv.out || die "編譯失敗(見上)"
     say "備份 + 換檔 + 重啟 fcv-crane"
-    $SSH "$CRANE" "cd ~/run && cp -p crane_control_PI.out crane_control_PI.out.prev-$STAMP && rm -f crane_control_PI.out && cp -p crane_drv.out crane_control_PI.out && md5sum crane_control_PI.out && sudo systemctl restart fcv-crane" </dev/null || die "換檔/重啟失敗"
+    $SSH "$CRANE" "cd ~/run && cp -p crane_control_PI.out crane_control_PI.out.prev-$STAMP && rm -f crane_control_PI.out && cp -p crane_drv.out crane_control_PI.out && md5sum crane_control_PI.out && $SUDO systemctl restart fcv-crane" </dev/null || die "換檔/重啟失敗(official 請先做 prep-official)"
     say "驗證(ExecStartPost 會補送 home_ground/motion_hz/wall_height,約 20 s)"
     $SSH "$CRANE" 'for i in $(seq 1 30); do ss -ltn | grep -q ":5002" && break; sleep 2; done; sleep 22; systemctl is-active fcv-crane; python3 ~/run/crcmd.py status | tr " " "\n" | /bin/grep -E "^(home_ground_cm|wall_height_cm|motion_hz|length_left)="' </dev/null
 }
@@ -99,7 +113,7 @@ deploy_crane() {
 deploy_server() {
     say "同步 server.js 並重啟兩支 node"
     scp -q "$REPO"/web_backend/server.js "$CRANE":/tmp/server.js.new || die "scp 失敗"
-    $SSH "$CRANE" "D=~/projects/facade_cleaning_v2/web; cp -p \$D/server.js \$D/server.js.bak-$STAMP && cp /tmp/server.js.new \$D/server.js && md5sum \$D/server.js && sudo systemctl restart fcv-web-v3" </dev/null || die "換檔/重啟失敗"
+    $SSH "$CRANE" "D=~/projects/facade_cleaning_v2/web; cp -p \$D/server.js \$D/server.js.bak-$STAMP && cp /tmp/server.js.new \$D/server.js && md5sum \$D/server.js && $SUDO systemctl restart fcv-web-v3" </dev/null || die "換檔/重啟失敗(official 請先做 prep-official)"
     $SSH "$CRANE" 'sleep 6; systemctl is-active fcv-web-v3; tail -8 ~/run/logs/web_v3_service.log | /bin/grep -a connected' </dev/null
 }
 
@@ -114,10 +128,23 @@ deploy_script() {
     $SSH "$BODY"  'md5sum ~/projects/facade_cleaning_v2/scripts/cycle_test.py' </dev/null
 }
 
+# [2026-09-21] official 一次性前置檢查:ssh key 進得去、吊機 sudo -n 放行 restart。只讀不改。
+prep_official() {
+    [ "${FCV_TARGET:-test}" = official ] || die "請加 FCV_TARGET=official"
+    local ok=1
+    for h in "$CRANE" "$BODY"; do
+        if $SSH -o BatchMode=yes "$h" true </dev/null 2>/dev/null; then echo "✅ ssh key OK  $h"
+        else echo "🔴 ssh key 未裝  $h  → ssh-copy-id $h"; ok=0; fi
+    done
+    if $SSH -o BatchMode=yes "$CRANE" 'sudo -n systemctl status fcv-crane >/dev/null 2>&1' </dev/null 2>/dev/null; then echo "✅ sudo -n OK   $CRANE"
+    else echo "🔴 sudo -n 不通  $CRANE  → 見檔頭第 2 點的 sudoers 一行"; ok=0; fi
+    [ "$ok" = 1 ] || die "official 前置未完成"
+}
+
 show_status() {
-    echo "=== 吊機 .25 ==="
+    echo "=== 吊機 ${CRANE#*@}($TARGET_LABEL)==="
     $SSH "$CRANE" 'systemctl is-active fcv-crane fcv-web-v3 | tr "\n" " "; echo; python3 ~/run/crcmd.py status 2>/dev/null | tr " " "\n" | /bin/grep -E "^(length_left|length_right|wall_height_cm|home_ground_cm|hold_guard|level_auto)=" | tr "\n" " "; echo' </dev/null
-    echo "=== 本體 .26 ==="
+    echo "=== 本體 ${BODY#*@} ==="
     $SSH "$BODY" 'systemctl --user is-active fcv-arm fcv-body | tr "\n" " "; echo; python3 ~/run/crcmd.py 127.0.0.1:5001 status 2>/dev/null | tr " " "\n" | /bin/grep -E "^(state|p[5-8]|arm_ready|estop|pusher_rpm)" | tr "\n" " "; echo' </dev/null
 }
 
@@ -125,10 +152,11 @@ case "${1:-}" in
     body)   deploy_body ;;
     arm)    deploy_arm ;;
     crane)  deploy_crane ;;
-    web)    exec "$REPO/scripts/deploy_web.sh" ;;   # 版號戳記 + 三方 md5,不必重啟 node
+    web)    PI="$CRANE" exec "$REPO/scripts/deploy_web.sh" ;;   # 版號戳記 + 三方 md5,不必重啟 node;PI 跟著 FCV_TARGET
     server) deploy_server ;;
     script) deploy_script ;;
     status) show_status ;;
-    *) sed -n '2,30p' "${BASH_SOURCE[0]}"; exit 2 ;;
+    prep-official) prep_official ;;
+    *) sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 2 ;;
 esac
-echo "✅ 完成:$1"
+echo "✅ 完成:$1($TARGET_LABEL)"

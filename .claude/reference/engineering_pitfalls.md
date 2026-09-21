@@ -153,7 +153,8 @@ release_feet_center → free_hang_settle(3 s)→ balancing(IMU 閉環,連續 mot
 與 `DM2J_RS570::set_travel_limit_cm()`(驅動層,只 `LOG_ERR … REJECTED`、指令回覆只剩 `ERR rail_move_command_failed`)。
 09-17 上午「上滑台可設負值」只放寬指令層,驅動層開機仍設 `[0,130]` ⇒ 負數全被擋,GUI 看不出原因,要到 Pi 上翻 log 才知道。
 - 🔴 改任何「範圍」之前先 `grep` 這個範圍的**所有**出現點(指令層 / 驅動層 / GUI 軟限位 / fake),三層一起改。
-- 驅動層的拒絕**要能從指令回覆看出來**——現在仍只在 log(🟡 待改:`ERR rail_move_command_failed` 後面帶原因)。
+- 驅動層的拒絕**要能從指令回覆看出來**——✅ 2026-09-21 起 `DM2J_RS570::last_error()`(累加式,bool 契約不變)
+  → `ERR rail_move_command_failed reason=travel_limit target=-3.000 range=[0.00,130.00]`。
 
 ### 2.7 防雜訊規則要有回頭路;凍結的感測值不能餵控制迴路(2026-09-19)
 

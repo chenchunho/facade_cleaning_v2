@@ -1,6 +1,7 @@
 #include "DM2J_RS570.h"
 #include "log_utils.h"
 #include <cstring>
+#include <cstdio>
 #include <thread>
 #include <chrono>
 
@@ -230,6 +231,9 @@ bool DM2J_RS570::travel_reject_(double cm, const char* what)
 	if (cm >= travel_lo_cm_ && cm <= travel_hi_cm_) return false;
 	LOG_ERR(_log_tag, "%s %.3f cm REJECTED — outside travel limit [%.2f, %.2f]",
 	        what, cm, travel_lo_cm_, travel_hi_cm_);
+	char buf[96];
+	snprintf(buf, sizeof buf, "travel_limit target=%.3f range=[%.2f,%.2f]", cm, travel_lo_cm_, travel_hi_cm_);
+	last_error_ = buf;
 	return true;
 }
 
@@ -247,6 +251,7 @@ bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int ac
 
 	// [2026-08-28] Range check BEFORE any bus traffic — cheapest place to stop a
 	// command that would drive the mechanism into its end stop.
+	last_error_.clear();
 	if (travel_reject_(pos_cm, "PR_move_cm")) return true;
 
 	// --- pulse-per-rev (with retry) ---
@@ -383,6 +388,7 @@ bool DM2J_RS570::PR_move_cm(int pr_num, int mode, int rpm, double pos_cm, int ac
 
 bool DM2J_RS570::PR_move_cm_nowait(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec)
 {
+	last_error_.clear();
 	if (travel_reject_(pos_cm, "PR_move_cm_nowait")) return true;
 	uint16_t ppr = 10000;
 	// PPR skipped to save one round-trip; assumes default 10000
@@ -395,11 +401,13 @@ bool DM2J_RS570::PR_move_cm_nowait(int pr_num, int mode, int rpm, double pos_cm,
 	// could never be detected. Propagate for real.
 	bool err = PR_move_set(pr_num, mode, rpm, pos_pulse, acc, dec);
 	err |= PR_trigger(pr_num);
+	if (err) last_error_ = "modbus_write_failed";
 	return err;
 }
 
 bool DM2J_RS570::PR_move_cm_set(int pr_num, int mode, int rpm, double pos_cm, int acc, int dec)
 {
+	last_error_.clear();
 	if (travel_reject_(pos_cm, "PR_move_cm_set")) return true;
 	uint16_t ppr = 10000;
 	int pos_pulse = cm_to_pulse_(pos_cm, ppr);

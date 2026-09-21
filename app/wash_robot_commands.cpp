@@ -446,8 +446,12 @@ std::string WashRobot::cmd_rail_move(double target_cm, int rpm, int acc, int dec
         if (wait_ms > 180000) wait_ms = 180000;
     }
 
-    if (D_(DM2J_ARM).PR_move_cm_nowait(0, 1, rpm, target_cm, acc, dec))
-        return "ERR rail_move_command_failed\n";
+    if (D_(DM2J_ARM).PR_move_cm_nowait(0, 1, rpm, target_cm, acc, dec)) {
+        // [2026-09-21] carry the driver's reason (travel guard / modbus) onto the wire —
+        // until now the rejection lived only in the Pi log (pitfalls §2.6).
+        const std::string& why = D_(DM2J_ARM).last_error();
+        return "ERR rail_move_command_failed" + (why.empty() ? std::string() : " reason=" + why) + "\n";
+    }
     // 🔴 [2026-09-02] dm2j_wait_done_ 遵循本專案慣例（projects/CLAUDE.md：
     //    **無異常回傳 false**）：完成 → false，通訊錯誤／故障／逾時 → true。
     //    初版寫成 `if (!dm2j_wait_done_(...))`，變成**動作成功時才回 ERR**

@@ -1,12 +1,36 @@
 # Work Log
 
+## 2026-09-21:程式/文件離線日 —— deploy.sh 認 official、GUI 畫 meter_suspect、goto 張力軟停講清楚、rail 拒絕帶原因、NTP 探測腳本
+
+per user「24V 治本已經解決,隧道延遲暫時用 WiFi 之後會再改,程式/文件(離線可做)開始」。機器全部離線,**全部未在真機驗證**,下次上機先 `FCV_TARGET=official ./scripts/deploy.sh prep-official`。
+
+### 已完成(未 commit,停在可檢視狀態)
+- **`scripts/deploy.sh` 認 official**:`FCV_TARGET=official`(吊機 `nexuni@192.168.1.10`、本體 `nexuni@192.168.1.100`),`web` 目標的 `PI` 跟著切;
+  sudo 一律 `sudo -n`(沒 NOPASSWD 就明確失敗);新增 `prep-official` 一次性檢查(ssh key ×2 + `sudo -n`)。
+  🔴 **前置要 user 做**:`ssh-copy-id` 兩台 + official 吊機放一行 sudoers(只放行 restart 兩支服務,寫在檔頭)。
+- **GUI 畫 `meter_suspect`**:Manual 吊機卡 L/R 數字被拒中標紅 + tooltip;Dashboard facts 多一列「⚠ 計米器 左 讀值被拒中(可能過期)」(平常隱藏)。
+  ⚠️ 踩坑:`.wf` 是 flex 會蓋掉 `hidden`,harness「every [hidden] is display:none」當場抓到 → 補 `.wf[hidden]{display:none}`。
+  fake_robot 加 `meter_suspect=` 欄 + harness-only `fake_meter_suspect [LRM]`;gui_v3_check +3 條。
+- **`crane_goto` 張力軟停講清楚**(09-15 帶過來的):吊機 `cmd_goto` 在 `motion_rope` 回 `OK tension_reached` 時加 `stopped=tension_stop short_by=N retract_tension_stop_kg=K`
+  (**保留 OK 前綴**——所有消費端把非 OK 當失敗,而且動作本身是安全完成;「改 WARN 前綴」被否決);GUI `gotoResultText` 畫「⚠️ 張力先到,停在 X(目標 Y,差 N;上限 K kg)」、log 走 ⚠️。
+  fake_robot 加 `fake_goto_short <cm>`;harness +1 條。
+- **rail 驅動層拒絕帶原因**(pitfalls §2.6 的 🟡):`DM2J_RS570` 累加式 `last_error()`(`travel_limit target=… range=[…]` / `modbus_write_failed`),
+  `cmd_rail_move` 回 `ERR rail_move_command_failed reason=…`。bool 契約不變。
+- **NTP**:寫 `scripts/systemd/official/ntp_probe.sh`(只探測:主路由答不答 NTP / 出不出公網 / 兩台時差),三個答案決定裝法;裝置專網沒 apt,不預設 chrony。
+- 驗證:`gui_v3_check` **212/212**、check_console 全過、`main.cpp`/`DM2J_RS570.cpp`/`wash_robot_commands.cpp` `-fsyntax-only` 綠、deploy.sh `bash -n` + 錯誤路徑。
+- 待辦表清理:24V 治本 ✅、隧道延遲 → 由 WiFi 橋取代(之後再改)。
+
+### 待完成
+- 🟡 下次上機:`prep-official` → 用 `FCV_TARGET=official ./scripts/deploy.sh crane/body/web` 把這批部署上去並驗:計米器標紅、goto 軟停文字、`rail -300` 回 reason、`ntp_probe.sh`。
+- 🟡 `work_log.md` 1,400 行,超過壓縮門檻 —— 下次文書日壓 09-16~09-19。
+
 ## 2026-09-19:official 開機競態修正 + 計米器「永久凍結」修正(resync)+ 平衡不吃可疑計米
 
 ### 已完成
 - **開機競態**:斷電重開後 `fcv-crane` 在開機 43 s 就起來,交換器/USR 網關還沒好 → 全部裝置被停用直到手動重啟。
   修法:drop-in 加 `ExecStartPre=/home/nexuni/run/wait_devices.sh`(等 `.30:4001` 與 `.34:4001`,上限 180 s,逾時放行)。
   ⚠️ 踩坑:腳本用 `#!/bin/sh` 但 `/dev/tcp` 是 **bash 專有** → dash 下永遠失敗、白等 180 s 讓 service 卡 `activating`。改 `#!/bin/bash` 後 0.005 s 放行。
-  🟡 這支腳本目前**只在 Pi 上**(`~/run/wait_devices.sh`),尚未鏡射進 repo `scripts/`。
+  ✅ 09-21 副本已進 `scripts/systemd/official/wait_devices.sh`。
 - **計米器永久凍結**(`main.cpp` `meter_read_robust`):30 cm/poll 的防雜訊規則沒有回頭路 —— 真實值一旦跟快取差 >30 cm,之後每次讀都被當「sustained corruption」,
   快取凍在舊值直到 `zero_meters`/重啟(official log:`prev=1616 v1=v2=3387` 持續 10 分鐘以上,GUI 顯示 1616/2496 實際 3387/5021)。
   official 觸發條件:3 顆錶串讀、網關慢 → 一輪 ≈0.5 s;平衡把左推到 62.5 Hz → 每輪 37 cm → 被拒 → 凍結 → err 越滾越大 → 推更高 Hz(自我強化,err 到 -103 cm 才被按停)。
@@ -28,7 +52,7 @@
 
 - **09-21 程式整理**(per user,機器離線):Pi 上才有的東西鏡射進 repo —— `scripts/systemd/official/`(三個 drop-in + `wait_devices.sh`)、
   `config/qwrt/`(hotplug + rc.local + 重建 README);`fcv-crane.service` `StartLimit*` 搬回 `[Unit]`;systemd README 加 official 安裝段;
-  changelog `[2026-09-19a]`(150 條)、pitfalls §2.7/§2.8 + 兩條方法論;上層索引已同步。`gui_v3_check` **208/208**、`main.cpp` 語法綠、`server.js` `node --check` 綠。
+  changelog `[2026-09-19a]`(150 條)、pitfalls §2.7/§2.8 + 兩條方法論;上層索引已同步。`gui_v3_check` **208/208**、`main.cpp` 語法綠、`server.js` `node --check` 綠。**commit `d844553`**(main)。
 
 ### 觀察(待實測定案)
 - 🟡 **左右繩同指令出繩量差很多**(平衡未介入的早段:左 +8 cm 時右 +18 cm;之後每段右都多)。可能右 SD76 計數模式(1x/2x)或滾輪不同 —— 這批只 clone 了 SCAL,面板其他參數沒對。**要捲尺實測**(各放 100 cm → `cal_zero`/`cal_set`)。
@@ -47,8 +71,6 @@
   本體 `.21`(QX-DO24 螺旋槳 PWM 網關)一開始 ARP 無回應 → user 上電後 ping 通、序列設定正確(115200 8N1);**裝置旗標只在 init 設一次**,restart fcv-body 後 `dev_gw21=1 dev_qx=1`、`pwm status` OK(ch3 由 ERR 變 11,ch4 50/1000 殘留照舊)。
 
 ### 待完成
-- 🟡 `deploy.sh` 目前只認測試機位址,對 official 仍手動 scp → 做成可選目標。
-- 🟡 GUI 顯示 `meter_suspect`。
 - 🟡 計米器捲尺校正、右/中錶面板參數(計數模式、DP)比對。
 
 ## 2026-09-18:**正式吊機 `official-crane` 從零建置上線**(Pi5 → 可控吊機)+ 一顆 binary 兩台共用(config-driven)
@@ -119,11 +141,11 @@
 - AP 管理 IP 還在 `192.168.100.1`(與吊機網段不同),**從吊機網段管不到**;要改成 `192.168.1.250` 之類才方便。
 
 ### 待完成
-- 🟡 **本體↔吊機橋接**:QWRT 開 WDS/4addr(或裝 relayd);AP 管理 IP 改 `192.168.1.250` 固定。
+- ✅ 09-19 本體↔吊機橋接通了(不是 WDS/relayd,是 MTK MAT)、AP 固定 `192.168.1.250` —— 見 09-19 條。
 - 🟡 **MH300 中繩絞盤**(`.32`)站號/baud 未測;程式仍寫 CLV900 slave 3 @ USR_A,與 official 佈線不符。
 - 🟡 official 跑任務前要**地面歸零**(計米器現值非零)、`wall_height` 尚未設(goto 目前被擋,安全)。
 - 🟡 `hold_guard` 曾被關過,操作前確認開啟。
-- 🟡 `config/official-crane_485.md` 已隨進度更新,但 MH300 / 橋接兩節待補。
+- 🟡 `config/official-crane_485.md` 橋接節已補(第七節);**MH300 節仍待補**。
 
 
 ## 2026-09-17 下午:手臂原則落地、急停收腳重送、距離上限/即時力道、張力門檻合併、警報不再拖 Idle 進 paused、rail 負值、第二顆水位計

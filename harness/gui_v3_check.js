@@ -223,6 +223,12 @@ async function secPre(P, port) {
   click('cg-go'); await waitFor(() => /(到位|已在位)/.test(txt('cg-rd')), 200);
   await waitFor(() => Math.abs(Math.abs(+w.__v3.last.cr.length_left) - 100) <= 5, 20);   // status 每秒一筆，回覆比它早到
   chk('拉到指定 100 → moved, result shown in the Manual card', [/到位 \d+ cm/.test(txt('cg-rd')), Math.abs(Math.abs(+w.__v3.last.cr.length_left) - 100) <= 5], [true, true]);
+  // [2026-09-21] 收繩張力軟停：吊機回 OK 但帶 stopped=tension_stop short_by=N ⇒ 不能畫 ✅ 到位（09-15 停在 135 被當成功）
+  await w.__v3.send('crane', 'fake_goto_short 20', 5000);
+  w.document.getElementById('cg-rd').textContent = '';
+  const nLog = w.__v3.logs().length;
+  click('cg-top'); await waitFor(() => /(張力先到|到位|已在位)/.test(txt('cg-rd')), 200);
+  chk('張力軟停 → ⚠️ 張力先到（差 20 cm、含收繩張力上限），不是 ✅ 到位；log 走 ⚠️ 不走 ✅', [/⚠️ 張力先到/.test(txt('cg-rd')), /差 20 cm/.test(txt('cg-rd')), /收繩張力上限 \d+ kg/.test(txt('cg-rd')), w.__v3.logs().slice(nLog).some(l => /⚠️ crane_goto 120 → OK goto .*stopped=tension_stop/.test(l))], [true, true, true, true]);
   w.document.getElementById('cg-rd').textContent = '';
   click('cg-top'); await waitFor(() => /(到位|已在位)/.test(txt('cg-rd')), 200);
   await waitFor(() => Math.abs(Math.abs(+w.__v3.last.cr.length_left) - 120) <= 5, 20);
@@ -462,6 +468,15 @@ async function secHold(P) {
   chk('OFF → 已關閉, card red, warning text, OFF button lit', [txt('hg-rd'), card().classList.contains('hg-off'), !warn().hidden && /已關閉/.test(warn().textContent), w.document.getElementById('hg-off').classList.contains('on')], ['已關閉', true, true, true]);
   const st = await w.__v3.send('crane', 'status', 8000);
   chk('crane status now carries hold_guard=0', /\bhold_guard=0\b/.test(st), true);
+  // [2026-09-21] meter_suspect=L/R/M：該側計米器讀值被防雜訊規則拒絕中（快取可能過期）→ 數字標紅、Dashboard 多一列；空字串 ⇒ 全部隱藏
+  const suspRow = () => w.document.getElementById('d-susp-row');
+  chk('meter_suspect 空 ⇒ Dashboard 那列隱藏、L/R 數字不標紅', [suspRow().hidden, w.document.getElementById('cr-l').classList.contains('bad')], [true, false]);
+  await w.__v3.send('crane', 'fake_meter_suspect L', 5000);
+  await waitFor(() => !suspRow().hidden, 30);
+  chk('meter_suspect=L ⇒ 列出現且寫「左」、cr-l 標紅、cr-r 不標', [/左/.test(txt('d-susp')), w.document.getElementById('cr-l').classList.contains('bad'), w.document.getElementById('cr-r').classList.contains('bad')], [true, true, false]);
+  await w.__v3.send('crane', 'fake_meter_suspect', 5000);
+  await waitFor(() => suspRow().hidden, 30);
+  chk('清掉 ⇒ 列隱藏、紅色消失（不是「無效」，數字一直在）', [suspRow().hidden, w.document.getElementById('cr-l').classList.contains('bad'), txt('cr-l') !== '—'], [true, false, true]);
   // [2026-09-16 per user] 目前工具：來源是手臂 STATUS 的 `tool=`（角度反推），en=0 要標快取
   // 🔴 STATUS 的 [M2] 是**另一則訊息**（line-buffered）⇒ 等它飄到，不是等 armStatus() 的回傳值
   await w.__v3.armStatus(); await waitFor(() => txt('mis-tool') !== '—', 20);

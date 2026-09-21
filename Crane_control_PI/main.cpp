@@ -4067,9 +4067,20 @@ static std::string cmd_goto(int target_cm) {
     const int32_t nL = home_ground_cm.load() - g_length_left.load();
     const int32_t nR = home_ground_cm.load() - g_length_right.load();
     const int32_t now = up ? std::max(nL, nR) : std::min(nL, nR);
+    // [2026-09-21] motion_rope's retract soft stop ("OK tension_reached": rope went
+    // taut before the cm target) used to come back as a plain "OK … err=-96" and
+    // the GUI painted ✅ 到位 (09-15: top stop at 135 with right rope at 76 kg).
+    // Keep the OK prefix — every consumer treats non-OK as failure and the motion
+    // itself completed safely — but name the stop so the GUI can say what happened.
+    // (A "WARN" prefix was considered and rejected for that reason.)
+    const bool tension_stop = (r.rfind("OK tension_reached", 0) == 0);
     oss << "OK goto target=" << target_cm << " from=" << here << " (L=" << hL << " R=" << hR << ")"
         << " " << (up ? "retract" : "pay_out") << "=" << cm
-        << " now=" << now << " err=" << (now - target_cm) << "\n";
+        << " now=" << now << " err=" << (now - target_cm);
+    if (tension_stop)
+        oss << " stopped=tension_stop short_by=" << (target_cm - now)
+            << " retract_tension_stop_kg=" << g_retract_tension_stop_kg.load();
+    oss << "\n";
     return oss.str();
 }
 

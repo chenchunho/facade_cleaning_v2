@@ -141,6 +141,7 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
   .big .bv{font-family:var(--mono);font-weight:700;font-size:22px;line-height:1.1;
     color:var(--ink);white-space:nowrap}
   .big .bu{font-size:12px;font-weight:600;color:var(--ink3);margin-left:2px}
+  .big .bv.bad{color:var(--bad)}                    /* [2026-09-21] meter_suspect：該側讀值被拒中 */
   .wl-lamp{color:var(--ink3)} .wl-lamp.on{color:var(--ok)} .wl-lamp.off{color:var(--warn)} .wl-lamp.bad{color:var(--bad)}
 
   /* [2026-09-10] 真空幫浦 A/B 輪替卡 */
@@ -238,7 +239,8 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
   .wall{display:flex;gap:14px}
   .wf{display:flex;justify-content:space-between;gap:12px;font-size:13px;
       border-bottom:1px dotted var(--line);padding:5px 0}
-  .wf .k{color:var(--ink2)} .wf .v{font-family:var(--mono);font-weight:600}
+  .wf[hidden]{display:none}   /* [2026-09-21] .wf 是 flex，會蓋掉 hidden（09-15 同坑，harness 會抓） */
+  .wf .k{color:var(--ink2)} .wf .v{font-family:var(--mono);font-weight:600} .wf .v.bad{color:var(--bad)}
   .wallfacts{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center}
   .devgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:6px;margin-top:10px}
   .dev{border:1px solid var(--line);border-radius:2px;padding:6px 8px;font-family:var(--mono);font-size:11px}
@@ -646,6 +648,9 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
                 <div class="wf"><span class="k">離底高度</span><span class="v" id="d-h">—</span></div>
                 <div class="wf"><span class="k">距頂</span><span class="v" id="d-toph">—</span></div>
                 <div class="wf"><span class="k">左右繩長差 L−R</span><span class="v" id="d-diff">—</span></div>
+                <!-- [2026-09-21] 吊機 status `meter_suspect=L/R/M`：該顆計米器的讀值正被防雜訊規則拒絕、快取可能過期
+                     （09-19 official 左錶凍在 1616 實際 3387 就是這個狀態）。平常空字串 ⇒ 整列隱藏。 -->
+                <div class="wf" id="d-susp-row" hidden><span class="k">⚠ 計米器</span><span class="v bad" id="d-susp">—</span></div>
                 <div class="wf" style="border-bottom:0"><span class="k">張力比 L/R</span><span class="v" id="d-ratio">—</span></div>
               </div>
             </div>
@@ -2240,6 +2245,28 @@ function paint(){
     bigv('cr-r', R);
     var d = L - R;                 // 左右差是差值，不受歸零平移影響，沿用繩長即可
     txt('d-diff', (d > 0 ? '+' : '') + d.toFixed(0) + ' cm');
+  }
+  // ---- meter suspect（[2026-09-21]）----
+  // `meter_suspect=` 是 L/R/M 的任意組合（空＝正常）。被拒中的那側數字標紅 + tooltip，
+  // Dashboard 多一列說明。這不是「無效」（無效會顯示 —），是「有值但可能是舊的」，所以數字照畫。
+  {
+    var susp = (cr && typeof cr.meter_suspect === 'string') ? cr.meter_suspect : '';
+    var names = [];
+    if (susp.indexOf('L') >= 0) names.push('左');
+    if (susp.indexOf('R') >= 0) names.push('右');
+    if (susp.indexOf('M') >= 0) names.push('中');
+    var mark = function(id, on){
+      var el = document.getElementById(id); if (!el) return;
+      el.classList.toggle('bad', on);
+      el.title = on ? '計米器讀值被防雜訊規則拒絕中（快取可能過期），2 秒內連貫會自動 RESYNC' : '';
+    };
+    mark('cr-l', susp.indexOf('L') >= 0);
+    mark('cr-r', susp.indexOf('R') >= 0);
+    var row = document.getElementById('d-susp-row');
+    if (row){
+      row.hidden = !names.length;
+      if (names.length) txt('d-susp', names.join('、') + ' 讀值被拒中（可能過期）');
+    }
     // ---- 大樓立面：機器人位置 + 吊繩長度 ----
     // 座標：玻璃面在 svg 的 y=11（頂，屋頂下緣）到 y=200（底），機器人高 18。
     // 🔴 H 是**離底高度** ⇒ 越大越靠上，所以用 (1 - H/TOPH)。
@@ -5445,8 +5472,15 @@ function gotoResultText(l){
   if (!/^OK/.test(l)) return '🔴 ' + l.slice(0, 60);
   if (/already_there/.test(l)) return '✅ 已在位（' + (/target=(-?\d+)/.exec(l) || [,'?'])[1] + ' cm）';
   var now = (/\bnow=(-?\d+)/.exec(l) || [])[1], tgt = (/\btarget=(-?\d+)/.exec(l) || [])[1], err = (/\berr=(-?[\d.]+)/.exec(l) || [])[1];
+  // [2026-09-21] 吊機 `stopped=tension_stop short_by=N`：收繩時繩先繃到「收繩張力上限」而軟停，
+  //    沒到目標。這是安全完成不是錯誤（OK 前綴），但畫成 ✅ 到位 會讓人以為到了頂（09-15 停在 135 當成功）。
+  if (/\bstopped=tension_stop\b/.test(l)){
+    var sb = (/\bshort_by=(-?\d+)/.exec(l) || [])[1], kg = (/\bretract_tension_stop_kg=([\d.]+)/.exec(l) || [])[1];
+    return '⚠️ 張力先到，停在 ' + (now !== undefined ? now : '?') + ' cm（目標 ' + (tgt !== undefined ? tgt : '?') + '，差 ' + (sb !== undefined ? sb : '?') + ' cm；收繩張力上限 ' + (kg !== undefined ? kg : '?') + ' kg）';
+  }
   return '✅ 到位 ' + (now !== undefined ? now : '?') + ' cm（目標 ' + (tgt !== undefined ? tgt : '?') + (err !== undefined ? '，誤差 ' + err : '') + '）';
 }
+function gotoIsShort(l){ return /^OK/.test(l) && /\bstopped=tension_stop\b/.test(l); }
 // rdIds：要顯示「移動中…／結果」的元素 id（可多個，Manual 與 Mission 各一份）
 function craneGotoAction(cm, whatText, rdIds){
   cm = Math.round(+cm);
@@ -5468,7 +5502,7 @@ function craneGotoAction(cm, whatText, rdIds){
     craneGotoBusy = false;
     var txtRes = gotoResultText(l);
     ids.forEach(function(id){ var e = document.getElementById(id); if (e){ delete e.dataset.busy; e.textContent = txtRes; } });
-    log((/^OK/.test(l) ? '✅ ' : '🔴 ') + 'crane_goto ' + cm + ' → ' + l, /^OK/.test(l) ? 'g' : 'e');
+    log((gotoIsShort(l) ? '⚠️ ' : /^OK/.test(l) ? '✅ ' : '🔴 ') + 'crane_goto ' + cm + ' → ' + l, gotoIsShort(l) ? 'w' : /^OK/.test(l) ? 'g' : 'e');
     return /^OK/.test(l);
   });
 }
