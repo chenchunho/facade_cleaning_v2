@@ -79,22 +79,17 @@ WashRobot::WashRobot()
     settings_.arm_clean_wall_mm              .store(ARM_CLEAN_WALL_MM);
     settings_.pusher_extend_feet_pulse       .store(PUSHER_EXTEND_FEET_PULSE);
     settings_.pusher_extend_feet_pulse_lower .store(PUSHER_EXTEND_FEET_PULSE_LOWER);
-    settings_.pusher_extend_body_pulse       .store(PUSHER_EXTEND_BODY_PULSE);
-    settings_.pusher_extend_body_pulse_short .store(PUSHER_EXTEND_BODY_PULSE_SHORT);
     settings_.vacuum_seal_deep_kpa           .store(VACUUM_SEAL_DEEP_KPA);
     settings_.realign_threshold_cm           .store(REALIGN_THRESHOLD_CM);
     settings_.realign_threshold_mean_cm      .store(REALIGN_THRESHOLD_MEAN_CM);
     settings_.rope_weight_limit_attached     .store(ROPE_WEIGHT_LIMIT_KG_PER_SENSOR_ATTACHED);
     settings_.rope_weight_limit_hanging      .store(ROPE_WEIGHT_LIMIT_KG_PER_SENSOR_HANGING);
-    settings_.step_cm_default                .store(STEP_CM_DEFAULT);
     settings_.step_cm_max                    .store(STEP_CM_MAX);
     settings_.vacuum_plateau_ms              .store(VACUUM_PLATEAU_MS);
     settings_.vacuum_backup_cm               .store(VACUUM_BACKUP_CM);
-    settings_.retract_slow_peel_cm           .store(RETRACT_SLOW_PEEL_CM);
     settings_.disable_retry_max_iters        .store(DISABLE_RETRY_MAX_ITERS);
     settings_.pusher_rpm_disable_slow        .store(PUSHER_RPM_DISABLE_SLOW);
     settings_.disable_phase_current_limit_ma .store(DISABLE_PHASE_CURRENT_LIMIT_MA);
-    settings_.step_margin_cm                 .store(STEP_MARGIN_CM);
     settings_.imu_ask_deg                    .store(IMU_ASK_DEG);
     settings_.arm_deploy_pos_tol_rad         .store(ARM_DEPLOY_POS_TOL_RAD);
     settings_.static_roll_offset_cm          .store(0.0);   // not calibrated yet
@@ -1241,8 +1236,6 @@ std::string WashRobot::cmd_get_settings() {
     oss << " arm_clean_wall_mm="              << settings_.arm_clean_wall_mm.load()              << ":" << ARM_CLEAN_WALL_MM;
     oss << " pusher_extend_feet_pulse="       << settings_.pusher_extend_feet_pulse.load()       << ":" << PUSHER_EXTEND_FEET_PULSE;
     oss << " pusher_extend_feet_pulse_lower=" << settings_.pusher_extend_feet_pulse_lower.load() << ":" << PUSHER_EXTEND_FEET_PULSE_LOWER;
-    oss << " pusher_extend_body_pulse="       << settings_.pusher_extend_body_pulse.load()       << ":" << PUSHER_EXTEND_BODY_PULSE;
-    oss << " pusher_extend_body_pulse_short=" << settings_.pusher_extend_body_pulse_short.load() << ":" << PUSHER_EXTEND_BODY_PULSE_SHORT;
     oss << " vacuum_seal_deep_kpa="           << settings_.vacuum_seal_deep_kpa.load()           << ":" << VACUUM_SEAL_DEEP_KPA;
     oss << std::fixed << std::setprecision(2);
     oss << " realign_threshold_cm="           << settings_.realign_threshold_cm.load()           << ":" << REALIGN_THRESHOLD_CM;
@@ -1250,17 +1243,14 @@ std::string WashRobot::cmd_get_settings() {
     oss << " rope_weight_limit_attached="     << settings_.rope_weight_limit_attached.load()     << ":" << ROPE_WEIGHT_LIMIT_KG_PER_SENSOR_ATTACHED;
     oss << " rope_weight_limit_hanging="      << settings_.rope_weight_limit_hanging.load()      << ":" << ROPE_WEIGHT_LIMIT_KG_PER_SENSOR_HANGING;
     oss.unsetf(std::ios::floatfield);
-    oss << " step_cm_default="                << settings_.step_cm_default.load()                << ":" << STEP_CM_DEFAULT;
     oss << " step_cm_max="                    << settings_.step_cm_max.load()                    << ":" << STEP_CM_MAX;
     oss << " vacuum_plateau_ms="              << settings_.vacuum_plateau_ms.load()              << ":" << VACUUM_PLATEAU_MS;
     oss << std::fixed << std::setprecision(2);
     oss << " vacuum_backup_cm="               << settings_.vacuum_backup_cm.load()               << ":" << VACUUM_BACKUP_CM;
-    oss << " retract_slow_peel_cm="           << settings_.retract_slow_peel_cm.load()           << ":" << RETRACT_SLOW_PEEL_CM;
     oss.unsetf(std::ios::floatfield);
     oss << " disable_retry_max_iters="        << settings_.disable_retry_max_iters.load()        << ":" << DISABLE_RETRY_MAX_ITERS;
     oss << " pusher_rpm_disable_slow="        << settings_.pusher_rpm_disable_slow.load()        << ":" << PUSHER_RPM_DISABLE_SLOW;
     oss << " disable_phase_current_limit_ma=" << settings_.disable_phase_current_limit_ma.load() << ":" << DISABLE_PHASE_CURRENT_LIMIT_MA;
-    oss << " step_margin_cm="                 << settings_.step_margin_cm.load()                 << ":" << STEP_MARGIN_CM;
     oss << std::fixed << std::setprecision(2);
     oss << " imu_ask_deg="                    << settings_.imu_ask_deg.load()                    << ":" << IMU_ASK_DEG;
     oss << " arm_deploy_pos_tol_rad="         << settings_.arm_deploy_pos_tol_rad.load()         << ":" << ARM_DEPLOY_POS_TOL_RAD;
@@ -1280,22 +1270,17 @@ std::string WashRobot::cmd_set_setting(const std::string& key, const std::string
     if      (key == "arm_clean_wall_mm")              bad = apply_to_atomic_<int>   (settings_.arm_clean_wall_mm,              value, 100,   1000);
     else if (key == "pusher_extend_feet_pulse")       bad = apply_to_atomic_<int>   (settings_.pusher_extend_feet_pulse,       value, 10000, 50000);
     else if (key == "pusher_extend_feet_pulse_lower") bad = apply_to_atomic_<int>   (settings_.pusher_extend_feet_pulse_lower, value, 10000, 50000);
-    else if (key == "pusher_extend_body_pulse")       bad = apply_to_atomic_<int>   (settings_.pusher_extend_body_pulse,       value, 10000, 50000);
-    else if (key == "pusher_extend_body_pulse_short") bad = apply_to_atomic_<int>   (settings_.pusher_extend_body_pulse_short, value, 10000, 50000);
     else if (key == "vacuum_seal_deep_kpa")           bad = apply_to_atomic_<int>   (settings_.vacuum_seal_deep_kpa,           value, -100,  0);
     else if (key == "realign_threshold_cm")           bad = apply_to_atomic_<double>(settings_.realign_threshold_cm,           value, 0.5,   20.0);
     else if (key == "realign_threshold_mean_cm")      bad = apply_to_atomic_<double>(settings_.realign_threshold_mean_cm,      value, 0.5,   20.0);
     else if (key == "rope_weight_limit_attached")     bad = apply_to_atomic_<double>(settings_.rope_weight_limit_attached,     value, 5.0,   200.0);
     else if (key == "rope_weight_limit_hanging")      bad = apply_to_atomic_<double>(settings_.rope_weight_limit_hanging,      value, 5.0,   200.0);
-    else if (key == "step_cm_default")                bad = apply_to_atomic_<int>   (settings_.step_cm_default,                value, 5,     60);
     else if (key == "step_cm_max")                    bad = apply_to_atomic_<int>   (settings_.step_cm_max,                    value, 5,     STEP_CM_MAX);   // [2026-08-31] 原本寫死 100 —— 與 STEP_CM_MAX 脫鉤，改常數改不動這裡（開機載入 settings.json 也走這條）
     else if (key == "vacuum_plateau_ms")              bad = apply_to_atomic_<int>   (settings_.vacuum_plateau_ms,              value, 200,   10000);
     else if (key == "vacuum_backup_cm")               bad = apply_to_atomic_<double>(settings_.vacuum_backup_cm,               value, 1.0,   50.0);
-    else if (key == "retract_slow_peel_cm")           bad = apply_to_atomic_<double>(settings_.retract_slow_peel_cm,           value, 0.5,   10.0);
     else if (key == "disable_retry_max_iters")        bad = apply_to_atomic_<int>   (settings_.disable_retry_max_iters,        value, 1,     20);
     else if (key == "pusher_rpm_disable_slow")        bad = apply_to_atomic_<int>   (settings_.pusher_rpm_disable_slow,        value, 10,    200);
     else if (key == "disable_phase_current_limit_ma") bad = apply_to_atomic_<int>   (settings_.disable_phase_current_limit_ma, value, 500,   3000);
-    else if (key == "step_margin_cm")                 bad = apply_to_atomic_<int>   (settings_.step_margin_cm,                 value, 0,     50);
     else if (key == "imu_ask_deg")                    bad = apply_to_atomic_<double>(settings_.imu_ask_deg,                    value, 1.0,   45.0);
     else if (key == "arm_deploy_pos_tol_rad")         bad = apply_to_atomic_<double>(settings_.arm_deploy_pos_tol_rad,         value, 0.01,  1.0);
     else if (key == "static_roll_offset_cm")          bad = apply_to_atomic_<double>(settings_.static_roll_offset_cm,          value, -50.0, 50.0);
@@ -1303,6 +1288,12 @@ std::string WashRobot::cmd_set_setting(const std::string& key, const std::string
 
     if (bad) return "ERR invalid_value_or_out_of_range key=" + key + " value=" + value + "\n";
     std::cout << "[settings] " << key << " = " << value << "\n";
+    // [2026-09-30] Persist on every successful set (same idea as the crane's
+    // crane_settings.txt). Before, a value only survived a restart if someone also
+    // sent `save_settings` — nobody did, so every tuning evaporated. Best effort:
+    // a write failure is reported in the reply, the value itself stays applied.
+    if (!settings_loading_ && save_settings_file_("settings.json"))
+        return "OK " + key + "=" + value + " persist=fail\n";
     return "OK " + key + "=" + value + "\n";
 }
 
@@ -1327,6 +1318,7 @@ bool WashRobot::load_settings_file_(const std::string& path) {
     }
     std::string line;
     int loaded = 0;
+    settings_loading_ = true;    // replaying through cmd_set_setting must not rewrite the file mid-read
     while (std::getline(f, line)) {
         // strip comments after '#'
         auto h = line.find('#');
@@ -1339,6 +1331,7 @@ bool WashRobot::load_settings_file_(const std::string& path) {
         if (r.rfind("OK", 0) == 0) ++loaded;
         else std::cerr << "[settings] load skipped: " << r;
     }
+    settings_loading_ = false;
     std::cout << "[settings] loaded " << loaded << " value(s) from " << path << "\n";
     return false;
 }
@@ -1371,10 +1364,13 @@ bool WashRobot::load_settings_file_(const std::string& path) {
 // 📌 預處理輸出逐位元不變——寫下去的正是巨集原本展開的內容，已用
 //    harness/prove_noop.sh 驗證。
 //
-// ⚠️ PUSHER_EXTEND_BODY_PULSE_SHORT 的巨集一處都沒被用到：那個 setting 可設定、
-//    會出現在 status、會存檔，但沒有任何程式碼讀它（v1 body 推桿殘留，v2 已無）。
-//    操作者改了會看到值變了，機器完全不理。刻意不動——移除可設定的 key 會改變
-//    指令介面＝功能改變，不是整理。已入待辦。
+// ✅ [2026-09-30 per user] Five settings that nothing read were removed from
+//    get/set/save: pusher_extend_body_pulse(_short) (v1 body pushers, gone in v2),
+//    retract_slow_peel_cm (two-stage retract deleted 2026-09-09), step_cm_default
+//    (step_cm_ is seeded from the constant; `set_step_cm` is the live knob) and
+//    step_margin_cm (no consumer at all). An operator could change them and see
+//    the value move while the machine ignored it. An old settings.json that still
+//    names them just logs "load skipped: unknown_setting_key" at boot.
 
 bool WashRobot::save_settings_file_(const std::string& path) const {
     std::ofstream f(path);
@@ -1387,8 +1383,6 @@ bool WashRobot::save_settings_file_(const std::string& path) const {
     f << "arm_clean_wall_mm              " << settings_.arm_clean_wall_mm.load()              << "\n";
     f << "pusher_extend_feet_pulse       " << settings_.pusher_extend_feet_pulse.load()       << "\n";
     f << "pusher_extend_feet_pulse_lower " << settings_.pusher_extend_feet_pulse_lower.load() << "\n";
-    f << "pusher_extend_body_pulse       " << settings_.pusher_extend_body_pulse.load()       << "\n";
-    f << "pusher_extend_body_pulse_short " << settings_.pusher_extend_body_pulse_short.load() << "\n";
     f << "vacuum_seal_deep_kpa           " << settings_.vacuum_seal_deep_kpa.load()           << "\n";
     f << std::fixed << std::setprecision(3);
     f << "realign_threshold_cm           " << settings_.realign_threshold_cm.load()           << "\n";
@@ -1396,17 +1390,14 @@ bool WashRobot::save_settings_file_(const std::string& path) const {
     f << "rope_weight_limit_attached     " << settings_.rope_weight_limit_attached.load()     << "\n";
     f << "rope_weight_limit_hanging      " << settings_.rope_weight_limit_hanging.load()      << "\n";
     f.unsetf(std::ios::floatfield);
-    f << "step_cm_default                " << settings_.step_cm_default.load()                << "\n";
     f << "step_cm_max                    " << settings_.step_cm_max.load()                    << "\n";
     f << "vacuum_plateau_ms              " << settings_.vacuum_plateau_ms.load()              << "\n";
     f << std::fixed << std::setprecision(3);
     f << "vacuum_backup_cm               " << settings_.vacuum_backup_cm.load()               << "\n";
-    f << "retract_slow_peel_cm           " << settings_.retract_slow_peel_cm.load()           << "\n";
     f.unsetf(std::ios::floatfield);
     f << "disable_retry_max_iters        " << settings_.disable_retry_max_iters.load()        << "\n";
     f << "pusher_rpm_disable_slow        " << settings_.pusher_rpm_disable_slow.load()        << "\n";
     f << "disable_phase_current_limit_ma " << settings_.disable_phase_current_limit_ma.load() << "\n";
-    f << "step_margin_cm                 " << settings_.step_margin_cm.load()                 << "\n";
     f << std::fixed << std::setprecision(3);
     f << "imu_ask_deg                    " << settings_.imu_ask_deg.load()                    << "\n";
     f << "arm_deploy_pos_tol_rad         " << settings_.arm_deploy_pos_tol_rad.load()         << "\n";
@@ -2882,7 +2873,19 @@ void WashRobot::crane_watchdog_loop_() {
         //    per user 拍板：「本體發現吊機異常是要終止」。
         //    ⚠️ 走到「終止」之前先走「觀測」，理由見 WASH_ROBOT.h 宣告處。
         {
-            const int64_t last_ok = crane_last_ok_ms_.load();
+            // [2026-09-30] "Link alive" = the freshest of two independent proofs:
+            //   crane_last_ok_ms_      — last successful command round-trip; only
+            //                            moves when a flow is sending commands
+            //   crane_peer_last_rx_ms_ — last reply on the IMU-push connection
+            //                            (imu_push_loop_, every 250 ms, always on)
+            // Using only the first made idle_ms grow without bound whenever the body
+            // was idle (measured 204,900 ms after 3.4 min) — a warn EVT on every idle
+            // period, and a number useless for picking the abort threshold. The
+            // keepalive ping that used to feed it stays retired (2026-05-15, zombie
+            // socket false aborts): the IMU push already IS that probe, on its own
+            // socket. If the IMU is unreadable the push stops and this falls back
+            // to command round-trips only — the pre-09-30 behaviour.
+            const int64_t last_ok = std::max(crane_last_ok_ms_.load(), crane_peer_last_rx_ms_.load());
             if (last_ok == 0) {
                 // 從未與吊機成功往來過（開機到第一道指令之間）。此時 idle 沒有意義
                 // —— 若拿 now-0 去比，開機當下就會立刻逾時。照 imu_roll_fresh() 的

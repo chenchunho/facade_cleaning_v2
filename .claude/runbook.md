@@ -775,7 +775,7 @@ ssh nexuni@192.168.5.26  'WR_DRIVER_DEBUG=0 bash ~/main_20260831/launch.sh facad
 ```
 
 📌 `web_backend` 的三個 IP 全部吃環境變數（`WROBOT_IP`／`CRANE_IP`／`ARM_IP`），**不用改碼**；
-`main` 的預設值是 `192.168.1.100` / `192.168.1.101`（有線那組）。
+預設值是有線那組 `192.168.1.100` / `192.168.1.10`（⚠️ 2026-09-30 更正：本行原寫 `.101`，`f4e0d02` 起已是 `.10`；official 由 systemd drop-in 注入）。
 📌 它需要 `express` + `ws`，`main` 的 `web_backend/` 沒有 `node_modules`
 → `ln -sfn ~/projects/web_ver2/node_modules ~/main_20260831/web_backend/node_modules`（免 npm install）。
 

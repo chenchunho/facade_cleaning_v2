@@ -30,3 +30,6 @@ harness/gui_cmd_log.txt
 
 # 本機等價建置產物(harness/build.sh 的輸出目錄,2026-09-15)
 .tmp_out/
+
+# local scratch (moved out of agent_ai/.tmp so the mirror keeps it); not versioned
+.claude/scratch/

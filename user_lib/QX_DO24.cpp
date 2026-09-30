@@ -23,18 +23,23 @@ bool QX_DO24::init(const std::string& ip, int port, int ID, bool debug) {
 	_log_tag = "QX:" + std::to_string(ID);
 	if (!owned_client->connectToServer(ip, port)) {
 		LOG_ERR(_log_tag, "connect failed %s:%d", ip.c_str(), port);
-		return false;
+		return true;    // error
 	}
 	client = owned_client.get();
-	return true;
+	return false;       // success
 }
 
+// [2026-09-30] Both init() overloads now follow the project convention
+// (false = success, true = error) like the other 12 drivers. They used to be
+// the only "true = success" init in user_lib/. Safe to flip: the single caller
+// (app/WASH_ROBOT.cpp pwm_.init) ignores the return value. The OTHER QX_DO24
+// methods keep their own documented semantics (e.g. getVersion: true = OK).
 bool QX_DO24::init(TCP_client& extClient, int ID, bool debug) {
 	client = &extClient;
 	deviceID = ID;
 	debug_mode = debug;
 	_log_tag = "QX:" + std::to_string(ID);
-	return true;
+	return false;       // success (Mode B does no bus traffic)
 }
 
 //=========== control: composite setChannel ===========

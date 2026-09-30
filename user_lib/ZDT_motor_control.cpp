@@ -404,6 +404,13 @@ bool ZDT_motor_control::motion_control_pos_mode(int dir, int acc_rpm, int rpm, i
 		LOG_ERR(_log_tag, "Invalid mode %d, must be 0 (relative) or 1 (absolute)", mode);
 		return true;
 	}
+	// [2026-09-30] Frame carries an UNSIGNED magnitude; sign goes in `dir`. A
+	// negative int here is sent as its two's complement (-1 -> 0xFFFFFFFF, ~4e9
+	// pulses = a full-stroke run into the end stop). Refuse instead of encoding.
+	if (pulse < 0) {
+		LOG_ERR(_log_tag, "Negative pulse %d refused (pass the magnitude, direction goes in dir)", pulse);
+		return true;
+	}
 
 	// 1. Build write-multiple-registers (0x10) frame
 	std::vector<uint8_t> cmd = {
@@ -482,6 +489,13 @@ bool ZDT_motor_control::motion_control_pos_mode_nowait(int dir, int acc_rpm, int
 	// mode: 0=relative, 1=absolute (only valid values)
 	if (mode != 0 && mode != 1) {
 		LOG_ERR(_log_tag, "Invalid mode %d, must be 0 (relative) or 1 (absolute)", mode);
+		return true;
+	}
+	// [2026-09-30] Frame carries an UNSIGNED magnitude; sign goes in `dir`. A
+	// negative int here is sent as its two's complement (-1 -> 0xFFFFFFFF, ~4e9
+	// pulses = a full-stroke run into the end stop). Refuse instead of encoding.
+	if (pulse < 0) {
+		LOG_ERR(_log_tag, "Negative pulse %d refused (pass the magnitude, direction goes in dir)", pulse);
 		return true;
 	}
 

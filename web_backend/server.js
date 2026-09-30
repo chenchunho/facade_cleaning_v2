@@ -193,6 +193,9 @@ function makeBridge(name, ip, port) {
                 state.buf = state.buf.slice(idx + 1);
                 if (line.endsWith('\r')) line = line.slice(0, -1);
                 if (!line) continue;
+                // [2026-09-30] hold_renew is sent by this backend on the browser's
+                // behalf (see `holdRenew` below); its reply belongs to nobody's queue.
+                if (name === 'crane' && /^OK hold_renew\b/.test(line)) continue;
                 broadcast({ src: name, line });
             }
         });
@@ -254,7 +257,9 @@ const arm        = makeBridge('arm',        ARM_IP,        ARM_PORT);
 // WashRobot has the same pattern (crane_cli_estop_) for exactly this reason.
 // Both connections share src='crane' so the frontend treats replies uniformly.
 const crane_intr = makeBridge('crane', CRANE_IP, CRANE_PORT);
-const CRANE_INTR_FIRST_TOKENS = new Set(['stop', 'status', 'home_status', 'ping']);
+// [2026-09-30] + hold_renew (for a hand-typed one; the GUI's keep-alive goes through
+// the `holdRenew` ws message below): must not sit behind a blocking main-connection command.
+const CRANE_INTR_FIRST_TOKENS = new Set(['stop', 'status', 'home_status', 'ping', 'hold_renew']);
 function routeCrane(cmd) {
     const tok = cmd.trim().split(/\s+/)[0];
     if (CRANE_INTR_FIRST_TOKENS.has(tok)) {
@@ -665,6 +670,16 @@ wss.on('connection', (ws) => {
             if (msg.mission === 'state')  return reply({ ok: true, state: missionSnapshot() });
             if (msg.mission === 'save')   return missionSave(msg.params || {}, reply);     // [2026-09-17 AI-2] GUI 存檔鈕
             return reply({ ok: false, err: 'unknown_mission_action' });
+        }
+
+        // [2026-09-30] ▲▼ hold lease keep-alive (crane HOLD_LEASE_MS). Deliberately NOT a
+        // queued `cmd`: the browser's per-target queue is single-file, and a renew stuck
+        // behind a slow reply would let the lease lapse mid-press. Fire-and-forget on the
+        // crane's interrupt connection; the reply is swallowed in makeBridge.
+        if (msg.holdRenew) {
+            const t = crane_intr.isConnected() ? crane_intr : crane;
+            t.send('hold_renew');
+            return;
         }
 
         if (typeof msg.cmd !== 'string' || !msg.cmd.length)

@@ -4,10 +4,10 @@
 # 一個週期 = 由頂端向下 5 步 × 40cm（走滿 200cm）+ 50Hz 一口氣拉回頂端。
 #
 # 每一步（使用者口述順序）：
+#   ① 風扇降回 FAN_OFF     —— 🔴 [2026-09-23 per user] **改回原版「伸腳前先關」**。
+#                              09-15 試過「吸附建立後才關」,實測更吵、吸附無改善 ⇒ 撤回。
 #   ② vacuum feet on       —— 開真空閥
 #   ③ pusher all extend_raw—— 推出 10cm，**不驗真空度**
-#   ①' 風扇降回 FAN_OFF     —— 🔴 [2026-09-15 per user] 由「伸腳前關」改成「**吸附建立後才關**」：
-#                              伸腳的那幾秒機體本來沒有貼牆推力，風扇留到 ③a 判定完才降。
 #      🔴 為什麼不驗：有些玻璃面有縫隙，吸盤落在縫上本來就吸不住，那是現場條件不是故障。
 #         smart_extend_subset_ 會為了找封一路補伸到 ~16cm 並重試 —— 在有縫的面上是徒勞。
 #   ③b 清潔動作      —— [2026-09-03 per user] 壓上(滾筒) → 滑台 0→100→0 → 收手臂。
@@ -20,9 +20,8 @@
 #         （暖啟動 15s vs 8s），10 週期 50 步再多約 6 分鐘。
 #      🔴 若 ③a 判定「一顆都沒吸到」，本步**跳過**（無附著時掃動只會讓機體擺盪），
 #         且整輪不中止 —— 改為計數並在總結報出。理由見 ③a 處的註解。
-#   ⑤' 風扇升到 FAN_ON      —— 🔴 [2026-09-15 per user] 由「收腳後開」改成「**收腳前先開**」：
-#                              推桿離開玻璃到風扇起轉之間原本沒有推力。
 #   ④ pusher all retract   —— 已內建「關閥→洩壓→CH6 正壓 500ms→兩段收回」
+#   ⑤ 風扇升到 FAN_ON      —— 🔴 [2026-09-23 per user] **改回原版「收腳後才開」**(09-15「收腳前先開」同上撤回)。
 #   ⑥ delay 1000ms
 #   ⑦ crane pay_out 40（30Hz）—— 並行監看
 #   ⑧ 靜置 300ms（imu_level 已移除，見下方步驟 ⑧ 的說明）
@@ -1345,10 +1344,10 @@ try:
                 bail("預期終點 %d cm 低於底端，超出區間 [%d, %d]" % (end, BOTTOM, TOP))
 
             pause_point("step%d_before_extend" % i)
-            # 🔴 [2026-09-15 per user] 順序改成「**先吸附、再關風扇**」。
-            #    原本是 ① 關風扇 → ② 開閥 → ③ 伸腳,機體在推桿還沒碰到玻璃的那幾秒**已經沒有貼牆推力**;
-            #    改成風扇維持 FAN_ON 直到四顆吸盤實際建立真空之後才降回 FAN_OFF,伸腳全程都有推力壓著。
-            #    ⇒ ① 不再關風扇(移到 ③a 之後),②③ 順序不變。
+            # 🔴 [2026-09-23 per user] 風扇順序改回原版:① 關風扇 → ② 開閥 → ③ 伸腳。
+            #    09-15 改成「先吸附、再關風扇」(伸腳時仍有推力),實測**更吵、吸附無改善** ⇒ 撤回。
+            r = fan(FAN_OFF)                                   # ①
+            if not r.startswith("OK"): bail("風扇關閉失敗：%s" % r)
             r = ask(WROBOT, "vacuum feet on", 20)              # ②
             if not r.startswith("OK"): bail("開真空閥失敗：%s" % r)
 
@@ -1383,11 +1382,6 @@ try:
             #    一次那種假象（讀太早，四顆全 0 卻照跑）。所以：逐步印、計數、總結再報一次。
             # 🔴 跳過 ③b 滑台掃動的理由：沒有附著時機體只掛在繩上，橫向移動滑台會讓它擺盪，
             #    而那個擺盪不屬於被測項目，只會污染 roll 統計。
-            # [2026-09-15 per user] 吸附判定完成後才關風扇(見 ① 的說明)。吸不到也要關 ——
-            # 沒附著時繼續吹只會讓機體貼牆擺盪,而下面本來就會跳過滑台掃動。
-            r = fan(FAN_OFF)                                   # ①(移到這裡)
-            if not r.startswith("OK"): bail("風扇關閉失敗：%s" % r)
-
             skip_rail = (n_seal == 0)
             if skip_rail:
                 no_seal_steps[0] += 1
@@ -1454,16 +1448,14 @@ try:
                     rail_pos[0] = RAIL_START
             t_rail = time.time() - t
 
-            # 🔴 [2026-09-15 per user] 順序改成「**先開風扇、再收腳**」。
-            #    原本是 ④ 收腳 → ⑤ 開風扇,推桿一離開玻璃到風扇起轉之間機體沒有貼牆推力。
-            #    改成收腳前先把風扇帶到 FAN_ON,整個脫離過程都有推力壓著。
-            r = fan(FAN_ON)                                     # ⑤(移到收腳之前)
-            if not r.startswith("OK"): bail("風扇開啟失敗：%s" % r)
-
             t = time.time()                                     # ④
             r = ask(WROBOT, "pusher all retract", 90)
             t_ret = time.time() - t
             if not r.startswith("OK"): bail("retract 失敗：%s" % r)
+
+            # 🔴 [2026-09-23 per user] 改回原版:收腳**之後**才開風扇(09-15「收腳前先開」撤回,理由同 ①)。
+            r = fan(FAN_ON)                                     # ⑤
+            if not r.startswith("OK"): bail("風扇開啟失敗：%s" % r)
 
             pause_point("step%d_before_pay_out" % i)
             time.sleep(1.0)                                     # ⑥
@@ -1546,6 +1538,8 @@ try:
             cur_b = height(field(ask(CRANE, "status", 10), "length_left"))
             print("   ── 最低點補清(高度 %s cm)" % ("?" if cur_b is None else "%.0f" % cur_b))
             pause_point("final_clean_before_extend")
+            r = fan(FAN_OFF)                                   # [2026-09-23] 原版順序:伸腳前先關
+            if not r.startswith("OK"): bail("補清:風扇關閉失敗:%s" % r)
             r = ask(WROBOT, "vacuum feet on", 20)
             if not r.startswith("OK"): bail("補清:開真空閥失敗:%s" % r)
             r = ask(WROBOT, "pusher all extend_raw", 90)
@@ -1556,8 +1550,6 @@ try:
                 pr_b = [field(ps, "p%d" % n) for n in (5, 6, 7, 8)]
                 if any(p is not None and p <= VAC_OK_KPA for p in pr_b): break
                 time.sleep(0.3)
-            r = fan(FAN_OFF)
-            if not r.startswith("OK"): bail("補清:風扇關閉失敗:%s" % r)
             n_seal_b = sum(1 for p in (pr_b or []) if p is not None and p <= VAC_OK_KPA)
             print("      四顆壓力 %s(吸到 %d 顆)" % ("/".join("%s" % p for p in (pr_b or [])), n_seal_b))
             if n_seal_b == 0:
@@ -1577,10 +1569,10 @@ try:
                     if not r.startswith("OK"): bail("補清:rail %d 復位失敗:%s" % (RAIL_START, r))
                     rail_pos[0] = RAIL_START
                 final_clean_done[0] += 1
-            r = fan(FAN_ON)
-            if not r.startswith("OK"): bail("補清:風扇開啟失敗:%s" % r)
             r = ask(WROBOT, "pusher all retract", 90)
             if not r.startswith("OK"): bail("補清:retract 失敗:%s" % r)
+            r = fan(FAN_ON)                                    # [2026-09-23] 原版順序:收腳後才開
+            if not r.startswith("OK"): bail("補清:風扇開啟失敗:%s" % r)
             print("   ── 補清完成 %.1fs" % (time.time() - t_fc))
 
         # ⑨ 拉回頂端

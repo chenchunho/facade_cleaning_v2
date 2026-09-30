@@ -32,7 +32,8 @@ public:
 	QX_DO24();
 	~QX_DO24();
 
-	// 初始化
+	// 初始化 —— [2026-09-30] 回傳值對齊專案慣例：false = 成功、true = 失敗
+	//（原本是 user_lib 唯一「true = 成功」的 init）。本類其他方法維持各自註明的語意。
 	bool init(const std::string& ip, int port, int ID = 1, bool debug = false);
 	bool init(TCP_client& extClient, int ID = 1, bool debug = false);
 

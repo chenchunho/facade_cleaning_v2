@@ -446,7 +446,28 @@ std::string WashRobot::cmd_rail_move(double target_cm, int rpm, int acc, int dec
         if (wait_ms > 180000) wait_ms = 180000;
     }
 
-    if (D_(DM2J_ARM).PR_move_cm_nowait(0, 1, rpm, target_cm, acc, dec)) {
+    // [2026-09-30] Retry the SEND on a bus write failure (bounded, logged). Safe:
+    // re-firing the same target is idempotent (driver just reloads the PR slot and
+    // re-triggers — same reasoning as arm_sweep_fire_nowait_'s redundant fires).
+    // Never retried: a travel-guard rejection (retrying can't change the answer),
+    // and the not_confirmed path below — there the command DID go out and the rail
+    // may be moving, so a resend would only mask what actually happened.
+    constexpr int RAIL_SEND_ATTEMPTS = 3;
+    constexpr int RAIL_SEND_SPACING_MS = 150;
+    bool send_err = true;
+    for (int attempt = 1; attempt <= RAIL_SEND_ATTEMPTS; ++attempt) {
+        send_err = D_(DM2J_ARM).PR_move_cm_nowait(0, 1, rpm, target_cm, acc, dec);
+        if (!send_err) {
+            if (attempt > 1)
+                std::cout << "[rail] send ok on attempt " << attempt << "/" << RAIL_SEND_ATTEMPTS << "\n";
+            break;
+        }
+        if (D_(DM2J_ARM).last_error() != "modbus_write_failed") break;
+        std::cerr << "[rail] send failed (" << D_(DM2J_ARM).last_error() << ") attempt "
+                  << attempt << "/" << RAIL_SEND_ATTEMPTS << "\n";
+        if (attempt < RAIL_SEND_ATTEMPTS) sleep_ms_(RAIL_SEND_SPACING_MS);
+    }
+    if (send_err) {
         // [2026-09-21] carry the driver's reason (travel guard / modbus) onto the wire —
         // until now the rejection lived only in the Pi log (pitfalls §2.6).
         const std::string& why = D_(DM2J_ARM).last_error();
@@ -4021,7 +4042,8 @@ std::string WashRobot::cmd_status() {
     // ⚠️ 與上面的 crane_peer_age_ms 是**兩件事**：那個量的是 IMU 推送那條的回覆，
     //    這個量的是「任何一次成功的指令往來」。兩者都是鏈路的側面，門檻各自獨立。
     {
-        const int64_t last_ok = crane_last_ok_ms_.load();
+        // [2026-09-30] same definition as crane_watchdog_loop_ ③ (freshest of the two proofs)
+        const int64_t last_ok = std::max(crane_last_ok_ms_.load(), crane_peer_last_rx_ms_.load());
         oss << " crane_idle_ms="     << (last_ok == 0 ? -1 : (now_ms_() - last_ok));
         oss << " crane_idle_ms_max=" << crane_idle_ms_max_.load();
         oss << " crane_idle_ms_max_motion=" << crane_idle_ms_max_motion_.load();
@@ -4237,6 +4259,17 @@ std::string WashRobot::cmd_set_first_step(const std::string& side) {
 std::string WashRobot::cmd_vacuum(const std::string& group, bool on) {
     State cur = state_.load();
     // [2026-09-15 per user] Error 放行 —— 急停後 Manual 仍要能操作(見 WASH_ROBOT.h state_violation_ 上方)。
+    // [2026-09-30] left/right used to be accepted and then act globally: since
+    // 2026-08-27 one valve (CH1) serves all four cups, so `vacuum left on` opened
+    // every cup while the reply said OK. Refuse what the hardware can't do, and
+    // tell an unknown group apart from a relay failure.
+    if (group == "left" || group == "right") {
+        if (CH_VALVE_LEFT == CH_VALVE_RIGHT)
+            return "ERR vacuum_group_not_independent (one valve CH" + std::to_string(CH_VALVE_RIGHT)
+                 + " serves all 4 cups; use feet|all)\n";
+    } else if (group != "feet" && group != "all") {
+        return "ERR unknown_vacuum_group (feet|all)\n";
+    }
     if (vacuum_valve_(group, on)) return "ERR vacuum_valve_fail\n";
     return "OK\n";
 }
@@ -4936,9 +4969,40 @@ void WashRobot::water_inlet_watchdog_loop_() {
     // for `status` fresh). Readings are cached for status so the 1 Hz status
     // refresh does not add XKC traffic to the .22 bus.
     int idle_ticks = 0;
+    // [2026-09-30] Gateway hot re-probe. TCP_client already reconnects a gateway
+    // that comes up late (reconnectLoop, 500 ms), but the dev_* presence flags
+    // are a cache written only by run_selfcheck_() — once at boot and on the
+    // `selfcheck` command. 09-19: `.21` powered up after the body started ⇒
+    // dev_qx stayed 0 and the fix was a service restart. Now a rising edge on any
+    // of the three gateways re-runs the self-check (not during motion; retried
+    // on later ticks while busy). Piggybacks on this loop: it already ticks
+    // every 2 s and owns no bus lock of its own.
+    bool gw_prev[3] = { cli_20_.isConnected(), cli_21_.isConnected(), cli_22_.isConnected() };
+    bool reprobe_pending = false;
     while (water_inlet_watchdog_running_.load()) {
         std::this_thread::sleep_for(std::chrono::seconds(2));
         if (!water_inlet_watchdog_running_.load()) break;
+        {
+            static const char* kGw[3] = { ".20", ".21", ".22" };
+            const bool gw_now[3] = { cli_20_.isConnected(), cli_21_.isConnected(), cli_22_.isConnected() };
+            for (int i = 0; i < 3; ++i) {
+                if (gw_now[i] && !gw_prev[i]) {
+                    std::cout << "[gw] " << kGw[i] << " reconnected — re-running selfcheck\n";
+                    evt_(std::string("gw_reconnected gw=") + kGw[i]);
+                    reprobe_pending = true;
+                }
+                gw_prev[i] = gw_now[i];
+            }
+            if (reprobe_pending && !motion_active_.load() && !step_in_progress_.load()) {
+                std::string detail;
+                const bool all_ok = run_selfcheck_(detail);
+                if (detail.rfind(" busy", 0) != 0) {   // zdt bus held → keep pending, retry next tick
+                    reprobe_pending = false;
+                    std::cout << (all_ok ? "[OK] re-selfcheck" : "[WARN] re-selfcheck") << detail << "\n";
+                    evt_(std::string("selfcheck_auto all_ok=") + (all_ok ? "1" : "0"));
+                }
+            }
+        }
         const int64_t ts = water_inlet_open_ts_ms_.load();
         const bool valve_open = (ts != 0);
         if (!valve_open && (++idle_ticks % 5) != 0) continue;   // closed: refresh every 10 s

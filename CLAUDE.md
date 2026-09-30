@@ -60,6 +60,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 🆕 `plans/cycle_test_with_fan_plan.md` | cycle_test 加風扇(螺旋槳)測試計畫（09-09） | 🟡 **尚未執行，等拍板** |
 | 🆕 `plans/wired_switch_and_loop_test_plan.md` | 切回有線 + 迴路測試計畫（09-09）；與「測完改回隧道 192.168.1」待辦直接相關 | 🟡 **尚未執行，等拍板** |
 | 🆕 `archive/leveling_two_stage_plan.md` | 兩段式水平修正（先計米器後 IMU） | ⚰️ 2026-09-12 歸檔：自述「IMU 連不上就放棄」已是既有行為，不需新增 |
+| 🆕 `reports/` | **實測/事件報告**(一次一份,檔名 `YYYY-MM-DD_<主題>.md`)。首份 `2026-09-19_official_field_test.md`(official 戶外實測,草稿待補 log) | 🟢 活的 |
+| 🆕 `archive/todo-table-2026-08-27_to_09-23.md` | `work_log.md` **舊待辦總表全文**(168 列 + 附錄,2026-09-23 清帳前原封)。新表的「舊#N」指這裡的第 N 列 | ⚪ 查證據/量測值用;仍開放的已搬進新總表 |
 | 🆕 `archive/changelog-2026-04.md` / `archive/changelog-2026-08.md` | `changelog.md` 按月輪替搬出的**全文**（8 條 / 40 條，原封） | ⚪ 追溯用；索引在 `changelog.md` 頂端 |
 | `plans/refactor_plan.md` | **程式架構重構計畫**：目標 6 層 + 安全橫切、黃金軌跡等價證明、階段與完成判準 | ⏸ **暫緩**（2026-09-12 jim 拍板：本體/吊機暫不做完整拆解，改針對性瘦身；已部分落地——dispatcher.h/rope_axis.h/profile.h/endpoints.h 為樁；重啟條件與 as-is/to-be 對應見檔頭）。基準仍是 `main-final` + runbook §A2 那 9 條預期差異 |
 | `archive/mh300_migration_plan.md` | SE3 → Delta MH300 變頻器遷移 | ⚰️ **2026-09-12 歸檔**：Phase 1/2/4 已完成（09-08 複驗）、Phase 3 邏輯差異（process-local base-block 旗標）未完成且**內容仍有效**。🔴 Phase 0 的 keypad 參數表是**唯一副本**。📌 現況 MH300 驅動**中央捲盤**（HARDWARE.md §1），左右鋼索仍 SE3 |
@@ -156,8 +158,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | 語意 | driver | 數量 |
 |---|---|---|
-| **`false` = 成功**（Modbus 風格，`true` = error） | SE3 / MH300 / DM2J / SD76 / DSZL / DY500 / JC100 / PQW / XKC / ZDT / ZS_DIO / CLV900 | **12** |
-| **`true` = 成功**（一般 bool 風格） | **`QX_DO24`**（唯一活著的異類。`DIHOOL_control` 原為第二個，2026-09-12 已整支刪除） | 2 |
+| **`false` = 成功**（Modbus 風格，`true` = error） | SE3 / MH300 / DM2J / SD76 / DSZL / DY500 / JC100 / PQW / XKC / ZDT / ZS_DIO / CLV900 / 🆕 **QX_DO24（2026-09-30 對齊）** | **13** |
+| ~~**`true` = 成功**（一般 bool 風格）~~ | ~~`QX_DO24`~~ → ✅ **2026-09-30 已改 false=成功**（唯一呼叫端不看回傳值）。`DIHOOL_control` 原為第二個，2026-09-12 已整支刪除 | **0** |
+
+✅ **2026-09-30 起 `init()` 全部同一派。** ⚠️ 但 QX_DO24 的**其他方法**仍各有語意（例：`getVersion` true = OK），呼叫前看 `.h`。以下為歷史說明：
 
 🔴 **從 `.h` 看不出來是哪一派** —— 兩者的宣告逐字相同。呼叫端寫 `if (dev.init(...))`
 在 12 支上的意思是「失敗了」，在 QX_DO24 上的意思是「成功了」。
@@ -297,6 +301,7 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 且都已被 `.claude/summaries/` 取代）。
 📌 **理由是「看了會被誤導」而不只是「沒用」。** 四個檔都在版控裡，需要時從 git 歷史取回。
 
+> ✅ **2026-09-30 已修**：兩檔 guard 改成各自唯一（`USER_LIB_SERIALPORT_DAMIAO_H` / `TRANSPORT_SERIAL_PORT_H`），以下為原問題說明。
 > 🐛 **`user_lib/SerialPort.h` 與 `transport/Serial_port.h` 是兩個不同的檔，卻共用同一個
 > include guard `SERIAL_PORT_H`**。前者是 `cleaning_arm` 的 damiao 那一套（經 `user_lib/damiao.h`），
 > 後者是本專案的序列埠。目前不爆是因為使用者不重疊 —— 但**只要哪天同一個編譯單元碰到兩者，

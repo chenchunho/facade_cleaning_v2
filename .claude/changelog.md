@@ -6,8 +6,10 @@
 > 保留「原因 / 決策(尤其被否決的)/ 驗證結論」。原則 ≤40 行,驗證表可超。
 > (原 2026-04 的「# 修改日誌」格式範本已由本說明取代。)
 
-## 索引(全部 151 條,新的在上)
+## 索引(全部 153 條,新的在上)
 
+- `[2026-09-30a]` 待辦 A 組 15 項(#3 滑台平衡經確認不需要):**hold 租約 1.5 s + `hold_renew`**、吊機本體鏈路年齡 `body_link_age_ms`(只觀測)、hold 中擋 motion(`ERR hold_active`)、**pay_out 30 Hz 上限**、本體閘道重連自動 selfcheck、rail 送出重試、ZDT `pulse<0`、`vacuum left/right` 拒絕、5 個死 setting 移除、設定自動持久化(本體 `settings.json` / 吊機 `crane_settings.txt` 擴充)、本體 watchdog 閒置改看 IMU 回覆、include guard、過期註解、`set_imu_roll` log 節流、`QX_DO24::init` 對齊 → (本檔)
+- `[2026-09-23a]` `cycle_test.py` 風扇順序改回原版(伸腳前關、收腳後開)+ 刪 `WASH_ROBOT.h` 孤兒註解;待辦總表清帳重建(舊表歸檔)→ (本檔)
 - `[2026-09-21a]` 離線日:`deploy.sh` `FCV_TARGET=official` + `prep-official`、GUI 畫 `meter_suspect`、`goto` 張力軟停 `stopped=tension_stop short_by=`(OK 前綴保留)+ GUI ⚠️、`DM2J::last_error()` → rail 拒絕帶原因、`ntp_probe.sh` → (本檔)
 - `[2026-09-19a]` **official 上線第二天**:開機競態 `ExecStartPre` 閘門、計米器凍結 RESYNC + 平衡不吃可疑計米、本體↔吊機 WiFi 橋(QWRT)通了 + 兩端 endpoint drop-in、web 橋 dead-peer 看門狗、吸附鎖只認密封(`v3-2026.09.19-1548`)→ (本檔)
 - `[2026-09-18a]` **裝置對應 config-driven**:計米器可拆兩條匯流排(`cli_M2`)、slave/水閥通道/張力 scale 全部 env 可覆蓋;GUI 水閥通道改由後端動態判定 ⇒ **測試機與正式機共用同一份原始碼**(`v3-2026.09.18-2326`)→ (本檔)
@@ -163,6 +165,41 @@
 ---
 
 ## 當月全文(2026-09,98 條)
+
+## [2026-09-30a] 待辦 A 組一次清(離線,未上機)
+
+per user「滑台橫走時平衡迴路不跑 可以吸盤有做動 還需要嗎，其他的全部都做」。**未 commit、未上機。**
+
+**#3 不做(per user 判斷成立)**:`cycle_test.py` 滑台只在吸附後掃(`n_seal==0` 直接跳過),吸附中繩子本來就不該被平衡迴路拉;平衡只在繩子動時才有意義。
+
+**吊機 `main.cpp`**
+- 🔴 **hold 租約**:`* on` 蓋章,`hold_renew` 續約(只動時間戳,不碰匯流排);`hold_loop` 每圈先查,逾 `HOLD_LEASE_MS=1500` → `hold_all_off` + `EVT hold_lease_expired`。`on` 成功後再蓋一次(啟動慢時不給舊章)。GUI 按住每 0.5 s 送 ws `{holdRenew:1}`,**server.js 代送** `hold_renew` 到吊機中斷通道、回覆在後端吃掉——**不經前端佇列**(第一版走 `send()` 佇列,harness 量到續約排在慢回覆後面、按住中租約過期);GUI 收 EVT 清按住狀態。
+- 🔴 **本體鏈路年齡**(#1 的修法選項 2,09-09 診斷時就同意):只算非 loopback 來源的收包 → status `body_link_age_ms`(-1=從未)、>3 s `EVT body_link_stale` / 恢復 `body_link_recovered`。**只觀測、不中止**——沒有實測分布前任何門檻都是猜。全域 watchdog 不動。
+- hold 期間 motion 四入口(motion_rope/roll_correct/align_lengths/side_measured)拿到鎖後擋 `ERR hold_active`;`cmd_manual`(緊急收繩)刻意不擋。
+- **`PAY_OUT_MAX_HZ=30`**:`dir_hz()` 套在所有下放方向的基準頻率(motion_rope 三段、side_measured、hold 單/雙側、manual、hold 同步重設);平衡修正量不夾(否則回到 09-01 的單邊飽和),最壞一側 = 30 + hz_head。status `pay_out_max_hz=`。設定值本身不夾(motion_hz 兩方向共用)。
+- `crane_settings.txt` 加平衡/Hz 調校 15 鍵(hold_hz、fine_adjust_hz、balance_*、imu_*、kick/freeze/roll_finish、level_deg_per_cm…);**刻意不存** motion_hz/roll_correct_hz(ExecStartPost 送、cycle_test 會 50↔30 切)、balance_enabled/source/hold_guard/level_auto(模式開關,重啟回安全預設)、fine_adjust_level_diff(level_auto 學習)。
+- `set_imu_roll` dispatch log 每 5 s 一行附累計數;`hold_renew` 不記。
+
+**本體**
+- 閘道重連自動 selfcheck(`.20/.21/.22` 上升緣,掛在 water_inlet_watchdog 2 s 迴圈;運動中不跑,zdt 匯流排忙就下輪再試)+ `EVT gw_reconnected` / `selfcheck_auto`。09-19 `.21` 晚上電:TCP 其實會自己重連,卡住的是 `dev_qx` 只在 selfcheck 更新的快取。
+- `cmd_rail_move` 送出失敗重試 3 次 / 150 ms(只重試 `modbus_write_failed`;travel 拒絕與 `not_confirmed` 不重試)。
+- `cmd_vacuum left|right` → `ERR vacuum_group_not_independent`(一顆閥 CH1 管四顆);未知 group → `ERR unknown_vacuum_group`(原本回 `vacuum_valve_fail` 誤導)。
+- 5 個死 setting 移除(`pusher_extend_body_pulse(_short)`/`retract_slow_peel_cm`/`step_cm_default`/`step_margin_cm`,struct/建構/get/set/save 共 20 行 + 4 個常數)。舊 settings.json 帶這幾鍵只會印 `load skipped`。
+- `set_setting` 成功即自動存 `settings.json`(載入回放時不存;寫失敗回 `persist=fail`,值仍生效)。
+- crane watchdog 閒置 = max(指令往來, IMU 推送回覆)——IMU 在線時閒置不再無限長大;09-30 前量到的峰值不可直接比。keepalive ping 維持停用(IMU 推送就是那個探針)。
+
+**驅動 / 其他**:ZDT `motion_control_pos_mode(_nowait)` 拒絕 `pulse<0`(補數會變 ~4e9 脈衝);`QX_DO24::init` 改 false=成功(唯一呼叫端不看回傳);`SerialPort.h` / `Serial_port.h` guard 各自唯一;`WASH_ROBOT.h` 推桿行程表(12→10 cm)、滑台行程/零點、runbook `.101` 三處過期註解。`.22 = arm-rail`、DSZL MBAP 文件兩條查證**早已改好**。
+
+**驗證**:本機 x86 兩支 binary 完整編譯連結 ✅、手臂 `-fsyntax-only` ✅;吊機 binary 跑在 fake_bus 上實測:不續約 1538 ms 放掉 + EVT ✅、續約 4 s 不放 ✅、hold 中 `pay_out`/`roll_correct` → `ERR hold_active` ✅、`set_hold_hz 50` 時 `down` 實際 30 / `up` 50 ✅、非 loopback 連線 → `body_link_age_ms` 251 → 靜默 3 s 發 stale、恢復發 recovered ✅、`crane_settings.txt` 寫出 19 行不含 motion_hz ✅。GUI harness **215 條**(+3 hold 租約),7 次完整跑 6 綠 1 紅(紅在手臂卡工具顯示的開機時序,與本次無關)。**未驗**:本體閘道重連 selfcheck、rail 重試、settings 自動存(只有編譯)。
+
+## [2026-09-23a] 風扇順序改回原版 + 待辦總表清帳(未上機)
+
+- `scripts/cycle_test.py`:步內與最低點補清兩處改回 **① 關風扇 → ② 開閥 → ③ 伸腳**、**④ 收腳 → ⑤ 開風扇**;檔頭步驟表同步。
+  理由(per user):09-15 改的「吸附建立後才關 / 收腳前先開」(伸腳與脫離全程有推力)實測**更吵、吸附無改善**。
+- `app/WASH_ROBOT.h`:刪掉描述 `crane_retract_safe_`(09-16 已刪)的孤兒註解——它黏在 `crane_stop_estop_` 宣告上方,讀起來像在說後者。
+- per user 同批要求的另三件**查證已完成,未改碼**:兩個死碼函式(09-16 `44bcb13`)、手臂 INIT 停滾筒(09-16)、`group_seal_ok_` 每側各 ≥1(08-31)。
+- 文件:`work_log.md` 待辦總表清帳重建,舊表原封 `archive/todo-table-2026-08-27_to_09-23.md`。
+驗證:`py_compile` 綠;**未上機**。
 
 ## [2026-09-21a] 離線日 —— deploy 認 official、meter_suspect 上 GUI、goto 軟停講清楚、rail 拒絕帶原因(未在真機驗證)
 

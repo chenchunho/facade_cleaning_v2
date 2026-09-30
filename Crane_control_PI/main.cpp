@@ -309,6 +309,22 @@ static constexpr double MIDDLE_WINCH_HZ_DEFAULT  = 10.0;
 static std::atomic<double> g_vfd_hold_hz     {VFD_HOLD_HZ_DEFAULT};
 static std::atomic<double> g_vfd_motion_hz   {VFD_MOTION_HZ_DEFAULT};
 
+// [2026-09-30] pay_out direction ceiling, enforced in code (per user: "上行 50Hz、
+// 下行最多 30Hz"). Until now it lived only in cycle_test.py's DOWN_HZ + its cleanup
+// write-back — a GUI pay_out after `set_motion_hz 50`, or a script aborted before
+// cleanup, ran the rope DOWN at 50 Hz.
+//   - Applied at every base-frequency read on a pay_out path (motion_rope,
+//     side_measured, hold ▼ single/dual, manual pay_out, hold-sync reset).
+//   - NOT applied to the balance trim on top of the base (apply_balance_trim's
+//     hz_head): clamping it would make balance one-sided at the ceiling, the exact
+//     saturation fixed on 2026-09-01. Worst case one side = 30 + hz_head briefly.
+//   - The settings themselves stay unclamped: motion_hz is shared by both
+//     directions and retract legitimately runs at 50.
+static constexpr double PAY_OUT_MAX_HZ = 30.0;
+static inline double dir_hz(double hz, bool pay_out) {
+    return pay_out ? std::min(hz, PAY_OUT_MAX_HZ) : hz;
+}
+
 // [2026-09-01] 減速距離的速度縮放 —— 說明見上方 CMD_HALF_SPEED_APPROACH_CM 附近。
 static constexpr double APPROACH_REF_HZ = 40.0;
 static inline double approach_scale() {
@@ -714,6 +730,17 @@ static std::atomic<bool> hold_down_left(false);   // vfd_left  pay_out (motor fo
 static std::atomic<bool> hold_down_right(false);  // vfd_right pay_out
 static std::atomic<bool> hold_loop_stop(false);
 static std::thread       hold_thread;
+
+// [2026-09-30] Hold lease. A hold used to run until the browser sent `off`; a
+// crashed browser / dead tablet / WiFi drop while pressing released nothing
+// (the global watchdog can't see it — web_backend talks to us over loopback and
+// every client's bytes feed the same last_ping_ms). Now `* on` stamps the lease,
+// the GUI re-stamps it with `hold_renew` every 500 ms while pressed, and
+// hold_loop drops all holds once it is older than HOLD_LEASE_MS.
+//   1500 ms = 3 renew periods: tolerates 2 lost renews on a lossy link.
+// cmd_roll_trim_ms's internal hold (<= 500 ms) finishes well inside one lease.
+static constexpr int HOLD_LEASE_MS = 1500;
+static std::atomic<uint64_t> g_hold_lease_ms(0);   // 0 = never stamped
 
 // Tension cache (updated by hold_loop, read by cmd_status / cmd_tension)
 static std::atomic<double> g_tension_left  {0.0};
@@ -1681,7 +1708,7 @@ static void allMotionEmergencyStop() {
 // `vfdStartRopeMotion` had no callers — motion_rope calls reliable_start_one
 // directly — removed 2026-09-16.)
 static bool vfdStartRopeHold(CraneVFD& inv, bool pay_out) {
-    return reliable_start_one(inv, g_vfd_hold_hz.load(), pay_out);
+    return reliable_start_one(inv, dir_hz(g_vfd_hold_hz.load(), pay_out), pay_out);
 }
 
 // Direction convention (wiring-dependent — flip fwd/rev if inverted on site):
@@ -1913,9 +1940,58 @@ static void touch_heartbeat() {
     }
 }
 
+// [2026-09-30] Per-source link age — OBSERVATION ONLY, nothing aborts on it.
+// last_ping_ms above is fed by every client, and web_backend runs on this Pi
+// (loopback) and pings every 10 s ⇒ it can never tell whether the body link is
+// alive. This tracks only NON-loopback peers, i.e. the body (its IMU push alone
+// sends `set_imu_roll` every 250 ms while the IMU reads).
+// Why not abort: the 2026-09-09 diagnosis chose "measure first" — nobody has a
+// number for how long the body link really goes quiet, so any threshold would
+// be a guess whose failure mode is aborting a motion mid-way. Status field
+// `body_link_age_ms` + EVT give that number; the GUI-disconnect consequence
+// (hold keeps running) is closed separately by the hold lease.
+static constexpr int BODY_LINK_STALE_MS = 3000;
+static std::atomic<uint64_t> g_body_last_rx_ms(0);   // 0 = never heard from a remote peer
+static std::atomic<bool>     g_body_link_stale(false);
+
+static bool peer_is_loopback(socket_t sock) {
+    sockaddr_storage ss{};
+    socklen_t len = sizeof(ss);
+    if (getpeername(sock, (sockaddr*)&ss, &len) != 0) return true;   // unknown → don't count it
+    if (ss.ss_family == AF_INET) {
+        const uint32_t a = ntohl(((sockaddr_in*)&ss)->sin_addr.s_addr);
+        return (a >> 24) == 127;
+    }
+    return true;   // this server is IPv4-only; anything else is not the body
+}
+
+static void touch_peer(socket_t sock) {
+    if (peer_is_loopback(sock)) return;
+    g_body_last_rx_ms.store(now_ms());
+    if (g_body_link_stale.exchange(false))
+        broadcast_evt("EVT body_link_recovered\n");
+}
+
+static int64_t body_link_age_ms() {
+    const uint64_t t = g_body_last_rx_ms.load();
+    return t == 0 ? -1 : (int64_t)(now_ms() - t);
+}
+
 static void watchdog_loop() {
     while (!watchdog_stop.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(HEARTBEAT_CHECK_MS));
+
+        // Body link staleness (observation only, see BODY_LINK_STALE_MS). Checked
+        // before the "no clients" early-out: a body that dropped its sockets
+        // entirely is exactly the case worth reporting.
+        {
+            const int64_t age = body_link_age_ms();
+            if (age > BODY_LINK_STALE_MS && !g_body_link_stale.exchange(true)) {
+                std::cout << "[link] body quiet " << age << " ms (> " << BODY_LINK_STALE_MS
+                          << " ms, observation only)\n";
+                broadcast_evt("EVT body_link_stale age_ms=" + std::to_string(age) + "\n");
+            }
+        }
 
         if (cmd_server.getConnectedClients().empty()) continue;
 
@@ -2519,6 +2595,17 @@ static void hold_loop() {
     auto    last_manual_alarm_at = std::chrono::steady_clock::now();
 
     while (!hold_loop_stop.load()) {
+        // Lease check first — must not depend on the tension read succeeding.
+        if (any_hold_active()) {
+            const uint64_t lease = g_hold_lease_ms.load();
+            const uint64_t age   = (lease == 0) ? 0 : now_ms() - lease;
+            if (lease != 0 && age > (uint64_t)HOLD_LEASE_MS) {
+                hold_all_off();
+                std::cout << "[hold] lease expired (" << age << " ms > " << HOLD_LEASE_MS
+                          << " ms without hold_renew) — all holds off\n";
+                broadcast_evt("EVT hold_lease_expired age_ms=" + std::to_string(age) + "\n");
+            }
+        }
         const bool active = any_hold_active();
 
         double l = 0.0, r = 0.0;
@@ -2630,9 +2717,9 @@ static void hold_loop() {
                 if (was_trimmed) {
                     const double base = g_vfd_hold_hz.load();
                     if (hold_up_left.load()  || hold_down_left.load())
-                        vfd_left .setFreqHz(base, VFD_MAX_HZ);
+                        vfd_left .setFreqHz(dir_hz(base, hold_down_left.load()),  VFD_MAX_HZ);
                     if (hold_up_right.load() || hold_down_right.load())
-                        vfd_right.setFreqHz(base, VFD_MAX_HZ);
+                        vfd_right.setFreqHz(dir_hz(base, hold_down_right.load()), VFD_MAX_HZ);
                     was_trimmed = false;
                     std::cout << "[BAL] hold sync ended — reset to base " << base << " Hz\n";
                 }
@@ -2647,7 +2734,8 @@ static void hold_loop() {
                     now_pt - last_balance_tick).count() >= BALANCE_TICK_MS) {
                 last_balance_tick = now_pt;
                 // hold 模式兩側同速，無三段式煞車 → 兩側 base 相同。
-                apply_balance_trim(g_vfd_hold_hz.load(), g_vfd_hold_hz.load(), cur_sync_dir,
+                apply_balance_trim(dir_hz(g_vfd_hold_hz.load(), cur_sync_dir > 0),
+                                   dir_hz(g_vfd_hold_hz.load(), cur_sync_dir > 0), cur_sync_dir,
                                    balance_base_left, balance_base_right, was_trimmed);
             }
         }
@@ -3137,6 +3225,7 @@ static std::string motion_rope(int cm, bool is_retract) {
     // one pay_out but server received two, second auto-ran after first done.
     std::unique_lock<std::mutex> lock(motion_mtx, std::try_to_lock);
     if (!lock.owns_lock()) return "ERR motion_busy\n";
+    if (any_hold_active()) return "ERR hold_active\n";   // [2026-09-30] see cmd_hold's reverse-gap note
 
     MotionScope ms;
     MotionTimeoutScope mts(cm);
@@ -3170,7 +3259,7 @@ static std::string motion_rope(int cm, bool is_retract) {
     // latency), then run command on both sides at near-same wall time (Phase B,
     // no retry). Drift between sides ~10ms vs concurrent-with-bundled-retry's
     // 80-700ms when one side hits a transient. See dual_vfd_sync_start doc.
-    if (dual_vfd_sync_start(g_vfd_motion_hz.load(), pay_out, pay_out)) {
+    if (dual_vfd_sync_start(dir_hz(g_vfd_motion_hz.load(), pay_out), pay_out, pay_out)) {
         return "ERR vfd_start_fail\n";
     }
     if (use_middle && middleStart(pay_out)) {
@@ -3334,10 +3423,10 @@ static std::string motion_rope(int cm, bool is_retract) {
             const int appr_half = approach_half_cm();   // [2026-09-01] 隨速度縮放
             const int appr_fine = approach_fine_cm();
             if (l_valid && !left_half_slowed && !left_slowed && movedL >= cm - appr_half) {
-                if (!vfd_left.setFreqHz(g_vfd_motion_hz.load() / 2.0, VFD_MAX_HZ)) left_half_slowed = true;
+                if (!vfd_left.setFreqHz(dir_hz(g_vfd_motion_hz.load(), pay_out) / 2.0, VFD_MAX_HZ)) left_half_slowed = true;
             }
             if (r_valid && !right_half_slowed && !right_slowed && movedR >= cm - appr_half) {
-                if (!vfd_right.setFreqHz(g_vfd_motion_hz.load() / 2.0, VFD_MAX_HZ)) right_half_slowed = true;
+                if (!vfd_right.setFreqHz(dir_hz(g_vfd_motion_hz.load(), pay_out) / 2.0, VFD_MAX_HZ)) right_half_slowed = true;
             }
             if (l_valid && !left_slowed && movedL >= cm - appr_fine) {
                 if (!vfd_left.setFreqHz(g_fine_adjust_hz.load(), VFD_MAX_HZ)) left_slowed = true;
@@ -3395,7 +3484,7 @@ static std::string motion_rope(int cm, bool is_retract) {
                     now_pt - last_balance_tick).count() >= BALANCE_TICK_MS) {
                 last_balance_tick = now_pt;
                 // 各側當前實際生效的頻率 —— 與上方三段式煞車的 latch 一致。
-                const double mh = g_vfd_motion_hz.load();
+                const double mh = dir_hz(g_vfd_motion_hz.load(), pay_out);
                 const double fa = g_fine_adjust_hz.load();
                 const double bl = left_slowed  ? fa : (left_half_slowed  ? mh / 2.0 : mh);
                 const double br = right_slowed ? fa : (right_half_slowed ? mh / 2.0 : mh);
@@ -3568,6 +3657,7 @@ static std::string cmd_roll_correct(int delta_cm) {
 
     std::unique_lock<std::mutex> lock(motion_mtx, std::try_to_lock);
     if (!lock.owns_lock()) return "ERR motion_busy\n";
+    if (any_hold_active()) return "ERR hold_active\n";   // [2026-09-30] see cmd_hold's reverse-gap note
 
     MotionScope ms;
     const int  abs_cm   = std::abs(delta_cm);
@@ -3725,6 +3815,7 @@ static std::string cmd_align_lengths() {
 
     std::unique_lock<std::mutex> lock(motion_mtx, std::try_to_lock);
     if (!lock.owns_lock()) return "ERR motion_busy\n";
+    if (any_hold_active()) return "ERR hold_active\n";   // [2026-09-30] see cmd_hold's reverse-gap note
 
     MotionScope ms;
     abort_flag = false;
@@ -3846,6 +3937,7 @@ static std::string cmd_side_measured(const std::string& cmd, int cm) {
     // still running in another connection's thread.
     std::unique_lock<std::mutex> lock(motion_mtx, std::try_to_lock);
     if (!lock.owns_lock()) return "ERR motion_busy\n";
+    if (any_hold_active()) return "ERR hold_active\n";   // [2026-09-30] see cmd_hold's reverse-gap note
     MotionScope ms;
 
     // 🔴 [2026-08-28] 這一行原本不存在，而下面的迴圈會檢查 abort_flag。
@@ -3880,7 +3972,7 @@ static std::string cmd_side_measured(const std::string& cmd, int cm) {
     //    **彈性是真的、且與速度正相關，但這一輪的大過衝是減速命令根本沒送到。**
     const double start_hz = (cm <= CMD_MEASURED_APPROACH_CM)
                           ? g_fine_adjust_hz.load()      // 短程：全程慢速，不依賴飛行中的寫入
-                          : g_vfd_motion_hz.load();
+                          : dir_hz(g_vfd_motion_hz.load(), pay_out);
     if (cm <= CMD_MEASURED_APPROACH_CM)
         std::cout << "[side_measured] 短程 " << cm << "cm <= approach "
                   << CMD_MEASURED_APPROACH_CM << "cm → 直接以 " << start_hz
@@ -4285,6 +4377,8 @@ static std::string cmd_status() {
     oss << " tension_left="    << (tvalid ? std::to_string(tl) : std::string("ERR"));
     oss << " tension_right="   << (tvalid ? std::to_string(tr) : std::string("ERR"));
     oss << " tension_valid="   << (tvalid ? 1 : 0);
+    oss << " body_link_age_ms=" << body_link_age_ms();   // [2026-09-30] -1 = never; non-loopback peers only
+    oss << " pay_out_max_hz="  << PAY_OUT_MAX_HZ;
     oss << " up_left="         << (hold_up_left.load()    ? 1 : 0);
     oss << " up_right="        << (hold_up_right.load()   ? 1 : 0);
     oss << " down_left="       << (hold_down_left.load()  ? 1 : 0);
@@ -4436,7 +4530,7 @@ static bool apply_hold_one_side(CraneVFD& inv, bool up, bool down,
 //      "left only retract / right only pay_out" intermittent observed when
 //      SE3 Modbus comms are flaky (CU-mode write fail, stale-buffer reply)
 static bool dual_vfd_hold_start(bool pay_out) {
-    const double hz = g_vfd_hold_hz.load();
+    const double hz = dir_hz(g_vfd_hold_hz.load(), pay_out);
     HOLD_TRACE("dual_vfd_hold_start ENTRY pay_out=" << pay_out << " hz=" << hz);
 
     // Switched to dual_vfd_sync_start (2026-05-14): old reliable_start_one
@@ -4539,10 +4633,13 @@ static std::string cmd_hold(const std::string& dir, const std::string& onoff) {
     //
     // 📌 用 try_lock 而不是等待：比照姊妹函式，重疊的指令直接拒絕而不是排隊，
     //    否則 washrobot 端逾時重連重送的同一個指令會堆積。
-    // 🟡 **反向未做（獨立決定）**：hold 生效期間再啟動 motion 仍然可能——本鎖只在
-    //    cmd_hold 執行期間持有，返回後 hold 仍 active 但鎖已放開。要補的話是在
-    //    motion 各進入點加 `any_hold_active()` 檢查（該函式已存在，行 ~1372），
-    //    但那會讓「hold 著時不能下 motion」，是行為改變，應由使用者拍板。
+    // ✅ [2026-09-30 per user] Reverse direction closed: this lock is only held while
+    //    cmd_hold runs, so a hold stays active after the lock is released. The four
+    //    motion entry points (motion_rope / roll_correct / align_lengths /
+    //    side_measured) now check any_hold_active() right after taking motion_mtx
+    //    and return `ERR hold_active`. cmd_roll_trim_ms is already refused by its
+    //    motion_active check (a hold sets motion_active). cmd_manual (emergency
+    //    retract, motion_flow.md §8) is deliberately NOT gated.
     std::unique_lock<std::mutex> hold_lock(motion_mtx, std::defer_lock);
     if (on) {
         hold_lock = std::unique_lock<std::mutex>(motion_mtx, std::try_to_lock);
@@ -4550,6 +4647,9 @@ static std::string cmd_hold(const std::string& dir, const std::string& onoff) {
             std::cout << "[cmd_hold] EXIT dir=" << dir << " result=ERR_MOTION_BUSY total=0ms\n";
             return "ERR motion_busy\n";
         }
+        // Stamp before starting the VFDs: the start itself can take ~600 ms and
+        // hold_loop must not see a stale lease from a previous press meanwhile.
+        g_hold_lease_ms.store(now_ms());
     }
 
     // Determine which sides this cmd affects (used for both device check and
@@ -4692,6 +4792,10 @@ static std::string cmd_hold(const std::string& dir, const std::string& onoff) {
     }
 
     motion_active.store(any_hold_active());
+    // Re-stamp after a successful start too: a slow start (driver retries) must
+    // not hand hold_loop a lease that is already old, while the GUI's renews may
+    // be queued behind this very command.
+    if (on && !err) g_hold_lease_ms.store(now_ms());
 
     auto exit_log = [&](const char* result) {
         const auto total = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -4753,6 +4857,30 @@ static void persist_crane_settings() {
     std::fprintf(f, "set_tension_diff_max_kg %.3f\n",     g_tension_diff_max_kg.load());
     std::fprintf(f, "set_retract_tension_stop_kg %.3f\n", g_retract_tension_stop_kg.load());
     std::fprintf(f, "set_length_diff_max_cm %.3f\n",      g_length_diff_max_cm.load());
+    // [2026-09-30] + the balance / Hz tuning family (they used to reset on every
+    // restart). Replayed after the unit's defaults, so the file wins.
+    // Deliberately NOT persisted (each resets for a reason):
+    //   motion_hz / roll_correct_hz — re-sent by ExecStartPost, and cycle_test
+    //       flips motion_hz 50↔30 mid-run: persisting would keep a run's leftover;
+    //   balance_enabled / balance_source / hold_guard / level_auto — mode
+    //       switches; a restart returning them to the safe default is the point;
+    //   fine_adjust_level_diff — learned by level_auto;
+    //   home_ground / wall_height — ExecStartPost owns them.
+    std::fprintf(f, "set_hold_hz %.6g\n",                  g_vfd_hold_hz.load());
+    std::fprintf(f, "set_middle_hz %.6g\n",                g_middle_winch_hz.load());
+    std::fprintf(f, "set_fine_adjust_hz %.6g\n",           g_fine_adjust_hz.load());
+    std::fprintf(f, "set_roll_finish_hz %.6g\n",           g_roll_finish_hz.load());
+    std::fprintf(f, "set_freeze_hz %.6g\n",                g_freeze_hz.load());
+    std::fprintf(f, "set_kick_hz %.6g\n",                  g_kick_hz.load());
+    std::fprintf(f, "set_balance_kp %.6g\n",               g_balance_kp.load());
+    std::fprintf(f, "set_balance_cap %.6g\n",              g_balance_trim_cap_ratio.load());
+    std::fprintf(f, "set_balance_deadband %.6g\n",         g_balance_deadband.load());
+    std::fprintf(f, "set_balance_hz_min %.6g\n",           g_balance_hz_min.load());
+    std::fprintf(f, "set_balance_hz_max %.6g\n",           g_balance_hz_max_offset.load());
+    std::fprintf(f, "set_balance_imu_kp %.6g\n",           g_balance_imu_kp.load());
+    std::fprintf(f, "set_balance_imu_deadband %.6g\n",     g_balance_imu_deadband.load());
+    std::fprintf(f, "set_fine_adjust_diff_tol %d\n",       (int)g_fine_adjust_diff_tol_cm.load());
+    std::fprintf(f, "set_level_deg_per_cm %.6g\n",         g_level_deg_per_cm.load());
     std::fclose(f);
 }
 
@@ -4974,6 +5102,7 @@ static std::string cmd_read_meter_scale(const std::string& side) {
 static std::string cmd_set_hold_hz(double hz) {
     if (hz <= 0 || hz > VFD_MAX_HZ) return "ERR hz_out_of_range\n";
     g_vfd_hold_hz.store(hz);
+    persist_crane_settings();
     std::cout << "[crane] vfd_hold_hz = " << hz << "\n";
     return "OK\n";
 }
@@ -4986,6 +5115,7 @@ static std::string cmd_set_motion_hz(double hz) {
 static std::string cmd_set_middle_hz(double hz) {
     if (hz <= 0 || hz > CLV900_MAX_HZ) return "ERR hz_out_of_range\n";
     g_middle_winch_hz.store(hz);
+    persist_crane_settings();
     std::cout << "[crane] middle_winch_hz = " << hz << "\n";
     return "OK\n";
 }
@@ -5003,12 +5133,14 @@ static std::string cmd_set_balance_enabled(const std::string& onoff) {
 static std::string cmd_set_balance_kp(double kp) {
     if (kp < 0 || kp > 10.0) return "ERR kp_out_of_range (0..10 Hz/cm)\n";
     g_balance_kp.store(kp);
+    persist_crane_settings();
     std::cout << "[crane] balance_kp = " << kp << " Hz/cm\n";
     return "OK\n";
 }
 static std::string cmd_set_balance_cap(double ratio) {
     if (ratio < 0 || ratio > 2.0) return "ERR ratio_out_of_range (0..2.0)\n";
     g_balance_trim_cap_ratio.store(ratio);
+    persist_crane_settings();
     std::cout << "[crane] balance_trim_cap_ratio = " << ratio
               << " (effective at hold_hz=" << g_vfd_hold_hz.load()
               << " → " << (g_vfd_hold_hz.load() * ratio) << " Hz; "
@@ -5019,12 +5151,14 @@ static std::string cmd_set_balance_cap(double ratio) {
 static std::string cmd_set_balance_deadband(double cm) {
     if (cm < 0 || cm > 50.0) return "ERR deadband_out_of_range (0..50 cm)\n";
     g_balance_deadband.store(cm);
+    persist_crane_settings();
     std::cout << "[crane] balance_deadband = " << cm << " cm\n";
     return "OK\n";
 }
 static std::string cmd_set_balance_hz_min(double hz) {
     if (hz < 0 || hz > VFD_MAX_HZ) return "ERR hz_out_of_range\n";
     g_balance_hz_min.store(hz);
+    persist_crane_settings();
     std::cout << "[crane] balance_hz_min = " << hz << " Hz\n";
     return "OK\n";
 }
@@ -5033,6 +5167,7 @@ static std::string cmd_set_balance_hz_min(double hz) {
 static std::string cmd_set_balance_hz_max(double offset) {
     if (offset < 0 || offset > VFD_MAX_HZ) return "ERR offset_out_of_range\n";
     g_balance_hz_max_offset.store(offset);
+    persist_crane_settings();
     std::cout << "[crane] balance_hz_max_offset = " << offset
               << " Hz (effective max = base_hz + " << offset
               << " → hold " << (g_vfd_hold_hz.load() + offset)
@@ -5042,6 +5177,7 @@ static std::string cmd_set_balance_hz_max(double offset) {
 static std::string cmd_set_fine_adjust_hz(double hz) {
     if (hz <= 0 || hz > VFD_MAX_HZ) return "ERR hz_out_of_range\n";
     g_fine_adjust_hz.store(hz);
+    persist_crane_settings();
     std::cout << "[crane] fine_adjust_hz = " << hz << " Hz\n";
     return "OK\n";
 }
@@ -5074,18 +5210,21 @@ static std::string cmd_set_balance_imu_kp(double v) {
     // 因為 1.0 就已經是「每 1 度偏差給滿基礎速度的差速」——再高沒有物理意義。
     if (!(v > 0.0) || v > 2.0) return "ERR out_of_range\n";
     g_balance_imu_kp.store(v);
+    persist_crane_settings();
     std::cout << "[crane] balance_imu_kp = " << v << " (base_hz 比例/deg)\n";
     return "OK\n";
 }
 static std::string cmd_set_balance_imu_deadband(double v) {
     if (v < 0.0 || v > IMU_ROLL_SANITY_DEG) return "ERR out_of_range\n";
     g_balance_imu_deadband.store(v);
+    persist_crane_settings();
     std::cout << "[crane] balance_imu_deadband = " << v << " deg\n";
     return "OK\n";
 }
 static std::string cmd_set_fine_adjust_diff_tol(int cm) {
     if (cm < 0 || cm > 20) return "ERR out_of_range\n";
     g_fine_adjust_diff_tol_cm.store(cm);
+    persist_crane_settings();
     std::cout << "[crane] fine_adjust_diff_tol_cm = " << cm << " cm\n";
     return "OK\n";
 }
@@ -5116,6 +5255,7 @@ static std::string cmd_set_level_auto(const std::string& mode) {
 static std::string cmd_set_level_deg_per_cm(double k) {
     if (!(k >= 0.2 && k <= 5.0)) return "ERR out_of_range (0.2..5.0)\n";
     g_level_deg_per_cm.store(k);
+    persist_crane_settings();
     std::cout << "[crane] level_deg_per_cm = " << k << "\n";
     return "OK\n";
 }
@@ -5127,18 +5267,21 @@ static std::string cmd_set_roll_finish_hz(double hz) {
         std::cout << "[crane] ⚠ roll_finish_hz = " << hz
                   << " Hz 低於建議操作下限 " << ROLL_FINISH_HZ_DEFAULT << " Hz\n";
     g_roll_finish_hz.store(hz);
+    persist_crane_settings();
     std::cout << "[crane] roll_finish_hz = " << hz << " Hz\n";
     return "OK\n";
 }
 static std::string cmd_set_freeze_hz(double hz) {
     if (hz <= 0 || hz > VFD_MAX_HZ) return "ERR hz_out_of_range\n";
     g_freeze_hz.store(hz);
+    persist_crane_settings();
     std::cout << "[crane] freeze_hz = " << hz << " Hz\n";
     return "OK\n";
 }
 static std::string cmd_set_kick_hz(double hz) {
     if (hz <= 0 || hz > VFD_MAX_HZ) return "ERR hz_out_of_range\n";
     g_kick_hz.store(hz);
+    persist_crane_settings();
     std::cout << "[crane] kick_hz = " << hz << " Hz\n";
     return "OK\n";
 }
@@ -5192,6 +5335,16 @@ static std::string cmd_stop() {
 
 static std::string cmd_ping() {
     return "OK pong\n";
+}
+
+// [2026-09-30] Re-stamp the hold lease (see HOLD_LEASE_MS). Deliberately touches
+// nothing but the timestamp — no bus traffic — so the GUI can send it every
+// 500 ms while a ▲▼ button is pressed. With no hold active it is a no-op, so a
+// late renew racing a release can never restart anything.
+static std::string cmd_hold_renew() {
+    if (!any_hold_active()) return "OK hold_renew idle\n";
+    g_hold_lease_ms.store(now_ms());
+    return "OK hold_renew\n";
 }
 
 // On-demand SE3 fault code diagnostic. Reads H1007 + H1008 from the requested
@@ -5312,7 +5465,23 @@ static std::string dispatch(const std::string& line) {
 
     // Log every cmd arrival except high-frequency polling (status/ping every 200ms+
     // would drown the log). Lets you trace "GUI clicked → cmd reached crane" timing.
-    if (cmd != "status" && cmd != "ping" && cmd != "tension" && cmd != "home_status") {
+    // [2026-09-30] + hold_renew (2 Hz while a ▲▼ is pressed; the on/off lines
+    // around it already tell the story). set_imu_roll arrives at 4 Hz from the
+    // body all day ⇒ one line per IMU_LOG_EVERY_MS with the count in between.
+    if (cmd == "set_imu_roll") {
+        static constexpr uint64_t IMU_LOG_EVERY_MS = 5000;
+        static std::atomic<uint64_t> last_log_ms{0};
+        static std::atomic<uint32_t> suppressed{0};
+        const uint64_t t = now_ms();
+        uint64_t prev = last_log_ms.load();
+        if (t - prev >= IMU_LOG_EVERY_MS && last_log_ms.compare_exchange_strong(prev, t)) {
+            std::cout << "[dispatch] cmd='" << line << "' t=" << t
+                      << " (+" << suppressed.exchange(0) << " set_imu_roll since last line)\n";
+        } else {
+            suppressed.fetch_add(1);
+        }
+    } else if (cmd != "status" && cmd != "ping" && cmd != "tension" && cmd != "home_status"
+               && cmd != "hold_renew") {
         std::cout << "[dispatch] cmd='" << line << "' t=" << now_ms() << "\n";
     }
 
@@ -5564,6 +5733,7 @@ static std::string dispatch(const std::string& line) {
     if (cmd == "status") return cmd_status();
     if (cmd == "stop")   return cmd_stop();
     if (cmd == "ping")   return cmd_ping();
+    if (cmd == "hold_renew") return cmd_hold_renew();
     if (cmd == "vfd_fault") {
         std::string side; iss >> side;
         if (iss.fail()) return "ERR usage:vfd_fault_<left|right>\n";
@@ -5658,6 +5828,7 @@ static std::string dispatch(const std::string& line) {
 
 static void on_receive(socket_t sock, const char* data, int len) {
     touch_heartbeat();
+    touch_peer(sock);
 
     thread_local std::string rx_buf;
     rx_buf.append(data, len);

@@ -666,6 +666,26 @@ async function secHold(P) {
   chk('no pct → fan=move (no colon)', [w.__v3.misParams().fan, w.__v3.misParams().rail], ['move', '0-100']);
   w.document.getElementById('mp-fanpct').value = '7';
   if (has('mission')) chk('body-mode start line carried the key=value tail', logHas(/起跑參數：mission start \d+ \d+ \d+ [\d.]+ \d+ fan=move:7 rail=0-100/), true);
+
+  // [2026-09-30] hold lease: pressing keeps renewing (quietly), release stops it;
+  // a crane-side lease expiry clears the pressed state.
+  const btn = w.document.querySelector('.btn.hold[data-hold="up_left"]');
+  const hs = async () => await w.__v3.send('crane', 'fake_hold_state', 8000);
+  const r0 = +(/renews=(\d+)/.exec(await hs()) || [0, 0])[1];
+  btn.dispatchEvent(new w.MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+  await sleep(1800);
+  const mid = await hs();
+  chk('按住 1.8 s：hold 還在（有續約，沒被租約放掉）、續約 ≥2 次（後端代送，不經佇列）、不進操作紀錄', [/holds=up_left/.test(mid), +(/renews=(\d+)/.exec(mid) || [0, 0])[1] - r0 >= 2, logHas(/hold_renew/)], [true, true, false]);
+  btn.dispatchEvent(new w.MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+  await sleep(300);
+  const r1 = +(/renews=(\d+)/.exec(await hs()) || [0, 0])[1];
+  await sleep(1200);
+  const after = await hs();
+  chk('放開 → off 送出、hold 清掉、續約停止', [/holds=-/.test(after), +(/renews=(\d+)/.exec(after) || [0, 0])[1] - r1], [true, 0]);
+  btn.dispatchEvent(new w.MouseEvent('mousedown', {bubbles: true, cancelable: true}));   // pressed; the crane then drops its lease
+  await sleep(200);
+  w.__v3.wsRef().onmessage({data: JSON.stringify({src: 'crane', line: 'EVT hold_lease_expired age_ms=1600'})});
+  chk('EVT hold_lease_expired → 按住狀態清除 + 🔴 log', [btn.classList.contains('active'), logHas(/hold_lease_expired.*吊機已自動停止/)], [false, true]);
 }
 
 async function secStop(P) {

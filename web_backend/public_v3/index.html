@@ -1862,6 +1862,11 @@ function connect(){
       window.__craneReleaseAll();
       log('🔴 ' + line + ' —— 伺服器已自動停止，按住狀態已清除', 'e');
     }
+    // [2026-09-30] 吊機 hold 租約逾時（1.5 s 沒收到 hold_renew）→ 吊機已自己停
+    if (/^EVT hold_lease_expired/.test(line) && window.__craneReleaseAll){
+      window.__craneReleaseAll();
+      log('🔴 ' + line + ' —— 按住續約中斷（連線不穩？），吊機已自動停止', 'e');
+    }
     // [2026-09-15] hold 模式張力保護開關與「關閉時只警示」事件（吊機）
     if (/^EVT (hold_guard|manual_tension_)/.test(line) && typeof onHoldGuardEvt === 'function') onHoldGuardEvt(line);
     if (/^EVT pusher_rpm /.test(line) && typeof onPusherRpmEvt === 'function') onPusherRpmEvt(line);
@@ -4471,8 +4476,21 @@ document.addEventListener('click', function(ev){
 //    看門狗兩道都不作用（motion_flow.md §8：完全由操作員眼睛判定）。
 // ⚠️ v1 只綁 mouseup/mouseleave/touchend/touchcancel。這裡多綁 blur 與
 //    visibilitychange —— 按住時切分頁或視窗失焦，那四個事件都不會發生。
+// 🔴 [2026-09-30] 按住續約：吊機的 hold 有 1.5 s 租約，按住期間每 0.5 s 續一次。
+//    瀏覽器當掉／平板沒電／按住時 WiFi 斷 → 續約停止 → 吊機 1.5 s 內自己停。
+//    以前放開完全靠這一頁送 `off`，那三種情況沒有任何一層會停繩。
+//    🔴 **不走 send() 佇列**：佇列是單線的，續約排在慢回覆後面就會讓租約在按住中過期
+//       （harness 第一版就量到這個）。改送 ws `{holdRenew:1}`，由 server.js 直接打吊機中斷
+//       通道、回覆在後端吃掉 ⇒ 不進佇列、不進操作紀錄。
 (function(){
   var held = [];
+  var renewTimer = null;
+  function renewTick(){
+    if (!held.length){ clearInterval(renewTimer); renewTimer = null; return; }
+    if (!wsUp) return;
+    try { ws.send(JSON.stringify({holdRenew: 1})); } catch(e){}
+  }
+  function startRenew(){ if (!renewTimer) renewTimer = setInterval(renewTick, 500); }
   function release(btn, ev){
     if (ev) ev.preventDefault();
     if (!btn.classList.contains('active')) return;
@@ -4488,6 +4506,7 @@ document.addEventListener('click', function(ev){
       if (btn.classList.contains('active')) return;
       btn.classList.add('active');
       held.push(btn);
+      startRenew();
       fire(CR, btn.dataset.hold + ' on', null, null);
     }
     btn.addEventListener('mousedown',   press);

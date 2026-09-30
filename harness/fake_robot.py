@@ -68,6 +68,7 @@ class Sim:
         self.estop = 'none'           # [2026-09-15] none|detaching|done|partial (body emergency_detach)
         self.pause_reason = 'none'    # [2026-09-16] none|user|error|balance_ask
         self.flow = 'none'            # [2026-09-16] none|return_home
+        self.holds = set(); self.hold_lease = 0.0; self.hold_renews = 0   # [2026-09-30] hold lease
         self.hold_guard = 1           # [2026-09-15] set_hold_guard on|off (hold-mode tension protection)
         self.meter_suspect = ''       # [2026-09-21] L/R/M subset — meter_loop rejecting coherent reads (cache stale)
         self.goto_short_cm = 0        # [2026-09-21] harness knob: next retract goto stops this many cm early on tension (0 = off)
@@ -123,6 +124,9 @@ class Sim:
         while True:
             time.sleep(0.25)
             with self.lock:
+                if self.holds and time.time() - self.hold_lease > 1.5:   # mirrors crane HOLD_LEASE_MS
+                    age = int((time.time() - self.hold_lease) * 1000); self.holds.clear()
+                    _bcast('crane', f'EVT hold_lease_expired age_ms={age}')
                 if self.moving:
                     side, tgt, _ = self.moving
                     cur = self.len_l if side in ('left', 'both') else self.len_r
@@ -160,6 +164,7 @@ class Sim:
         s = self
         return (f'OK length_left={s.len_l:.1f} length_right={s.len_r:.1f} length_middle=ERR meter_suspect={s.meter_suspect}'
                 f' tension_left={s.ten_l:.1f} tension_right={s.ten_r:.1f} tension_valid=1'
+                f' body_link_age_ms=250 pay_out_max_hz=30'
                 f' up_left=0 up_right=0 down_left=0 down_right=0'
                 f' hold_guard={s.hold_guard} tension_max_kg={s.tension_max_kg:g} tension_diff_max_kg={s.tension_diff_max_kg:g} length_diff_max_cm={s.length_diff_max_cm:g}'
                 f' retract_tension_stop_kg={s.retract_tension_stop_kg:g} dsz_left_scale=-0.0205816 dsz_right_scale=-0.0236364'
@@ -508,8 +513,12 @@ def wr_dispatch(line, bcast):
                 return f'OK active={s.pump_active}\n', True
             if a[:1] == ['on']: s.relay[1] = 1; return 'OK ch2=1 active=A\n', True
             if a[:1] == ['off']: s.relay[1] = s.relay[2] = 0; return 'OK ch2=0 active=A\n', True
-        if c == 'vacuum':
-            on = a[:1] != ['off']; s.relay[0] = 1 if on else 0
+        if c == 'vacuum':   # [2026-09-30] mirrors the body: one valve ⇒ left/right refused
+            g = a[0] if len(a) > 1 else 'feet'
+            if g in ('left', 'right'):
+                return 'ERR vacuum_group_not_independent (one valve CH1 serves all 4 cups; use feet|all)\n', True
+            if g not in ('feet', 'all'): return 'ERR unknown_vacuum_group (feet|all)\n', True
+            on = a[-1:] != ['off']; s.relay[0] = 1 if on else 0
             return f'OK ch1={s.relay[0]}\n', True
         if c == 'brush': s.relay[4] = 1 if a[:1] != ['off'] else 0; return f'OK ch5={s.relay[4]}\n', True
         if c == 'water_pump': s.relay[3] = 1 if a[:1] != ['off'] else 0; return f'OK ch4={s.relay[3]}\n', True
@@ -678,6 +687,18 @@ def cr_dispatch(line, bcast):
             s.moving = None; return 'OK stopped\n', True
         if c in ('hold', 'hold_all_off'):
             return 'OK\n', True
+        # [2026-09-30] ▲▼ hold + lease (crane HOLD_LEASE_MS=1500, renewed by `hold_renew`)
+        if c in ('up', 'down', 'up_left', 'up_right', 'down_left', 'down_right'):
+            if not a or a[0] not in ('on', 'off'): return 'ERR expected_on_or_off\n', True
+            if a[0] == 'on': s.holds.add(c); s.hold_lease = time.time()
+            else: s.holds.discard(c)
+            return 'OK\n', True
+        if c == 'hold_renew':
+            if not s.holds: return 'OK hold_renew idle\n', True
+            s.hold_lease = time.time(); s.hold_renews += 1
+            return 'OK hold_renew\n', True
+        if c == 'fake_hold_state':   # harness-only
+            return f'OK holds={",".join(sorted(s.holds)) or "-"} renews={s.hold_renews}\n', True
         if c == 'zero_meters':
             s.len_l = s.len_r = 0.0; s.home_ground = 0; s.crane_zeroed = 1; s.crane_zeroed_at = int(time.time()); s.top_cm = 0.0
             return 'OK zeroed\n', True

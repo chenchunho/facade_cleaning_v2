@@ -118,7 +118,7 @@ public:
     // acc/dec 單位為 **ms/1000rpm**（斜坡時間 = acc x rpm/1000 毫秒）。
     // 值越大 = 斜坡越長 = 起停越柔。<=0 表示沿用 ARM_SWEEP_ACC/DEC(=100)。
     // rpm/acc/dec 傳 <=0 表示沿用 ARM_SWEEP_RPM / ARM_SWEEP_ACC / ARM_SWEEP_DEC。
-    std::string cmd_rail_move(double target_cm, int rpm = 0, int acc = 0, int dec = 0);  // 絕對定位（0=左端，正向往右）
+    std::string cmd_rail_move(double target_cm, int rpm = 0, int acc = 0, int dec = 0);  // 絕對定位（0 = 上次 rail_zero 的位置，正向往右；合法窗 ±ARM_RAIL_TRAVEL_MAX_CM，09-17 起可在中間歸零）
     std::string cmd_rail_pos();                            // 讀目前座標
     std::string cmd_rail_zero();                           // 設當前位置為零點
     std::string cmd_rail_jog(const std::string& dir, int rpm);  // [2026-09-11] JOG fwd/rev/stop(按住才動,含 deadman+行程守衛)
@@ -725,7 +725,8 @@ private:
     // 📌 想把導程釘得更精確，最準的是數皮帶輪齒數 × 齒距（整數，無讀尺誤差）。
     static constexpr double ARM_RAIL_LEAD_CM_PER_REV = 7.731;
 
-    // 滑台總行程（實機目測 50 cm）。留 2 cm 餘裕給鬆弛量與量測誤差。
+    // 滑台行程守衛（⚠️ [2026-09-30] 本段開頭原寫「實機目測 50 cm、留 2 cm 餘裕」＝ 08-28 的舊值，
+    // 現值 130 與其由來見本段末；「0 點 = 左端」也只在 09-17 之前成立，見 ARM_RAIL_TRAVEL_MIN_CM）。
     // 🔴 這個上限的價值不在「限制」，在於**超範圍會被明確拒絕並記錄** ——
     //    2026-08-28 之前，下一個超出行程兩倍的指令，三邊都沒有任何抗議。
     //
@@ -768,6 +769,8 @@ private:
     // （同日先訂 14.0 cm，隨即改為 12.0 cm；下方行程計算已依 12.0 更新。）
     //
     // ⚠ 行程餘裕縮小，改動前務必理解：
+    // ⚠️ [2026-09-30] 下表是 preset 12.0 cm（08-27~08-31）時算的；現值 10.0 cm（見本段末）
+    //    ⇒ 最大總伸長 15.0 cm、剩餘餘裕 5.0 cm；do_cross_obstacle_ 的 2×preset = 20 cm ＝ 剛好頂到行程。
     //   SMC LEYG25 行程            20.0 cm
     //   preset                     12.0 cm
     //   disable_seal 有效補伸       +5.0 cm  ← 見 DISABLE_RETRY_MAX_ITERS 註解：
@@ -793,15 +796,12 @@ private:
     //    所以改小它＝改小「標稱貼合位置」，仍保有往前補伸的能力。
     static constexpr int PUSHER_EXTEND_FEET_PULSE       = 30000;  // feet upper (slave 5,6) 10.0 cm ([2026-08-28] 原註解寫 5,7 —— 那是「右側」不是「上面」) (2026-08-31: 36000→30000 per user；2026-08-27: 24300→36000 per user；2026-07-27: 統一兩顆都 8.1cm；慣例 3000 pulse=1cm)
     static constexpr int PUSHER_EXTEND_FEET_PULSE_LOWER = 30000;  // feet lower (slave 7,8) 10.0 cm ([2026-08-28] 原註解寫 6,8 —— 那是「左側」不是「下面」) (2026-08-31: 36000→30000 per user，與 upper 保持一致；2026-08-27: 24300→36000 per user)
-    static constexpr int PUSHER_EXTEND_BODY_PULSE       = 34000;  // body upper (slave 5,6) ~11.3 cm (2026-05-28: 30000→36000 +6000=+2cm; 2026-05-28i: 36000→33000 -3000=-1cm，bench 顯示 36000+over 害 Phase 1 fast 700rpm 撞 wall peakI 1500mA+；2026-05-29: 33000→34000 +1000=+0.8cm，邊際提速 iter loop 收斂)
-    static constexpr int PUSHER_EXTEND_BODY_PULSE_SHORT = 35400;  // body lower (slave 7,8) ~11.8 cm (2026-05-28: 29400→32400 +3000=+1cm；2026-05-28h: 32400→35400 +3000=+1cm，bench log body lower wall at 42798、SHORT 仍不夠導致 iter 0 plateau,加深一輪)
     static constexpr int PUSHER_RETRACT_PULSE      = 300;   // 收腳目標 (2026-07-14: 0→300 ≈0.1cm)。高速收到 0=機械原點會撞 hardstop「叩」一聲；停在原點前 0.1cm 避免撞擊。<FAKE-DONE 容差 50°(500pulse)、300pulse=30° 仍算收好
     static constexpr int PUSHER_RPM           = 400;     // extend 用（feet）(2026-07-14: 700→1200 激進提速；2026-07-23 per user: 1200→900 調降；2026-09-09 per user: 900→600 ＝ 2/3 速；2026-09-15 per user: 600→400 再減 1/3)
     // [2026-07-31 per user] pusher_two_stage_retract_ 改成比照 Linux_test 功能31
     // 的破真空輔助單段直收（CH_BREAK_VACUUM 主動破壞真空 + 直接快收，不再需要
-    // 慢慢剝離）。原兩段式的常數鏈已於 2026-09-09 刪除（見下方說明）；RETRACT_SLOW_PEEL_CM 保留
-    // 這三個「第一段慢脫壁」專用的常數不再被 retract 邏輯使用（保留常數定義本身，
-    // 因為 RETRACT_SLOW_PEEL_CM 還有 runtime settings_ 可調路徑，懶得順便拆）。
+    // 慢慢剝離）。原兩段式的常數鏈已於 2026-09-09 刪除（見下方說明）；最後剩下的
+    // RETRACT_SLOW_PEEL_CM 連同它的 runtime setting 於 2026-09-30 一併移除（沒有讀者）。
     static constexpr int PUSHER_RPM_RETRACT_FULL = 400;     // 破真空輔助單段直收速度 (2026-07-31 per user: 900→1000 比照 bench 初版 → bench 上又測過 900→700→500，同步拉回正式程式；2026-09-15 per user: 500→330 再減 1/3 → 同日 330→400→600→500→600→400(per user 定案。舊正壓時序下 600rpm 峰值 2.1A;改成「正壓包住整個收」後 500/600 都只有 0.4~0.6A,速度不再受電流限制,回到 400 取餘裕))
     // [2026-09-17 per user] Runtime pusher RPM shared by Manual and Mission (single
 // truth in the body). The two constants above are only the compile-time
@@ -814,7 +814,6 @@ private:
     int  pusher_rpm_extend_()  const { return pusher_rpm_ext_.load(); }
     int  pusher_rpm_retract_() const { return pusher_rpm_ret_.load(); }
     void persist_body_settings_();   // writes ~/run/body_settings.json (best effort)
-    static constexpr double RETRACT_SLOW_PEEL_CM = 1.0;     // [已不用於 retract] 原兩段式第一段慢脫壁距離
     // [2026-07-31 per user] 破真空閥時序，比照 Linux_test 功能31 bench 驗證值。
     // 🔴 [2026-09-15 per user, 當日三修] 收腳時序 = **開閥同時就收,正壓包住整個收的動作**:
     //    關真空閥 → 靜置 PRE_ON_REST(100) → CH6 ON → (PRE_MOVE=0,不等)送四顆同步收
@@ -875,8 +874,8 @@ private:
     //    這三個是物理事實，值得留在文字裡；但不再以 constexpr 形式存在，
     //    避免「看起來有人在用」。
     //
-    // ⚠️ **`RETRACT_SLOW_PEEL_CM` 刻意保留**（見上）—— 它還活著：
-    //    `settings_` 可調、`cmd_status` 有輸出、存檔也寫它。動它會改到 wire 內容。
+    // ✅ `RETRACT_SLOW_PEEL_CM` 原本因「settings_ 可調、會改到 wire 內容」刻意保留；
+    //    2026-09-30 per user 連 setting 一起移除（見 WASH_ROBOT.cpp save_settings_file_ 上方）。
     //
     // 📌 判準沿用本日的教訓：**要刪之前找「誰讀這個值」，不是「誰定義它」。**
 
@@ -899,7 +898,6 @@ private:
     // 的 apply 邊界）——2026-08-31 之前那裡寫死 100，光改本常數改不動執行期路徑，
     // 而開機載入 settings.json 也走同一條 apply，等於舊設定檔可以把上限帶回 100。
     static constexpr int STEP_CM_MAX      = 45;
-    static constexpr int STEP_MARGIN_CM   = 10;   // crane extra slack before feet move (2026-05-27: 15→10 提速)
     // [2026-07-27 per user] do_step_sync_ backoff-retry: if a whole side is
     // still unsealed after the in-place per-side retry, retreat the crane
     // toward the pre-step position in this many cm per attempt (full 4-cup
@@ -1545,6 +1543,9 @@ private:
     //    （實測：閒置 3.4 分鐘 → idle_ms = 204,900），所以「不分狀態的峰值」會被
     //    閒置洗到無限大、對訂門檻毫無幫助。而 abort 只在 motion_active_ 時才成立
     //    ⇒ **第②步要看的是 _motion 那個**。留著不分狀態的那個是為了看得到對比。
+    // 📌 [2026-09-30] idle 改算「指令往來 / IMU 推送回覆」兩者較新的那個（見
+    //    crane_watchdog_loop_ ③）⇒ IMU 在線時閒置不再無限長大；上面「兩個峰值」
+    //    的理由只在 IMU 讀不到（推送停止）時仍成立。09-30 之前量到的峰值不可直接比。
     std::atomic<int64_t> crane_idle_ms_max_;         // 任何狀態下的峰值
     std::atomic<int64_t> crane_idle_ms_max_motion_;  // ← 訂 abort 門檻要看這個
     std::atomic<bool>    crane_wd_warned_;     // EVT 去抖：一次逾時只報一次
@@ -1811,23 +1812,18 @@ private:
         std::atomic<int>    arm_clean_wall_mm;
         std::atomic<int>    pusher_extend_feet_pulse;
         std::atomic<int>    pusher_extend_feet_pulse_lower;
-        std::atomic<int>    pusher_extend_body_pulse;
-        std::atomic<int>    pusher_extend_body_pulse_short;
         std::atomic<int>    vacuum_seal_deep_kpa;
         std::atomic<double> realign_threshold_cm;
         std::atomic<double> realign_threshold_mean_cm;
         // ---- L2 (medium-frequency wall-tune) ----
         std::atomic<double> rope_weight_limit_attached;
         std::atomic<double> rope_weight_limit_hanging;
-        std::atomic<int>    step_cm_default;
         std::atomic<int>    step_cm_max;
         std::atomic<int>    vacuum_plateau_ms;
         std::atomic<double> vacuum_backup_cm;
-        std::atomic<double> retract_slow_peel_cm;
         std::atomic<int>    disable_retry_max_iters;
         std::atomic<int>    pusher_rpm_disable_slow;         // [2026-07-14] Tier2 重吸補伸速度 live-tune
         std::atomic<int>    disable_phase_current_limit_ma;  // [2026-07-14] 障礙偵測相電流門檻 live-tune
-        std::atomic<int>    step_margin_cm;
         std::atomic<double> imu_ask_deg;
         std::atomic<double> arm_deploy_pos_tol_rad;
         // [2026-06-02] Result of last balance calibration (Phase 5 record).
@@ -1837,6 +1833,9 @@ private:
         // does NOT take effect on motion until then.
         std::atomic<double> static_roll_offset_cm;
     } settings_;
+    // [2026-09-30] true only while load_settings_file_ replays settings.json through
+    // cmd_set_setting — suppresses the auto-save that every successful set does.
+    bool settings_loading_ = false;
 
     // Settings persistence — see Settings struct above. Returns true on file
     // I/O error (no file = silent fall-through to defaults).
@@ -2389,10 +2388,6 @@ private:
     // Returns kg; WEIGHT_NO_DATA_KG if all sources fail.
     double      read_rope_weight_max_kg_();
 
-    // Read max rope weight (kg) via the dedicated estop channel — bypasses
-    // crane_mtx_, so it works WHILE a retract holds that mutex (the normal
-    // read_rope_weight_max_kg_ would block). Used by crane_retract_safe_'s
-    // active monitor. Returns kg; -1 on comm/parse fail / detached.
     // [2026-09-09] Emergency stop over the dedicated estop channel — never
     // takes crane_mtx_, so it can overtake an in-flight motion command.
     // Returns true only on an OK ack; a false MUST be surfaced by the caller.
@@ -2510,11 +2505,10 @@ private:
     // wall while vacuum builds.
     bool             pusher_move_(int slave, int pulse, int rpm = 0, int acc = PUSHER_ACC, bool defer_stall_release = false);   // rpm 0 = pusher_rpm_extend_()
     bool             pusher_move_many_(const std::vector<int>& slaves, int pulse, int rpm = 0, int acc = PUSHER_ACC, bool defer_stall_release = false);
-    // Pipelined two-stage retract: stage 1 slow-peels RETRACT_SLOW_PEEL_CM off
-    // the wall (sync start), then each slave — the moment it finishes stage 1 —
-    // immediately fires stage 2 (fast retract to 0) without waiting for siblings.
-    // Returns true (error) on stall / timeout. Replaces the old pusher_move_many_
-    // ×2 retract pattern at every call site.
+    // Retract (name kept from the old two-stage design): since 2026-07-31 it is a
+    // single break-vacuum-assisted fast retract (see PUSHER_RPM_RETRACT_FULL above);
+    // the slow-peel first stage and its RETRACT_SLOW_PEEL_CM are gone.
+    // Returns true (error) on stall / timeout.
     bool             pusher_two_stage_retract_(const std::vector<int>& slaves, int rpm = 0);  // [2026-09-11] rpm 可選(預設=RETRACT_FULL,既有呼叫端不變)
 
     // Group extend with concurrent vacuum monitoring. As cup pressure crosses
