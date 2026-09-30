@@ -311,7 +311,7 @@ public:
     // (M1 stop-seek). Hold torque needs time to build against the ~1.6 Nm static
     // preload; INIT's M1 slam once shook M2 off the slot while tau was still 0.94.
     static constexpr int   STARTUP_TO_INIT_DWELL_MS = 2000;
-    static constexpr float DEPLOY_F_TARGET_NM   = 5.0f;    // [2026-09-15 per user] 3→5(10 趟滾筒實測:3 N·m 時掃動中 tau 由 3.86 掉到 1.2~1.9 ⇒ 壓不住)。舊註:[2026-09-11] 15→8 → [2026-09-14] 8→3:現場看 3 Nm 清潔效果好,定為工作力度
+    static constexpr float DEPLOY_F_TARGET_NM   = 3.0f;    // [2026-09-30 per user] 5→3:定案工作力道 3(腳本 FCV_ARM_NM / GUI mp-armnm 本來就是 3,09-15 那次只改了這裡 ⇒ 實跑一直是 3)。已知代價:09-15 量到 3 N·m 掃動中 tau 掉到 1.2~1.9。前一次:[2026-09-15 per user] 3→5(10 趟滾筒實測:3 N·m 時掃動中 tau 由 3.86 掉到 1.2~1.9 ⇒ 壓不住)。舊註:[2026-09-11] 15→8 → [2026-09-14] 8→3:現場看 3 Nm 清潔效果好,定為工作力度
     static constexpr float DEPLOY_F_TOUCH_NM    = 2.0f;    // 輕觸判定：超過此值視為接觸
     // [2026-09-17 per user] 防呆:目標壓力上限。15 Nm 時代壓橫桿堵轉拉垮 24V(09-11),
     // 工作力度定 3(09-14);GUI 可即時改力道後,這裡是最後一道閘,DEPLOY_F / SETFORCE 都擋。

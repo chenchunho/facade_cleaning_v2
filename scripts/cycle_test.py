@@ -143,9 +143,9 @@ ARM_SLOT  = 'RIGHT'     # 固定滾筒（per user）。LEFT=刮刀 / CENTER
 ARM_WALL_MM = 520       # DEPLOY 的假設牆距（僅在退回舊路徑時使用，見 ARM_TARGET_NM）
 # [2026-09-04 per user] 目標壓力 15 N·m，現場目視定案。DEPLOY_F 用它，不用 ARM_WALL_MM。
 # [2026-09-11 per user] 15→8:降力刷過(偵測不可靠,改低力,刷到橫桿也無傷)。
-#   env FCV_ARM_NM 可覆蓋。⚠️ 手臂 DEFAULT(main_api.h DEPLOY_F_TARGET_NM)也已 8,
-#   但 cycle_test 是**顯式傳值**,故必須在這裡也降,否則 full 仍用 15。
+#   env FCV_ARM_NM 可覆蓋。cycle_test 是**顯式傳值**,手臂 header 的 DEFAULT 不影響這裡。
 # [2026-09-14 per user] 8→3:現場三種力度(8/6/3)各跑一趟,3 Nm 清潔效果好,定為工作力度。
+# [2026-09-30 per user] 定案 3(09-15 手臂 header 改 5 未同步到這裡;這次反過來把 header 改回 3,三處一致)。
 ARM_TARGET_NM = float(os.environ.get("FCV_ARM_NM", "3"))
 # [2026-09-14 per user] 乾掃:FCV_DRY=1 時滾筒段也 wet=False(不噴水、不開滾刷),只驗步態與力控。
 #   預設 0 = 原本行為(滾筒噴水+滾刷)。

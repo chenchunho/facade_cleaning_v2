@@ -6,8 +6,9 @@
 > 保留「原因 / 決策(尤其被否決的)/ 驗證結論」。原則 ≤40 行,驗證表可超。
 > (原 2026-04 的「# 修改日誌」格式範本已由本說明取代。)
 
-## 索引(全部 153 條,新的在上)
+## 索引(全部 154 條,新的在上)
 
+- `[2026-09-30b]` `DEPLOY_F` 工作力道定案 3:手臂 header `DEPLOY_F_TARGET_NM` 5→3,與腳本/GUI 一致 → (本檔)
 - `[2026-09-30a]` 待辦 A 組 15 項(#3 滑台平衡經確認不需要):**hold 租約 1.5 s + `hold_renew`**、吊機本體鏈路年齡 `body_link_age_ms`(只觀測)、hold 中擋 motion(`ERR hold_active`)、**pay_out 30 Hz 上限**、本體閘道重連自動 selfcheck、rail 送出重試、ZDT `pulse<0`、`vacuum left/right` 拒絕、5 個死 setting 移除、設定自動持久化(本體 `settings.json` / 吊機 `crane_settings.txt` 擴充)、本體 watchdog 閒置改看 IMU 回覆、include guard、過期註解、`set_imu_roll` log 節流、`QX_DO24::init` 對齊 → (本檔)
 - `[2026-09-23a]` `cycle_test.py` 風扇順序改回原版(伸腳前關、收腳後開)+ 刪 `WASH_ROBOT.h` 孤兒註解;待辦總表清帳重建(舊表歸檔)→ (本檔)
 - `[2026-09-21a]` 離線日:`deploy.sh` `FCV_TARGET=official` + `prep-official`、GUI 畫 `meter_suspect`、`goto` 張力軟停 `stopped=tension_stop short_by=`(OK 前綴保留)+ GUI ⚠️、`DM2J::last_error()` → rail 拒絕帶原因、`ntp_probe.sh` → (本檔)
@@ -165,6 +166,12 @@
 ---
 
 ## 當月全文(2026-09,98 條)
+
+## [2026-09-30b] `DEPLOY_F` 工作力道定案 3(未上機)
+
+per user「DEPLOY_F 力道 3」(C 組 #5 選 b)。`cleaning_arm/main_api.h` `DEPLOY_F_TARGET_NM` 5.0→3.0;`cycle_test.py` 註解同步。
+背景:09-14 定 3(清潔效果)→ 09-15 定 5 但只改了 header,腳本 `FCV_ARM_NM`/GUI `mp-armnm` 仍 3 且都顯式傳值 ⇒ **實跑一直是 3**;header 只影響不帶力道的 `DEPLOY_F`。本次三處一致,行為對 Mission 不變。
+已知代價(09-15 實測):3 N·m 掃動中 tau 由 3.86 掉到 1.2~1.9;若現場再出現壓不住,改這裡。驗證:`main_api.cpp` `-fsyntax-only` ✅。
 
 ## [2026-09-30a] 待辦 A 組一次清(離線,未上機)
 

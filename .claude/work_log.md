@@ -16,7 +16,7 @@
 | | 項目 | 出處 |
 |---|---|---|
 | 🔴 | **抗風 / 低樓層貼牆的現場量測**(9/19 實測兩大問題的前置):① 吊點離牆水平距離 d、吸盤面到掛點深度 ② 測試牆面朝向 ③ 風扇全速推力 ④ 拉 9/19 log:橫移/失敗時的 roll、張力、風扇占空比、每次吸附的 `p5..p8`(吸到哪幾顆、是否同側、高度)⑤ **DJI 空拍 6 支 + 8 張**(Drive 下載好後補看,俯視可估 d)⇒ 算「各高度 × 風速」可作業範圍;補齊後出報告 v2 | 報告 3.3/3.5 |
-| 🔴 | **部署 `3e60c7d` + 09-23 改動並驗**:`prep-official` → `FCV_TARGET=official deploy.sh crane/body/web/script`;驗計米器標紅、goto 軟停文字、`rail -300` 回 reason、`ntp_probe.sh`、**風扇新順序**;🆕 **09-30 A 組**:① ▲▼ 按住拔網路線 → 1.5 s 內自己停 + GUI 紅字 ② `set_hold_hz 50` 按 ▼ 看 log `hz=30` ③ `body_link_age_ms` 平常 ≤300、斷 WiFi 發 `body_link_stale` ④ 本體 `.21` 晚上電 → 自動 `selfcheck_auto` ⑤ `set_setting` 後重啟值還在、`crane_settings.txt` 19 行 ⑥ `crane_idle_ms` 閒置不再無限長大 | 09-21/23/30 |
+| 🔴 | **部署到 `505a422` 並驗**(含 09-21/23/30 三批):`prep-official` → `FCV_TARGET=official deploy.sh crane/body/web/script`;驗計米器標紅、goto 軟停文字、`rail -300` 回 reason、`ntp_probe.sh`、**風扇新順序**;🆕 **09-30 A 組**:① ▲▼ 按住拔網路線 → 1.5 s 內自己停 + GUI 紅字 ② `set_hold_hz 50` 按 ▼ 看 log `hz=30` ③ `body_link_age_ms` 平常 ≤300、斷 WiFi 發 `body_link_stale` ④ 本體 `.21` 晚上電 → 自動 `selfcheck_auto` ⑤ `set_setting` 後重啟值還在、`crane_settings.txt` 19 行 ⑥ `crane_idle_ms` 閒置不再無限長大 | 09-21/23/30 |
 | 🟡 | **WiFi 橋 RF**:9/19 實測全程連線正常、IMU 平衡經 WiFi 表現良好;但 RSSI −70、Tx PER 83% 仍偏弱(前一晚曾斷 285 s)。主路由改 20 MHz、拉近/對準;長期 5 GHz 或有線 | 09-19、報告 2.2 |
 | 🔴 | **`.22` 匯流排實體層沒修**(終端電阻/線長/接地未查);風扇開 15× 錯誤;official 也偶發 JC100:5 TIMEOUT;**JC-100 slave 8 換表頭**(單日 67 錯) | 舊#26/#27、09-15 |
 | 🟡 | **本體繼電器型號確認(PQW 還是 ZS-DIO)**:repo 全部記 PQW(驅動 `PQW_IO_16O_RLY`、`HARDWARE.md`、git 全歷史本體沒用過 ZS 驅動),user 09-23 記得是 ZS。**唯讀判定**:對 `.20` slave 12 FC03 讀 `0x0043`=12 → PQW;讀 `0x0032`=12 → ZS-DIO(或看電控箱標籤)。若是 ZS → 本體換 `ZS_DIO_R_RLY`(吊機 09-10 同坑) | 09-23 |
@@ -37,7 +37,6 @@
 |---|---|---|
 | 🔴 | **抗風對策方向**:9/19 平均 7 m/s、陣風 16 m/s 下,拉上 2–3 層就左右橫移、風扇壓上也壓不住;1–3 樓吸不上或只吸 1–2 顆。分析(報告 3.3):主因推定為**長繩回復剛性低(W/L)+ 風**,受風面三個:機器、6 mm 鋼索、**黃色臍帶**(影片中被吹成大弧)。現場試過**地面導引繩:效果不大**,且越高側向分量越小、高樓層拉不到(user 09-23)。候選:頂樓端側向約束/導軌、作業風速上限、臍帶收束、加大貼牆推力。**先等 B 組量測** | 報告 3.1b/3.3 |
 | 🔴 | **清潔部件 × 垂直窗框**:刀具垂直 + 滑台橫掃,遇垂直直料會卡住(程式只處理水平橫桿跳過帶)。方向 A 行程限單一分格 / B 遇直料抬起跨越 / C 刀具水平靠吊機上下刮 / D 刀具可轉向。**先收集目標建築分格寬、直料間距與凸出深度** | 報告 3.3b |
-| 🔴 | **`DEPLOY_F` 工作力道 3 還是 5** | 09-14 定 3(清潔效果)→ 腳本 `FCV_ARM_NM` 預設 3、GUI `mp-armnm` 預設 3;09-15 又定 3→5(3 N·m 掃動中 tau 掉到 1.2~1.9 壓不住)但**只改了手臂 header**。⇒ 實跑一直是 3。(a) 腳本+GUI 改 5 / (b) header 改回 3 |
 
 ### D. ⏸ 暫停 / 長期(有意擱置,別當成漏掉)
 - **隧道(Fathom-X)**:VFD 運轉掉 90% 封包的電氣問題、`IMU_ROLL_STALE_MS=750` 對隧道太緊、隧道閒置 1% 丟包 —— per user 09-21「暫時用 WiFi 之後會再改」,**切回隧道前要先讀舊#1/#2**。
@@ -60,12 +59,13 @@
 - **09-23 本次做掉**:風扇順序改回原版(`cycle_test.py`,未上機)。
 - **09-30 A 組清完**(per user「其他的全部都做」,未上機):hold 租約 + `hold_renew`(舊#19)/吊機本體鏈路年齡 `body_link_age_ms` 只觀測(舊#3 選項 2)/hold 中擋 motion/pay_out 30 Hz 上限/本體閘道重連自動 selfcheck(舊#78)/rail 送出重試/ZDT `pulse<0`/`vacuum left|right` 拒絕/5 個死 setting 移除/設定自動持久化(本體 `settings.json`、吊機 `crane_settings.txt` +15 鍵)/本體 watchdog 閒置改看 IMU 回覆(舊#16)/include guard(舊#138)/過期註解/`set_imu_roll` log 節流/`QX_DO24::init` 對齊(舊#70)。
 - **09-30 不做**:滑台橫走時平衡迴路不跑(舊#8)—— per user「吸盤有做動,還需要嗎」:滑台只在吸附後掃(`n_seal==0` 跳過),吸附中繩子不該被平衡拉 ⇒ 不是缺陷。
+- **09-30 拍板**:`DEPLOY_F` 工作力道 **3**(per user)→ 手臂 header `DEPLOY_F_TARGET_NM` 5→3,與腳本/GUI 一致(已知代價:09-15 量到掃動中 tau 掉到 1.2~1.9,若再現改調這裡)。
 - **09-30 查證早已改好**:`WASH_ROBOT.h` 的 `.22 = arm-rail`(09-03 已重寫)、DSZL MBAP 規格段(`motion_flow.md` 已寫原生 Modbus TCP)。
 
 ---
 
 
-## 2026-09-30:待辦 A 組一次清(離線,未 commit、未上機)
+## 2026-09-30:待辦 A 組一次清(離線,commit `505a422`,未上機)
 
 per user「滑台橫走時平衡迴路不跑 可以吸盤有做動 還需要嗎,其他的全部都做」。細節 `changelog [2026-09-30a]`。
 
