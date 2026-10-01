@@ -68,10 +68,11 @@
 ## 2026-10-01:測試機部署 + 吊機端上機驗證(本體離線)
 
 - 測試機 `raspberry-cran` 開機 → 部署 `6f910ff` 吊機/server/GUI(`v3-2026.10.01-1526`)。驗證 7 項全過(表見 `changelog [2026-10-01a]`):租約斷線 1563 ms 放掉、`hold_active`、放繩 30 Hz、設定持久化、續約撐得住。
-- 🔴 **抓到並修好**:19 行設定回放讓 `restart fcv-crane` 82 s 逼近 90 s 啟動逾時 → `crcmd.py` 收到回覆即走 + unit 一次送 → 21 s。測試機 unit 已換;**official unit 還沒換**(已加進 B 組)。未 commit。
+- 🔴 **抓到並修好**:19 行設定回放讓 `restart fcv-crane` 82 s 逼近 90 s 啟動逾時 → `crcmd.py` 收到回覆即走 + unit 一次送 → 21 s。測試機 unit 已換;**official unit 還沒換**(已加進 B 組)。commit `9a04e3e`。
 - 斷線測試手法:Pi 端臨時 nft 表擋 laptop→:8080(使用者走 WiFi 無法拔線)。
 - per user:**9/19 報告 v2 不做**(DJI 空拍素材不補看),報告定稿 v1。
 - SE3 故障碼唯讀重驗:4/6 成功、履歷全 `160/OPT`(見 B 組該列,降 🟢)。
+- **收尾**:全部 push(`ff4fb32`,本地 = origin/main)。測試機現況:新版吊機/GUI 在跑、`hold_hz` 10、`balance_kp` 1.0、無殘留 nft 表與暫存腳本。下一步要本體開機(驗本體半邊)或上 official(記得換 unit)。
 
 ## 2026-09-30:待辦 A 組一次清(離線,commit `505a422`,未上機)
 
