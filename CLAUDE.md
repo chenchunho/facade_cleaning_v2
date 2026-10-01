@@ -495,7 +495,7 @@ Raspberry Pi 5（本體主控）
   ├─ USR #1  192.168.1.20  (cli_20_)  ─── 「動力 + 滑台 bus」
   │     ├─ ZDT slave 5,6 ── 右腳 上/下 推桿（SMC LEYG25）
   │     ├─ ZDT slave 7,8 ── 左腳 上/下 推桿
-  │     ├─ PQW slave 12 ─── 8CH 繼電器（2026-08-27 從 .22 搬來）
+  │     ├─ ZS-DIO slave 12 ─ 8CH 繼電器（2026-08-27 從 .22 搬來；🔴 2026-10-01 實證是 ZS-DIO 不是 PQW，驅動已換）
   │     └─ DM2J slave 14 ── 上滑台（乘載機械手臂；2026-08-28 從 .22 搬回）
   │
   ├─ USR #2  192.168.1.21  (cli_21_)  ─── 🆕「PWM bus」2026-09-03 新增
@@ -579,7 +579,8 @@ Raspberry Pi（吊機主控）
 ### 吸盤控制邏輯（🔴 已從 v1 的三區變成**單閥四吸盤**）
 
 ```
-PQW 8CH 繼電器（本體 .20 slave 12）        權威：app/WASH_ROBOT.h:449-474
+ZS-DIO 8CH 繼電器（本體 .20 slave 12；2026-10-01 前一直被當 PQW 驅動）  權威：app/WASH_ROBOT.h:449-474
+  （常數/成員仍叫 PQW_* / pqw_ —— 刻意不改名，同吊機 09-10）
   ├─ CH1  VT307 電磁閥 ── 全部 4 顆吸盤（唯一一顆閥）
   │        ⚠️ CH_VALVE_LEFT == CH_VALVE_RIGHT == 1（2026-08-27 左右合併）
   ├─ CH2  dp0105 真空產生器（運轉期間常開）
@@ -681,7 +682,7 @@ Socket timeouts: 100-500ms per device. TCP monitor thread: 500ms reconnect polli
 | `ZDT_motor_control` | 閉環步進驅動卡 × 9 | Modbus-TCP (RS485_2) | 驅動 SMC LEYG25 推桿，encoder 回饋，堵轉保護 |
 | `JC_100_METER` | 真空氣壓感測器 × 9 | Modbus-TCP (RS485_3) | 讀取壓力 (0.1 kPa)，裝於各推桿末端吸盤 |
 | `DY_500_weight_sensor` | 鋼索重量感測器 × 2 | Modbus-TCP (RS485_3) | 讀取重量 (int32/float)，裝於機體與鋼索連接處 |
-| `PQW_IO_16O_RLY` | 8CH 繼電器模組 × 2 | Modbus-TCP | washrobot cli_22_ slave 12 (CH1-6 + CH8)：dp0105 泵浦 + VT307 電磁閥 + 刷洗/水泵。<br>🔴 **2026-09-10：吊機端已不再使用本驅動**——原記「crane cli_M slave 12 (CH4 only, 2026-06-05 搬遷)：水箱進水球閥」，實體其實是 ZS-DIO，已改由 `ZS_DIO_R_RLY` 驅動、移到獨佔網關 `.32`。**本驅動現在只服務本體那顆。** |
+| `PQW_IO_16O_RLY` | 8CH 繼電器模組 × 2 | Modbus-TCP | washrobot cli_22_ slave 12 (CH1-6 + CH8)：dp0105 泵浦 + VT307 電磁閥 + 刷洗/水泵。<br>🔴 **2026-09-10：吊機端已不再使用本驅動**——原記「crane cli_M slave 12 (CH4 only, 2026-06-05 搬遷)：水箱進水球閥」，實體其實是 ZS-DIO，已改由 `ZS_DIO_R_RLY` 驅動、移到獨佔網關 `.32`。~~本驅動現在只服務本體那顆。~~ 🔴 **2026-10-01:本體那顆也是 ZS-DIO**(`.20` slave 12:holding `0x0032`=12、`0x0043`=0),已改 `ZS_DIO_R_RLY` ⇒ **本驅動目前沒有任何主控程式在用**(本體 build 清單已移除)。驅動註解裡的「PQW 韌體 echo 不標準(05→00)」其實是 ZS 在回 FC05。 |
 | `WT901BC_TTL` | 九軸姿態儀 | USB→TTL Serial 115200 | 背景執行緒連續讀取，checksum 驗證；Roll+Pitch 平衡監控 |
 | `damiao` (header-only) + `SerialPort` | damiao 清潔手臂馬達 × 2 (M1+M2) | USB-CAN (/dev/ttyACM0 @ 921600) | M1 大臂 DM10010L (slave 0x01) + M2 工具頭 DM4340_48V (slave 0x02)；廠商驅動 header-only，由獨立服務 `cleaning_arm/motor_api` 使用，TCP :9527 對外。washrobot 透過 `arm_cmd_` 跨 process 下指令 (127.0.0.1:9527)。整個專案唯一走 CAN 的裝置 |
 | `SD76_length_meters` | 計米器 × 3 | Modbus-TCP (USR_M 感測 bus, .34) | 左 (USR_M.34 slave 1) / 右 (USR_M.34 slave 2) / 中間 (USR_M.34 slave 4, 未安裝)；2026-05-15 re-layout 全部 SD76 移到此 bus，int32 讀取，支援 pause/resume/zero。<br>2026-06-05 ~ 2026-09-10 此 bus 曾與繼電器模組共用，**09-10 已把繼電器移到獨佔的 `.32`**（共用時它會被 SD76 的輪詢擠掉）⇒ 現在 `.34` 只有 SD76 |

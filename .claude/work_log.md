@@ -16,28 +16,23 @@
 | | 項目 | 出處 |
 |---|---|---|
 | 🔴 | **抗風 / 低樓層貼牆的現場量測**(9/19 實測兩大問題的前置):① 吊點離牆水平距離 d、吸盤面到掛點深度 ② 測試牆面朝向 ③ 風扇全速推力 ④ 拉 9/19 log:橫移/失敗時的 roll、張力、風扇占空比、每次吸附的 `p5..p8`(吸到哪幾顆、是否同側、高度)⇒ 算「各高度 × 風速」可作業範圍(⚪ 10-01 per user:**9/19 報告 v2 不做**,DJI 空拍不再補看;報告維持 v1) | 報告 3.3/3.5 |
-| 🔴 | **部署到 `6f910ff` 並驗**(含 09-21/23/30 三批 + 手臂 `DEPLOY_F` 預設 3 ⇒ **手臂也要部署**):`prep-official` → `FCV_TARGET=official deploy.sh crane/body/web/script`;驗計米器標紅、goto 軟停文字、`rail -300` 回 reason、`ntp_probe.sh`、**風扇新順序**;🆕 **09-30 A 組**:①② ✅ **10-01 測試機已驗**(租約/30 Hz/hold_active/吊機設定持久化),official 部署後只需抽驗;🔴 **official 的 `fcv-crane.service` 要換新版**(否則 19 行回放 82 s 逼近 90 s 啟動逾時);🔴 **本體 drop-in 改回 official**(`fcv-body.service.d/endpoints.conf.official-disabled` → `endpoints.conf` + `systemctl --user daemon-reload`,10-01 為接測試吊機而停用);✅ 本體半邊 10-01 測試機已驗(vacuum 分組、settings 持久、gw 重連 selfcheck、鏈路年齡);剩手臂部署 + 風扇順序;③ `body_link_age_ms` 平常 ≤300、斷 WiFi 發 `body_link_stale` ④ 本體 `.21` 晚上電 → 自動 `selfcheck_auto` ⑤ `set_setting` 後重啟值還在、`crane_settings.txt` 19 行 ⑥ `crane_idle_ms` 閒置不再無限長大 | 09-21/23/30 |
+| 🔴 | **official 部署到最新 main 並驗**(含 09-21/23/30 三批 + 10-01 本體 ZS-DIO 驅動 / 設定只存差異 / crcmd + 手臂 `DEPLOY_F` 預設 3 ⇒ **手臂也要部署**;official 本體繼電器型號也要先唯讀確認):`prep-official` → `FCV_TARGET=official deploy.sh crane/body/web/script`;驗計米器標紅、goto 軟停文字、`rail -300` 回 reason、`ntp_probe.sh`、**風扇新順序**;🆕 **09-30 A 組**:①② ✅ **10-01 測試機已驗**(租約/30 Hz/hold_active/吊機設定持久化),official 部署後只需抽驗;🔴 **official 的 `fcv-crane.service` 要換新版**(否則 19 行回放 82 s 逼近 90 s 啟動逾時);🔴 **本體 drop-in 改回 official**(`fcv-body.service.d/endpoints.conf.official-disabled` → `endpoints.conf` + `systemctl --user daemon-reload`,10-01 為接測試吊機而停用);✅ 本體半邊 10-01 測試機已驗(vacuum 分組、settings 持久、gw 重連 selfcheck、鏈路年齡);✅ 風扇順序 10-01 真機通過(no_arm);剩**手臂部署**(手臂維修中,裝回後:`systemctl --user start fcv-arm` + `arm_attached on` + `deploy.sh arm`);③ `body_link_age_ms` 平常 ≤300、斷 WiFi 發 `body_link_stale` ④ 本體 `.21` 晚上電 → 自動 `selfcheck_auto` ⑤ `set_setting` 後重啟值還在、`crane_settings.txt` 19 行 ⑥ `crane_idle_ms` 閒置不再無限長大 | 09-21/23/30 |
 | 🟡 | **WiFi 橋 RF**:9/19 實測全程連線正常、IMU 平衡經 WiFi 表現良好;但 RSSI −70、Tx PER 83% 仍偏弱(前一晚曾斷 285 s)。主路由改 20 MHz、拉近/對準;長期 5 GHz 或有線 | 09-19、報告 2.2 |
-| 🔴 | **`.22` 匯流排實體層沒修**(終端電阻/線長/接地未查);風扇開 15× 錯誤;official 也偶發 JC100:5 TIMEOUT;**JC-100 slave 8 換表頭**(單日 67 錯) | 舊#26/#27、09-15 |
-| 🟡 | **本體繼電器型號確認(PQW 還是 ZS-DIO)**:repo 全部記 PQW(驅動 `PQW_IO_16O_RLY`、`HARDWARE.md`、git 全歷史本體沒用過 ZS 驅動),user 09-23 記得是 ZS。**唯讀判定**:對 `.20` slave 12 FC03 讀 `0x0043`=12 → PQW;讀 `0x0032`=12 → ZS-DIO(或看電控箱標籤)。若是 ZS → 本體換 `ZS_DIO_R_RLY`(吊機 09-10 同坑) | 09-23 |
+| 🔴 | **`.22` 匯流排實體層沒修**(終端電阻/線長/接地未查);風扇開 15× 錯誤;official 也偶發 JC100:5 TIMEOUT;**JC-100 slave 8 換表頭**(單日 67 錯)。👁 10-01 觀察:風扇不轉時近乎乾淨;風扇轉時 `.20`/`.21`/`.22` **三條同時**出錯;**對照測試**:停 0 錯 / 7% ~7 / 8% ~15 每 30 s(劑量相關、兩輪重現),8% 時繼電器回讀約半數失敗 ⇒ 見 10-01 日誌 | 舊#26/#27、09-15、10-01 |
 | 🔴 | **official 計米器捲尺校正**(9/19 實測確認左右需重校;同指令左 +8 cm 時右 +18 cm)、中錶 DP=0→2(面板)、漂移累積 | 09-19、報告 3.4 |
 | 🟡 | MH300 中繩:official `.32` 站號/baud 未測;程式仍寫 CLV900 slave 3 @ USR_A;MH300 必驗清單(方向/電流 scale/run bit/fault code);`0x2002` 開機無條件清已寫、未上機 | 舊#21/#76 |
 | 🟡 | official 兩台 Pi 無 NTP(先跑 `ntp_probe.sh`) | 09-21 |
-| 🟡 | 真機驗 09-16 兩條只在 fake 驗過的路徑:吸附中 `crane_goto` → `ERR cups_attached`;中止五步(`[web] STOP ⑤` + 四顆回大氣) | 09-16 |
-| 🟡 | 手臂:`DEPLOY_F` WARN 分支從未在硬體觸發、`theta_max=1.10` 無上界實測、四個樞軸→玻璃幾何常數未實體量、臂長 490 vs 編碼器尺度 1.53× 無法分辨(量角器量一次)、M1 passive 根因(08-17 起)、**M2 掃動被摩擦帶走 26~28°** | 舊#105/#106、附錄 手臂/滑台群 |
-| 🟢 | ZDT `trigger_home(0x02)` 原生歸位試用(`pulse<0` 守衛 09-30 已做,這半要上機) | 舊 A 組 |
-| 🟡 | `status` 的 `p_err=` 與 attach 的 `partial_seal=` 兩條「讓失敗看得見」路徑從沒被執行到 | 舊#69 |
+| 🟡 | 真機驗 09-16 中止五步(`[web] STOP ⑤` + 四顆回大氣)。✅ 吸附中 `crane_goto` → `ERR cups_attached` **10-01 真機已驗** | 09-16、10-01 |
+| 🟡 | **手臂裝回後**(10-01 拆修中;本體 `arm_attached off`、`fcv-arm` 已停):`start fcv-arm` + `arm_attached on` + `deploy.sh arm`;**繼電器 CH4 噴水泵 / CH5 滾刷**在新 ZS 驅動下開關回讀(10-01 沒測)。手臂:`DEPLOY_F` WARN 分支從未在硬體觸發、`theta_max=1.10` 無上界實測、四個樞軸→玻璃幾何常數未實體量、臂長 490 vs 編碼器尺度 1.53× 無法分辨(量角器量一次)、M1 passive 根因(08-17 起)、**M2 掃動被摩擦帶走 26~28°** | 舊#105/#106、附錄 手臂/滑台群 |
+| 🟡 | `status` 的 `p_err=` 與 attach 的 `partial_seal=` 兩條「讓失敗看得見」路徑從沒被執行到(非缺陷,只是未觸發)。👁 10-01:`attach` 四顆全吸 → 未走到 `partial_seal`;風扇轉時 slave 8 讀不到 → `p_err=` 應會出現,下次跑風扇時抓一次 status 即可驗 | 舊#69、10-01 |
 | 🟢 | SE3 `readFaultCode`:**10-01 測試機重驗** `vfd_fault left/right` ×3 → 成功 4/6,失敗是 `0x1008` 偶發 comm fail(不再是「連續」);兩側履歷 4 筆皆 `160/OPT`(推定為程式重啟時 keepalive 中斷,當天重啟多次)。剩:偶發失敗要不要加重試、OPT 是否只在重啟時累加 | 舊#100/#141、10-01 |
-| 🟢 | 右腳推桿阻力 1.4~1.6× 左腳(假說:右側離牆較近);四顆推桿接觸力不均 2.1× | 舊#25/#107 |
-| 🟢 | 20 cm 下降總張力掉 4.7 kg(已知與姿態相關,是否另有滑輪遲滯未查) | 舊#34/#39 |
-| 🟢 | 單側收繩固定過衝 ~1 cm(可補償) | 舊#35 |
+| 🟢 | 右腳推桿阻力 1.4~1.6× 左腳(假說:右側離牆較近);四顆推桿接觸力不均 2.1×。👁 10-01 小樣本(每支 4 次、400 rpm、頂端)**未重現**,左略高 —— 要結論需整趟多步(下次跑 full 時統計 `wait_many` 行) | 舊#25/#107、10-01 |
 
 ### C. 要你拍板(09-23 已逐項對碼;1/2/3/4/6/9 照建議維持現狀,不再列)
 | | 項目 | 說明 |
 |---|---|---|
 | 🔴 | **抗風對策方向**:9/19 平均 7 m/s、陣風 16 m/s 下,拉上 2–3 層就左右橫移、風扇壓上也壓不住;1–3 樓吸不上或只吸 1–2 顆。分析(報告 3.3):主因推定為**長繩回復剛性低(W/L)+ 風**,受風面三個:機器、6 mm 鋼索、**黃色臍帶**(影片中被吹成大弧)。現場試過**地面導引繩:效果不大**,且越高側向分量越小、高樓層拉不到(user 09-23)。候選:頂樓端側向約束/導軌、作業風速上限、臍帶收束、加大貼牆推力。**先等 B 組量測** | 報告 3.1b/3.3 |
 | 🔴 | **清潔部件 × 垂直窗框**:刀具垂直 + 滑台橫掃,遇垂直直料會卡住(程式只處理水平橫桿跳過帶)。方向 A 行程限單一分格 / B 遇直料抬起跨越 / C 刀具水平靠吊機上下刮 / D 刀具可轉向。**先收集目標建築分格寬、直料間距與凸出深度** | 報告 3.3b |
-| 🟡 | **設定持久化要不要改成「只存與預設不同的鍵」** | 10-01 發現:現在整組寫入(本體 17 / 吊機 19)⇒ 檔案存在後,改程式預設值不生效。只存差異 = 改預設會生效,但「刻意設成跟預設一樣」的值也會跟著預設變 |
 
 ### D. ⏸ 暫停 / 長期(有意擱置,別當成漏掉)
 - **隧道(Fathom-X)**:VFD 運轉掉 90% 封包的電氣問題、`IMU_ROLL_STALE_MS=750` 對隧道太緊、隧道閒置 1% 丟包 —— per user 09-21「暫時用 WiFi 之後會再改」,**切回隧道前要先讀舊#1/#2**。
@@ -60,6 +55,9 @@
 - **09-23 本次做掉**:風扇順序改回原版(`cycle_test.py`,未上機)。
 - **09-30 A 組清完**(per user「其他的全部都做」,未上機):hold 租約 + `hold_renew`(舊#19)/吊機本體鏈路年齡 `body_link_age_ms` 只觀測(舊#3 選項 2)/hold 中擋 motion/pay_out 30 Hz 上限/本體閘道重連自動 selfcheck(舊#78)/rail 送出重試/ZDT `pulse<0`/`vacuum left|right` 拒絕/5 個死 setting 移除/設定自動持久化(本體 `settings.json`、吊機 `crane_settings.txt` +15 鍵)/本體 watchdog 閒置改看 IMU 回覆(舊#16)/include guard(舊#138)/過期註解/`set_imu_roll` log 節流/`QX_DO24::init` 對齊(舊#70)。
 - **09-30 不做**:滑台橫走時平衡迴路不跑(舊#8)—— per user「吸盤有做動,還需要嗎」:滑台只在吸附後掃(`n_seal==0` 跳過),吸附中繩子不該被平衡拉 ⇒ 不是缺陷。
+- **10-01 拍板**:ZDT 原生歸位 `trigger_home(0x02)` **不採用、結案**(per user)——讀回零參數(停本體,`FC04 0x0022`;FC03 回空、0x001C exception)四顆皆出廠預設:方向 0/CW(推定=伸出)、30 rpm、逾時 10 s、碰撞 300 rpm/800 mA/60 ms ⇒ 直接觸發會往牆伸、把牆當零點;要用須對 4 顆改寫參數且換件即丟。保留手刻 `zdt_home`(先探測方向、09-11 實證)。細節 `summaries/ZDT_MODBUS_SUMMARY.md` §3.3.5/3.3.6。
+- **10-01 拍板**:張力方向遲滯(靜止 下停 −5 / 上停 +6 kg)**門檻不改**(per user)——遲滯相對餘裕很小(收繩軟停 75 vs 上升單側 ~50-55、單側上限 100 vs 傾斜時 ~65),且門檻管的是動態峰值;唯一放大處是單側傾斜時左右差(單側 5 cm 達 36 kg / 門檻 50)⇒ 另一個不做大幅單側移動的理由。
+- **10-01 拍板**:單側過衝 +1 cm(四方向固定、與距離無關)**不補償**(per user A)——單側移動只用在姿態修正,修完會再量再修、過衝被下一輪吸收;日後要精準定位再改「提前停」(`side_measured` 停止點)。
 - **09-30 拍板**:`DEPLOY_F` 工作力道 **3**(per user)→ 手臂 header `DEPLOY_F_TARGET_NM` 5→3,與腳本/GUI 一致(已知代價:09-15 量到掃動中 tau 掉到 1.2~1.9,若再現改調這裡)。
 - **09-30 查證早已改好**:`WASH_ROBOT.h` 的 `.22 = arm-rail`(09-03 已重寫)、DSZL MBAP 規格段(`motion_flow.md` 已寫原生 Modbus TCP)。
 
@@ -84,6 +82,45 @@
   - ⚠️ **新發現(待拍板)**:設定自動持久化是**整組寫入**(本體 17 鍵、吊機 19 行)⇒ 檔案一旦存在,**之後改程式預設值不會生效**(檔案蓋回舊值)。
     本體測完已移除 `settings.json`(原本就沒有,檔案在 `/tmp/settings.json.test-1001`);吊機 19 行仍在。修法候選:只存與預設不同的鍵。
   - 未做:**手臂部署**(per user 先不測;重啟會 M1 回零)、**風扇順序**(per user 先不測)。
+  - **手臂拆下維修**(per user):本體 `arm_attached off`、`fcv-arm` stop(⚠️ 仍 enabled、arm_attached 不持久 ⇒ 重開會恢復)。M1 原本一直 `switchControlMode FINAL failed`。
+  - **`cycle_test.py` 加 `no_arm=1` / `FCV_NO_ARM=1`**(per user B 案):跳 arm_ready 檢查、每步與補清的清潔、暫停/收尾的 arm_retract,起跑送 `arm_attached off` 且 init 後不切回。
+    fake_robot 先驗(指令序列無任何 arm_* 除 `arm_attached off`)→ 部署兩台。
+  - ✅ **風扇順序真機通過**(`full 1 1 10 rail=off final_clean=0 no_arm=1`,FCV_DRY=1,FCV_TOP_CM=244):`pwm duty=5`(回讀✓)→ 伸腳 10 cm → 吸 3 顆(p5 −2 / p6 −46 / p7 −43 / p8 −53,每側 ≥1 ✓)→ 收腳(CH6 正壓)→ `duty=7`(回讀✓)→ 下放 10 cm → `duty=5` → 拉回頂端。roll 均 0.22°、L/R 差 1 cm、整步 14.9 s。log `~/run/logs/fan_order_1001.log`(吊機)。
+    觀察:**p5 這趟沒吸上**(單次,待多趟看);`.21` QX CRC mismatch ×2(重試後寫入+回讀都成功)。
+    ⚠️ ssh 直接跑 full 要自帶 `FCV_TOP_CM=<牆高>`(GUI Mission 由 server.js 帶);沒帶會落到 231。
+  - 🔴 **本體繼電器 = ZS-DIO**(per user 09-23 記得是 ZS,今天實證):停本體 30 s,`.20` slave 12 FC03 → `0x0043`=**0**(PQW 站號暫存器,若是 PQW 應為 12)、`0x0032`=**12**(ZS-DIO 站號)⇒ **本體也是用 PQW 驅動在開 ZS-DIO**(同吊機 09-10 那顆)。能用是因 FC05 線圈位址重疊、回讀也對得上。換 `ZS_DIO_R_RLY` 牽涉吸盤閥/破真空閥等安全通道 ⇒ 待討論(已進 B 組)。
+  - ✅ **9/16 吸附鎖真機驗證**:Ready 下手動 `vacuum feet on` + `pusher all extend_raw` → 四顆 −67~−70 → `crane_goto 240` → `ERR cups_attached sealed=4 unreadable=0`,吊機**沒收到** goto(L/R 維持 −244/−245)。
+  - `attach` 4 顆第一次就全吸(p5 −62)⇒ 上一趟 p5 沒吸是**偶發**;因此 `partial_seal=` 路徑仍未被觸發(要真的有吸不上才走得到)。`detach`、收腳、關閥關幫浦正常。
+  - ✅ **單側過衝實測**(機器掛繩、未吸附、頂端):`pay_out_left 5`/`retract_left 5` → 計米器 ±**6**;`pay_out_right 3`/`retract_right 3` → ±**4** ⇒ **四個方向固定 +1 cm,與距離無關**(回報 `moved=` 是停止瞬間值,之後滑行 1 cm)。
+    ⚠️ **單側 5 cm ⇒ roll −6.38°**(超過 Mission 6° 中止門檻;單側張力 29.5/65.6 kg),單側 3 cm ⇒ +3.0°。
+  - ✅ **下降 20 cm 張力掉 = 方向遲滯**(per user 放行 20 cm):靜止總張力 下降前 97.7 → `pay_out 20` 後 **92.6(−5.1)** → `retract 20` 後 **98.7(+6.1)**;移動中 下 min 79.1 / 上 max 119.4。
+    兩次停止 roll 都在 ±1° ⇒ 不是姿態;推定滑輪/捲筒摩擦,**往下停偏輕、往上停偏重,差 ~6 kg**。雙側也過衝:放 20 → 21。腳本 `/tmp/ten20.py`(取樣 0.15 s,另開連線)。
+  - 👁 **觀察:匯流排錯誤與風扇的時間關係**(今天 15:56 起的本體 log,只記現象不下結論)
+    - 風扇**未轉**時:JC-100 5~8 各 3~7 次單筆 TIMEOUT(皆「連續 1 次」),其他裝置無錯。
+    - 風扇轉的 5 s 內(16:30:12 duty 7 → 16:30:17 duty 5):**`.22` JC-100 5/6/7/8 TIMEOUT + slave 8 `ADDR_MISMATCH`(收 `A8`,應 `08`,單一位元)/CRC 連 3 次 → fast-fail;`.20` PQW `reply slave 44 != 12`;`.21` QX CRC ×2**。風扇停即止。
+    - 即:錯誤出現在**三條匯流排同時**,且只在風扇轉時。與舊紀錄「風扇開 15× 錯誤」一致;是否為電調 EMI / 共地,未查。JC-100 slave 8 仍是錯最多的一顆。
+    - 同一時段 slave 8 讀不到 ⇒ 那時 status 應會出 `p_err=`(當下沒抓 status,未驗)。
+  - ✅ **本體繼電器換 `ZS_DIO_R_RLY`**(per user「換,照建議做」):
+    ① 先補強 ZS 驅動(檔頭自己寫「回 production 前先補回覆驗證」):收發改 `TCP_client::sendAndReceive` 原子交易(`.20` 與 ZDT/DM2J 多執行緒共用)、FC01/02/04 回覆驗站號/FC/長度/CRC。吊機那顆一併受惠。
+    ② 本體成員型別換掉,**名稱 `pqw_`/`PQW_*` 刻意保留**(同吊機 09-10);`build_body.sh` PQW→ZS。⚠️ 行為差異:`controlRelay` 現在會驗 FC06 echo、3 次失敗回 true(PQW 永遠回 false)⇒ `try_or_pause_` 呼叫端可能會停。
+    ③ 真機:`[OK] relay ZS-DIO slave 12 8CH`、selfcheck 全過;CH1/2/3/6/7/8 逐一 on→回讀→off→回讀全對(**CH4 噴水泵 / CH5 滾刷沒測**:手臂拆下、管線/線可能外露);`init`→`attach`(4 顆一次吸)→`detach`→`pusher all retract`(CH6 破真空 300 ms)正常,ZSDIO 錯誤 0 筆。
+    📌 PQW 驅動註解的「韌體 echo 不標準 05→00」= ZS 在回 FC05。本體已無程式用 PQW 驅動。
+    📌 **`detach` 只關閥不收腳**(原設計);要收腳另送 `pusher all retract`。
+  - ✅ **設定持久化改「只存與預設不同的值」**(per user OK):本體 `save_settings_file_`、吊機 `persist_crane_settings` 逐鍵比對編譯預設,全預設 ⇒ 刪檔(沒檔 = 預設)。
+    真機:吊機部署後回放舊 19 行 → 全是預設 → 檔案自動消失;`set_balance_kp 1.5` → 檔只剩那行、重啟仍 1.5 → 改回 1.0 → 檔消失;本體 `imu_ask_deg 12.5` → 1 行 → 改回 45 → 檔消失。兩台現況:**無設定檔(全預設)**。
+  - 👁 **觀察:推桿左右阻力**(今天 log `[wait_many ZDT:N] done at`,伸出 n=4 / 收回 n=3 每支,含風扇測試、attach ×2、手動伸):
+    伸出 時間/峰值 右上 1575/421、右下 1462/587、左上 1500/664、左下 1688/523(右均 1519 ms/504 mA,左均 1594/594);收回 左下 759 mA 最高、其餘 ~500。
+    ⇒ 9/2 的「右腳 1.4~1.6× 時間、+20% 電流」**今天未重現**(左略高)。條件不同:樣本少(9/2 每支 50)、推桿 rpm 900→400、頂端單一位置;每支各有一次低電流(未觸牆)。
+  - 👁 **觀察:風扇 × 匯流排錯誤的對照與劑量測試**(本體 idle、未吸附、掛繩;風扇 CH1;每段 30 s,同時每 0.5 s 打 `relay_status`(.20)/`pwm status`(.21)/`water_level`(.22),JC-100 輪詢照常)
+    | 風扇 | 段 1 | 段 2 | 平均驅動層錯誤/30 s | 應用層指令失敗 |
+    |---|---|---|---|---|
+    | 5%(停) | 0/0/0(×3 段)+ 最後一段 1 | | **0** | 0 |
+    | 7% | 5 | 9 | **7** | 1(`relay_status`)|
+    | 8% | 16 | 14 | **15** | **7**(全是 `relay_status`,約讀取次數一半)|
+    - 分布:7% 以 `.21` QX、`.22` XKC 為主,`.20` ZS-DIO 偶發;8% 起 `.20` ZS-DIO 每段 4、`.22` JC-100 6/7/8 也出現。風扇停 → 立即歸零。
+    - ⇒ 風扇開關兩輪完全重現、錯誤隨轉速上升、三條匯流排同時受影響。電調通電但馬達不轉(5%)= 0 錯。
+    - ⚠️ 8% 時繼電器**回讀**約半數讀不到;`pqw_set_relay_verified_` 讀不到時是 best-effort 放行 ⇒ 那時的「寫後回讀確認」等於失效(寫入本身有 FC06 echo 比對)。
+    - 未查:干擾路徑(電調/馬達輻射、共地、電源)。
   - 現場:per user 機器已掛繩貼牆、設好最高最低 → 檢查 OK:地面歸零 16:18:50、牆高 **244**(原 231)、目前離地 ~35 cm、L/R 差 1 cm、張力 46+50 ≈ 96 kg、本體未吸附、roll −0.73°。
 - **收尾**:全部 push(`ff4fb32`,本地 = origin/main)。測試機現況:新版吊機/GUI 在跑、`hold_hz` 10、`balance_kp` 1.0、無殘留 nft 表與暫存腳本。下一步要本體開機(驗本體半邊)或上 official(記得換 unit)。
 

@@ -18,7 +18,7 @@
 #include "ZDT_motor_control.h"
 #include "FrameAnalyzer.h"
 #include "JC_100_METER.h"
-#include "PQW_IO_16O_RLY.h"
+#include "ZS_DIO_R_RLY.h"      // [2026-10-01] body relay is a ZS-DIO (was driven via PQW_IO_16O_RLY)
 #include "QX_DO24.h"
 #include "XKC_Y25_RS485.h"
 #include "Serial_port.h"
@@ -1468,7 +1468,13 @@ private:
     // handles serialization within cli_22_.
     ZDT_motor_control zdt_[9];   // index 0..8 → slave 1..9
     JC_100_METER      meter_[9]; // index 0..8 → slave 1..9
-    PQW_IO_16O_RLY    pqw_;
+    // 🔴 [2026-10-01] Type changed PQW_IO_16O_RLY → ZS_DIO_R_RLY: the module at .20 slave 12
+    //    is a ZS-DIO (holding 0x0032 = 12, 0x0043 = 0). Name `pqw_` / constants PQW_* /
+    //    wire tokens kept on purpose (same call as the crane's 09-10 swap): ~60 call sites,
+    //    zero functional gain from renaming. Seeing `pqw_` does NOT mean the hardware is PQW.
+    //    Behaviour change: controlRelay() now verifies the FC06 echo and returns true after
+    //    3 failed tries (PQW's always returned false) — try_or_pause_ callers can now pause.
+    ZS_DIO_R_RLY      pqw_;
     QX_DO24           pwm_;      // 4-ch PWM output, cli_22_ slave 6
     XKC_Y25_RS485     lvl_;            // water tank level sensor (slave 13 on cli_22_)
     XKC_Y25_RS485     lvl_high_;       // [2026-09-17] high-water sensor (slave 14 on cli_22_)

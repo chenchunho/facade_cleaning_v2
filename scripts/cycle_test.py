@@ -90,7 +90,8 @@ _MODES = {
              " [fan=move[:pct]|all[:pct]](位置不限;move=只在下行移動時開 預設7,all=全程同值 預設6、all:5=不開)"
              " [rail=<起>-<迄>|off](滾筒 起→迄、刮刀 迄→起,開跑前先到起點;例 0-100、20-100、100-20;舊 0|100 仍收)"
              " [final_clean=0|1](預設 1:最後一次放繩後在最低點再清一次)"
-             " [return_top=0|1](預設 1:最後一個週期結束拉回頂端;0=停在最低點,週期之間仍會回頂)",
+             " [return_top=0|1](預設 1:最後一個週期結束拉回頂端;0=停在最低點,週期之間仍會回頂)"
+             " [no_arm=1](手臂維修中:不檢查 arm_ready、不做清潔,只跑吊機/吸附/風扇;同 FCV_NO_ARM=1)",
     "crane": "純吊機頂↔底來回 + 每趟姿態統計(讀 raw_x)。參數 [trips]",
     "arm":   "手臂清潔動作耐久(壓上→滑台掃→收)。參數 [cycles] [rail_cm(0=不加滑台)] [slot=RIGHT|LEFT|CENTER]",
 }
@@ -150,6 +151,11 @@ ARM_TARGET_NM = float(os.environ.get("FCV_ARM_NM", "3"))
 # [2026-09-14 per user] 乾掃:FCV_DRY=1 時滾筒段也 wet=False(不噴水、不開滾刷),只驗步態與力控。
 #   預設 0 = 原本行為(滾筒噴水+滾刷)。
 DRY_RUN = os.environ.get("FCV_DRY", "0").strip() == "1"
+# [2026-10-01 per user] 無手臂模式:手臂拆下維修時仍要能驗吊機步態/吸附/風扇順序。
+#   FCV_NO_ARM=1(或參數 no_arm=1):跳過 arm_ready 起跑檢查、每步與補清的手臂清潔(壓上/滑台/刮刀)、
+#   暫停與收尾的 arm_retract;起跑時送 `arm_attached off`、init 後**不切回 on**。
+#   吊機下放、伸腳吸附、收腳、風扇照常 ⇒ 被測項只少了「清潔」。預設關,正式流程不受影響。
+NO_ARM = [KV.get("no_arm", os.environ.get("FCV_NO_ARM", "0")).strip() in ("1", "on", "yes")]
 # 自動偵測：本體若還是舊 binary（沒有 arm_deploy_f 代轉）會回 `ERR unknown_cmd`，
 # 第一次遇到就整輪退回 arm_deploy 舊路徑並大聲說一次。不必手動切旗標。
 ARM_FORCE_MODE = [True]
@@ -788,7 +794,8 @@ def pause_point(where):
     if not PAUSE_REQ[0]: return
     print("[PAUSE] paused where=%s —— 收臂、關水泵/滾刷、風扇停;腳維持吸附、吊機不動" % where)
     ask(WROBOT, "water_pump off", 10); ask(WROBOT, "brush off", 10)
-    ask(WROBOT, "arm_retract", 30); fan(FAN_OFF)
+    if not NO_ARM[0]: ask(WROBOT, "arm_retract", 30)
+    fan(FAN_OFF)
     t0 = time.time()
     while PAUSE_REQ[0]:
         if time.time() - t0 > PAUSE_MAX_S:
@@ -824,7 +831,8 @@ def cleanup():
     ⚠️ 手臂收回**不會**破壞現場證據：θ 與 tau 在中止當下已經被記錄，收回只是卸力。
     ⚠️ 放在最前面：先卸力再處理其他，因為其他兩件都不緊急。
     """
-    print("   [收尾] 手臂 arm_retract : %s" % ask(WROBOT, "arm_retract", 90)[:50])
+    if not NO_ARM[0]:
+        print("   [收尾] 手臂 arm_retract : %s" % ask(WROBOT, "arm_retract", 90)[:50])
     print("   [收尾] 風扇 %d%% / motion_hz→%d : %s / %s"
           % (FAN_OFF, DOWN_HZ, fan(FAN_OFF), ask(CRANE, "set_motion_hz %d" % DOWN_HZ, 15)))
     # [2026-09-16] 背景關閥計時器可能還沒到 —— 收尾一律關閥(冪等),否則腳本結束後閥還開著,
@@ -1029,7 +1037,10 @@ _sealed = [k for k in ("p5", "p6", "p7", "p8") if field(ws1, k) is not None and 
 if _sealed:
     print("🔴 起跑時已吸附(%s ≤ -40 kPa)—— 不是乾淨起點,請先 `pusher all retract` 收腳再開始。" % ",".join(_sealed))
     sys.exit(1)
-if sfield(ws1, "arm_ready") != "1":
+if NO_ARM[0]:
+    print("⚠️ 【無手臂模式】FCV_NO_ARM=1 / no_arm=1:不檢查 arm_ready、不做任何清潔動作,只跑吊機/吸附/風扇。")
+    print("   arm_attached → %s" % ask(WROBOT, "arm_attached off", 10)[:40])
+elif sfield(ws1, "arm_ready") != "1":
     print("🔴 arm_ready=%s —— 手臂未待命(STARTUP/INIT 失敗?看 fcv-arm log),不跑。" % sfield(ws1, "arm_ready")); sys.exit(1)
 cs1 = ask(CRANE, "status", 10)
 print("共用值快照(Manual 調的、這趟就用的):")
@@ -1149,7 +1160,7 @@ if not _pump_on:
         print("真空幫浦 A/B 皆 OFF → 自動送 init(會開幫浦;arm_attached 先關再開,不動手臂)…")
         ask(WROBOT, "arm_attached off", 10)
         r_init = ask(WROBOT, "init", 90)
-        ask(WROBOT, "arm_attached on", 10)
+        if not NO_ARM[0]: ask(WROBOT, "arm_attached on", 10)   # 無手臂模式維持 off
         if not r_init.startswith("OK"):
             print("🔴 init 失敗:%s —— 沒有真空源,不跑。" % r_init[:100]); sys.exit(1)
         rs2 = ask(WROBOT, "relay_status", 15)
@@ -1435,7 +1446,9 @@ try:
                 crossbar_skip_steps[0] += 1
                 print("   ⚠ 高度 %d cm 落在橫桿跳過帶 %d-%d cm —— 跳過手臂 deploy(不壓橫桿)、續到下一位置"
                       % (int(cur), skip_bar[0], skip_bar[1]))
-            if not skip_rail and skip_bar is None:
+            if NO_ARM[0]:
+                print("   (無手臂模式:跳過本步清潔)")
+            elif not skip_rail and skip_bar is None:
                 pause_point("step%d_before_roller" % i)
                 arm_clean_combo("RIGHT", wet=not DRY_RUN)   # 滾筒:噴水 + 滾刷 + 滑台 起點→對面(FCV_DRY=1 → 乾掃)
                 pause_point("step%d_before_squeegee" % i)
@@ -1552,7 +1565,9 @@ try:
                 time.sleep(0.3)
             n_seal_b = sum(1 for p in (pr_b or []) if p is not None and p <= VAC_OK_KPA)
             print("      四顆壓力 %s(吸到 %d 顆)" % ("/".join("%s" % p for p in (pr_b or [])), n_seal_b))
-            if n_seal_b == 0:
+            if NO_ARM[0]:
+                print("      (無手臂模式:補清跳過清潔)")
+            elif n_seal_b == 0:
                 no_seal_steps[0] += 1
                 print("      ⚠ 真空未建立 —— 補清跳過清潔,直接收腳")
             elif in_skip_band(cur_b) is not None:

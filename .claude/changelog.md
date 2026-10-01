@@ -6,8 +6,11 @@
 > 保留「原因 / 決策(尤其被否決的)/ 驗證結論」。原則 ≤40 行,驗證表可超。
 > (原 2026-04 的「# 修改日誌」格式範本已由本說明取代。)
 
-## 索引(全部 156 條,新的在上)
+## 索引(全部 159 條,新的在上)
 
+- `[2026-10-01e]` 設定持久化只存與預設不同的值(本體 settings.json / 吊機 crane_settings.txt;全預設刪檔)→ (本檔)
+- `[2026-10-01d]` 本體繼電器換 `ZS_DIO_R_RLY`(實證是 ZS-DIO)+ ZS 驅動補強(原子交易 + 回覆驗證)→ (本檔)
+- `[2026-10-01c]` `cycle_test.py` 無手臂模式 `no_arm=1`/`FCV_NO_ARM=1`;風扇順序真機通過 → (本檔)
 - `[2026-10-01b]` `deploy.sh` body/crane 補同步 `user_lib/ transport/ common/`(本體部署因只送 app/ 而編譯失敗);本體半邊上機驗證 → (本檔)
 - `[2026-10-01a]` 測試機部署 + 上機驗證 hold 租約/30 Hz/hold_active/設定持久化;🔴 修 `crcmd.py` 每條固定等 2 s ⇒ ExecStartPost 19 行回放 82 s 逼近 90 s 啟動逾時 → 21 s → (本檔)
 - `[2026-09-30b]` `DEPLOY_F` 工作力道定案 3:手臂 header `DEPLOY_F_TARGET_NM` 5→3,與腳本/GUI 一致 → (本檔)
@@ -168,6 +171,26 @@
 ---
 
 ## 當月全文(2026-09,98 條)
+
+## [2026-10-01e] 設定持久化:只存與預設不同的值
+
+per user。09-30 的自動持久化整組寫入 ⇒ 檔一存在,之後改程式預設不生效。改:`WashRobot::save_settings_file_` 與 `persist_crane_settings` 逐鍵比對編譯預設(double 容差 1e-9),只寫不同的;全部預設 ⇒ `std::remove` 刪檔。代價(已接受):刻意設成等於預設的值會跟著日後預設變。
+吊機兩個預設寫在宣告處的(`fine_adjust_diff_tol` 1、`level_deg_per_cm` 0.85)以字面值比對並註明。
+驗證:測試機兩台部署後實測(見 work_log 10-01)。
+
+## [2026-10-01d] 本體繼電器換 ZS-DIO 驅動 + ZS 驅動補強(真機驗證)
+
+起因:`.20` slave 12 holding `0x0032`=12(ZS 站號)、`0x0043`=0(PQW 站號)⇒ 本體那顆是 ZS-DIO,與吊機 09-10 同坑。per user 換。
+- `user_lib/ZS_DIO_R_RLY.{h,cpp}`:`sendAndReceive` 改 `TCP_client::sendAndReceive` 原子交易;`parseBitResponse` 驗 slave/FC/長度/CRC;`readGroupState` 同。公開介面不變。檔頭由「退役、未硬化」改為現況。
+- `app/WASH_ROBOT.{h,cpp}`:`pqw_` 型別 PQW_IO_16O_RLY → ZS_DIO_R_RLY(名稱/常數刻意不改);init 訊息改 `relay ZS-DIO`。`scripts/build/build_body.sh` 清單 PQW→ZS。
+- 行為差異:`controlRelay` 驗 FC06 echo,3 次失敗回 true(PQW 版永遠 false)。
+- 驗證:本機兩支 binary 編譯連結;真機 CH1/2/3/6/7/8 on/off 回讀全對、selfcheck、init→attach→detach→retract(CH6)正常、ZSDIO 錯誤 0。未測 CH4/CH5(手臂拆修)。
+- 文件:CLAUDE.md 架構圖/吸盤控制/驅動表、HARDWARE.md §2 更正。
+
+## [2026-10-01c] `cycle_test.py` 無手臂模式 + 風扇順序真機驗證
+
+per user「手臂拆下維修」→ B 案:`no_arm=1`(或 `FCV_NO_ARM=1`)跳過 `arm_ready` 起跑檢查、每步與最低點補清的 `arm_clean_combo`/`arm_slot`、`pause_point` 與 `cleanup` 的 `arm_retract`;起跑送 `arm_attached off`,自動 init 後不切回 on。預設關。
+驗證:fake_robot 整趟 rc=0、指令序列除 `arm_attached off` 無任何 arm_*;真機 `full 1 1 10 rail=off final_clean=0 no_arm=1`(乾跑)→ ①`pwm 5`→②③伸腳→吸 3 顆→④收腳→⑤`pwm 7`→下放,**09-23 改回的原版風扇順序在真機確認**。
 
 ## [2026-10-01b] `deploy.sh` 補同步驅動層 + 本體半邊上機驗證(測試機,WiFi)
 

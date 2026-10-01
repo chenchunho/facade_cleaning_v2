@@ -62,14 +62,14 @@ std::vector<uint8_t> ZS_DIO_R_RLY::sendAndReceive(const std::vector<uint8_t>& cm
 {
 	LOG_HEX(_log_tag, "TX", cmd.data(), (int)cmd.size());
 
-	client().sendData(
-		reinterpret_cast<const char*>(cmd.data()),
-		(int)cmd.size(),
-		100
-	);
-
+	// [2026-10-01] One atomic drain→send→recv transaction (TCP_client::sendAndReceive).
+	// The old separate sendData()/receiveData() released the socket lock in between:
+	// fine on the crane's dedicated .32 gateway, but the body's relay shares .20 with
+	// the ZDT pushers and the DM2J rail, driven from several threads — exactly the
+	// frame interleave that made every other .20/.22 driver go atomic on 2026-09-01.
 	uint8_t buf[64];
-	int n = client().receiveData(reinterpret_cast<char*>(buf), sizeof(buf), timeout_ms);
+	int n = client().sendAndReceive(reinterpret_cast<const char*>(cmd.data()), (int)cmd.size(),
+	                                reinterpret_cast<char*>(buf), sizeof(buf), 100, timeout_ms);
 
 	if (n <= 0)
 		return {};
@@ -102,12 +102,32 @@ bool ZS_DIO_R_RLY::verifyEcho(const std::vector<uint8_t>& cmd, const std::vector
 bool ZS_DIO_R_RLY::parseBitResponse(const std::vector<uint8_t>& resp, int count, std::vector<bool>& states)
 {
 	// response format: [slave_id] [func] [byte_count] [data...] [crc_lo] [crc_hi]
+	// [2026-10-01] Validate before believing it (same checks as PQW parseReadResponse):
+	// a garbled frame used to be decoded as relay states — on a shared, noisy bus
+	// (fan-on, 10-01 log) that could "confirm" an OFF that never happened.
 	if (resp.size() < 5)
 		return true;
+	if (resp[0] != slave_id) {
+		LOG_ERR(_log_tag, "bit reply slave %d != %d", (int)resp[0], (int)slave_id);
+		return true;
+	}
+	if (resp[1] != 0x01 && resp[1] != 0x02) {       // 0x81/0x82 = Modbus exception
+		LOG_ERR(_log_tag, "bit reply FC 0x%02X", (int)resp[1]);
+		return true;
+	}
 
 	int byte_count = resp[2];
 	if ((int)resp.size() < 3 + byte_count + 2)
 		return true;
+	if (byte_count < (count + 7) / 8) {
+		LOG_ERR(_log_tag, "bit reply too short: %d bytes for %d ch", byte_count, count);
+		return true;
+	}
+	const uint16_t rx_crc = (uint16_t)resp[3 + byte_count] | ((uint16_t)resp[4 + byte_count] << 8);
+	if (crc16_modbus(resp.data(), 3 + byte_count) != rx_crc) {
+		LOG_ERR(_log_tag, "bit reply CRC mismatch");
+		return true;
+	}
 
 	states.clear();
 	states.resize(count, false);
@@ -306,6 +326,8 @@ bool ZS_DIO_R_RLY::readGroupState(int group, uint16_t& bitmask)
 	// response format: [slave_id] [func] [byte_count] [data_hi] [data_lo] [crc_lo] [crc_hi]
 	if (resp.size() < 7)
 		return true;
+	if (resp[0] != slave_id || resp[1] != 0x04 || resp[2] != 2) return true;   // [2026-10-01]
+	if (crc16_modbus(resp.data(), 5) != ((uint16_t)resp[5] | ((uint16_t)resp[6] << 8))) return true;
 
 	bitmask = ((uint16_t)resp[3] << 8) | resp[4];
 	return false;

@@ -66,7 +66,7 @@
 
 | 段 | 網關 | 屬 | 掛載(slave) | 驅動程式(`user_lib/`) | 擁有者 |
 |---|---|---|---|---|---|
-| **B1 動力/滑台** | `.20` | 本體 | ZDT 推桿 ×4(**5,6,7,8**)、PQW 繼電器(**12**,**實體 8CH**)、DM2J 上滑台(**14**) | ZDT_motor_control、PQW_IO_16O_RLY、DM2J_RS570 | WashRobot |
+| **B1 動力/滑台** | `.20` | 本體 | ZDT 推桿 ×4(**5,6,7,8**)、**ZS-DIO** 繼電器(**12**,**實體 8CH**;🔴 2026-10-01 實證,之前誤記 PQW)、DM2J 上滑台(**14**) | ZDT_motor_control、**ZS_DIO_R_RLY**(10-01 起;原 PQW_IO_16O_RLY)、DM2J_RS570 | WashRobot |
 | **B2 PWM** | `.21` | 本體 | QX-DO24 4 路 PWM(**9**)—**獨佔整段**,驅動貼牆螺旋槳 ESC | QX_DO24 | WashRobot |
 | **B3 感測** | `.22` | 本體 | JC-100 真空壓力 ×4(**5,6,7,8**)、XKC-Y25 液位(**13**) | JC_100_METER、XKC_Y25_RS485 | WashRobot |
 | **C1 左繩** | `.30` | 吊機 | SE3 變頻 左(**1**);**中繩絞盤 MH300**(設計期為 CLV900 slave 3;**實裝 MH300 掛哪段/哪個 slave 待確認**) | SE3_inverter、MH300_inverter(CLV900_inverter 為設計期殘留) | Crane |

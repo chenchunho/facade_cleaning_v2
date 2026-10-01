@@ -235,12 +235,21 @@ Modify power-loss record flag setting.
 
 When enabled, speed reporting switches from 1 RPM to 0.1 RPM resolution.
 
-## 3.3.6 Modify Homing Parameters
+## 3.3.5 Read Homing Parameters (FC 0x03/0x04, Reg 0x0022 / 括號版 0x001C, Qty 8)
 
-Adjustable homing parameters (via dedicated registers):
-- Homing speed
-- Homing timeout
-- Collision detection: RPM threshold, current threshold, duration threshold
+Source: doc/推桿ZDT/ZDT閉環步進馬達MODBUS協議.pdf p.22–23(2026-10-01 補)。
+回覆 8 個暫存器:R1=[回零模式(H) 回零方向(L)] / R2=回零速度 rpm / R3:R4=回零逾時 ms(32-bit)/
+R5=碰撞判定轉速 rpm / R6=碰撞判定電流 mA / R7=碰撞判定時間 ms / R8=[上電觸發(H) 00]。
+
+🔴 **2026-10-01 本體實測(.20 slave 5~8,四顆相同)**:`FC04 0x0022 ×8` → `[0, 30, 0, 10000, 300, 800, 60, 0]`
+= 模式 0(單圈就近)、**方向 0 = CW**、30 rpm、逾時 10000 ms、碰撞 300 rpm / 800 mA / 60 ms、上電不觸發(**全為出廠預設**)。
+⚠️ **FC03 0x0022 回合法但 byte_count=0 的空回覆;0x001C 回 exception 0x01** ⇒ 這批推桿的韌體走 `0x0022` + **FC04**。
+
+## 3.3.6 Modify Homing Parameters (FC 0x10, Reg 0x004C / 括號版 0x00C0, Qty 9)
+
+TX: `Addr 10 00 4C 00 09 12 AE [store] [mode] [dir] [speed] [timeout 32-bit] [clog_rpm] [clog_ma] [clog_ms] [power_on_trigger] 00 CRC`
+- 方向 00/01 = CW/CCW(預設 CW);速度 0–3000 rpm(預設 30);逾時 ms(預設 10000);碰撞 300 rpm / 800 mA / 60 ms。
+- 原理:堵轉位置當零點,同時滿足 (1) 轉速 < 碰撞轉速 (2) 相電流 > 碰撞電流 (3) 持續 > 碰撞時間。
 
 ## Acceleration Formula (Emm)
 
@@ -290,8 +299,10 @@ speed 0x00F6、estop 0x00FE、batch read 0x04/0x0043/0x10、狀態旗標、CRC16
   **不是 ZDT**。兩者的 homing 能力與暫存器完全不同,曾被混淆。
 - 2026-09-11 因此手刻了 `cmd_zdt_home`(相對驅動撞硬限位+set_zero)來做 24V-blip
   後的重歸零 —— 那其實重造了 ZDT 原生的撞限位歸位(mode 0x02)。
-- 🔮 待辦:試 `trigger_home(0x02)`,能用就換原生歸位(撞限參數見 §3.3.6,可能要調);
-  不能用則保留手刻 zdt_home(已實機驗證可用)。
+- ⚪ **2026-10-01 結案:不換原生歸位,保留手刻 `zdt_home`**(per user)。理由:`trigger_home` 的**方向取自驅動器存的參數**
+  (實測 = 0/CW;本專案伸出用 dir 0 ⇒ 推定 CW = 伸出),直接觸發 0x02 會往牆伸、把「碰到牆」當零點。要用得先對 4 顆寫
+  回零參數(方向 CCW、逾時 ≥15 s:30 rpm 收 20 cm 約 13 s),換推桿/恢復出廠就丟 ⇒ 又會反向撞。手刻版每次**先探測方向**,
+  正好避開這個坑,且 09-11 已實機驗證。
 
 ### ⚠️ 2. pos_mode 的 pulse 是無號,驅動未擋負值
 - §3.2.11:pulse 範圍 0x00000000–0xFFFFFFFF(**無號**),方向由 `dir` 決定。

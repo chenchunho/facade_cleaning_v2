@@ -4851,36 +4851,48 @@ static std::string cmd_set_hold_guard(const std::string& mode) {
 static void persist_crane_settings() {
     const char* home = std::getenv("HOME");
     const std::string path = std::string(home ? home : "/home/user") + "/run/crane_settings.txt";
-    FILE* f = std::fopen(path.c_str(), "w");
-    if (!f) { std::cerr << "[settings] cannot write " << path << "\n"; return; }
-    std::fprintf(f, "set_tension_max_kg %.3f\n",          g_tension_max_kg.load());
-    std::fprintf(f, "set_tension_diff_max_kg %.3f\n",     g_tension_diff_max_kg.load());
-    std::fprintf(f, "set_retract_tension_stop_kg %.3f\n", g_retract_tension_stop_kg.load());
-    std::fprintf(f, "set_length_diff_max_cm %.3f\n",      g_length_diff_max_cm.load());
-    // [2026-09-30] + the balance / Hz tuning family (they used to reset on every
-    // restart). Replayed after the unit's defaults, so the file wins.
-    // Deliberately NOT persisted (each resets for a reason):
+    // [2026-10-01 per user] Only values that differ from the compiled default are
+    // written (absent line = default). Writing all of them pinned every default
+    // into the file, so a later change of a default in the code never reached a
+    // crane that already had the file. Trade-off accepted: a value deliberately
+    // set equal to the default follows future default changes.
+    // Deliberately NOT persisted at all (each resets for a reason):
     //   motion_hz / roll_correct_hz — re-sent by ExecStartPost, and cycle_test
-    //       flips motion_hz 50↔30 mid-run: persisting would keep a run's leftover;
+    //       flips motion_hz 50<->30 mid-run: persisting would keep a run's leftover;
     //   balance_enabled / balance_source / hold_guard / level_auto — mode
     //       switches; a restart returning them to the safe default is the point;
     //   fine_adjust_level_diff — learned by level_auto;
     //   home_ground / wall_height — ExecStartPost owns them.
-    std::fprintf(f, "set_hold_hz %.6g\n",                  g_vfd_hold_hz.load());
-    std::fprintf(f, "set_middle_hz %.6g\n",                g_middle_winch_hz.load());
-    std::fprintf(f, "set_fine_adjust_hz %.6g\n",           g_fine_adjust_hz.load());
-    std::fprintf(f, "set_roll_finish_hz %.6g\n",           g_roll_finish_hz.load());
-    std::fprintf(f, "set_freeze_hz %.6g\n",                g_freeze_hz.load());
-    std::fprintf(f, "set_kick_hz %.6g\n",                  g_kick_hz.load());
-    std::fprintf(f, "set_balance_kp %.6g\n",               g_balance_kp.load());
-    std::fprintf(f, "set_balance_cap %.6g\n",              g_balance_trim_cap_ratio.load());
-    std::fprintf(f, "set_balance_deadband %.6g\n",         g_balance_deadband.load());
-    std::fprintf(f, "set_balance_hz_min %.6g\n",           g_balance_hz_min.load());
-    std::fprintf(f, "set_balance_hz_max %.6g\n",           g_balance_hz_max_offset.load());
-    std::fprintf(f, "set_balance_imu_kp %.6g\n",           g_balance_imu_kp.load());
-    std::fprintf(f, "set_balance_imu_deadband %.6g\n",     g_balance_imu_deadband.load());
-    std::fprintf(f, "set_fine_adjust_diff_tol %d\n",       (int)g_fine_adjust_diff_tol_cm.load());
-    std::fprintf(f, "set_level_deg_per_cm %.6g\n",         g_level_deg_per_cm.load());
+    std::string body;
+    char line[96];
+    auto w = [&](const char* cmd, double v, double d) {
+        if (std::fabs(v - d) <= 1e-9) return;
+        std::snprintf(line, sizeof(line), "%s %.6g\n", cmd, v);
+        body += line;
+    };
+    w("set_tension_max_kg",          g_tension_max_kg.load(),          TENSION_MAX_KG_DEFAULT);
+    w("set_tension_diff_max_kg",     g_tension_diff_max_kg.load(),     TENSION_DIFF_MAX_KG_DEFAULT);
+    w("set_retract_tension_stop_kg", g_retract_tension_stop_kg.load(), RETRACT_TENSION_STOP_KG_DEFAULT);
+    w("set_length_diff_max_cm",      g_length_diff_max_cm.load(),      LENGTH_DIFF_MAX_CM_DEFAULT);
+    w("set_hold_hz",                 g_vfd_hold_hz.load(),             VFD_HOLD_HZ_DEFAULT);
+    w("set_middle_hz",               g_middle_winch_hz.load(),         MIDDLE_WINCH_HZ_DEFAULT);
+    w("set_fine_adjust_hz",          g_fine_adjust_hz.load(),          FINE_ADJUST_HZ_DEFAULT);
+    w("set_roll_finish_hz",          g_roll_finish_hz.load(),          ROLL_FINISH_HZ_DEFAULT);
+    w("set_freeze_hz",               g_freeze_hz.load(),               FREEZE_HZ_DEFAULT);
+    w("set_kick_hz",                 g_kick_hz.load(),                 KICK_HZ_DEFAULT);
+    w("set_balance_kp",              g_balance_kp.load(),              BALANCE_KP_DEFAULT);
+    w("set_balance_cap",             g_balance_trim_cap_ratio.load(),  BALANCE_TRIM_CAP_RATIO_DEFAULT);
+    w("set_balance_deadband",        g_balance_deadband.load(),        BALANCE_DEADBAND_DEFAULT);
+    w("set_balance_hz_min",          g_balance_hz_min.load(),          BALANCE_HZ_MIN_DEFAULT);
+    w("set_balance_hz_max",          g_balance_hz_max_offset.load(),   BALANCE_HZ_MAX_OFFSET_DEFAULT);
+    w("set_balance_imu_kp",          g_balance_imu_kp.load(),          BALANCE_IMU_KP_DEFAULT);
+    w("set_balance_imu_deadband",    g_balance_imu_deadband.load(),    BALANCE_IMU_DEADBAND_DEFAULT);
+    w("set_fine_adjust_diff_tol",    g_fine_adjust_diff_tol_cm.load(), 1);      // literal default at its declaration
+    w("set_level_deg_per_cm",        g_level_deg_per_cm.load(),        0.85);   // ditto
+    if (body.empty()) { std::remove(path.c_str()); return; }   // all defaults: no file
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (!f) { std::cerr << "[settings] cannot write " << path << "\n"; return; }
+    std::fputs(body.c_str(), f);
     std::fclose(f);
 }
 

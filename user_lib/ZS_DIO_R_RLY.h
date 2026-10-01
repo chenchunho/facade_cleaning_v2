@@ -1,23 +1,17 @@
-// ⚰️ RETIRED FROM PRODUCTION — 2026-05-07, marked 2026-08-28
+// ✅ BACK IN PRODUCTION (two units):
+//   - crane  : water-inlet relay @ USR_W .32 slave 1, 4CH (since 2026-09-10)
+//   - body   : main 8CH relay   @ USR .20 slave 12      (since 2026-10-01 — it had
+//              always been a ZS-DIO driven by PQW_IO_16O_RLY; proven by reading
+//              holding reg 0x0032 = 12 (ZS station) while 0x0043 (PQW station) = 0)
 //
-// 捲揚機繼電器控制。2026-05-07 起左右鋼索改由兩台 SE3-210 變頻器驅動
-// （Crane_control_PI/main.cpp:41），本 driver **已不在任何主控程式裡**：
-// 全 repo 只剩 `Linux_test/main.cpp` 的第 10 項選單引用它，作為 bench 工具。
-//
-// 🔴 **本檔刻意不隨 2026-08-28 的 driver 稽核一起硬化。** 那一輪替
-// SD76 / DSZL / DY-500 / SE3 / MH300 / CLV900 / ZDT / PQW / DM2J 補上了
-// 回覆驗證（slave id / 功能碼 / 長度邊界 / CRC）。本檔同樣缺這些檢查，
-// 但既然 production 不再使用，改它只會增加沒人驗證的改動面。
-//   → parseBitResponse() 已有 `3 + byte_count + 2` 的長度邊界，走 vector，
-//     **沒有記憶體覆寫風險**；缺的是 slave id 與 CRC，後果僅止於
-//     bench 工具讀到錯的繼電器狀態。
-//
-// 📌 **哪些內容仍然有效**：暫存器與線圈位址對照見
-// `.claude/summaries/ZS_DIO_MODBUS_SUMMARY.md`（保留作歷史對照）。
-//
-// ⚠️ **若日後要讓它重回 production，先補回覆驗證再說**——照
-// `PQW_IO_16O_RLY::parseReadResponse()` 的寫法即可，那支是同類型的
-// 繼電器模組、同樣走 FC 0x01。
+// 2026-10-01 hardening (the header used to say "harden before reuse"):
+//   - every transaction is one atomic TCP_client::sendAndReceive() (the body's
+//     .20 bus is shared with ZDT/DM2J across threads);
+//   - FC01/FC02/FC04 replies are checked for slave id, function code, length, CRC.
+//   - FC06 writes were already verified by exact echo (verifyEcho). Note: the
+//     "PQW echoes 05 as 00, non-standard" quirk recorded in PQW_IO_16O_RLY.cpp
+//     was this ZS module answering an FC05 it doesn't natively speak.
+// Register / coil map: .claude/summaries/ZS_DIO_MODBUS_SUMMARY.md
 #ifndef ZS_DIO_R_RLY_H
 #define ZS_DIO_R_RLY_H
 
