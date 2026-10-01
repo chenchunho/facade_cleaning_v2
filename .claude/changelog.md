@@ -6,8 +6,9 @@
 > 保留「原因 / 決策(尤其被否決的)/ 驗證結論」。原則 ≤40 行,驗證表可超。
 > (原 2026-04 的「# 修改日誌」格式範本已由本說明取代。)
 
-## 索引(全部 154 條,新的在上)
+## 索引(全部 155 條,新的在上)
 
+- `[2026-10-01a]` 測試機部署 + 上機驗證 hold 租約/30 Hz/hold_active/設定持久化;🔴 修 `crcmd.py` 每條固定等 2 s ⇒ ExecStartPost 19 行回放 82 s 逼近 90 s 啟動逾時 → 21 s → (本檔)
 - `[2026-09-30b]` `DEPLOY_F` 工作力道定案 3:手臂 header `DEPLOY_F_TARGET_NM` 5→3,與腳本/GUI 一致 → (本檔)
 - `[2026-09-30a]` 待辦 A 組 15 項(#3 滑台平衡經確認不需要):**hold 租約 1.5 s + `hold_renew`**、吊機本體鏈路年齡 `body_link_age_ms`(只觀測)、hold 中擋 motion(`ERR hold_active`)、**pay_out 30 Hz 上限**、本體閘道重連自動 selfcheck、rail 送出重試、ZDT `pulse<0`、`vacuum left/right` 拒絕、5 個死 setting 移除、設定自動持久化(本體 `settings.json` / 吊機 `crane_settings.txt` 擴充)、本體 watchdog 閒置改看 IMU 回覆、include guard、過期註解、`set_imu_roll` log 節流、`QX_DO24::init` 對齊 → (本檔)
 - `[2026-09-23a]` `cycle_test.py` 風扇順序改回原版(伸腳前關、收腳後開)+ 刪 `WASH_ROBOT.h` 孤兒註解;待辦總表清帳重建(舊表歸檔)→ (本檔)
@@ -166,6 +167,26 @@
 ---
 
 ## 當月全文(2026-09,98 條)
+
+## [2026-10-01a] 測試機(raspberry-cran)部署 6f910ff 吊機/server/GUI + 上機驗證;crcmd 啟動逾時修正
+
+**部署**(`deploy.sh crane/server/web`,GUI `v3-2026.10.01-1526`):吊機相依檔與 repo md5 全一致,只同步 main.cpp。本體離線,本體側未部署。
+
+**🔴 部署當下抓到**:`crane_settings.txt` 由 4 行變 19 行後,`systemctl restart fcv-crane` 量到 **82 s**(`TimeoutStartUSec=90s`)——開機慢一點 systemd 就會判啟動失敗、殺掉吊機。根因 `scripts/crcmd.py` 每條指令固定 `drain(2.0 s)`,且 unit 每行開一個 python。
+修:`crcmd.py` 收到第一行非 EVT 回覆即換下一條(上限仍 2 s);`fcv-crane.service` 改 `tr '\n' '\0' | xargs -0 python3 crcmd.py` 一次送完。→ **21 s**。測試機 unit 已換(舊檔 `.prev-1001-*`;舊檔是 09-19 前版,StartLimit 兩行還在 [Service])。⚠️ **official 的 unit 也要換**(下次上 official 時)。
+
+**上機驗證(測試機,繩上無負載)**:
+| 項目 | 結果 |
+|---|---|
+| status `pay_out_max_hz=30`、`body_link_age_ms=-1`(本體不在)、`hold_renew` 閒置回 idle | ✅ |
+| 設定持久化:改 `balance_kp 1.9` → 重啟仍 1.9、`motion_hz` 仍 30(驗完改回 1.0) | ✅ |
+| 續約撐得住:▼ 左按住 5.5 s 未被租約放掉 | ✅ |
+| 關分頁:0.46 s 就收到 off —— 是既有 blur/visibilitychange 保護,**不是租約** | ✅(舊保護) |
+| **斷線**:按住 ▲ 左 0.5 s 後在吊機端 nft 丟 laptop→:8080(模擬 WiFi 斷)→ `lease expired (1563 ms)`,切斷到停 1.67 s | ✅ |
+| 按住時送 `pay_out 1` → `ERR hold_active` | ✅ |
+| `hold_hz 50` 時 ▼ 雙側 → `dual_vfd_hold_start pay_out=1 hz=30`(驗完改回 10) | ✅ |
+
+📌 使用者用 WiFi,拔線測不了 ⇒ 改在 Pi 端用臨時 nft 表(`inet fcvcut`,priority -10,測完整表刪除)擋封包;這招比拔線更可重現,之後要測斷線可沿用。
 
 ## [2026-09-30b] `DEPLOY_F` 工作力道定案 3(未上機)
 

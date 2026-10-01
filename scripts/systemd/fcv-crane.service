@@ -14,7 +14,7 @@ WorkingDirectory=/home/user/run
 ExecStart=/bin/sh -c "mkfifo -m 600 /home/user/run/crane.in 2>/dev/null; exec 3<> /home/user/run/crane.in; exec stdbuf -oL -eL ./crane_control_PI.out <&3"
 # 🔴 這三個執行期參數**不持久化**,重啟一定要補送(2026-09-17 起另加 crane_settings.txt:張力/繩長差門檻,2026-09-30 再加平衡/Hz 調校家族,由程式在 set_* 時自動寫;motion_hz 刻意不在檔內),否則:home_ground_cm 回 0(cycle_test 會誤判慣例)、
 #    wall_height_cm 回 0(goto 直接拒絕)、motion_hz 回編譯預設。牆高從 web 存的 wall_height.json 讀。
-ExecStartPost=/bin/sh -c "sleep 20; cd /home/user/run; W=$(python3 -c 'import json;print(int(json.load(open(\"/home/user/run/wall_height.json\"))[\"cm\"]))' 2>/dev/null || echo 0); python3 crcmd.py 'set_home_ground 0' 'set_motion_hz 30' 'set_roll_correct_hz 30' \"set_wall_height $W\"; if [ -f crane_settings.txt ]; then L=$(cat crane_settings.txt); echo \"$L\" | while read -r l; do [ -n \"$l\" ] && python3 crcmd.py \"$l\"; done; fi"
+ExecStartPost=/bin/sh -c "sleep 20; cd /home/user/run; W=$(python3 -c 'import json;print(int(json.load(open(\"/home/user/run/wall_height.json\"))[\"cm\"]))' 2>/dev/null || echo 0); python3 crcmd.py 'set_home_ground 0' 'set_motion_hz 30' 'set_roll_correct_hz 30' \"set_wall_height $W\"; if [ -f crane_settings.txt ]; then L=$(cat crane_settings.txt); echo \"$L\" | tr '\\n' '\\0' | xargs -0 python3 crcmd.py; fi"
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:/home/user/run/logs/crane_service.log
