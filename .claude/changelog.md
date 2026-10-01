@@ -6,8 +6,9 @@
 > 保留「原因 / 決策(尤其被否決的)/ 驗證結論」。原則 ≤40 行,驗證表可超。
 > (原 2026-04 的「# 修改日誌」格式範本已由本說明取代。)
 
-## 索引(全部 155 條,新的在上)
+## 索引(全部 156 條,新的在上)
 
+- `[2026-10-01b]` `deploy.sh` body/crane 補同步 `user_lib/ transport/ common/`(本體部署因只送 app/ 而編譯失敗);本體半邊上機驗證 → (本檔)
 - `[2026-10-01a]` 測試機部署 + 上機驗證 hold 租約/30 Hz/hold_active/設定持久化;🔴 修 `crcmd.py` 每條固定等 2 s ⇒ ExecStartPost 19 行回放 82 s 逼近 90 s 啟動逾時 → 21 s → (本檔)
 - `[2026-09-30b]` `DEPLOY_F` 工作力道定案 3:手臂 header `DEPLOY_F_TARGET_NM` 5→3,與腳本/GUI 一致 → (本檔)
 - `[2026-09-30a]` 待辦 A 組 15 項(#3 滑台平衡經確認不需要):**hold 租約 1.5 s + `hold_renew`**、吊機本體鏈路年齡 `body_link_age_ms`(只觀測)、hold 中擋 motion(`ERR hold_active`)、**pay_out 30 Hz 上限**、本體閘道重連自動 selfcheck、rail 送出重試、ZDT `pulse<0`、`vacuum left/right` 拒絕、5 個死 setting 移除、設定自動持久化(本體 `settings.json` / 吊機 `crane_settings.txt` 擴充)、本體 watchdog 閒置改看 IMU 回覆、include guard、過期註解、`set_imu_roll` log 節流、`QX_DO24::init` 對齊 → (本檔)
@@ -167,6 +168,14 @@
 ---
 
 ## 當月全文(2026-09,98 條)
+
+## [2026-10-01b] `deploy.sh` 補同步驅動層 + 本體半邊上機驗證(測試機,WiFi)
+
+- `scripts/deploy.sh`:`deploy_body` 加送 `user_lib/*` `transport/*` `common/*.h` `facade_cleaning_v2/main.cpp`;`deploy_crane` 加送 `user_lib/*` `transport/*` `common/*.h` `mechanism/*.h`。
+  起因:09-30 改了 ZDT/QX/DM2J 與 `Serial_port.h` 的 guard,`deploy body` 只送 `app/`+`command/` → Pi 上編譯失敗(這次是失敗;簽名沒變的話會**靜默**編出新舊混合)。
+- 本體部署前發現 drop-in 還指 official(`.1.10`)→ 停用為 `endpoints.conf.official-disabled`,回到 unit 預設 `.5.25`。
+- 驗證全過:vacuum 分組錯誤碼、死 setting 移除、`set_setting` 持久化(測完移除 `settings.json`)、`crane_idle_ms` 不再無限長大、`body_link_age_ms` ~100、IMU log 節流、**`.21` 斷電再上電 4.5 s 自動重連 + 自動 selfcheck(`dev_qx=1`,免重啟)**。
+- 發現待拍板:持久化整組寫入 ⇒ 檔案存在後程式預設值變更不生效。未做:手臂部署、風扇順序(per user)。
 
 ## [2026-10-01a] 測試機(raspberry-cran)部署 6f910ff 吊機/server/GUI + 上機驗證;crcmd 啟動逾時修正
 

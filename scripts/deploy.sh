@@ -69,6 +69,12 @@ deploy_body() {
     say "同步原始碼"
     scp -q "$REPO"/app/WASH_ROBOT.{h,cpp} "$REPO"/app/wash_robot_commands.cpp "$BODY":~/projects/facade_cleaning_v2/app/ || die "scp app 失敗"
     scp -q "$REPO"/command/dispatcher.cpp "$BODY":~/projects/facade_cleaning_v2/command/ || die "scp command 失敗"
+    # [2026-10-01] 驅動層 / 傳輸層 / common 也要送:09-30 只改了 user_lib(ZDT/QX/DM2J)與 transport 的 guard,
+    #   本函式原本只送 app/ + command/ ⇒ Pi 上拿舊驅動編 → 編譯失敗(那次幸好失敗;若簽名沒變就會**靜默**編出半新半舊)。
+    scp -q "$REPO"/user_lib/*.cpp "$REPO"/user_lib/*.h "$BODY":~/projects/facade_cleaning_v2/user_lib/ || die "scp user_lib 失敗"
+    scp -q "$REPO"/transport/*.cpp "$REPO"/transport/*.h "$BODY":~/projects/facade_cleaning_v2/transport/ || die "scp transport 失敗"
+    scp -q "$REPO"/common/*.h "$BODY":~/projects/facade_cleaning_v2/common/ || die "scp common 失敗"
+    scp -q "$REPO"/facade_cleaning_v2/main.cpp "$BODY":~/projects/facade_cleaning_v2/facade_cleaning_v2/ || die "scp main 失敗"
     say "Pi 上編譯"
     # [2026-09-16] `~/run/build_body.sh` 是 Pi 上的副本,repo 改了 TU 清單(例如拿掉 DY_500)它不會跟著變 ⇒ 每次先同步。
     scp -q "$REPO"/scripts/build/build_body.sh "$BODY":~/run/build_body.sh || die "scp build_body.sh 失敗"
@@ -101,6 +107,11 @@ deploy_arm() {
 deploy_crane() {
     say "同步原始碼"
     scp -q "$REPO"/Crane_control_PI/main.cpp "$CRANE":~/projects/facade_cleaning_v2/Crane_control_PI/ || die "scp 失敗"
+    # [2026-10-01] 同 deploy_body:驅動/傳輸/common 一起送,否則只改驅動時 Pi 用舊檔編。
+    scp -q "$REPO"/user_lib/*.cpp "$REPO"/user_lib/*.h "$CRANE":~/projects/facade_cleaning_v2/user_lib/ || die "scp user_lib 失敗"
+    scp -q "$REPO"/transport/*.cpp "$REPO"/transport/*.h "$CRANE":~/projects/facade_cleaning_v2/transport/ || die "scp transport 失敗"
+    scp -q "$REPO"/common/*.h "$CRANE":~/projects/facade_cleaning_v2/common/ || die "scp common 失敗"
+    scp -q "$REPO"/mechanism/*.h "$CRANE":~/projects/facade_cleaning_v2/mechanism/ || die "scp mechanism 失敗"
     say "Pi 上編譯"
     scp -q "$REPO"/scripts/build/build_crane.sh "$CRANE":~/run/build_crane.sh || die "scp build_crane.sh 失敗"   # 同上,副本要跟著 repo
     $SSH "$CRANE" 'bash ~/run/build_crane.sh 2>&1 | tail -2' </dev/null | /bin/grep -q crane_drv.out || die "編譯失敗(見上)"

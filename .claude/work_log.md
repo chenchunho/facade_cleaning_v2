@@ -16,7 +16,7 @@
 | | 項目 | 出處 |
 |---|---|---|
 | 🔴 | **抗風 / 低樓層貼牆的現場量測**(9/19 實測兩大問題的前置):① 吊點離牆水平距離 d、吸盤面到掛點深度 ② 測試牆面朝向 ③ 風扇全速推力 ④ 拉 9/19 log:橫移/失敗時的 roll、張力、風扇占空比、每次吸附的 `p5..p8`(吸到哪幾顆、是否同側、高度)⇒ 算「各高度 × 風速」可作業範圍(⚪ 10-01 per user:**9/19 報告 v2 不做**,DJI 空拍不再補看;報告維持 v1) | 報告 3.3/3.5 |
-| 🔴 | **部署到 `6f910ff` 並驗**(含 09-21/23/30 三批 + 手臂 `DEPLOY_F` 預設 3 ⇒ **手臂也要部署**):`prep-official` → `FCV_TARGET=official deploy.sh crane/body/web/script`;驗計米器標紅、goto 軟停文字、`rail -300` 回 reason、`ntp_probe.sh`、**風扇新順序**;🆕 **09-30 A 組**:①② ✅ **10-01 測試機已驗**(租約/30 Hz/hold_active/吊機設定持久化),official 部署後只需抽驗;🔴 **official 的 `fcv-crane.service` 要換新版**(否則 19 行回放 82 s 逼近 90 s 啟動逾時);③ `body_link_age_ms` 平常 ≤300、斷 WiFi 發 `body_link_stale` ④ 本體 `.21` 晚上電 → 自動 `selfcheck_auto` ⑤ `set_setting` 後重啟值還在、`crane_settings.txt` 19 行 ⑥ `crane_idle_ms` 閒置不再無限長大 | 09-21/23/30 |
+| 🔴 | **部署到 `6f910ff` 並驗**(含 09-21/23/30 三批 + 手臂 `DEPLOY_F` 預設 3 ⇒ **手臂也要部署**):`prep-official` → `FCV_TARGET=official deploy.sh crane/body/web/script`;驗計米器標紅、goto 軟停文字、`rail -300` 回 reason、`ntp_probe.sh`、**風扇新順序**;🆕 **09-30 A 組**:①② ✅ **10-01 測試機已驗**(租約/30 Hz/hold_active/吊機設定持久化),official 部署後只需抽驗;🔴 **official 的 `fcv-crane.service` 要換新版**(否則 19 行回放 82 s 逼近 90 s 啟動逾時);🔴 **本體 drop-in 改回 official**(`fcv-body.service.d/endpoints.conf.official-disabled` → `endpoints.conf` + `systemctl --user daemon-reload`,10-01 為接測試吊機而停用);✅ 本體半邊 10-01 測試機已驗(vacuum 分組、settings 持久、gw 重連 selfcheck、鏈路年齡);剩手臂部署 + 風扇順序;③ `body_link_age_ms` 平常 ≤300、斷 WiFi 發 `body_link_stale` ④ 本體 `.21` 晚上電 → 自動 `selfcheck_auto` ⑤ `set_setting` 後重啟值還在、`crane_settings.txt` 19 行 ⑥ `crane_idle_ms` 閒置不再無限長大 | 09-21/23/30 |
 | 🟡 | **WiFi 橋 RF**:9/19 實測全程連線正常、IMU 平衡經 WiFi 表現良好;但 RSSI −70、Tx PER 83% 仍偏弱(前一晚曾斷 285 s)。主路由改 20 MHz、拉近/對準;長期 5 GHz 或有線 | 09-19、報告 2.2 |
 | 🔴 | **`.22` 匯流排實體層沒修**(終端電阻/線長/接地未查);風扇開 15× 錯誤;official 也偶發 JC100:5 TIMEOUT;**JC-100 slave 8 換表頭**(單日 67 錯) | 舊#26/#27、09-15 |
 | 🟡 | **本體繼電器型號確認(PQW 還是 ZS-DIO)**:repo 全部記 PQW(驅動 `PQW_IO_16O_RLY`、`HARDWARE.md`、git 全歷史本體沒用過 ZS 驅動),user 09-23 記得是 ZS。**唯讀判定**:對 `.20` slave 12 FC03 讀 `0x0043`=12 → PQW;讀 `0x0032`=12 → ZS-DIO(或看電控箱標籤)。若是 ZS → 本體換 `ZS_DIO_R_RLY`(吊機 09-10 同坑) | 09-23 |
@@ -37,6 +37,7 @@
 |---|---|---|
 | 🔴 | **抗風對策方向**:9/19 平均 7 m/s、陣風 16 m/s 下,拉上 2–3 層就左右橫移、風扇壓上也壓不住;1–3 樓吸不上或只吸 1–2 顆。分析(報告 3.3):主因推定為**長繩回復剛性低(W/L)+ 風**,受風面三個:機器、6 mm 鋼索、**黃色臍帶**(影片中被吹成大弧)。現場試過**地面導引繩:效果不大**,且越高側向分量越小、高樓層拉不到(user 09-23)。候選:頂樓端側向約束/導軌、作業風速上限、臍帶收束、加大貼牆推力。**先等 B 組量測** | 報告 3.1b/3.3 |
 | 🔴 | **清潔部件 × 垂直窗框**:刀具垂直 + 滑台橫掃,遇垂直直料會卡住(程式只處理水平橫桿跳過帶)。方向 A 行程限單一分格 / B 遇直料抬起跨越 / C 刀具水平靠吊機上下刮 / D 刀具可轉向。**先收集目標建築分格寬、直料間距與凸出深度** | 報告 3.3b |
+| 🟡 | **設定持久化要不要改成「只存與預設不同的鍵」** | 10-01 發現:現在整組寫入(本體 17 / 吊機 19)⇒ 檔案存在後,改程式預設值不生效。只存差異 = 改預設會生效,但「刻意設成跟預設一樣」的值也會跟著預設變 |
 
 ### D. ⏸ 暫停 / 長期(有意擱置,別當成漏掉)
 - **隧道(Fathom-X)**:VFD 運轉掉 90% 封包的電氣問題、`IMU_ROLL_STALE_MS=750` 對隧道太緊、隧道閒置 1% 丟包 —— per user 09-21「暫時用 WiFi 之後會再改」,**切回隧道前要先讀舊#1/#2**。
@@ -72,6 +73,18 @@
 - 斷線測試手法:Pi 端臨時 nft 表擋 laptop→:8080(使用者走 WiFi 無法拔線)。
 - per user:**9/19 報告 v2 不做**(DJI 空拍素材不補看),報告定稿 v1。
 - SE3 故障碼唯讀重驗:4/6 成功、履歷全 `160/OPT`(見 B 組該列,降 🟢)。
+- **下午:本體開機 → 測試吊機 + 本體(兩台都走 WiFi `192.168.5.x`)**
+  - 🔴 **本體還掛著 9/19 official 的 drop-in**(`~/.config/systemd/user/fcv-body.service.d/endpoints.conf` → 吊機 `.1.10`)⇒ 連不到測試吊機。
+    已改名 **`endpoints.conf.official-disabled`**(unit 本身預設就是 `.5.25`)。**🔴 下次上 official 要改回來**(已寫進 B 組部署列)。
+  - 部署本體 + `cycle_test.py`(兩台)。⚠️ `deploy.sh body` 只送 `app/`+`command/`,09-30 改的 `user_lib`/`transport` 沒送 → **Pi 上編譯失敗**;手動補送後成功。
+    已修 `deploy.sh`:body/crane 一併同步 `user_lib/ transport/ common/`(+ crane `mechanism/`、body `main.cpp`),未 commit。
+  - **驗證(全過)**:`vacuum left/right` → `ERR vacuum_group_not_independent`、`vacuum body` → `unknown_vacuum_group`(繼電器沒動)/5 個死 setting 從 `get_settings` 消失/
+    `set_setting imu_ask_deg 12.5` → 重啟後仍 12.5/本體 `crane_idle_ms` ~140、峰值 260(不再無限長)、吊機 `body_link_age_ms` ~100/
+    `set_imu_roll` log 每 5 s 一行(+19)/**`.21` 閘道斷電再上電 → 4.5 s 重連 → `[gw] .21 reconnected — re-running selfcheck` → `dev_qx=1`,免重啟**(09-19 的情境)。
+  - ⚠️ **新發現(待拍板)**:設定自動持久化是**整組寫入**(本體 17 鍵、吊機 19 行)⇒ 檔案一旦存在,**之後改程式預設值不會生效**(檔案蓋回舊值)。
+    本體測完已移除 `settings.json`(原本就沒有,檔案在 `/tmp/settings.json.test-1001`);吊機 19 行仍在。修法候選:只存與預設不同的鍵。
+  - 未做:**手臂部署**(per user 先不測;重啟會 M1 回零)、**風扇順序**(per user 先不測)。
+  - 現場:per user 機器已掛繩貼牆、設好最高最低 → 檢查 OK:地面歸零 16:18:50、牆高 **244**(原 231)、目前離地 ~35 cm、L/R 差 1 cm、張力 46+50 ≈ 96 kg、本體未吸附、roll −0.73°。
 - **收尾**:全部 push(`ff4fb32`,本地 = origin/main)。測試機現況:新版吊機/GUI 在跑、`hold_hz` 10、`balance_kp` 1.0、無殘留 nft 表與暫存腳本。下一步要本體開機(驗本體半邊)或上 official(記得換 unit)。
 
 ## 2026-09-30:待辦 A 組一次清(離線,commit `505a422`,未上機)
