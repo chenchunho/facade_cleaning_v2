@@ -16,7 +16,7 @@
 | | 項目 | 出處 |
 |---|---|---|
 | 🔴 | **抗風 / 低樓層貼牆的現場量測**(9/19 實測兩大問題的前置):① 吊點離牆水平距離 d、吸盤面到掛點深度 ② 測試牆面朝向 ③ 風扇全速推力 ④ 拉 9/19 log:橫移/失敗時的 roll、張力、風扇占空比、每次吸附的 `p5..p8`(吸到哪幾顆、是否同側、高度)⑤ **DJI 空拍 6 支 + 8 張**(Drive 下載好後補看,俯視可估 d)⇒ 算「各高度 × 風速」可作業範圍;補齊後出報告 v2 | 報告 3.3/3.5 |
-| 🔴 | **部署到 `505a422` 並驗**(含 09-21/23/30 三批):`prep-official` → `FCV_TARGET=official deploy.sh crane/body/web/script`;驗計米器標紅、goto 軟停文字、`rail -300` 回 reason、`ntp_probe.sh`、**風扇新順序**;🆕 **09-30 A 組**:① ▲▼ 按住拔網路線 → 1.5 s 內自己停 + GUI 紅字 ② `set_hold_hz 50` 按 ▼ 看 log `hz=30` ③ `body_link_age_ms` 平常 ≤300、斷 WiFi 發 `body_link_stale` ④ 本體 `.21` 晚上電 → 自動 `selfcheck_auto` ⑤ `set_setting` 後重啟值還在、`crane_settings.txt` 19 行 ⑥ `crane_idle_ms` 閒置不再無限長大 | 09-21/23/30 |
+| 🔴 | **部署到 `6f910ff` 並驗**(含 09-21/23/30 三批 + 手臂 `DEPLOY_F` 預設 3 ⇒ **手臂也要部署**):`prep-official` → `FCV_TARGET=official deploy.sh crane/body/web/script`;驗計米器標紅、goto 軟停文字、`rail -300` 回 reason、`ntp_probe.sh`、**風扇新順序**;🆕 **09-30 A 組**:① ▲▼ 按住拔網路線 → 1.5 s 內自己停 + GUI 紅字 ② `set_hold_hz 50` 按 ▼ 看 log `hz=30` ③ `body_link_age_ms` 平常 ≤300、斷 WiFi 發 `body_link_stale` ④ 本體 `.21` 晚上電 → 自動 `selfcheck_auto` ⑤ `set_setting` 後重啟值還在、`crane_settings.txt` 19 行 ⑥ `crane_idle_ms` 閒置不再無限長大 | 09-21/23/30 |
 | 🟡 | **WiFi 橋 RF**:9/19 實測全程連線正常、IMU 平衡經 WiFi 表現良好;但 RSSI −70、Tx PER 83% 仍偏弱(前一晚曾斷 285 s)。主路由改 20 MHz、拉近/對準;長期 5 GHz 或有線 | 09-19、報告 2.2 |
 | 🔴 | **`.22` 匯流排實體層沒修**(終端電阻/線長/接地未查);風扇開 15× 錯誤;official 也偶發 JC100:5 TIMEOUT;**JC-100 slave 8 換表頭**(單日 67 錯) | 舊#26/#27、09-15 |
 | 🟡 | **本體繼電器型號確認(PQW 還是 ZS-DIO)**:repo 全部記 PQW(驅動 `PQW_IO_16O_RLY`、`HARDWARE.md`、git 全歷史本體沒用過 ZS 驅動),user 09-23 記得是 ZS。**唯讀判定**:對 `.20` slave 12 FC03 讀 `0x0043`=12 → PQW;讀 `0x0032`=12 → ZS-DIO(或看電控箱標籤)。若是 ZS → 本體換 `ZS_DIO_R_RLY`(吊機 09-10 同坑) | 09-23 |
@@ -66,6 +66,8 @@
 
 
 ## 2026-09-30:待辦 A 組一次清(離線,commit `505a422`,未上機)
+
+- **收尾**:C 組 `DEPLOY_F` 力道 per user 定 **3**(`6f910ff`,手臂 header 5→3);**10-01 push 到 GitHub**(`625174b..6f910ff`,含先前累積共 27 個 commit,本地與 origin/main 一致)。C 組只剩抗風、清潔部件 × 直料兩項,都等現場資料。
 
 per user「滑台橫走時平衡迴路不跑 可以吸盤有做動 還需要嗎,其他的全部都做」。細節 `changelog [2026-09-30a]`。
 
