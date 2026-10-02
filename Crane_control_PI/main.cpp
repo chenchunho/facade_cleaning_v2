@@ -320,9 +320,14 @@ static std::atomic<double> g_vfd_motion_hz   {VFD_MOTION_HZ_DEFAULT};
 //     saturation fixed on 2026-09-01. Worst case one side = 30 + hz_head briefly.
 //   - The settings themselves stay unclamped: motion_hz is shared by both
 //     directions and retract legitimately runs at 50.
-static constexpr double PAY_OUT_MAX_HZ = 30.0;
+static constexpr double PAY_OUT_MAX_HZ = 30.0;          // default + restart value
+static constexpr double PAY_OUT_MAX_HZ_CEIL = 50.0;     // motor base frequency
+// [2026-10-01 per user「下行 我想試試 40 50」] Runtime override for testing
+// (`set_pay_out_max_hz`). Deliberately NOT persisted: a restart always comes
+// back to PAY_OUT_MAX_HZ, so a test value can never silently become the rule.
+static std::atomic<double> g_pay_out_max_hz {PAY_OUT_MAX_HZ};
 static inline double dir_hz(double hz, bool pay_out) {
-    return pay_out ? std::min(hz, PAY_OUT_MAX_HZ) : hz;
+    return pay_out ? std::min(hz, g_pay_out_max_hz.load()) : hz;
 }
 
 // [2026-09-01] 減速距離的速度縮放 —— 說明見上方 CMD_HALF_SPEED_APPROACH_CM 附近。
@@ -4378,7 +4383,7 @@ static std::string cmd_status() {
     oss << " tension_right="   << (tvalid ? std::to_string(tr) : std::string("ERR"));
     oss << " tension_valid="   << (tvalid ? 1 : 0);
     oss << " body_link_age_ms=" << body_link_age_ms();   // [2026-09-30] -1 = never; non-loopback peers only
-    oss << " pay_out_max_hz="  << PAY_OUT_MAX_HZ;
+    oss << " pay_out_max_hz="  << g_pay_out_max_hz.load();
     oss << " up_left="         << (hold_up_left.load()    ? 1 : 0);
     oss << " up_right="        << (hold_up_right.load()   ? 1 : 0);
     oss << " down_left="       << (hold_down_left.load()  ? 1 : 0);
@@ -5353,6 +5358,14 @@ static std::string cmd_ping() {
 // nothing but the timestamp — no bus traffic — so the GUI can send it every
 // 500 ms while a ▲▼ button is pressed. With no hold active it is a no-op, so a
 // late renew racing a release can never restart anything.
+static std::string cmd_set_pay_out_max_hz(double hz) {
+    if (!(hz >= 1.0 && hz <= PAY_OUT_MAX_HZ_CEIL)) return "ERR out_of_range (1..50)\n";
+    g_pay_out_max_hz.store(hz);
+    std::cout << "[crane] pay_out_max_hz = " << hz << " Hz (not persisted; restart -> "
+              << PAY_OUT_MAX_HZ << ")\n";
+    return "OK pay_out_max_hz=" + std::to_string((int)std::lround(hz)) + "\n";
+}
+
 static std::string cmd_hold_renew() {
     if (!any_hold_active()) return "OK hold_renew idle\n";
     g_hold_lease_ms.store(now_ms());
@@ -5746,6 +5759,11 @@ static std::string dispatch(const std::string& line) {
     if (cmd == "stop")   return cmd_stop();
     if (cmd == "ping")   return cmd_ping();
     if (cmd == "hold_renew") return cmd_hold_renew();
+    if (cmd == "set_pay_out_max_hz") {
+        double hz = 0; iss >> hz;
+        if (iss.fail()) return "ERR usage:set_pay_out_max_hz_<1..50>\n";
+        return cmd_set_pay_out_max_hz(hz);
+    }
     if (cmd == "vfd_fault") {
         std::string side; iss >> side;
         if (iss.fail()) return "ERR usage:vfd_fault_<left|right>\n";
