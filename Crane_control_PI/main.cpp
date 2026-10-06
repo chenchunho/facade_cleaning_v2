@@ -314,13 +314,23 @@ static std::atomic<double> g_vfd_motion_hz   {VFD_MOTION_HZ_DEFAULT};
 // write-back — a GUI pay_out after `set_motion_hz 50`, or a script aborted before
 // cleanup, ran the rope DOWN at 50 Hz.
 //   - Applied at every base-frequency read on a pay_out path (motion_rope,
-//     side_measured, hold ▼ single/dual, manual pay_out, hold-sync reset).
+//     side_measured, manual pay_out).
+//   - [2026-10-02 per user「上下行照使用者選的去跑」] NOT applied to hold ▼
+//     (GUI Manual press-and-hold): hold_hz is an explicit operator choice and the
+//     operator is watching. (Same day the default ceiling itself went to 50 —
+//     see PAY_OUT_MAX_HZ — so goto / Mission follow motion_hz too.)
+//     10-01 field data for the record: pay_out 50 Hz → roll 6.26°, L−R 10 cm.
 //   - NOT applied to the balance trim on top of the base (apply_balance_trim's
 //     hz_head): clamping it would make balance one-sided at the ceiling, the exact
 //     saturation fixed on 2026-09-01. Worst case one side = 30 + hz_head briefly.
 //   - The settings themselves stay unclamped: motion_hz is shared by both
 //     directions and retract legitimately runs at 50.
-static constexpr double PAY_OUT_MAX_HZ = 30.0;          // default + restart value
+// [2026-10-02 per user「上下行照使用者選的去跑」(兩件事都做)] default raised 30 → 50
+// (= ceiling) so goto / Mission pay_out also run at the selected motion_hz; with
+// set_hold_hz / set_motion_hz now capped at 50 the min() below is a no-op unless
+// someone lowers it again with set_pay_out_max_hz. cycle_test.py still sets its own
+// DOWN_HZ=30 before descending.
+static constexpr double PAY_OUT_MAX_HZ = 50.0;          // default + restart value
 static constexpr double PAY_OUT_MAX_HZ_CEIL = 50.0;     // motor base frequency
 // [2026-10-01 per user「下行 我想試試 40 50」] Runtime override for testing
 // (`set_pay_out_max_hz`). Deliberately NOT persisted: a restart always comes
@@ -1713,7 +1723,7 @@ static void allMotionEmergencyStop() {
 // `vfdStartRopeMotion` had no callers — motion_rope calls reliable_start_one
 // directly — removed 2026-09-16.)
 static bool vfdStartRopeHold(CraneVFD& inv, bool pay_out) {
-    return reliable_start_one(inv, dir_hz(g_vfd_hold_hz.load(), pay_out), pay_out);
+    return reliable_start_one(inv, g_vfd_hold_hz.load(), pay_out);   // hold: no pay_out ceiling (10-02)
 }
 
 // Direction convention (wiring-dependent — flip fwd/rev if inverted on site):
@@ -2722,9 +2732,9 @@ static void hold_loop() {
                 if (was_trimmed) {
                     const double base = g_vfd_hold_hz.load();
                     if (hold_up_left.load()  || hold_down_left.load())
-                        vfd_left .setFreqHz(dir_hz(base, hold_down_left.load()),  VFD_MAX_HZ);
+                        vfd_left .setFreqHz(base, VFD_MAX_HZ);
                     if (hold_up_right.load() || hold_down_right.load())
-                        vfd_right.setFreqHz(dir_hz(base, hold_down_right.load()), VFD_MAX_HZ);
+                        vfd_right.setFreqHz(base, VFD_MAX_HZ);
                     was_trimmed = false;
                     std::cout << "[BAL] hold sync ended — reset to base " << base << " Hz\n";
                 }
@@ -2739,8 +2749,7 @@ static void hold_loop() {
                     now_pt - last_balance_tick).count() >= BALANCE_TICK_MS) {
                 last_balance_tick = now_pt;
                 // hold 模式兩側同速，無三段式煞車 → 兩側 base 相同。
-                apply_balance_trim(dir_hz(g_vfd_hold_hz.load(), cur_sync_dir > 0),
-                                   dir_hz(g_vfd_hold_hz.load(), cur_sync_dir > 0), cur_sync_dir,
+                apply_balance_trim(g_vfd_hold_hz.load(), g_vfd_hold_hz.load(), cur_sync_dir,
                                    balance_base_left, balance_base_right, was_trimmed);
             }
         }
@@ -4535,7 +4544,7 @@ static bool apply_hold_one_side(CraneVFD& inv, bool up, bool down,
 //      "left only retract / right only pay_out" intermittent observed when
 //      SE3 Modbus comms are flaky (CU-mode write fail, stale-buffer reply)
 static bool dual_vfd_hold_start(bool pay_out) {
-    const double hz = dir_hz(g_vfd_hold_hz.load(), pay_out);
+    const double hz = g_vfd_hold_hz.load();   // hold: no pay_out ceiling (10-02)
     HOLD_TRACE("dual_vfd_hold_start ENTRY pay_out=" << pay_out << " hz=" << hz);
 
     // Switched to dual_vfd_sync_start (2026-05-14): old reliable_start_one
@@ -5116,15 +5125,18 @@ static std::string cmd_read_meter_scale(const std::string& side) {
 // Runtime frequency adjust. Range checked against driver upper bound; takes
 // effect on NEXT motor-start command (not currently-running motors). Caller
 // should send a fresh hold/motion cmd after change to apply at the inverter.
+// [2026-10-02 per user] operator-selectable rope speeds capped at the motor base
+// frequency (50 Hz), not VFD_MAX_HZ (120): both directions now follow the selection.
+static constexpr double ROPE_USER_HZ_MAX = 50.0;
 static std::string cmd_set_hold_hz(double hz) {
-    if (hz <= 0 || hz > VFD_MAX_HZ) return "ERR hz_out_of_range\n";
+    if (hz <= 0 || hz > ROPE_USER_HZ_MAX) return "ERR hz_out_of_range (1..50)\n";
     g_vfd_hold_hz.store(hz);
     persist_crane_settings();
     std::cout << "[crane] vfd_hold_hz = " << hz << "\n";
     return "OK\n";
 }
 static std::string cmd_set_motion_hz(double hz) {
-    if (hz <= 0 || hz > VFD_MAX_HZ) return "ERR hz_out_of_range\n";
+    if (hz <= 0 || hz > ROPE_USER_HZ_MAX) return "ERR hz_out_of_range (1..50)\n";
     g_vfd_motion_hz.store(hz);
     std::cout << "[crane] vfd_motion_hz = " << hz << "\n";
     return "OK\n";

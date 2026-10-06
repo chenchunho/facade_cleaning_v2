@@ -9,7 +9,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 1. 讀 **`.claude/work_log.md`** — 最新進度 + 待完成項目（最新紀錄在最上方）；每個決策條目上方會標示「**規範權威：** xxx」，指向該決策落在哪份規範文件（CLAUDE.md 某節 / motion_flow.md §X），要確認完整規範就跳過去讀
 2. 讀 **`.claude/motion_flow.md`** — 完整運動流程規格（硬體表、phase、狀態機、指令協定、參數常數）
 3. 讀 **`.claude/runbook.md`** — 啟動順序、Web GUI 按鈕對應、raw command 指令集、典型流程、緊急處置（知道「怎麼用」系統）
-4. ⚠️ 本 CLAUDE.md 的硬體架構圖可能**落後於 motion_flow.md**，以 **motion_flow.md §2 為準**
+4. ⚠️ 硬體現況的權威是 **`.claude/HARDWARE.md`**、現行程式規格是 **`.claude/reference/v2_app_redesign_plan.md`**；
+   本 CLAUDE.md 的架構圖可能落後於它們。🔴 **`motion_flow.md` 是 v1、已凍結，§2 硬體表已過期，不要拿它當現況**
+   （2026-10-03 更正：此行原寫「以 motion_flow.md §2 為準」，與下方「規格文件有三個世代」表矛盾）
+
+### 🔴 動機器前必知（2026-10-03 由 work_log／memory 收進來）
+
+- 🔴 **測試性移動吊機單次最多 5 cm**（per user 2026-09-15）：驗新命令、量隧道干擾、看回覆格式時一律 `goto <目前±5>` 或
+  `pay_out/retract 5` 以內；大距離（cycle_test full、放到最低、回頂）**要使用者指示才走**。理由：測試時吸附／手臂／繩長不一定完整
+- 🔴 **兩套環境、程式共用一份**：測試吊機 `raspberry-cran` ／正式 `official-crane`（否決維護兩套）。
+  official 的佈線刻意不同 ⇒ 裝置↔匯流排↔站號由 **env 驅動**，預設＝測試機；official 靠 **systemd drop-in** 覆蓋
+  （副本 `scripts/systemd/official/`，裝置表 `config/official-crane_485.md`；unit 副本說明見 `scripts/systemd/README.md`）
+- 🔴 **本體的 official drop-in 目前是停用狀態**（2026-10-01 為接測試吊機改名為
+  `~/.config/systemd/user/fcv-body.service.d/endpoints.conf.official-disabled`）⇒ **下次上 official 前要改回 `endpoints.conf`**，
+  否則本體會連測試吊機的 `.5.25`。現況以 `work_log.md` 待辦總表的部署列為準
 
 待完成工作、已討論但尚未實作的設計決策，都在上述 `.claude/` 文件中。
 
@@ -793,11 +806,13 @@ if (drv.init("192.168.1.20", 4001)) {
 | `LOG_DBG(tag, fmt, ...)` | DBG | 除錯訊息 |
 | `LOG_HEX(tag, note, data, len)` | DBG | Hex dump |
 
-**所有 level 都由 `debug_mode` 成員統一控制：**
+**WRN/INF/DBG/HEX 由 `debug_mode` 成員控制；`LOG_ERR` 自 2026-08-31 起無條件輸出（每呼叫點限流）：**
 
-- `debug_mode == false`（預設）→ 完全靜默，一行都不印
+- `debug_mode == false`（預設）→ 只印 `LOG_ERR`（限流），其餘靜默
 - `debug_mode == true` → ERR/WRN/INF/DBG/HEX 全部輸出
-- 理由：錯誤本來就透過 bool return（true=error）通知呼叫端，log 純為除錯觀察用；驅動庫預設不吵，由使用者決定何時打開
+- 🔴 為什麼 ERR 例外：08-31 driver 回覆驗證的五條拒絕理由全走 `LOG_ERR` 卻被 `debug_mode` 蓋住，
+  計米器失聯只剩沒有理由的 `ERR`——**會偵測、會記錄但看不到＝沒有偵測**；修好後第一次啟動就抓到真故障。
+  見 `common/log_utils.h` 的 `[2026-08-31]` 註解（⚠️ 同檔檔頭 "ALL levels are gated" 為舊說法）
 
 **呼叫端要求：**
 

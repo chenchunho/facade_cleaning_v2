@@ -14,10 +14,11 @@
 // Format:  [HH:MM:SS.mmm] [LEVEL] [DEVICE:ID] <message>
 // Levels:  ERR / WRN / INF / DBG
 //
-// ALL levels are gated by a boolean named `debug_mode` visible at the call
-// site. When debug_mode is false the driver is completely silent; callers
-// already receive errors via the bool return convention (true = error).
-// Turn debug_mode on to observe internal behaviour at any severity.
+// WRN / INF / DBG are gated by a boolean named `debug_mode` visible at the
+// call site. LOG_ERR is NOT gated (since 2026-08-31): it always prints, with
+// per-call-site rate limiting when debug_mode is false (see LOG_ERR below).
+// Callers still receive errors via the bool return convention (true = error);
+// turn debug_mode on to see everything, unthrottled.
 //
 // LOG_HEX (TX/RX hex dumps) has an additional secondary gate:
 //   - default: OFF (hex dumps suppressed even when debug_mode is on)
@@ -35,7 +36,7 @@
 //
 // Driver class must expose:
 //   std::string _log_tag;   // e.g. "ZDT:3", "DM2J:1", "TCP"
-//   bool        debug_mode; // master switch for ALL log output
+//   bool        debug_mode; // switch for WRN/INF/DBG; also lifts LOG_ERR throttling
 //
 // Output goes to stderr (not stdout), one line per call.
 // No file output, no async queue, no thread-safety lock (line interleaving
