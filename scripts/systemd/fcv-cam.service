@@ -1,0 +1,27 @@
+# [2026-10-07 per user] Dashboard camera relay: RTSP (XiongMai .112/.113 on the body LAN) -> H.264 fMP4 (default) + MJPEG (fallback) on :8091.
+# Body Pi, systemd **user** unit (same as fcv-body / fcv-arm): ~/.config/systemd/user/fcv-cam.service
+# Installed/updated by `scripts/deploy.sh cam`. Camera list / rate / quality via FCV_CAM_* (see scripts/cam_relay.py).
+# H.264 passthrough pipes stay warm (copy only, ~1 % CPU each, wired LAN only); MJPEG transcoding runs only while watched.
+[Unit]
+Description=FCV camera relay (RTSP -> H.264 fMP4 + MJPEG :8091) for console v3 Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nexuni/run
+Environment=FCV_CAM_PORT=8091
+Environment=FCV_CAMS=1=192.168.1.112,2=192.168.1.113
+Environment=FCV_CAM_WARM=1
+Environment=FCV_CAM_FPS=5
+Environment=FCV_CAM_Q=9
+ExecStart=/usr/bin/python3 -u /home/nexuni/projects/facade_cleaning_v2/scripts/cam_relay.py
+# Video is the lowest-priority thing on this Pi: the body control loop and its links come first.
+Nice=10
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/nexuni/run/logs/cam_service.log
+StandardError=append:/home/nexuni/run/logs/cam_service.log
+
+[Install]
+WantedBy=default.target

@@ -52,6 +52,12 @@ const ARM_PORT        = 9527;
 // proxyToCam() 與 /snap/:cam_id、/mjpeg/:cam_id 兩條路由。前端的 Camera
 // 分頁與 app.js 的 wireCamera/wireDepthCamera 也一併刪除。
 // frame_capture.py 本身沒動；depth_cam_service.py 已於 2026-09-01 刪除。
+// [2026-10-07 per user] Cameras are back on the Dashboard (two XiongMai .112/.113 on the BODY LAN), but
+// NOT proxied through here: fcv-cam on the body Pi (scripts/cam_relay.py, :8091) serves H.264/MJPEG and the
+// browser loads it directly. Relaying via this process would put every frame on WiFi twice (body ->
+// crane -> browser). This server only tells the page where the streams are ({src:'cam'} on connect).
+const CAM_BASE = process.env.CAM_BASE || ('http://' + WASHROBOT_IP + ':8091');
+const CAM_IDS  = String(process.env.CAM_IDS || '1,2').split(',').map(s => s.trim()).filter(Boolean);
 
 const RECONNECT_MS = 1000;   // 2026-04-29: 3000 → 1000 配合前端 panel-disabled 3s debounce，瞬斷情境總計約 1s 即恢復、UI 不會 flicker
 
@@ -406,7 +412,8 @@ function missionStart(p, reply) {
     // [2026-09-15 per user] cycle_test full 的 key=value 參數（位置不限）：fan=move[:pct]|all[:pct]、
     // rail=<起>-<迄>|off（同日由 0|100 升級；舊 0|100 腳本仍收）。只在帶了才 append；格式不對就拒絕，不讓腳本起跑後才炸。
     const kv = [];
-    if (p.fan  !== undefined && p.fan  !== '') { if (/^(move|all)(:(5|6|7|8|9|10))?$/.test(String(p.fan)))  kv.push('fan='  + p.fan);  else bad.push('fan(move[:5-10]|all[:5-10])'); }
+    // [2026-10-07] pct cap 10 -> 9 to match GUI / cycle_test / body PWM_DUTY_MAX_PCT (10-06 duty_max 9).
+    if (p.fan  !== undefined && p.fan  !== '') { if (/^(move|all)(:(5|6|7|8|9))?$/.test(String(p.fan)))  kv.push('fan='  + p.fan);  else bad.push('fan(move[:5-9]|all[:5-9])'); }
     if (p.rail !== undefined && p.rail !== '') {
         const r = String(p.rail);
         const m = /^(\d{1,3})-(\d{1,3})$/.exec(r);
@@ -615,6 +622,7 @@ wss.on('connection', (ws) => {
     //    「看起來沒在跑」比「沒有畫面」危險得多。
     ws.send(JSON.stringify({ src: 'mission', state: missionSnapshot() }));
     ws.send(JSON.stringify(wallMsg()));   // 牆高：每個新連線都要知道
+    ws.send(JSON.stringify({ src: 'cam', base: CAM_BASE, ids: CAM_IDS }));   // [2026-10-07] Dashboard 攝影機位置
     if (mission.ring.length)
         ws.send(JSON.stringify({ src: 'mission', backlog: mission.ring.slice() }));
 

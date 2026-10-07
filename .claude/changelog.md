@@ -6,8 +6,11 @@
 > 保留「原因 / 決策(尤其被否決的)/ 驗證結論」。原則 ≤40 行,驗證表可超。
 > (原 2026-04 的「# 修改日誌」格式範本已由本說明取代。)
 
-## 索引(全部 160 條,新的在上)
+## 索引(全部 163 條,新的在上)
 
+- `[2026-10-07c]` 攝影機串流優化:**H.264 直通 fMP4 → `<video>`+MSE**(MJPEG 退為備援)、`cam_mjpeg.py`→`cam_relay.py`;攝影機多餘功能全關、GOP 1 s(`v3-2026.10.07-2126`)→ (本檔)
+- `[2026-10-07b]` 風扇 `duty_max` 10→9 部署(本體/腳本/GUI/server.js 四處一致);`deploy.sh` 測試機吊機位址可 `FCV_CRANE` 覆蓋(DHCP .25→.31)→ (本檔)
+- `[2026-10-07a]` **Dashboard 兩支攝影機**:本體 `fcv-cam`(`scripts/cam_mjpeg.py` :8091,RTSP→MJPEG、有人看才跑)+ GUI 攝影機卡 + `server.js` `{src:'cam'}` + `deploy.sh cam` + 機身 OSD 關閉(`scripts/xm_ipcam.py`)→ (本檔)
 - `[2026-10-01f]` 吊機 `set_pay_out_max_hz <1..50>`(放繩上限執行期覆寫,不持久化);30/40/50 Hz 上下行速度實測 → (本檔)
 - `[2026-10-01e]` 設定持久化只存與預設不同的值(本體 settings.json / 吊機 crane_settings.txt;全預設刪檔)→ (本檔)
 - `[2026-10-01d]` 本體繼電器換 `ZS_DIO_R_RLY`(實證是 ZS-DIO)+ ZS 驅動補強(原子交易 + 回覆驗證)→ (本檔)
@@ -172,6 +175,29 @@
 ---
 
 ## 當月全文(2026-09,98 條)
+
+## [2026-10-07c] 攝影機串流優化(H.264 直通)+ 攝影機多餘功能關閉
+
+per user「兩隻的速度有點慢,都關閉不該啟用的功能,串流可以再優化」。查:攝影機子碼流本身 ~20–25 fps,**慢的是我們 MJPEG 5 fps**。
+- **`scripts/cam_relay.py`(取代同日的 `cam_mjpeg.py`)**:每支兩條 ffmpeg 管線 —— `/cam/<id>.mp4` = `-c:v copy` fMP4、`frag_every_frame`(一張一段,muxer 不囤),**常駐(warm)**,新觀看者拿 init + 最近關鍵畫格起的 GOP 快取 ⇒ 開畫面即有;ffmpeg 重啟就結束回應讓頁面重連(新管線時間軸重來,同一個 MediaSource 會卡);`/cam/<id>.mjpg` 保留為備援(有人看才轉)。status 加 `codec` 與 `modes{mp4,mjpeg}`。
+- **GUI**:`<video>` + MediaSource(`sequence` 模式),codec 從 init 段的 avcC 讀;追即時邊緣:落後 >1.5 s 跳、>0.6 s 1.1 倍速、<0.4 s 回 1.0(🔴 第一版 0.3 s 門檻 ⇒ Chrome 本身就留 ~0.3 s ⇒ 永遠 1.1 倍、掉格 30%);無資料 6 s / 10 s 內沒資料 ⇒ 重連;無 MSE 或連續失敗 ⇒ MJPEG。格式選單 自動/H.264/MJPEG(localStorage)。點畫面 = 全螢幕。
+- **攝影機端**(XM 34567,`scripts/xm_ipcam.py`;改前整份備份 `config/ipcam/features_*_before_cleanup_20261007.json`):音訊(主/子)、移動偵測、人形偵測、雲端 P2P(`secu100.net`,Ret 603 = 重開生效)、推播、線上自動升級、每週自動重開、錄影 → 關;子碼流 GOP 2→1 s;慢快門 2→0(A/B 實驗:不影響 fps)。重開後全數保留;**重開後兩支實測 20.0 fps**(重開前子碼流 25,原因未明,非慢快門)。
+- 驗證:harness 231 過(`[cam]` +2:格式選單/無 MSE 退 MJPEG、avcC 解析);**真 Chrome 154 無頭**(`harness/cam_browser_check.js`,CDP):兩路 mp4、20 fps、readyState 4、播放端落後 ~0.4 s、掉格 ~1%;本體 ffmpeg copy 各 0.2% CPU;WiFi 0.34+0.27 Mbps(MJPEG 1.46+0.98);兩路開著 `body_link_age_ms` avg 128 / max 248(基準 127/253)。
+
+## [2026-10-07b] 風扇占空比上限 9% 部署 + 部署腳本可指定吊機位址
+
+per user(10-06「duty_max 9」;依 10-02 實測兩顆 NPP 合計 50 A,雙顆 10% = 49 A 頂限流)。改:本體 `PWM_DUTY_MAX_PCT = 9`(`setDutyLimits`)、`cycle_test.py` fan pct >9 拒跑、GUI 輸入/驗證 5~9,**10-07 補 `server.js` Mission `fan=` 正則**(原仍收 `:10`)。harness:`fake_robot` duty_max 9。
+測試吊機 WiFi DHCP 由 .25 漂到 .31 ⇒ `deploy.sh` 測試機 `CRANE="${FCV_CRANE:-user@192.168.5.25}"`(預設不變);本體端走 drop-in `crane-ip.conf`(見 work_log 10-07)。
+驗證:真機 `pwm set 1 50 65535 10` → `ERR pwm_duty_rejected_must_be_5_to_9_pct`、`pwm status` `duty_max=9`;harness 229 過。
+
+## [2026-10-07a] Dashboard 兩支攝影機
+
+per user。**推翻 09-01「攝影機不列入本版架構」與 08-27 移除攝影機反向代理**(那時是「以後不用串接攝影機」)。
+- 攝影機 `.112`/`.113` 在**本體那段**有線網,吊機看不到 ⇒ 新 `scripts/cam_mjpeg.py`(⚠️ 同日由 `cam_relay.py` 取代,見 10-07c)(Python 標準庫)= 本體 user service `fcv-cam` :8091:`/cam/<id>.mjpg`(multipart)、`/cam/<id>.jpg`、`/cam/status`(CORS *)。子碼流 800×448 → ffmpeg MJPEG 5 fps q9;**有人看才起 ffmpeg**(離開 10 s 後停)、卡住 8 s 重啟、每支最多 4 人、mpjpeg 以 Content-Length 切幀(不掃 FFD9)。`Nice=10`。
+- **不經 server.js 轉送**:瀏覽器直連本體(經吊機轉 = 每張畫面走兩次 WiFi);`server.js` 只在 ws 連線送 `{src:'cam', base, ids}`(`CAM_BASE`/`CAM_IDS` 可覆蓋,預設 `http://$WROBOT_IP:8091`)。
+- GUI:Dashboard 第一張卡、整列寬、兩路並排(≤520px 上下);**只在 Dashboard 分頁開著 + 視窗可見 + 沒按暫停時拉串流**(本體 WiFi 同時承載吊機連線與 IMU 推送);狀態輪詢 2 s(即時 n fps/畫面停 n s/離線/服務離線);fcv-cam 回報 0 人但頁面以為開著 ⇒ 自動重連。`deploy.sh cam` 安裝/更新 unit。
+- 驗證:harness 新 `[cam]` 段 13 項(假 fcv-cam 狀態服務)全過,總 229;真機兩支 jpg/mjpg 皆 800×448;開兩路 30 s:ffmpeg 各 ~5% CPU、WiFi 1.46 + 0.98 Mbps,`body_link_age_ms` avg 127→144 / max 253→256(推送週期 ~250 ms 內,無明顯劣化)。
+- **OSD 關掉**(per user「兩隻 OSD 幫我移除」):XM 34567 `AVEnc.VideoWidget` 的時間/標題 `EncodeBlend`+`PreviewBlend` → false(原因:鐘沒對時停在 09-14/09-10、兩支標題都 `CAM01`)。Ret=100、讀回 false、快照確認畫面已無字。工具由 git 歷史救回並擴充為 `scripts/xm_ipcam.py`(`get`/`osd on|off`/`time`);改前整段備份 `config/ipcam/`。
 
 ## [2026-10-01f] `set_pay_out_max_hz`(測試用執行期覆寫)+ 上下行速度實測
 

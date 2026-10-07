@@ -318,6 +318,9 @@ elif FAN_MODE == "all":
     FAN_ON = FAN_OFF = max(5, int(_fan_pct or 6))
 else:
     print("🔴 fan= 只認 move[:pct] / all[:pct],收到:%r" % KV.get("fan")); sys.exit(2)
+# [2026-10-06] body refuses duty > 9 (PWM_DUTY_MAX_PCT: 2×NPP 50 A supply limit) — fail here, not mid-run.
+if FAN_ON > 9:
+    print("🔴 fan pct 上限 9(本體 PWM_DUTY_MAX_PCT),收到 %d" % FAN_ON); sys.exit(2)
 # [2026-09-15 per user] 最後一次放繩之後,**在最低點再清一次**(final_clean=1,預設開)。
 #   為什麼需要:每一步的順序是「清潔 → 往下移動」,所以 N 步清的是 N 個位置,
 #   **最後一次移動到的那個位置從來沒被清過**(5 步 40cm 從 243 起跑 → 清 243/203/163/123/83,

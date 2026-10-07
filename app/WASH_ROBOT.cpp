@@ -267,6 +267,7 @@ bool WashRobot::init() {
         // 的暫存器且「請勿頻繁寫入」。獨立匯流排上沒有撞號問題 ⇒ 沒有理由花一次 flash
         // 寫入去改一個不影響任何事的數字。
         pwm_.init(cli_21_, PWM_SLAVE, dbg);
+        pwm_.setDutyLimits(pwm_.dutyMinPct(), PWM_DUTY_MAX_PCT);   // [2026-10-06] 10 → 9, see WASH_ROBOT.h
         std::cout << "[OK] QX-DO24 PWM slave " << PWM_SLAVE << " (presence not probed)\n";
     } else {
         std::cout << "[--] QX-DO24 PWM DISABLED (PWM_ENABLED=false) — slave "

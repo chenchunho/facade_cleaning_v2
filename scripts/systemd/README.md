@@ -10,6 +10,7 @@
 | `fcv-web-v3.service` | 吊機 .25 | system | `node server.js`(v3 主控台) | HTTP :8080(09-16 由 8081 改回,v1 退役後接手主埠) |
 | `fcv-arm.service`    | 本體 `nexuni@192.168.5.26` | **user**(此機 sudo 密碼不在 Claude 手上)| `~/projects/…/cleaning_arm/motor_api` | TCP :9527 |
 | `fcv-body.service`   | 本體 .26 | **user** | `~/run/facade_cleaning_v2.out` | TCP :5001 |
+| `fcv-cam.service`    | 本體 .26 | **user** | `python3 ~/projects/…/scripts/cam_relay.py`(🆕 2026-10-07,Dashboard 攝影機;`deploy.sh cam` 安裝) | HTTP :8091(MJPEG;有人看才跑 ffmpeg) |
 
 ## 兩個非顯而易見的設計
 

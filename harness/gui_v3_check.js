@@ -4,7 +4,7 @@
 //   node harness/gui_v3_check.js            # spawn fake_robot + web_backend(v3) on a free port, run all sections
 //   node harness/gui_v3_check.js --attach 8081   # use an already-running v3 server (e.g. from gui_offline.sh)
 //                                                #   ⚠️ checks assume a FRESH fake_robot; a dirty one fails ③/⑥ etc.
-//   node harness/gui_v3_check.js --only evt,flow # run a subset: boot, evt, flow, mission, safe, report
+//   node harness/gui_v3_check.js --only evt,flow # run a subset: boot, cam, evt, flow, mission, safe, report
 //
 // What it is: jsdom loads web_backend/public_v3/index.html, opens a REAL WebSocket to server.js, which
 // bridges to fake_robot.py (5001/5002/9527). Every check clicks buttons / reads DOM text — the same path
@@ -19,6 +19,7 @@ const path = require('path');
 const fs = require('fs');
 const { spawn, spawnSync } = require('child_process');
 const net = require('net');
+const http = require('http');
 
 const REPO = path.resolve(__dirname, '..');
 const WEB = path.join(REPO, 'web_backend');
@@ -31,7 +32,7 @@ const RUN = path.join(REPO, 'tmp', 'gui_v3_check'); fs.mkdirSync(RUN, { recursiv
 const argv = process.argv.slice(2);
 const argOf = (k) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : null; };
 const ATTACH = argOf('--attach');
-const ONLY = (argOf('--only') || 'boot,evt,pre,script,mission,safe,hold,stop,report').split(',');
+const ONLY = (argOf('--only') || 'boot,cam,evt,pre,script,mission,safe,hold,stop,report').split(',');
 const has = (s) => ONLY.includes(s);
 
 // ---- deps (resolve from web_backend so `npm install` there is enough) ----
@@ -55,6 +56,10 @@ const portOpen = (p) => new Promise(r => { const s = net.connect(p, '127.0.0.1')
 
 // ---- environment ----
 const procs = [];
+// [2026-10-07] fake fcv-cam: only /cam/status (jsdom never fetches <img> without the canvas package).
+// server.js gets CAM_BASE pointing here, so the page polls a server we control. CORS * like the real one.
+const camLive = (id, extra) => Object.assign({ id, host: '192.168.1.11' + id, state: 'live', clients: 1, fps: 5, last_frame_age_ms: 150, err: '', restarts: 0 }, extra || {});
+const camFake = { port: 0, hits: 0, down: false, srv: null, status: { cams: [camLive('1'), camLive('2')] } };
 async function bringUp() {
   if (ATTACH) return +ATTACH;
   // fake_robot must be OURS: the checks assume a fresh sim (nothing zeroed / homed / init'ed).
@@ -70,10 +75,19 @@ async function bringUp() {
   try { fs.unlinkSync(path.join(RUN, 'run', 'wall_height.json')); } catch (_) {}   // server wall memory must be fresh too (①②⑦ read it)
   try { fs.unlinkSync(path.join(RUN, 'run', 'mission_params.json')); } catch (_) {}  // 09-17: 存檔 check writes it; a stale one would also pre-fill the form
   let port = 8090; while (!(await portFree(port))) port++;
+  camFake.port = 18191; while (!(await portFree(camFake.port))) camFake.port++;
+  camFake.srv = http.createServer((req, res) => {
+    if (!/^\/cam\/status/.test(req.url)) { res.writeHead(404); return res.end(); }
+    camFake.hits++;
+    if (camFake.down) { res.writeHead(500, { 'Access-Control-Allow-Origin': '*' }); return res.end(); }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify(camFake.status));
+  }).listen(camFake.port, '127.0.0.1');
   const w = spawn('node', ['server.js'], {
     cwd: WEB,
     env: Object.assign({}, process.env, { WROBOT_IP: '127.0.0.1', CRANE_IP: '127.0.0.1', ARM_IP: '127.0.0.1',
-      HTTP_PORT: String(port), PUBLIC_DIR: path.join(WEB, 'public_v3'), HOME: RUN }),
+      HTTP_PORT: String(port), PUBLIC_DIR: path.join(WEB, 'public_v3'), HOME: RUN,
+      CAM_BASE: `http://127.0.0.1:${camFake.port}` }),
     stdio: ['ignore', fs.openSync(path.join(RUN, 'web.log'), 'w'), 'inherit']
   });
   procs.push(w);
@@ -81,7 +95,7 @@ async function bringUp() {
   if (!ok) throw new Error('web_backend v3 did not come up (see tmp/gui_v3_check/web.log)');
   return port;
 }
-function tearDown() { procs.forEach(p => { try { p.kill(); } catch (_) {} }); }
+function tearDown() { procs.forEach(p => { try { p.kill(); } catch (_) {} }); if (camFake.srv) camFake.srv.close(); }
 
 // ---- page ----
 function loadPage(port) {
@@ -137,6 +151,61 @@ async function secBoot(P) {
       .filter(e => !e.classList.contains('why') && P.w.getComputedStyle(e).display !== 'none')
       .map(e => e.id || e.className);
     chk('every [hidden] element is really display:none', bad.join(','), ''); }
+}
+
+// [2026-10-07 per user] Dashboard cameras: card placement, stream only while visible, status painting,
+// pause, reconnect-on-zero-viewers, service down. Streams themselves are not loaded by jsdom — we check src.
+async function secCam(P) {
+  console.log('\n[cam] 2026-10-07 Dashboard 攝影機');
+  const doc = P.w.document, BASE = `http://127.0.0.1:${camFake.port}`;
+  const imgs = () => Array.from(doc.querySelectorAll('#d-cam-card .camf img'));
+  const srcs = () => imgs().map(i => i.getAttribute('src') || '');
+  const streaming = () => srcs().map(s => s.startsWith(BASE + '/cam/') && /\.mjpg\?t=\d+$/.test(s));
+  const blank = () => srcs().map(s => s.startsWith('data:image/gif'));
+  const st = () => Array.from(doc.querySelectorAll('#d-cam-card .cam-st')).map(e => e.textContent);
+  const tab = (p) => doc.querySelector(`[role=tab][data-p="${p}"]`).click();
+  const dash = doc.querySelector('.pane[data-pane="dashboard"] .man');
+  chk('camera card is the FIRST Dashboard card, full width, cameras 1 & 2', [dash.firstElementChild.id, dash.firstElementChild.style.gridColumn.replace(/\s+/g, ''), Array.from(doc.querySelectorAll('#d-cam-card .camf')).map(f => f.dataset.cam).join(',')], ['d-cam-card', '1/-1', '1,2']);
+  await waitFor(() => streaming().every(Boolean), 40);
+  chk('server {src:cam} → both <img> stream from CAM_BASE /cam/<id>.mjpg', [streaming(), srcs().map(s => s.replace(/\?t=\d+$/, ''))], [[true, true], [BASE + '/cam/1.mjpg', BASE + '/cam/2.mjpg']]);
+  await waitFor(() => st().every(t => /即時/.test(t)), 20);
+  chk('status poll paints 即時 · 5 fps on both + header 2/2 即時', [st(), P.txt('d-cam-state')], [['MJPEG · 即時 · 5 fps', 'MJPEG · 即時 · 5 fps'], '2/2 即時']);
+  camFake.status = { cams: [camLive('1'), camLive('2', { state: 'error', clients: 0, err: 'Connection timed out' })] };
+  await waitFor(() => /離線/.test(st()[1]), 20);
+  chk('camera 2 error → 離線 + overlay shows the reason; header 1/2', [st()[1], /攝影機離線[\s\S]*Connection timed out/.test(doc.querySelectorAll('#d-cam-card .camo')[1].textContent), P.txt('d-cam-state')], ['MJPEG · 離線', true, '1/2 即時']);
+  camFake.status = { cams: [camLive('1'), camLive('2', { last_frame_age_ms: 5200 })] };
+  await waitFor(() => /畫面停/.test(st()[1]), 20);
+  chk('live but no frame for 5 s → ⚠ 畫面停 5 s', st()[1], 'MJPEG · ⚠ 畫面停 5 s');
+  camFake.status = { cams: [camLive('1'), camLive('2')] };
+  tab('manual'); await sleep(300);
+  const h0 = camFake.hits; await sleep(4500);
+  chk('leave Dashboard → both streams dropped (blank src) and status polling stops', [blank(), camFake.hits - h0], [[true, true], 0]);
+  tab('dashboard'); await waitFor(() => streaming().every(Boolean), 20);
+  chk('back to Dashboard → both streams restart', streaming(), [true, true]);
+  P.click('d-cam-toggle'); await sleep(200);
+  chk('⏸ 暫停 → blank, header 已暫停, button ▶ 開啟, remembered in localStorage', [blank(), P.txt('d-cam-state'), P.txt('d-cam-toggle'), P.w.localStorage.getItem('fcv.cam.paused')], [[true, true], '已暫停', '▶ 開啟', '1']);
+  P.click('d-cam-toggle'); await waitFor(() => streaming().every(Boolean), 20);
+  chk('▶ 開啟 → streams again, button back to ⏸ 暫停', [streaming(), P.txt('d-cam-toggle'), P.w.localStorage.getItem('fcv.cam.paused')], [[true, true], '⏸ 暫停', '0']);
+  { const t0 = imgs()[0].getAttribute('src');
+    camFake.status = { cams: [camLive('1', { clients: 0 }), camLive('2')] };
+    const healed = await waitFor(() => imgs()[0].getAttribute('src') !== t0, 48);   // heal waits >6 s from stream start
+    chk('fcv-cam reports 0 viewers on a stream we think is open → reconnect (new ?t=)', [healed, streaming()[0], imgs()[1].getAttribute('src') !== null], [true, true, true]);
+    camFake.status = { cams: [camLive('1'), camLive('2')] }; }
+  camFake.down = true;
+  await waitFor(() => /服務離線/.test(P.txt('d-cam-state') || ''), 20);
+  chk('fcv-cam unreachable (HTTP 500) → header 服務離線, both 服務離線', [P.txt('d-cam-state'), st()], ['服務離線', ['MJPEG · 服務離線', 'MJPEG · 服務離線']]);
+  camFake.down = false;
+  await waitFor(() => /2\/2 即時/.test(P.txt('d-cam-state') || ''), 20);
+  chk('fcv-cam back → 2/2 即時', P.txt('d-cam-state'), '2/2 即時');
+  { const sel = doc.getElementById('d-cam-mode');
+    chk('[10-07 優化] format selector 自動/H.264/MJPEG, default 自動; jsdom has no MediaSource → both figures MJPEG, <video> hidden',
+        [sel && Array.from(sel.options).map(o => o.value).join(','), sel && sel.value, Array.from(doc.querySelectorAll('#d-cam-card .camf')).map(f => f.dataset.mode).join(','),
+         Array.from(doc.querySelectorAll('#d-cam-card video')).map(v => P.w.getComputedStyle(v).display).join(',')],
+        ['auto,mp4,mjpeg', 'auto', 'mjpeg,mjpeg', 'none,none']);
+    // avcC parser on a synthetic init fragment: ... 'avcC' 01 4D 00 1E ... → avc1.4D001E (the real cameras, 10-07)
+    const u8 = new P.w.Uint8Array([0, 0, 0, 9, 0x61, 0x76, 0x63, 0x43, 1, 0x4D, 0x00, 0x1E, 0xFF]);
+    chk('avcCodec() reads profile/compat/level from avcC', [P.w.__v3.avcCodec(u8), P.w.__v3.avcCodec(new P.w.Uint8Array([1, 2, 3]))], ['avc1.4D001E', '']); }
+  chk('no jsdom errors after the camera section', P.errors.length, 0);
 }
 
 async function secEvt(P) {
@@ -273,7 +342,9 @@ async function secScript(P) {
   w.document.getElementById('mp-rail').value = '50-50';
   chk('validate: rail 起=迄 rejected', w.__v3.misValidate(w.__v3.misParams()).some(b => /rail/.test(b)), true);
   w.document.getElementById('mp-rail').value = 'off'; w.document.getElementById('mp-fanpct').value = '11';
-  chk('validate: rail=off ok, fan pct 11 rejected', w.__v3.misValidate(w.__v3.misParams()).join(), 'fan pct 5~10');
+  chk('validate: rail=off ok, fan pct 11 rejected', w.__v3.misValidate(w.__v3.misParams()).join(), 'fan pct 5~9');
+  w.document.getElementById('mp-fanpct').value = '10';
+  chk('[10-06] fan pct 10 rejected too (duty_max 9)', w.__v3.misValidate(w.__v3.misParams()).join(), 'fan pct 5~9');
   w.document.getElementById('mp-fanpct').value = '6';
   // capture what the page would send to server.js instead of really spawning cycle_test against the fake
   const wsObj = w.__v3.wsRef(); const realSend = wsObj.send; const sent = [];
@@ -751,6 +822,7 @@ function secReport() {
     console.log(`v3 page: ${PAGE}\nserver : http://127.0.0.1:${port}  (fake_robot 5001/5002/9527)`);
     const P = loadPage(port);
     if (has('boot')) await secBoot(P); else await sleep(3500);
+    if (has('cam') && !ATTACH) await secCam(P);
     if (has('evt')) await secEvt(P);
     if (has('pre')) await secPre(P, port);
     if (has('script')) await secScript(P);

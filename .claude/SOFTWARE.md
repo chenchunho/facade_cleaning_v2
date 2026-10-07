@@ -41,6 +41,8 @@
    編排/上機測試:scripts/cycle_test.py(09-17 由 Linux_test/ 搬來;full / arm / crane 模式,走 TCP 打三程序;server.js Mission 起跑的就是它)
    離線測試:    harness/(fake_robot 假端點 + gui_v3_check / fake_bus 假匯流排 + 回放比對)
    (相機管線 frame_capture/ 2026-09-16 已自樹移除;user_lib/FrameAnalyzer 仍在本體 build 內,為樁)
+   🆕 攝影機轉播:scripts/cam_relay.py = 本體 user service fcv-cam,HTTP :8091(2026-10-07;RTSP .112/.113 → H.264 直通 fMP4(預設,<video>+MSE)/ MJPEG(退路),
+      有人看才跑 ffmpeg;瀏覽器直連本體,server.js 只送 {src:'cam'} 位置,不轉送畫面)
 ```
 
 📌 **硬體邊界 = 軟體邊界**(per user 2026-09-13,`HARDWARE.md` §0):吊機與本體兩箱之間**只共用 220V 進線與隧道通訊**,

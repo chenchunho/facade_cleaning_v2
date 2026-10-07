@@ -11,8 +11,7 @@
 ### A. 離線可做(程式/文件)
 | | 項目 | 出處 |
 |---|---|---|
-| 🟡 | **查 `length_diff_max_cm`(10 cm)為何 13~16 cm 不觸發**:比的是絕對 L−R、相對起點、還是扣 `level_diff` 後?起點已偏 5~7 cm 時保護範圍是否被放寬 | 10-01 速度測試 |
-| 🟢 | `cycle_test` 上行目前 50 Hz 回頂:要不要改 30 Hz(roll RMS 0.5 vs 1.1°,每公尺 +2.5 s)—— 待拍板;**避開 40 Hz 上行**(兩次擺盪) | 10-01 |
+| 🟡 | **`length_diff_max_cm` 餘裕**(10-07 查明「13~16 cm 不觸發」**不是 bug**:比的是本次動作相對位移差,10-01 26 趟最大 9 cm):10-06 起下行可到 50 Hz、實測已 9/10 + 計米器抖動 ⇒ 可能誤停。待拍板:門檻 → 12~13 或下行維持 30 Hz;零風險可先做 `length_diff_peak` 印出 | 10-01、10-07 |
 
 ### B. 要上機
 | | 項目 | 出處 |
@@ -24,7 +23,7 @@
 | 🔴 | **official 計米器捲尺校正**(9/19 實測確認左右需重校;同指令左 +8 cm 時右 +18 cm)、中錶 DP=0→2(面板)、漂移累積 | 09-19、報告 3.4 |
 | 🟡 | MH300 中繩:official `.32` 站號/baud 未測;程式仍寫 CLV900 slave 3 @ USR_A;MH300 必驗清單(方向/電流 scale/run bit/fault code);`0x2002` 開機無條件清已寫、未上機 | 舊#21/#76 |
 | 🟡 | official 兩台 Pi 無 NTP(先跑 `ntp_probe.sh`) | 09-21 |
-| 🟡 | 真機驗 09-16 中止五步(`[web] STOP ⑤` + 四顆回大氣)。✅ 吸附中 `crane_goto` → `ERR cups_attached` **10-01 真機已驗** | 09-16、10-01 |
+| 🟡 | 真機驗 09-16 中止五步(`[web] STOP ⑤` + 四顆回大氣)。✅ 吸附中 `crane_goto` → `ERR cups_attached` **10-01 真機已驗**。⏸ 10-07 per user「暫時不修、保持待辦」:環境已備好(吊機 `fcv-web-v3` drop-in `no-arm.conf` = `FCV_NO_ARM=1`、本體 `fcv-arm` 停 + `arm_attached off`);**卡在起點須在頂端**(當時計米器 4/3 = 底部)。測法:機器頂端貼玻璃 → Mission 1/1/5 cm、fan `move:5`、rail off → 推桿伸出時按中止(無手臂時吸住只有幾秒)→ 看 ①②③(④)⑤ 順序、⑤ 在 proc 結束後、p5..p8 回大氣、橫幅「停止中 → 已脫離牆面」、吊機沒動 | 09-16、10-01、10-07 |
 | 🟡 | **手臂裝回後**(10-01 拆修中;本體 `arm_attached off`、`fcv-arm` 已停):`start fcv-arm` + `arm_attached on` + `deploy.sh arm`;**繼電器 CH4 噴水泵 / CH5 滾刷**在新 ZS 驅動下開關回讀(10-01 沒測)。手臂:`DEPLOY_F` WARN 分支從未在硬體觸發、`theta_max=1.10` 無上界實測、四個樞軸→玻璃幾何常數未實體量、臂長 490 vs 編碼器尺度 1.53× 無法分辨(量角器量一次)、M1 passive 根因(08-17 起)、**M2 掃動被摩擦帶走 26~28°** | 舊#105/#106、附錄 手臂/滑台群 |
 | 🟡 | `status` 的 `p_err=` 與 attach 的 `partial_seal=` 兩條「讓失敗看得見」路徑從沒被執行到(非缺陷,只是未觸發)。👁 10-01:`attach` 四顆全吸 → 未走到 `partial_seal`;風扇轉時 slave 8 讀不到 → `p_err=` 應會出現,下次跑風扇時抓一次 status 即可驗 | 舊#69、10-01 |
 | 🟢 | SE3 `readFaultCode`:**10-01 測試機重驗** `vfd_fault left/right` ×3 → 成功 4/6,失敗是 `0x1008` 偶發 comm fail(不再是「連續」);兩側履歷 4 筆皆 `160/OPT`(推定為程式重啟時 keepalive 中斷,當天重啟多次)。剩:偶發失敗要不要加重試、OPT 是否只在重啟時累加 | 舊#100/#141、10-01 |
@@ -66,6 +65,38 @@
 ---
 
 
+## 2026-10-07:測試吊機 DHCP 換 IP(.25 → .31)→ 本體連不到吊機(IMU 推送斷)
+
+- 兩台開機後 `.25` 不通。倉庫路由器 ARP(`drayops.py 5.1 arp`):`raspberry-cran` = **192.168.5.31**(MAC `DC-A6-32-75-8A-AA`,WiFi S5)、`washrobot` 仍 .26。
+  SSH ECDSA 主機金鑰與 known_hosts 的 .25 **逐字相同** ⇒ 同一台。路由器 bindmac 只綁了 NVR/打卡鐘/LED,**兩台機器人都是 DHCP**。
+  ⚠️ `.31` 不在 `~/.ssh/config` 的 claudeuser 清單 ⇒ 要 `-i ~/.ssh/claudeuser`。
+- 症狀(user「IMU 有問題」):IMU 本身正常(`dev_imu=1`、n_angle 遞增);本體 `FCV_EP_CRANE_HOST=192.168.5.25` 寫死 ⇒ `[WARN] crane IMU push channel not up yet`、`crane_peer_age_ms=-1`;三條本體↔吊機連線(主/estop/IMU)全斷 ⇒ 吊機平衡退回計米器、`crane_goto` 失敗。
+- **per user 選 B(臨時)**:本體加 drop-in **`~/.config/systemd/user/fcv-body.service.d/crane-ip.conf`**(`FCV_EP_CRANE_HOST=192.168.5.31`),unit 本體不動 → daemon-reload + restart → `[OK] crane 192.168.5.31:5002`、estop/IMU channel connected;吊機 `body_link_age_ms=239`、`imu_roll_fresh=1`。
+  (未採 A:路由器 bindmac 把吊機固定 .25。)
+- ✅ **部署 duty_max 9**(per user「1 8 開始」):`deploy.sh` 測試機吊機位址改可覆蓋 **`FCV_CRANE=user@192.168.5.31`**(預設仍 .25);本機 `~/.ssh/config` claudeuser 清單加 `.31`。
+  `deploy.sh body` → `[OK] crane 192.168.5.31:5002`、selfcheck 全過、未吸附;真機 `pwm set 1 50 65535 10` → `ERR pwm_duty_rejected_must_be_5_to_9_pct`、`pwm status` `duty_max=9`、ch1=5。`deploy.sh script` 兩台 md5 一致。
+  ⚠️ 補漏:`server.js` Mission `fan=` 仍收 `:10` → 改 5~9(harness 216 過;**未部署**,要 `deploy.sh server` 重啟 fcv-web-v3)。⚠️ `pwm set` 參數序是 `<ch> <hz> <control> <duty>`(不是 duty 在前)。
+- ✅ **離線:`length_diff_max_cm` 查明**(`Crane_control_PI/main.cpp:3335-3344`):`|(L−L0)−(R−R0)| > 10`(整數 cm、每 20 ms、無去抖),L0/R0=動作起點;**只在 `motion_rope`**(pay_out/retract/goto/Mission);hold(GUI ▲▼)、side_measured、fine_adjust **不檢查**;與 `level_diff` 無關。
+  10-01 重算(`agent_ai/.tmp/1001speed/*.json`):起點 L−R +5~+7、絕對 13~16、**相對最大 9** ⇒ 照設計不觸發。待辦改列「餘裕」(見總表 A)。
+- 🧹 總表 A「cycle_test 上行 50 Hz」刪除:`cycle_test.py:307` 早已 `DOWN_HZ, UP_HZ = 30, 30`。
+- ✅ `server.js` 已部署(`FCV_CRANE=… deploy.sh server`);吊機 **`/etc/systemd/system/fcv-web-v3.service.d/no-arm.conf`**(`FCV_NO_ARM=1`,🔴 **手臂裝回後刪除** + daemon-reload + restart);本體 `fcv-arm` stop、`arm_attached off`。
+- 🆕 **Dashboard 要加兩支攝影機畫面**(per user,優先於 8)。查證:
+  - 攝影機在**本體那段有線網**:本體 `eth0 .1.100` ping/RTSP `.112` OK(子碼流 h264 **800×448 25 fps**);吊機 `.1.10` 那段**完全看不到**(只有 .30~.34)⇒ 串流要由本體出,瀏覽器直連本體 `.26`(經吊機轉 = WiFi 流量兩倍)。
+  - 🔴 **攝影機 2 `.113` 失聯**:本體/吊機兩段 ping sweep 都沒有、XM 廣播搜尋(UDP 34569、msgid 1530)只回 `.112` ⇒ 推定沒電/沒接線;✅ **user 處理後重掃:`.113` 回來了**(同 MAC/SN、仍在本體段),兩支 RTSP 子碼流皆 h264 800×448 25 fps。本體段另有一台未知 `.250`(MAC `58:23:bc:00:33:1a`)。
+  - 本體 ffmpeg 子碼流 → MJPEG 實測(10 s):8 fps q7 = CPU 7.4%、3.2 Mbps;**5 fps q9 = CPU 5.5%、1.6 Mbps**/支。⚠️ 本體 WiFi 同時承載控制 + IMU 推送,上線後要量 `body_link_age_ms` / `imu_roll_age_ms`。
+- ✅ **攝影機上線**(per user「可以 開始做」;細節 changelog `[2026-10-07a]`):本體 **`fcv-cam`**(`scripts/cam_mjpeg.py` :8091,user service、enabled)+ GUI Dashboard 第一張「攝影機」卡(`v3-2026.10.07-2042`)+ `server.js` `{src:'cam'}`(已部署)+ `deploy.sh cam`。
+  驗證:harness 229 過(新 `[cam]` 13 項);真機 `.jpg` 兩支 800×448;開兩路 30 s:ffmpeg 各 ~5%、WiFi 1.46+0.98 Mbps、`body_link_age_ms` avg 127→144 / max 253→256 ⇒ **無明顯劣化**。🟡 待 user 用瀏覽器實看(Ctrl+F5)。
+  ✅ **OSD 移除**(per user「兩隻 OSD 幫我移除」):原因是鐘沒對時(停 09-14 / 09-10)、兩支標題都 `CAM01`。XM 34567 `AVEnc.VideoWidget` 時間/標題的 `EncodeBlend`+`PreviewBlend` → false,兩支 Ret=100、讀回 false、快照確認無字。
+    工具由 git 歷史救回擴充成 **`scripts/xm_ipcam.py`**(`get`/`osd on|off`/`time`,在本體跑);**原設定備份**(per user 問)`config/ipcam/videowidget_{112,113}_before_osd_off_20261007.json`(本體 `~/run/cam_osd_backup_*` 另有一份)。GUI 註解同步 `v3-2026.10.07-2106`。
+  📌 決策:**推翻 09-01「攝影機不列入本版架構」**(CLAUDE.md / HARDWARE.md 已改);畫面**不經吊機轉送**(省一倍 WiFi)。
+  ⚠️ changelog 漏記 10-02(`0f61823`)、10-06(`c069c84`)兩次 commit 的條目(待補)。
+- ✅ **攝影機優化**(per user「速度有點慢、關閉不該啟用的功能、串流再優化」;細節 changelog `[2026-10-07c]`、`summaries/IPCAM_XIONGMAI_SUMMARY.md`):
+  - 查因:攝影機本身 20~25 fps,**慢的是我們 MJPEG 5 fps**。
+  - 攝影機端關掉:音訊、移動/人形偵測、雲端 P2P、推播、線上自動升級、每週自動重開、錄影;子碼流 GOP 2→1 s;慢快門 2→0。改前整份備份 `config/ipcam/features_*`;重開機後全數保留。⚠️ 重開後兩支 **20.0 fps**(重開前 25,原因未明、已排除慢快門)。
+  - 串流改 **H.264 直通**(`scripts/cam_relay.py` 取代 `cam_mjpeg.py`,本體舊檔已刪):fMP4 一張一段、常駐 + GOP 快取;GUI `<video>`+MSE,MJPEG 退為備援 + 格式選單(`v3-2026.10.07-2126`)。
+  - 驗證:harness 231 過;**真 Chrome 無頭(CDP,`harness/cam_browser_check.js`)**:兩路 H.264 20 fps、播放端落後 ~0.4 s、掉格 ~1%(第一版追趕門檻 0.3 s 害 1.1 倍速 + 掉格 30%,已改遲滯);本體 ffmpeg 各 0.2% CPU、WiFi 0.34+0.27 Mbps;兩路開著鏈路年齡 avg 128/max 248(=基準)。🟡 待 user 實際瀏覽器看(Ctrl+F5)。
+- 🔴 **待辦/伏筆**:① 吊機 IP 若再變(或回 .25)要改/刪 `crane-ip.conf` ② `deploy.sh`(`CRANE=user@192.168.5.25`)與 `deploy_web.sh`(`PI` 預設 .25)、GUI 網址都還指 .25 ⇒ 部署要覆蓋或改用 .31(`PI=user@192.168.5.31`)③ 上 official 時:drop-in 依檔名排序,`endpoints.conf`(還原後)排在 `crane-ip.conf` 之後會蓋過它,但仍建議一併刪除。
+
 ## 2026-10-03:從上層搬入(agent_ai 上層日誌拆檔時的核對;上層原有、這裡沒有的)
 - ⚠️ **踩坑(09-01 續十二)X518/DSZL 張力刻度校正順序不可省**:空載 `zero_tension` → 掛已知重量 → 算 scale → **移除後必須回 0**(負向對照)。當天第一次跳過歸零、拿「碰巧讀到 0」當基準,方向與大小全錯,是靠移除後停在 raw 117 才抓到。official 計米器/張力計重校時照這個順序。
 - 📌 **實測依據(09-04)力控貼合 `DEPLOY_F` 耐久基準**:滾筒 50 輪(吸盤連續 22 分鐘零衰減)+ 雙工具 10 輪,全部零中止(當時目標 15 N·m;09-30 起工作力道改 3)。手臂裝回後可當回歸對照。
@@ -96,6 +127,11 @@
     ⚠️ 驅動層 log 有「同一處錯誤重複發生,本輪已抑制」⇒ 計數是**下限**(QX 每段都剛好 4,疑似被抑制封頂)。
     📌 測試腳本修正:逾時後等 1.5 s 吃掉遲到回覆再繼續(上一輪的錯位問題),本輪回覆已對齊。
   - ⚠️ 測試腳本缺陷:逾時(3 s)後遲到的回覆讓後續「指令 ↔ 回覆」錯位一格(log 中 `pwm set` 拿到前一個 `pwm status` 的回覆);**風扇實際有照計畫切換**(錯位回覆中的 `ch1=7/8` 與段落吻合),驅動層計數取自本體 log 不受影響,應用層失敗數只供參考。結束風扇 5% 已回讀確認。
+
+- 🟡 **風扇 `duty_max` 10 → 9**(10-06 per user;依據 10-02 電源實測:2×NPP 50 A,雙顆 10% = 49 A 頂限流、9% = 45 A)
+  - 本體:`WASH_ROBOT.h` 新增 `PWM_DUTY_MAX_PCT = 9.0`,init 後 `pwm_.setDutyLimits(min, 9)`(driver 預設仍 10 = 馬達規格);超出回 `ERR pwm_duty_rejected_must_be_5_to_9_pct`。
+  - GUI:Manual/Mission 風扇輸入 max 9、`setFanDuty` 5~9、Mission 驗證 `fan pct 5~9`、狀態字 ≥9 顯示「上限」;`cycle_test.py` 起跑前擋 `fan pct > 9`;fake_robot duty_max=9;harness +1 項(216 全過)。
+  - 部署:✅ GUI `v3-2026.10.06-1147`;⏳ **本體 + `cycle_test.py` 待本體開機**(`deploy.sh body` + `deploy.sh script`,後者要兩台都在)。加第 3 顆 NPP 後改回 10。
 
 - ✅ **(10-02 改、10-06 部署)「上下行照使用者選」第二步**(per user「兩件事都做」):① `PAY_OUT_MAX_HZ` 30 → **50**(goto / Mission / side_measured 下行也照 motion_hz;`set_pay_out_max_hz` 仍可壓低,不持久化)② `set_hold_hz` / `set_motion_hz` 上限 120 → **50**(`ROPE_USER_HZ_MAX`,馬達額定)③ GUI Manual hz 輸入 max 50。⚠️ Mission 實際仍 30/30:`cycle_test.py` 自己設 `DOWN_HZ, UP_HZ = 30, 30`(介面不能選)。
   - ✅ 10-06 真機:`pay_out_max_hz=50`;`set_hold_hz 60` / `set_motion_hz 51` → `ERR hz_out_of_range (1..50)`;`set_hold_hz 50` OK。GUI `v3-2026.10.06-1025`。

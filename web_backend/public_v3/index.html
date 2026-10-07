@@ -222,6 +222,20 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
   .cupg svg{display:block}
   .cupg .cl2{font-family:var(--mono);font-size:10px;color:var(--ink3);margin-top:2px}
 
+  /* [2026-10-07 per user] 攝影機兩路：並排（≤520px 上下）。框的比例照子碼流 800×448。
+     遮罩字（.camo）在 img 底下：暫停/離線時 img 換成透明 1×1，字就露出來；有畫面時被蓋住。 */
+  .camgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .camf{margin:0;display:flex;flex-direction:column;gap:4px;min-width:0}
+  .camv{position:relative;background:var(--sunk);aspect-ratio:800/448;border-radius:2px;overflow:hidden;cursor:zoom-in}
+  .camv img,.camv video{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;display:block}
+  .camv .off{display:none}   /* 不用 [hidden]：上一行的 display:block 會蓋掉它（09-15 同型坑） */
+  .camv:fullscreen{background:#000}
+  .camo{position:absolute;left:0;top:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;
+        padding:8px;font-size:12px;color:var(--ink3);text-align:center;white-space:pre-line}
+  .camf figcaption{display:flex;justify-content:space-between;gap:8px;font-size:12px;color:var(--ink2)}
+  .cam-st{font-family:var(--mono);font-size:11px;color:var(--ink3);text-align:right}
+  .cam-st.ok{color:var(--ok)} .cam-st.warn{color:var(--warn)} .cam-st.bad{color:var(--bad)}
+
   /* 大樓立面 */
   .bldg{display:flex;gap:14px}
   .bldg svg{flex:none}
@@ -543,6 +557,7 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
   /* [v3] 手機寬度（現場平板直立 / 手機）：單欄、頂欄換行、大字縮一級、表格可橫捲 */
   @media (max-width:520px){
     .man{padding:10px;grid-template-columns:1fr;gap:10px}
+    .camgrid{grid-template-columns:1fr}
     .mis-grid{grid-template-columns:1fr}
     .mis-btns{flex-direction:row;flex-wrap:wrap}
     .mis-btns .mis-big{width:auto;flex:1 1 30%}
@@ -618,6 +633,31 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
             「靜默寫入不存在的元素」（找不到就 return，沒有任何徵兆）。 -->
     <div class="pane on" data-pane="dashboard" role="tabpanel">
       <div class="man">
+        <!-- [2026-10-07 per user] 兩支攝影機（本體區網 .112/.113）。串流由本體 fcv-cam（scripts/cam_relay.py :8091）直接給瀏覽器，
+             server.js 只在連線時告訴頁面位置（{src:'cam'}）。**只在看得到時才拉**：Dashboard 分頁開著、
+             視窗沒縮小、沒按暫停 —— 走的是本體那條同時承載吊機連線與 IMU 推送的 WiFi（H.264 每路 ~0.3 Mbps；MJPEG 1~1.6 Mbps）。
+             📌 攝影機 OSD（時間＋CAM01 標題）10-07 per user 已在機身關掉（鐘沒對時會誤導；scripts/xm_ipcam.py osd on 可開回）。
+                畫面新不新以本卡的狀態字（即時 n fps／畫面停 n s）為準。 -->
+        <div class="grp" id="d-cam-card" style="grid-column:1/-1">
+          <header><span>攝影機</span>
+            <span class="lock" id="d-cam-state" style="background:var(--idle-soft);color:var(--ink2)">—</span>
+            <select id="d-cam-mode" style="font-size:11.5px;padding:1px 4px" title="畫面格式（只影響這個瀏覽器）：自動＝瀏覽器支援就用 H.264（順、省頻寬），否則 MJPEG">
+              <option value="auto">自動</option><option value="mp4">H.264</option><option value="mjpeg">MJPEG</option></select>
+            <button class="btn" id="d-cam-toggle" style="padding:2px 10px;font-size:11.5px" title="暫停／恢復兩路畫面（只影響這個瀏覽器）">⏸ 暫停</button></header>
+          <div>
+            <div class="camgrid">
+              <figure class="camf" data-cam="1">
+                <div class="camv" title="點一下全螢幕"><div class="camo">—</div><img alt="攝影機 1"><video class="off" muted playsinline autoplay disablepictureinpicture></video></div>
+                <figcaption><span>攝影機 1</span><span class="cam-st">—</span></figcaption>
+              </figure>
+              <figure class="camf" data-cam="2">
+                <div class="camv" title="點一下全螢幕"><div class="camo">—</div><img alt="攝影機 2"><video class="off" muted playsinline autoplay disablepictureinpicture></video></div>
+                <figcaption><span>攝影機 2</span><span class="cam-st">—</span></figcaption>
+              </figure>
+            </div>
+          </div>
+        </div>
+
         <div class="grp">
           <header><span>機器在哪裡</span>
             <span class="lock" id="d-range" style="background:var(--idle-soft);color:var(--ink2)">—</span></header>
@@ -929,7 +969,7 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
                       <option value="move">move（下行才開）</option>
                       <option value="all">all（全程）</option>
                     </select>
-                    <span class="mpf"><span class="mpl">%</span><input class="numin" id="mp-fanpct" type="number" value="7" min="5" max="10" step="1" aria-label="風扇 pct"></span>
+                    <span class="mpf"><span class="mpl">%</span><input class="numin" id="mp-fanpct" type="number" value="7" min="5" max="9" step="1" aria-label="風扇 pct"></span>
                   </span></div>
                 <div class="ctl mp"><span class="cl">滑台<small><code>rail=&lt;起&gt;-&lt;迄&gt;</code> 0~130、起≠迄 · <code>off</code>＝清潔段不動滑台</small></span>
                   <span class="mpc">
@@ -1427,7 +1467,7 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
             <div class="ctl"><span class="cl">狀態<small>duty, hz, ctrl, enable · <strong>看回讀不看回傳</strong></small></span>
               <span class="rd" id="rd-fan">—</span><span class="rd" id="rd-fanraw" style="color:var(--ink3)">—</span></div>
             <div class="ctl"><span class="cl">占空比<small>驅動鎖 5~10%，5=停止 10=全速</small></span>
-              <span class="rd"><input id="fan-duty" class="numin" type="number" value="7" min="5" max="10" step="1" aria-label="風扇占空比"></span>
+              <span class="rd"><input id="fan-duty" class="numin" type="number" value="7" min="5" max="9" step="1" aria-label="風扇占空比"></span>
               <button class="btn" id="fan-set">套用</button></div>
             <div class="ctl stack"><span class="cl">快捷<small>5＝停止 · 7＝作業 · 10＝全速</small></span>
               <span class="ctlrow">
@@ -1744,6 +1784,7 @@ function connect(){
     //    放它往下走會被 queue 的認領邏輯當成回覆吃掉（本檔 :1105 記過的那個雷）。
     if (m.src === 'mission'){ if (typeof onMissionMsg === 'function') onMissionMsg(m); return; }   // [09-15] 腳本模式：server.js 的 ring/state
     if (m.src === 'wall'){ if (typeof onWall === 'function') onWall(m); return; }
+    if (m.src === 'cam'){ if (typeof onCamCfg === 'function') onCamCfg(m); return; }   // [10-07] 攝影機位置（本體 fcv-cam）
     if (m.src === 'status'){
       var armWasUp = conn.arm;
       var wasUp = {washrobot: conn.washrobot, crane: conn.crane, arm: conn.arm};
@@ -2594,7 +2635,7 @@ function paintPwm(line){
   var m = /ch1=(\d+),(\d+),(\d+),(\d+)/.exec(line);
   if (!m){ txt('rd-fan', '讀不到'); return; }
   var duty = +m[1];
-  var s = duty <= 5 ? '停止' : (duty >= 10 ? '全速' : '作業');
+  var s = duty <= 5 ? '停止' : (duty >= 9 ? '上限' : '作業');   // [2026-10-06] 上限 10 → 9（本體 PWM_DUTY_MAX_PCT）
   txt('rd-fanraw', m[1] + ',' + m[2] + ',' + m[3] + ',' + m[4]);
   var rd = document.getElementById('rd-fan');
   rd.textContent = duty + '% ' + s + ' 已確認'; rd.className = 'rd on';
@@ -3723,7 +3764,7 @@ function misValidate(p){
   if (!(p.step_cm >= 1 && p.step_cm <= 200)) bad.push('step_cm 1~200');
   if (!(p.steps >= 1 && p.steps <= 99)) bad.push('steps 1~99');
   if (!(p.cycles >= 1 && p.cycles <= 999)) bad.push('cycles 1~999');
-  if (!/^(move|all)(:(5|6|7|8|9|10))?$/.test(p.fan)) bad.push('fan pct 5~10');
+  if (!/^(move|all)(:(5|6|7|8|9))?$/.test(p.fan)) bad.push('fan pct 5~9');   // [2026-10-06] 上限 10 → 9（本體 PWM_DUTY_MAX_PCT）
   var m = /^(\d{1,3})-(\d{1,3})$/.exec(p.rail);
   if (!(p.rail === 'off' || (m && +m[1] <= 130 && +m[2] <= 130 && m[1] !== m[2]))) bad.push('rail <起>-<迄> 0~130 起≠迄 或 off');
   if (!(p.arm_nm >= 1 && p.arm_nm <= 15)) bad.push('arm_nm 1~15');
@@ -4670,7 +4711,7 @@ if (balModeEl) balModeEl.addEventListener('change', function(){
 // 所以快捷剛好就是全部六檔，不會有「按了被拒」的格子。
 // 📌 語意：5＝停止、7＝作業、10＝全速。中間三檔沒有既定用途，留給現場試。
 function setFanDuty(d){
-  if (!(d >= 5 && d <= 10)) { alert('占空比由驅動層鎖在 5~10%'); return; }
+  if (!(d >= 5 && d <= 9)) { alert('占空比鎖在 5~9%（10-06 起上限 9：兩顆 NPP 電源 50 A，10% 會頂到限流）'); return; }
   var el = document.getElementById('fan-duty');
   if (el) el.value = d;
   // 一律看回讀不看回傳字串：60 次實測中 readback_failed / control_write_failed
@@ -5685,6 +5726,280 @@ document.addEventListener('click', function(ev){
   paintBtn();
 })();
 
+//=========== cameras (Dashboard, 2026-10-07 per user) ===========
+// Streams come straight from fcv-cam on the body Pi (scripts/cam_relay.py :8091); server.js only tells us
+// where ({src:'cam'}). Pull video only while it can be seen: Dashboard tab on + page visible + not paused
+// by this viewer — the body's WiFi also carries the crane link and the IMU push.
+// Two formats (10-07 per user「速度有點慢」→ optimized the same day):
+//   mp4   = H.264 passthrough (fMP4, one fragment per frame) into <video> via MediaSource: camera frame rate
+//           (~20 fps), ~0.3 Mbps, no decode on the body. Default whenever the browser has MediaSource.
+//   mjpeg = <img> multipart, re-encoded 5 fps, 1~1.6 Mbps. Fallback (older iPhone Safari has no MSE) or chosen.
+var CAM_BLANK = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+var camCfg = {base:'', ids:[]};
+var camSt = {ok:null, cams:{}};            // last /cam/status; ok=false ⇒ fcv-cam unreachable
+var camPaused = false, camModePref = 'auto';
+try { camPaused = localStorage.getItem('fcv.cam.paused') === '1'; camModePref = localStorage.getItem('fcv.cam.mode') || 'auto'; } catch(e){}
+var camPollT = null, camPollBusy = false;
+
+function camOnScreen(){
+  var p = document.querySelector('.pane[data-pane="dashboard"]');
+  return !!(p && p.classList.contains('on')) && document.visibilityState !== 'hidden';
+}
+function camWant(){ return !!camCfg.base && !camPaused && camOnScreen(); }
+function camFigs(){ return [].slice.call(document.querySelectorAll('#d-cam-card .camf')); }
+function camMseOk(){
+  try {
+    return !!(window.MediaSource && window.fetch && window.ReadableStream) &&
+           MediaSource.isTypeSupported('video/mp4; codecs="avc1.4D001E"');
+  } catch(e){ return false; }
+}
+function camModeFor(f){
+  if (camModePref === 'mjpeg' || f._mseBroken) return 'mjpeg';
+  return camMseOk() ? 'mp4' : 'mjpeg';
+}
+// codec string straight from the init segment's avcC box: 'avcC' + version + profile + compat + level
+function avcCodec(u8){
+  for (var i = 0; i + 7 < u8.length; i++){
+    if (u8[i] === 0x61 && u8[i+1] === 0x76 && u8[i+2] === 0x63 && u8[i+3] === 0x43){
+      var h = function(x){ return ('0' + x.toString(16).toUpperCase()).slice(-2); };
+      return 'avc1.' + h(u8[i+5]) + h(u8[i+6]) + h(u8[i+7]);
+    }
+  }
+  return '';
+}
+function u8cat(list){
+  var n = 0, i, o = 0; for (i = 0; i < list.length; i++) n += list[i].length;
+  var out = new Uint8Array(n); for (i = 0; i < list.length; i++){ out.set(list[i], o); o += list[i].length; }
+  return out;
+}
+
+function camStart(f){
+  camStop(f);
+  var mode = camModeFor(f), img = f.querySelector('img'), vid = f.querySelector('video');
+  f.dataset.mode = mode; f.dataset.on = '1'; f.dataset.t0 = String(Date.now());
+  img.classList.toggle('off', mode !== 'mjpeg'); vid.classList.toggle('off', mode !== 'mp4');
+  if (mode === 'mjpeg') img.src = camCfg.base + '/cam/' + f.dataset.cam + '.mjpg?t=' + Date.now();
+  else mseStart(f, vid);
+}
+function camStop(f){
+  // Swapping src / aborting the fetch is what drops the connection (= fcv-cam sees the viewer leave).
+  var img = f.querySelector('img');
+  if (f.dataset.on === '1' || !img.getAttribute('src')) img.src = CAM_BLANK;
+  mseStop(f);
+  f.dataset.on = '0';
+}
+
+// ---- MSE player: fetch the endless fMP4 response, append as it arrives, stay near the live edge ----
+function mseStart(f, vid){
+  var p = {dead:false, q:[], sb:null, head:[], t0:Date.now(), ac:(window.AbortController ? new AbortController() : null)};
+  f._mse = p;
+  p.ms = new MediaSource();
+  p.url = URL.createObjectURL(p.ms);
+  vid.src = p.url;
+  p.ms.addEventListener('sourceopen', function(){
+    if (p.dead) return;
+    fetch(camCfg.base + '/cam/' + f.dataset.cam + '.mp4?t=' + Date.now(), {cache:'no-store', signal: p.ac ? p.ac.signal : undefined})
+      .then(function(r){
+        if (!r.ok || !r.body) throw new Error('HTTP ' + r.status);
+        var rd = r.body.getReader();
+        function pump(){
+          return rd.read().then(function(x){
+            if (p.dead) return;
+            if (x.done) throw new Error('stream ended');
+            if (!p.sb){
+              p.head.push(x.value);
+              var all = u8cat(p.head), codec = avcCodec(all);
+              if (!codec){ if (all.length > 262144) throw new Error('no avcC in init segment'); return pump(); }
+              p.sb = p.ms.addSourceBuffer('video/mp4; codecs="' + codec + '"');
+              p.sb.mode = 'sequence';   // ignore camera timestamps: resync gaps can't leave holes that stall playback
+              p.sb.addEventListener('updateend', function(){ mseFeed(p, vid); });
+              p.codec = codec; p.q.push(all); p.head = null;
+            } else p.q.push(x.value);
+            p.lastData = Date.now();
+            mseFeed(p, vid);
+            return pump();
+          });
+        }
+        return pump();
+      })
+      .catch(function(e){ if (!p.dead) mseFail(f, String(e && e.message || e)); });
+  }, {once:true});
+  p.timer = setInterval(function(){ mseChase(f, p, vid); }, 500);
+  try { var pr = vid.play(); if (pr && pr.catch) pr.catch(function(){}); } catch(e){}
+}
+function mseFeed(p, vid){
+  if (p.dead || !p.sb || p.sb.updating || !p.q.length) return;
+  var buf = p.q.length === 1 ? p.q[0] : u8cat(p.q);
+  p.q = [];
+  try { p.sb.appendBuffer(buf); }
+  catch(e){
+    // QuotaExceeded: drop what's behind the playhead and retry once on the next updateend
+    try { if (vid.buffered.length && vid.currentTime > 2) p.sb.remove(0, vid.currentTime - 1); } catch(e2){}
+  }
+}
+function mseChase(f, p, vid){
+  if (p.dead) return;
+  var now = Date.now();
+  if (p.lastData ? now - p.lastData > 6000 : now - p.t0 > 10000){ mseFail(f, p.lastData ? 'no data for 6 s' : 'no data within 10 s'); return; }
+  if (!vid.buffered || !vid.buffered.length) return;
+  var end = vid.buffered.end(vid.buffered.length - 1), lag = end - vid.currentTime;
+  // Live view: never let it drift. Far behind (tab was busy, WiFi hiccup) → jump; somewhat behind → play faster.
+  // 🔴 Chrome itself keeps ~0.3 s buffered ahead of the playhead (headless Chrome 154, 10-07): a 0.3 s threshold
+  //    left playbackRate stuck at 1.1 and ~30 % of frames dropped. Hysteresis: speed up > 0.6 s, back to 1.0 < 0.4 s.
+  if (lag > 1.5 || vid.currentTime < vid.buffered.start(0)) vid.currentTime = Math.max(0, end - 0.3);
+  if (lag > 0.6) vid.playbackRate = 1.1; else if (lag < 0.4) vid.playbackRate = 1.0;
+  if (vid.paused){ try { var pr = vid.play(); if (pr && pr.catch) pr.catch(function(){}); } catch(e){} }
+  if (!p.sb.updating && vid.currentTime - vid.buffered.start(0) > 20){
+    try { p.sb.remove(0, vid.currentTime - 5); } catch(e){}
+  }
+}
+function mseStop(f){
+  var p = f._mse; if (!p) return;
+  p.dead = true; f._mse = null;
+  clearInterval(p.timer);
+  try { if (p.ac) p.ac.abort(); } catch(e){}
+  var vid = f.querySelector('video');
+  try { vid.removeAttribute('src'); vid.load(); } catch(e){}
+  try { URL.revokeObjectURL(p.url); } catch(e){}
+}
+function mseFail(f, why){
+  if (!f._mse) return;
+  mseStop(f);
+  f._mseErr = why;
+  f._mseFails = (f._mseFails || 0) + 1;
+  // Stream ended / stalled → reconnect shortly. Fails before ANY data twice in a row in auto mode →
+  // this browser can't play it: fall back to MJPEG for the rest of the page's life.
+  if (camModePref === 'auto' && f._mseFails >= 3 && !f._mseEverPlayed) f._mseBroken = true;
+  setTimeout(function(){ if (camWant() && f.dataset.on === '1') camStart(f); }, 1500);
+  camPaint();
+}
+
+function camApply(){
+  var want = camWant();
+  camFigs().forEach(function(f){
+    var known = camCfg.ids.indexOf(f.dataset.cam) >= 0;
+    if (want && known){ if (f.dataset.on !== '1' || f.dataset.mode !== camModeFor(f)) camStart(f); }
+    else camStop(f);
+  });
+  camPollCtl(!!camCfg.base && camOnScreen());
+  camPaint();
+}
+function camPollCtl(on){
+  if (on && !camPollT){ camPoll(); camPollT = setInterval(camPoll, 2000); }
+  else if (!on && camPollT){ clearInterval(camPollT); camPollT = null; }
+}
+function camPoll(){
+  if (camPollBusy || !camCfg.base) return;
+  camPollBusy = true;
+  var x = new XMLHttpRequest();
+  function done(ok, j){
+    camPollBusy = false;
+    camSt.ok = ok; camSt.cams = {};
+    if (ok && j && j.cams) j.cams.forEach(function(c){ camSt.cams[String(c.id)] = c; });
+    camHeal();
+    camPaint();
+  }
+  try {
+    x.open('GET', camCfg.base + '/cam/status', true);
+    x.timeout = 1500;
+    x.onload = function(){ var j = null; try { j = JSON.parse(x.responseText); } catch(e){} done(x.status === 200 && !!j, j); };
+    x.onerror = x.ontimeout = function(){ done(false, null); };
+    x.send();
+  } catch(e){ done(false, null); }
+}
+// A stream the server no longer counts (fcv-cam restarted, body rebooted, WiFi blip) leaves the picture
+// frozen — neither <img> MJPEG nor a hung fetch says so. Reconnect when fcv-cam reports 0 viewers of our kind.
+function camHeal(){
+  if (!camWant() || !camSt.ok) return;
+  camFigs().forEach(function(f){
+    var c = camSt.cams[f.dataset.cam]; if (!c || f.dataset.on !== '1') return;
+    var m = c.modes && c.modes[f.dataset.mode], n = m ? m.clients : c.clients;
+    if (f._mse && f._mse.sb) f._mseEverPlayed = true;
+    if (n === 0 && Date.now() - (+f.dataset.t0 || 0) > 6000) camStart(f);
+  });
+}
+function camPaint(){
+  var tg = document.getElementById('d-cam-toggle');
+  if (tg) tg.textContent = camPaused ? '▶ 開啟' : '⏸ 暫停';
+  var ms = document.getElementById('d-cam-mode');
+  if (ms && ms.value !== camModePref) ms.value = camModePref;
+  var nLive = 0, nKnown = 0;
+  camFigs().forEach(function(f){
+    var id = f.dataset.cam, c = camSt.cams[id];
+    var m = c && c.modes && f.dataset.mode ? (c.modes[f.dataset.mode] || c) : c;
+    var o = f.querySelector('.camo'), s = f.querySelector('.cam-st');
+    var fmt = f.dataset.on === '1' ? (f.dataset.mode === 'mp4' ? 'H.264' : 'MJPEG') : '';
+    var over = '連線中…', stTxt = '—', cls = '';
+    if (!camCfg.base) over = '等待後端告知攝影機位置…';
+    else if (camCfg.ids.indexOf(id) < 0) over = '未設定（server.js CAM_IDS）';
+    else {
+      nKnown++;
+      if (camPaused){ over = '已暫停（按右上「開啟」）'; stTxt = '暫停'; }
+      else if (camSt.ok === false){ over = '連不到攝影機服務\n' + camCfg.base; stTxt = '服務離線'; cls = 'bad'; }
+      else if (!m){ stTxt = '…'; }
+      else if (m.state === 'error'){ over = '攝影機離線\n' + (m.err || ''); stTxt = '離線'; cls = 'bad'; }
+      else if (m.state === 'live' && m.last_frame_age_ms > 3000){
+        stTxt = '⚠ 畫面停 ' + Math.round(m.last_frame_age_ms / 1000) + ' s'; cls = 'warn';
+      }
+      else if (m.state === 'live'){ stTxt = '即時 · ' + m.fps + ' fps'; cls = 'ok'; nLive++; }
+      else stTxt = m.state === 'starting' ? '連線中' : '待命';
+      if (fmt && stTxt !== '暫停') stTxt = fmt + ' · ' + stTxt;
+      if (f._mseBroken && camModePref === 'auto') stTxt += '（此瀏覽器播不了 H.264，改 MJPEG）';
+    }
+    o.textContent = over;
+    s.textContent = stTxt; s.className = 'cam-st' + (cls ? ' ' + cls : '');
+    s.title = (m && m.err) ? m.err : (f._mseErr ? 'H.264: ' + f._mseErr : '');
+  });
+  var st = document.getElementById('d-cam-state');
+  if (!st) return;
+  var txt = nLive + '/' + (nKnown || camFigs().length) + ' 即時', bg = 'var(--warn-soft)', fg = 'var(--warn)';
+  if (!camCfg.base){ txt = '—'; bg = 'var(--idle-soft)'; fg = 'var(--ink2)'; }
+  else if (camPaused){ txt = '已暫停'; bg = 'var(--idle-soft)'; fg = 'var(--ink2)'; }
+  else if (camSt.ok === false){ txt = '服務離線'; bg = 'var(--bad-soft)'; fg = 'var(--bad)'; }
+  else if (nKnown && nLive === nKnown){ bg = 'var(--ok-soft)'; fg = 'var(--ok)'; }
+  st.textContent = txt; st.style.background = bg; st.style.color = fg;
+}
+function onCamCfg(m){
+  var base = String(m.base || '').replace(/\/+$/, '');
+  var ids = (m.ids || []).map(String);
+  var changed = base !== camCfg.base || ids.join(',') !== camCfg.ids.join(',');
+  camCfg = {base: base, ids: ids};
+  if (changed) camFigs().forEach(camStop);   // every ws (re)connect resends it; only restart when it moved
+  camApply();
+}
+(function(){
+  var tg = document.getElementById('d-cam-toggle');
+  if (tg) tg.addEventListener('click', function(){
+    camPaused = !camPaused;
+    try { localStorage.setItem('fcv.cam.paused', camPaused ? '1' : '0'); } catch(e){}
+    camApply();
+  });
+  var ms = document.getElementById('d-cam-mode');
+  if (ms) ms.addEventListener('change', function(){
+    camModePref = ms.value;
+    try { localStorage.setItem('fcv.cam.mode', camModePref); } catch(e){}
+    camFigs().forEach(function(f){ f._mseBroken = false; f._mseFails = 0; camStop(f); });
+    camApply();
+  });
+  camFigs().forEach(function(f){
+    var box = f.querySelector('.camv');
+    box.addEventListener('click', function(){
+      // Full screen of the live element (works for <video> and <img>); no fullscreen API → MJPEG in a new tab.
+      if (box.requestFullscreen && !document.fullscreenElement){ box.requestFullscreen().catch(function(){}); return; }
+      if (document.fullscreenElement){ document.exitFullscreen(); return; }
+      if (camCfg.base) window.open(camCfg.base + '/cam/' + f.dataset.cam + '.mjpg', '_blank', 'noopener');
+    });
+    // MJPEG refused / dropped: show the overlay instead of a broken-image icon. Keep data-on=1 so
+    // camHeal() reconnects once fcv-cam answers again.
+    f.querySelector('img').addEventListener('error', function(){
+      var img = this; if (f.dataset.on === '1' && f.dataset.mode === 'mjpeg' && img.src !== CAM_BLANK) img.src = CAM_BLANK;
+    });
+    f.querySelector('video').addEventListener('playing', function(){ f._mseEverPlayed = true; f._mseFails = 0; });
+  });
+  document.addEventListener('visibilitychange', camApply);
+  camApply();
+})();
+
 //=========== tabs ===========
 
 var tabs = [].slice.call(document.querySelectorAll('.rail button'));
@@ -5714,6 +6029,7 @@ function showTab(name){
   if (t.disabled) return false;
   tabs.forEach(function(x){ x.setAttribute('aria-selected', String(x === t)); });
   panes.forEach(function(p){ p.classList.toggle('on', p.dataset.pane === name); });
+  if (typeof camApply === 'function') camApply();   // [10-07] 攝影機只在 Dashboard 看得到時才拉串流
   return true;
 }
 tabs.forEach(function(t){
@@ -5762,12 +6078,12 @@ setInterval(paint, 1000);
 // [2026-09-10] 版號寫在啟動那行，讓人一眼看得出瀏覽器拿到的是不是新版
 // （這個頁面是單一檔，改完不換檔名，快取沒清就會靜默停在舊版）。
 // ⚠️ 舊文案「server.js 未改動」已不成立 —— Mission 那批改過 server.js，拿掉。
-var CONSOLE_VER = 'v3-2026.10.06-1025';   // 唯一版號來源：scripts/deploy_web.sh 部署時 sed 這一行
+var CONSOLE_VER = 'v3-2026.10.07-2126';   // 唯一版號來源：scripts/deploy_web.sh 部署時 sed 這一行
 txt('ver-tag', CONSOLE_VER);   // 頂欄版號與這行同源，不再各寫各的
 log('console v3 啟動 —— 版本 ' + CONSOLE_VER + '（本體 mission 指令族 + SAFE + 作業流程頁；不 spawn 腳本）');
 // [v3] 無頭測試鉤（jsdom + fake_robot 端對端）。整支腳本包在 IIFE 裡，沒有這個鉤子測試碰不到 send()。
 // 🔴 只讀／送指令用，不是給頁面內部呼叫的 API；不要在別處依賴它。
-window.__v3 = {send: send, fire: fire, armErr: armErr, last: last, conn: conn, logs: function(){ return LOGBUF.slice(); }, onDetachEvt: onDetachEvt, paintEstopState: paintEstopState, wrStateText: wrStateText, wrMoving: function(st){ return WR_MOVING.test(st); }, armStatus: armStatus, armTool: function(){ return armTool; }, paintArmTool: paintArmTool, armApplyM2Line: armApplyM2Line, cupsState: cupsState, isSafe: function(){ return isSafe(); }, onHoldGuardEvt: onHoldGuardEvt, misParams: misParams, misValidate: misValidate, preMissing: preMissing, onMissionMsg: onMissionMsg, wsRef: function(){ return ws; }, setBackend: function(b){ MISSION_BACKEND = b; misBackendApply(); misPaint(); }, backend: function(){ return MISSION_BACKEND; },
+window.__v3 = {send: send, avcCodec: avcCodec, fire: fire, armErr: armErr, last: last, conn: conn, logs: function(){ return LOGBUF.slice(); }, onDetachEvt: onDetachEvt, paintEstopState: paintEstopState, wrStateText: wrStateText, wrMoving: function(st){ return WR_MOVING.test(st); }, armStatus: armStatus, armTool: function(){ return armTool; }, paintArmTool: paintArmTool, armApplyM2Line: armApplyM2Line, cupsState: cupsState, isSafe: function(){ return isSafe(); }, onHoldGuardEvt: onHoldGuardEvt, misParams: misParams, misValidate: misValidate, preMissing: preMissing, onMissionMsg: onMissionMsg, wsRef: function(){ return ws; }, setBackend: function(b){ MISSION_BACKEND = b; misBackendApply(); misPaint(); }, backend: function(){ return MISSION_BACKEND; },
                mis: function(){ return mis; }, wall: function(){ return wall; }, misPaint: misPaint,
                onMissionEvt: onMissionEvt, onSafeEvt: onSafeEvt};
 

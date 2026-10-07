@@ -217,7 +217,7 @@ class Sim:
 
     def pwm_status(self):
         return (f'OK ch1={self.pwm_duty:.0f},{self.pwm_hz},65535,1 ch2=5,50,0,0 ch3=ERR ch4=50,1000,0,0'
-                f' duty_min=5 duty_max=10 freq_lock=50 active_ch=1\n')
+                f' duty_min=5 duty_max=9 freq_lock=50 active_ch=1\n')
 
     # [2026-09-16] 真機 STATUS 的 [M2] 段有 `tool=`(由 M2 角度反推,±0.09 rad):
     #   滾筒 0.8558 / 刮刀 0.1913 / center 0 / 其餘 between。
@@ -537,7 +537,7 @@ def wr_dispatch(line, bcast):
         if c == 'pwm':
             if a[:1] == ['status']: return s.pwm_status(), True
             if a[:1] == ['set'] and len(a) >= 3:
-                try: s.pwm_duty = max(5.0, min(10.0, float(a[2])))
+                try: s.pwm_duty = max(5.0, min(9.0, float(a[2])))
                 except ValueError: pass
                 return f'OK ch1={s.pwm_duty:.0f},{s.pwm_hz}\n', True
             return 'OK\n', True

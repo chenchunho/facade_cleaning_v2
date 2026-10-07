@@ -278,6 +278,7 @@ cleaning_arm/        # 手臂控制 binary
                      #    📌 這是**刻意的服務邊界**，不是待重構的債（refactor_plan §3.4）
 harness/             # 重構等價性驗證：假匯流排 + 軌跡比對（不需要機器）
 scripts/             # cycle_test.py(任務腳本,server.js Mission 起跑的就是它;09-17 由 Linux_test/ 搬來,該目錄退役)
+                     #    cam_relay.py(🆕 10-07 Dashboard 攝影機轉播,本體 fcv-cam :8091)/ xm_ipcam.py(🆕 10-07 攝影機設定:OSD/對時/讀設定)
                      #    deploy.sh(開發期部署)/ deploy_web.sh / crcmd.py / systemd/(unit 副本)/ build/(建置腳本權威版)/ link_probe.sh
 tmp/                 # 暫存工作區（已 gitignore，不進版控）
 ```
@@ -298,14 +299,14 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
 | ~~`facade_cleaning_v2.sln`~~ | ⚰️ **2026-09-07 連同 4 個 `.vcxproj` 一併刪除**（VS 不再使用） | ⚪ 取回見 git `79a2312` |
 | ~~`deploy_and_test.pdf`~~ | ⚰️ **2026-09-16 per user 刪除**(v1 時期部署說明;產生器 `.claude/archive/gen_deploy_pdf.py` 仍在歸檔) | ⚪ git 有 |
 | ~~`dm2j_manual_utf8.txt`~~ | ⚰️ **2026-09-16 per user 刪除**(手冊文字擷取;權威是 `summaries/DM2J_RS_MODBUS_SUMMARY.md` + `doc/上滑台/DM2J-RS.V1.pdf`) | ⚪ git 有 |
-| `harness/` | **重構的等價性驗證**（2026-08-29 新增）：假匯流排 + 軌跡正規化 + 兩個版本比對。不需要機器 | 🟡 工具已完成並自我測試過；**尚未端到端跑過**。🔴 **2026-09-12 更正:「本機缺 `g++`」是錯的** —— 本機有 **g++ 9.4.0**(x86_64),`-fsyntax-only` 與 `-E` 預處理比對當日實測可用,harness 的前提早就成立。🆕 **09-13 加 `gui_offline.sh` + `fake_robot.py`**:三個假端點回真格式、狀態會動,**把 GUI 送的每條指令記成 KNOWN/UNKNOWN 清單**(從 GUI 推導程式面功能);見 `harness/README_gui_offline.md` |
+| `harness/` | **重構的等價性驗證**（2026-08-29 新增）：假匯流排 + 軌跡正規化 + 兩個版本比對。不需要機器 | 🟡 工具已完成並自我測試過；**尚未端到端跑過**。🔴 **2026-09-12 更正:「本機缺 `g++`」是錯的** —— 本機有 **g++ 9.4.0**(x86_64),`-fsyntax-only` 與 `-E` 預處理比對當日實測可用,harness 的前提早就成立。🆕 **09-13 加 `gui_offline.sh` + `fake_robot.py`**:三個假端點回真格式、狀態會動,**把 GUI 送的每條指令記成 KNOWN/UNKNOWN 清單**(從 GUI 推導程式面功能);見 `harness/README_gui_offline.md`。🆕 10-07 `cam_browser_check.js`:**真 Chrome**(CDP)驗攝影機 H.264 播放(jsdom 沒有 MediaSource) |
 | 🆕 `scripts/build/` | **建置腳本（權威版）**：本體／吊機兩支(`Linux_test` 那支 09-16 隨目錄一併移除) + `README.md`。2026-09-07 由兩台 Pi 的 `~/bringup/`（2026-09-09 已搬到 `~/projects/facade_cleaning_v2/`）逐位元取回 —— 在那之前**只存在於 Pi 上、不在版控** | 🟢 活的，**VS 移除後這是唯一的建置定義**（手臂例外，見 `cleaning_arm/compile.sh`） |
 | ~~`scripts/bench/`~~ | ⚰️ **2026-09-16 刪除**(09-09 從 Pi 取回的搬家前建置/啟動腳本,已被 `scripts/build/` + systemd 取代;git `842e774` 之前仍有) | ⚪ |
 | 🆕 `web_backend/tools/` | `check_console.js`：前端靜默失敗檢查器（重複 id／寫到不存在的元素／括號／`<div>` 開合）。改前端後跑一次 | 🟢 活的。⚠️ 已知盲區：只比對字面字串，樣板字串動態組的 id 看不到（工具自己會印） |
 | `doc/` | **原廠手冊**（14 個裝置／27 檔／41 MB）。`.claude/summaries/` 的 `Source:` 都指到這裡 | ⚪ 在 `.gitignore`，**不進版控但進雲端鏡像** |
 | `command/` | 🆕 **指令層**（2026-08-30 階段 2）：`dispatcher.{h,cpp}`，由 `facade_cleaning_v2/main.cpp` 抽出的 373 行分派器 | 🟢 活的 |
 | `mechanism/` | 🆕 **機構層**（2026-08-30 階段 3）：`rope_axis.h`，吊機繩的虛擬軸（三裝置三匯流排） | 🟡 型別與狀態已就位，**閉環尚未搬進去** |
-| `config/` | 🆕 **設定檔**（2026-08-30 階段 4）：`axis_profile.txt`，機構標定 + provenance | 🟢 活的。🔴 **不存在也正常**——沒有它就走編譯進去的常數 |
+| `config/` | 🆕 **設定檔**（2026-08-30 階段 4）：`axis_profile.txt`，機構標定 + provenance；🆕 `ipcam/`＝攝影機 OSD 改前備份（2026-10-07，程式不讀） | 🟢 活的。🔴 **不存在也正常**——沒有它就走編譯進去的常數 |
 | ~~`.vs/`（43 MB）~~／`tmp/` | ⚰️ `.vs/` 已於 2026-09-07 刪除（VS 快取，不再需要）／`tmp/` 為暫存工作區（現存 1.5 GB 廠商軟體包）| ⚪ `tmp/` 在 `.gitignore` **且不進雲端鏡像 ⇒ 零備份**；手冊一律放 `doc/` |
 
 🗑️ **2026-08-28 已刪除 4 個檔（228 KB）**：`main_tmp.txt`（v1 時期 `main.cpp` 開頭註解的舊副本，
@@ -372,6 +373,7 @@ tmp/                 # 暫存工作區（已 gitignore，不進版控）
   │ 本體 Pi  washrobot │
   │   facade_cleaning_v2   :5001                 │
   │   motor_api（手臂）     :9527  ← 0.0.0.0 全介面 │
+  │   cam_relay.py（fcv-cam）:8091  攝影機 H.264/MJPEG（2026-10-07）│
   └───────────────────┘
 ```
 
@@ -491,7 +493,15 @@ v1 時代它是 ZDT bus、2026-07 退役；現在是**新網關**，**QX-DO24 �
 外部訊號 →（2-wire tether 雙絞線）**Fathom-X Tether Interface Board** →（Ethernet）
 **8 Port PoE Switch** → 兩台 Pi、全部 USR 網關。
 
-⚰️ **攝影機不列入本版架構（2026-09-01 per user：「這個版本不用」）。**
+🆕 **2026-10-07 per user：Dashboard 加兩支攝影機畫面 ⇒ 下面「不列入」那段的「本版程式不使用」已推翻。**
+兩支 XiongMai `.112` / `.113`（協定見 `summaries/IPCAM_XIONGMAI_SUMMARY.md`）接在**本體那段有線網路**
+（吊機 `eth0` 那段看不到它們，10-07 ping 掃描 + XM 廣播搜尋實證）⇒ 轉播服務 **`fcv-cam`（本體 user service，
+`scripts/cam_relay.py`，HTTP `:8091`）**：子碼流 800×448 H.264 **直通**成 fMP4（每張一段）→ 瀏覽器 `<video>`+MSE（預設，~20 fps、每路 ~0.3 Mbps、本體不解碼）；MJPEG 5 fps 只當退路（無 MSE 的瀏覽器，有人看才轉碼）；瀏覽器**直接**向本體拉，
+`server.js` 只在 ws 連線時送 `{src:'cam', base, ids}`（`CAM_BASE` / `CAM_IDS` 可覆蓋）——**不經吊機轉送**（否則每張畫面走兩次 WiFi）。
+（MJPEG 版實測每支 CPU 5%、1~1.6 Mbps，per user 嫌慢 → 同日改 H.264 直通。）攝影機端多餘功能（音訊/移動與人形偵測/雲端 P2P/推播/線上升級/自動重開/錄影）10-07 已關、子碼流 GOP 1 s，備份 `config/ipcam/`。
+**OSD（時間＋`CAM01` 標題）10-07 per user 已在機身關掉**（鐘沒對時會誤導）；工具 `scripts/xm_ipcam.py`（在本體跑），原設定備份 `config/ipcam/`。
+
+⚰️ **攝影機不列入本版架構（2026-09-01 per user：「這個版本不用」）。** ← 🔴 2026-10-07 已推翻，見上段
 先前這裡記著「PoE 防水 2MP 攝影機 ×4（左上/左下/右上/右下），`frame_capture/` 走 RTSP，
 cam1 `.110` / cam2 `.111`」——**實體或許還掛在 switch 上，但本版程式不使用**：
 2D 相機路線 2026-08-27 已作廢（`scripts/wr.sh` 的 cam1/cam2 window 早已註解），

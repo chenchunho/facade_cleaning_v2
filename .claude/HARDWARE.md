@@ -226,7 +226,7 @@ QX-DO24 獨佔(否則整段一起掛)、**ZDT 5-8 與 JC100 5-8 刻意同號不�
 | WT901BC-TTL 姿態儀 | TTL UART | `/dev/ttyUSB0` 115200 | 非 Modbus(`0x55` 封包) | 本體 Pi;roll 每 250 ms 推給吊機平衡 |
 | Damiao 手臂馬達 ×2 | USB-CAN | `/dev/ttyACM0` 921600 | 廠商 CAN | 本體 Pi;M1 0x01 / M2 0x02 |
 | DY-500 繩重感測 ×2 | — | — | — | **未使用**(per user 2026-09-12);驅動 `user_lib/DY_500` 與本體 `weight_[2]` 為殘留,可清 |
-| ~~相機 IPCAM ×2~~ | — | ~~`.112` / `.113`~~ | — | ⚰️ **機身目前沒有相機**(per user 2026-09-13)。程式/文件裡的 `.112`/`.113`、`frame_capture/`、`FrameAnalyzer` 皆為歷史殘留。若日後再裝:admin 空密碼、34567/8899/8000 **不可 port-forward** 的規矩仍適用 |
+| 相機 IPCAM ×2(XiongMai) | Ethernet(**本體那段**有線網) | `192.168.1.112` / `.113` | RTSP :554(子碼流 800×448 H.264) | 🆕 **2026-10-07 per user 重新使用**(09-13「機身沒有相機」已過期):本體 `fcv-cam`(`scripts/cam_relay.py` :8091)轉 H.264 fMP4 / MJPEG 給 Dashboard。10-07 實測重開後 20 fps、GOP 1 s;音訊/偵測/雲端/升級等已關(備份 `config/ipcam/`)。吊機 eth0 那段看不到。admin 空密碼、34567/8899/8000 **不可 port-forward**;OSD 10-07 已關(`scripts/xm_ipcam.py`,備份 `config/ipcam/`)。`frame_capture/`、`FrameAnalyzer` 仍為歷史殘留 |
 
 ---
 

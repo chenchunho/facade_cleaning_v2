@@ -176,6 +176,10 @@ ssh user@192.168.5.25 'D=/home/user/projects/facade_cleaning_v2/web; cd $D && WR
 ssh nexuni@192.168.5.26 'cd ~/run && rm -f wr_<D>_in logs/wr_<D>.log && mkfifo -m 600 wr_<D>_in && setsid nohup sh -c "exec sleep infinity > /home/nexuni/run/wr_<D>_in" >/dev/null 2>&1 </dev/null & sleep 1; cd ~/run && WR_DRIVER_DEBUG=0 FCV_EP_CRANE_HOST=192.168.5.25 setsid nohup stdbuf -oL -eL ./facade_cleaning_v2.out > logs/wr_<D>.log 2>&1 < wr_<D>_in & sleep 3; echo started'
 ```
 
+📌 **攝影機(2026-10-07)**:Dashboard 最上方「攝影機」卡,畫面來自本體 `fcv-cam`(`http://<本體>:8091`,開機自啟;H.264 直通為預設,右上選單可切 MJPEG;點畫面全螢幕)。
+查狀態 `curl -s http://192.168.5.26:8091/cam/status`;單張 `…/cam/1.jpg`;重裝/更新 `./scripts/deploy.sh cam`;log `~/run/logs/cam_service.log`(本體)。
+卡片顯示「服務離線」= 連不到 `:8091`(本體沒開機或 fcv-cam 掛了);「離線」= 攝影機本身連不到(看卡片滑鼠提示的錯誤字)。
+
 #### 🔴🔴 第 3 步的 `FCV_EP_CRANE_HOST=192.168.5.25` 不可省 —— 省掉不會報錯，只會安靜地走上壞的那條
 
 📌 **2026-09-08 補。** 本節 19:19 初版寫成時還沒有這個需求；同日 19:50（`m1`）與 20:10（`m2`）

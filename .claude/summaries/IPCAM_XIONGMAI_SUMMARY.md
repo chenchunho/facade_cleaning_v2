@@ -74,10 +74,37 @@ Dahua 風格的 `/cam/realmonitor?...` 路徑回 `401`，**這個平台不吃**�
   🔴 **`34567` / `8899` / `8000` 絕不可在路由器上做 port forward。** 遠端看一律走 VPN 或反向代理（只轉 RTSP/HTTPS 且加認證）。
 - 韌體 build 2024-04，非最新；`GK7201V200` 系列有已知 CVE，區網隔離是目前唯一的緩解。
 
+## 🆕 OSD（2026-10-07 per user 兩支都關掉）
+
+`AVEnc.VideoWidget` 的 `TimeTitleAttribute`（左上時間）與 `ChannelTitleAttribute`（左下 `CAM01`）
+各有 `EncodeBlend`（燒進編碼串流＝RTSP／Dashboard 看到的）與 `PreviewBlend`（機身預覽），**四個都設 false**。
+理由：鐘沒對時（10-07 兩支停在 09-14 / 09-10，會誤導）、兩支標題都叫 `CAM01`。
+- 原設定備份：`config/ipcam/videowidget_{112,113}_before_osd_off_20261007.json`（改前整段，兩支皆 `true`）
+- 開回：`python3 scripts/xm_ipcam.py <ip> osd on`（在本體跑；寫前自動備份到 `~/run/cam_osd_backup_*.json`）
+
+## 🆕 多餘功能關閉 + 編碼調整（2026-10-07 per user）
+
+| 設定段 | 改了什麼 |
+|---|---|
+| `Simplify.Encode` | 主/子碼流 `AudioEnable` → false；**子碼流 GOP 2 → 1 s**（開畫面/重連更快、MSE 播放器需要） |
+| `Detect.MotionDetect` / `Detect.HumanDetection` | `Enable` → false（人形偵測是 AI 演算法，吃機身運算） |
+| `NetWork.Nat` | `NatEnable` → false（XMeye 雲端 P2P `secu100.net`）。🔴 寫入回 **Ret=603 = 已存、重開機後生效** |
+| `NetWork.PMS` | 推播 `push.umeye.cn` → 關 |
+| `NetWork.OnlineUpgrade` | `Enable`/`AutoCheck`/`AutoUpgradeImp` → false（**不可讓它自己升級韌體**） |
+| `General.AutoMaintain` | `AutoRebootDay` Tuesday 03:00 → `Never` |
+| `Record` | `RecordMode` → `ClosedRecord`（本來就沒記憶卡） |
+| `Camera.Param` | `EsShutter`（電子慢快門）`0x2` → `0x0`；A/B 實驗**不影響 fps** |
+
+- 備份：`config/ipcam/features_{112,113}_before_cleanup_20261007.json`（改前 27 段整份，兩支完全相同）。
+- 重開機（`OPMachine` `{"Action":"Reboot"}`，msgid 1450）後全部保留。
+- ⚠️ **重開後兩支子碼流實測 20.0 fps**（`ffprobe` pts 計算 10 s／201 張），重開前量到 25（`nb_read_packets`）。原因未明，已排除慢快門；主碼流 1080P 本來就回報 20/1。20 fps 夠用，沒再追。
+- 沒動：曝光/白平衡/日夜切換等影像參數（避免畫面變化）、RTSP 伺服器、UPnP/DDNS/Email/FTP（本來就關）。
+
 ## 讀取工具
 
-XM 私有協定的讀取腳本（login → getConfig）保存在
-`Linux_test/xm_ipcam.py`（`python3 xm_ipcam.py <ip> [dump|time]`）：連 `34567`，20-byte header `ff|ver|00 00|sid(4)|seq(4)|total|cur|msgid(2)|len(4)`，
+🆕 **2026-10-07 搬回 repo：`scripts/xm_ipcam.py`**（`<ip> get [Name] | osd off|on | time`，在本體 Pi 上跑）。
+原本 XM 私有協定的讀取腳本（login → getConfig）保存在
+`Linux_test/xm_ipcam.py`（09-16 隨 `Linux_test/` 移除，git `842e774` 之前仍有）：連 `34567`，20-byte header `ff|ver|00 00|sid(4)|seq(4)|total|cur|msgid(2)|len(4)`，
 密碼走 XM「sofia」雜湊（MD5 後每 2 byte 相加 mod 62 映射到 `[0-9A-Za-z]`，取 8 碼）。
 登入 1000／讀設定 1042／寫設定 1040／系統資訊 1020／設時間 1450／查時間 1452。
 `Ret=100` 成功 / `Ret=203` 帳密錯 / `Ret=607` 無此設定段。

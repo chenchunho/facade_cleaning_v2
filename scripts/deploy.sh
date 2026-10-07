@@ -7,7 +7,8 @@
 #   ./scripts/deploy.sh web     # GUI(index.html)—— 不重啟 node,交給 scripts/deploy_web.sh
 #   ./scripts/deploy.sh server  # server.js → 重啟 fcv-web-v3(v2 的 fcv-web 09-16 退役)
 #   ./scripts/deploy.sh script  # scripts/cycle_test.py → 兩台 Pi(無服務,不必重啟;09-17 由 Linux_test/ 搬來)
-#   ./scripts/deploy.sh status  # 四支服務狀態 + 機器現況
+#   ./scripts/deploy.sh cam     # scripts/cam_relay.py + fcv-cam.service → 本體(Dashboard 攝影機 :8091,2026-10-07)
+#   ./scripts/deploy.sh status  # 服務狀態 + 機器現況
 #
 #   FCV_TARGET=official ./scripts/deploy.sh <同上>   # [2026-09-21] 正式機:吊機 nexuni@192.168.1.10、本體 nexuni@192.168.1.100
 #   ./scripts/deploy.sh prep-official                # 一次性:檢查 official 的 ssh key + sudo -n(見下)
@@ -35,7 +36,10 @@
 set -uo pipefail
 
 case "${FCV_TARGET:-test}" in
-    test)     BODY=nexuni@192.168.5.26;  CRANE=user@192.168.5.25;    TARGET_LABEL="測試機" ;;
+    # [2026-10-07] test crane is WiFi DHCP and drifts (.25 -> .31 on 10-07) => FCV_CRANE overrides it,
+    #   e.g. `FCV_CRANE=user@192.168.5.31 ./scripts/deploy.sh script`. The body side follows the same IP via
+    #   its drop-in `fcv-body.service.d/crane-ip.conf` (see work_log 10-07), not via this script.
+    test)     BODY=nexuni@192.168.5.26;  CRANE="${FCV_CRANE:-user@192.168.5.25}"; TARGET_LABEL="測試機" ;;
     official) BODY=nexuni@192.168.1.100; CRANE=nexuni@192.168.1.10;  TARGET_LABEL="正式機 official" ;;
     *) echo "🔴 FCV_TARGET 只認 test / official(得到 '$FCV_TARGET')" >&2; exit 2 ;;
 esac
@@ -139,6 +143,17 @@ deploy_script() {
     $SSH "$BODY"  'md5sum ~/projects/facade_cleaning_v2/scripts/cycle_test.py' </dev/null
 }
 
+# [2026-10-07 per user] Dashboard 攝影機轉播(本體 :8091,user service fcv-cam)。
+#   攝影機在本體那段有線網路,吊機看不到 ⇒ 服務只裝在本體。重啟只會斷畫面,不影響控制。
+deploy_cam() {
+    say "同步 cam_relay.py + fcv-cam.service 到本體"
+    python3 -m py_compile "$REPO"/scripts/cam_relay.py || die "語法錯誤,沒有送出"
+    scp -q "$REPO"/scripts/cam_relay.py "$BODY":~/projects/facade_cleaning_v2/scripts/ || die "scp cam_relay.py 失敗"
+    scp -q "$REPO"/scripts/systemd/fcv-cam.service "$BODY":~/.config/systemd/user/fcv-cam.service || die "scp unit 失敗"
+    $SSH "$BODY" 'systemctl --user daemon-reload && systemctl --user enable fcv-cam >/dev/null 2>&1; systemctl --user restart fcv-cam && sleep 2 && systemctl --user is-active fcv-cam && curl -s -m 3 http://127.0.0.1:8091/cam/status; echo; md5sum ~/projects/facade_cleaning_v2/scripts/cam_relay.py' </dev/null || die "fcv-cam 啟動失敗(看本體 ~/run/logs/cam_service.log)"
+    md5sum "$REPO"/scripts/cam_relay.py
+}
+
 # [2026-09-21] official 一次性前置檢查:ssh key 進得去、吊機 sudo -n 放行 restart。只讀不改。
 prep_official() {
     [ "${FCV_TARGET:-test}" = official ] || die "請加 FCV_TARGET=official"
@@ -156,7 +171,7 @@ show_status() {
     echo "=== 吊機 ${CRANE#*@}($TARGET_LABEL)==="
     $SSH "$CRANE" 'systemctl is-active fcv-crane fcv-web-v3 | tr "\n" " "; echo; python3 ~/run/crcmd.py status 2>/dev/null | tr " " "\n" | /bin/grep -E "^(length_left|length_right|wall_height_cm|home_ground_cm|hold_guard|level_auto)=" | tr "\n" " "; echo' </dev/null
     echo "=== 本體 ${BODY#*@} ==="
-    $SSH "$BODY" 'systemctl --user is-active fcv-arm fcv-body | tr "\n" " "; echo; python3 ~/run/crcmd.py 127.0.0.1:5001 status 2>/dev/null | tr " " "\n" | /bin/grep -E "^(state|p[5-8]|arm_ready|estop|pusher_rpm)" | tr "\n" " "; echo' </dev/null
+    $SSH "$BODY" 'systemctl --user is-active fcv-arm fcv-body fcv-cam | tr "\n" " "; echo; python3 ~/run/crcmd.py 127.0.0.1:5001 status 2>/dev/null | tr " " "\n" | /bin/grep -E "^(state|p[5-8]|arm_ready|estop|pusher_rpm)" | tr "\n" " "; echo' </dev/null
 }
 
 case "${1:-}" in
@@ -166,6 +181,7 @@ case "${1:-}" in
     web)    PI="$CRANE" exec "$REPO/scripts/deploy_web.sh" ;;   # 版號戳記 + 三方 md5,不必重啟 node;PI 跟著 FCV_TARGET
     server) deploy_server ;;
     script) deploy_script ;;
+    cam)    deploy_cam ;;
     status) show_status ;;
     prep-official) prep_official ;;
     *) sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 2 ;;

@@ -611,6 +611,12 @@ private:
     //   要到第一個指令才看得出來。
     static constexpr bool PWM_ENABLED = true;
     static constexpr int  PWM_SLAVE   = 9;   // 2026-08-28 per user: 6→9（模組端已改）
+    // [2026-10-06 per user「duty_max 9」] Propeller duty ceiling narrowed from the
+    // driver default 10% (= full throttle, motor spec) to 9%: the two NPP-1700-48
+    // supplies give 2×25 A ≈ 50 A; both props at 10% measured 49 A (supply in current
+    // limit, 56 V), at 9% 45 A. Running at the limit risks a PSU/ESC trip = thrust
+    // lost while on the wall. Raise back to 10 if a third NPP is added.
+    static constexpr double PWM_DUTY_MAX_PCT = 9.0;
 
     // [2026-08-28 per user] 同步步伐（do_step_sync_）內建的 PWM 占空比切換：
     //   解真空 + 收腳 → 寫 7.0%，整個吊機移動期間都維持開啟
