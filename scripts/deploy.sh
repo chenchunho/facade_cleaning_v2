@@ -14,8 +14,9 @@
 #   ./scripts/deploy.sh prep-official                # 一次性:檢查 official 的 ssh key + sudo -n(見下)
 #
 # 🔴 official 與測試機的差別只有三件,全部由 FCV_TARGET 切:
-#   1. 位址(上面兩個);2. 吊機 sudo:測試機 user 有 NOPASSWD,official 的 nexuni 沒有 → 本腳本一律 `sudo -n`,
-#      第一次用之前請在 official 上放一行 sudoers(只放行 restart 這兩支服務,不是整個 NOPASSWD):
+#   1. 位址(上面兩個);2. 吊機 sudo:測試機 user 有 NOPASSWD;🆕 **2026-10-08 起 official 的 nexuni 也是全開 NOPASSWD
+#      (`/etc/sudoers.d/010_nexuni-nopasswd`,per user「留著不移除」)**⇒ 下面那行 sudoers 已不需要,留作最小權限的備案。
+#      本腳本仍一律 `sudo -n`(沒權限就明確失敗,不會卡在密碼提示):
 #        echo 'nexuni ALL=(root) NOPASSWD: /usr/bin/systemctl restart fcv-crane, /usr/bin/systemctl restart fcv-web-v3' | sudo tee /etc/sudoers.d/fcv-deploy
 #   3. ssh key:official 兩台都還沒裝(09-19 是用密碼+paramiko 做的)→ `ssh-copy-id nexuni@192.168.1.10` / `…@192.168.1.100`。
 #   裝置位址/站號/校正值**不在這裡**,在 Pi 上的 systemd drop-in(副本 scripts/systemd/official/),部署程式不會動到它們。
@@ -40,7 +41,9 @@ case "${FCV_TARGET:-test}" in
     #   e.g. `FCV_CRANE=user@192.168.5.31 ./scripts/deploy.sh script`. The body side follows the same IP via
     #   its drop-in `fcv-body.service.d/crane-ip.conf` (see work_log 10-07), not via this script.
     test)     BODY=nexuni@192.168.5.26;  CRANE="${FCV_CRANE:-user@192.168.5.25}"; TARGET_LABEL="測試機" ;;
-    official) BODY=nexuni@192.168.1.100; CRANE=nexuni@192.168.1.10;  TARGET_LABEL="正式機 official" ;;
+    # [2026-10-08] same override for official: in the warehouse the wired .1.x net is not reachable from the laptop,
+    #   the crane is on WiFi (e.g. `FCV_TARGET=official FCV_CRANE=nexuni@192.168.5.15 ./scripts/deploy.sh crane`).
+    official) BODY="${FCV_BODY:-nexuni@192.168.1.100}"; CRANE="${FCV_CRANE:-nexuni@192.168.1.10}"; TARGET_LABEL="正式機 official" ;;
     *) echo "🔴 FCV_TARGET 只認 test / official(得到 '$FCV_TARGET')" >&2; exit 2 ;;
 esac
 SUDO="sudo -n"   # 兩台都走 -n:沒 NOPASSWD 就明確失敗,不會卡在密碼提示(見檔頭第 2 點)

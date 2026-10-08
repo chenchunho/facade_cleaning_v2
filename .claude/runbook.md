@@ -909,7 +909,19 @@ pay_out_left  <on|off>         # 手動左放繩
 pay_out_right <on|off>         # 手動右放繩
 retract_left  <on|off>         # 手動左收繩
 retract_right <on|off>         # 手動右收繩
-middle_set <rpm> <pay|retract|stop>   # 手動中間絞盤變頻器
+middle_set <rpm> <pay|retract|stop>   # 手動中間絞盤變頻器(⚠️ 無租約,一直轉到 stop;GUI 改用 middle_hold)
+# 🆕 2026-10-08 中繩 CLV900(需 FCV_CLV900_ENABLE=1;official = USR .36 slave 3)
+middle_hold <pay|retract> <on|off>    # 按住才轉,與鋼索 hold 共用 1.5 s 租約(hold_renew 一起續);ERR motion_active / clv900_unavailable
+middle_stop                           # 減速停 + 清中繩按住
+set_middle_hz <hz>                    # 中繩基準頻率(1..50,持久化);GUI 有 10/20/30/40/50 快選
+set_middle_auto <0|1>                 # 自動跟隨:pay_out/retract/goto 與兩側同步 ▲▼ 帶中繩(持久化)。🔴 方向確認 + 中繩掛繩後才開
+set_middle_link <0|1>                 # Manual「連動」:兩側同步 ▲▼ 帶中繩同收同放(速度 = middle_hz;不存檔,重啟回 0)
+set_middle_dir_invert <0|1>           # 放繩 = 正轉,除非 1(持久化;動作中拒絕)
+set_middle_ratio <k>                  # 中繩長度 = 左右平均位移 × k(0.1..5.0,持久化)
+set_middle_link_track <0|1>           # 連動方式(持久化,預設 1):1 長度跟隨(需中計米器,落後 >15 cm 中止)/ 0 只照速度(不讀中計米器,計米器壞時用;🔴 無長度保護)
+set_middle_pay_extra <pct>            # 放繩多放 %(0..100,持久化,預設 0):放繩時中繩追 k×(1+pct%)、Hz 前饋 ×(1+pct%);收繩不加;落後中止仍以 k×平均 判
+#   自動跟隨中止:middle_lag(中繩會吊住機器,>15 cm)/ middle_wrong_dir(反向 ≥5 cm)/ middle_fault → 緊急停 + EVT motion_abort
+#   status:middle_state(1 正/2 反/3 停)middle_fault middle_run_hz middle_hold middle_auto middle_link middle_ratio middle_pay_extra middle_link_track middle_dir_invert middle_comm_fail dev_gw_mw
 zero_meters <ground|top>       # 鋼索歸零（地面起點 / 洗窗起點，後者存 home_ground_cm）
 home_status                    # 回 `OK home_ground_cm=N left=M right=M middle=M remaining=R`
 roll_correct <delta_cm>        # Phase 5 左右鋼索差動（正值=左放右收）

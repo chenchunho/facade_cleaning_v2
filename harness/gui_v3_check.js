@@ -4,7 +4,7 @@
 //   node harness/gui_v3_check.js            # spawn fake_robot + web_backend(v3) on a free port, run all sections
 //   node harness/gui_v3_check.js --attach 8081   # use an already-running v3 server (e.g. from gui_offline.sh)
 //                                                #   ⚠️ checks assume a FRESH fake_robot; a dirty one fails ③/⑥ etc.
-//   node harness/gui_v3_check.js --only evt,flow # run a subset: boot, cam, evt, flow, mission, safe, report
+//   node harness/gui_v3_check.js --only evt,flow # run a subset: boot, cam, evt, flow, mission, safe, hold, stop, middle, report
 //
 // What it is: jsdom loads web_backend/public_v3/index.html, opens a REAL WebSocket to server.js, which
 // bridges to fake_robot.py (5001/5002/9527). Every check clicks buttons / reads DOM text — the same path
@@ -32,7 +32,7 @@ const RUN = path.join(REPO, 'tmp', 'gui_v3_check'); fs.mkdirSync(RUN, { recursiv
 const argv = process.argv.slice(2);
 const argOf = (k) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : null; };
 const ATTACH = argOf('--attach');
-const ONLY = (argOf('--only') || 'boot,cam,evt,pre,script,mission,safe,hold,stop,report').split(',');
+const ONLY = (argOf('--only') || 'boot,cam,evt,pre,script,mission,safe,hold,stop,middle,report').split(',');
 const has = (s) => ONLY.includes(s);
 
 // ---- deps (resolve from web_backend so `npm install` there is enough) ----
@@ -778,6 +778,10 @@ async function secStop(P) {
   await waitFor(() => w.__v3.cupsState().attached, 40);
   await waitFor(() => holdsDisabled(), 20);
   chk('吸附中：▲▼ 六顆全灰（這組直連吊機，後端擋不到，GUI 是唯一防線）', holdsDisabled(), true);
+  // [2026-10-08] 中繩 ▼放／▲收 也是直連吊機的按住鈕 ⇒ 同一道鎖；停止鈕不鎖（出口永遠要在）
+  { const mh = Array.from(w.document.querySelectorAll('.btn.mhold'));
+    await waitFor(() => mh.every(b => b.disabled), 20);
+    chk('吸附中：中繩 ▼放／▲收 兩顆也灰，「停止」仍可按', [mh.length, mh.every(b => b.disabled), dis('mid-stop')], [2, true, false]); }
   chk('吸附中：三顆「拉到…」與控制列 ⤒ 也灰', [dis('cg-top'), dis('cg-ground'), dis('cg-go'), dis('mbar-top')], [true, true, true, true]);
   const hintOn = () => !w.document.getElementById('cup-lock-hint').hidden && txt('cup-lock-hint') !== '';   // .why 系用 visibility 佔位，看 hidden+文字
   chk('吸附中：顯示一行說明與顆數', [hintOn(), /吸附中（\d+ 顆密封/.test(txt('cup-lock-hint'))], [true, true]);
@@ -799,10 +803,253 @@ async function secStop(P) {
   await waitFor(() => !w.__v3.cupsState().attached, 60);
   await waitFor(() => holdsEnabled(), 20);
   chk('按「收腳」→ 壓力回到大氣 → 吊機動作解鎖、說明收起', [holdsEnabled(), dis('cg-top'), hintOn()], [true, false, false]);
+  { const mh = Array.from(w.document.querySelectorAll('.btn.mhold'));
+    await waitFor(() => mh.every(b => !b.disabled), 20);
+    chk('…中繩 ▼放／▲收 跟著解鎖', mh.every(b => !b.disabled), true); }
   await waitFor(() => /已脫離牆面/.test(txt('stopbar')), 20);
   chk('橫幅轉成「已脫離牆面，純吊在繩上」', /已脫離牆面/.test(txt('stopbar')), true);
   await waitFor(() => !shown('stopbar'), 40);
   chk('數秒後自動收起', shown('stopbar'), false);
+}
+
+async function secMiddle(P) {
+  console.log('\n[middle] 2026-10-08 — 中繩（CLV900）：Manual 卡、按住租約、停用規則、Setting 三項、EVT');
+  const { w, txt } = P;
+  const $ = (id) => w.document.getElementById(id);
+  const logHas = (re) => w.__v3.logs().some(l => re.test(l));
+  const send = (cmd) => w.__v3.send('crane', cmd, 8000);
+  const hs = async () => await send('fake_hold_state');
+  const renews = (st) => +(/renews=(\d+)/.exec(st) || [0, 0])[1];
+  const ev = (el, type) => el.dispatchEvent(new w.MouseEvent(type, { bubbles: true, cancelable: true }));
+  const pay = w.document.querySelector('.btn.mhold[data-mhold="pay"]');
+  const ret = w.document.querySelector('.btn.mhold[data-mhold="retract"]');
+  const cr = () => w.__v3.last.cr || {};
+  const nConf = () => w.__confirms.length;
+
+  // ---- 起點：假吊機預設 dev_clv900=1，卡片可用 ----
+  await send('fake_clv900 1'); await send('middle_stop'); await send('stop');
+  await waitFor(() => txt('mid-state') === '停機', 30);
+  chk('預設 dev_clv900=1：中繩卡可用（按鈕可按、停用說明收起）、狀態停機、故障碼 0 無故障、按住「無」', [pay.disabled, ret.disabled, $('mid-off').hidden, txt('mid-state'), txt('mid-fault'), txt('mid-hold')], [false, false, true, '停機', '0 · 無故障', '無']);
+  chk('速度顯示 status 的 middle_hz（30 Hz）、讀取連續失敗 0 次、中計米器有數字', [txt('mid-hz'), txt('mid-cf'), /^-?\d+cm$/.test(txt('mid-len'))], ['30 Hz', '0', true]);
+
+  // ---- 按住 ▼放：送 on、每 500 ms 續約（後端代送）、放開送 off ----
+  const r0 = renews(await hs()), len0 = parseFloat(txt('mid-len'));
+  ev(pay, 'mousedown');
+  await sleep(1800);
+  const mid = await hs();
+  chk('按住 ▼放 1.8 s：吊機 middle_hold=pay 還在（有續約）、續約 ≥2 次、不進操作紀錄', [/middle=pay/.test(mid), renews(mid) - r0 >= 2, logHas(/hold_renew/)], [true, true, false]);
+  await waitFor(() => txt('mid-hold') === '放 ▼', 20);
+  chk('畫面照 status 畫：按鈕反白、按住「放 ▼」、狀態正轉、運轉 30.0Hz、中計米器隨之增加', [pay.classList.contains('active'), txt('mid-hold'), txt('mid-state'), txt('mid-runhz'), parseFloat(txt('mid-len')) > len0], [true, '放 ▼', '正轉', '30.0Hz', true]);
+  ev(pay, 'mouseup');
+  await sleep(300);
+  const r1 = renews(await hs());
+  await sleep(1200);
+  const after = await hs();
+  chk('放開 → middle_hold pay off 送出、hold 清掉、續約停止', [/middle=none/.test(after), renews(after) - r1, pay.classList.contains('active')], [true, 0, false]);
+  await waitFor(() => txt('mid-state') === '停機' && txt('mid-runhz') === '0.0Hz', 20);
+  chk('放開後狀態回停機、運轉 0.0Hz', [txt('mid-state'), txt('mid-runhz')], ['停機', '0.0Hz']);
+
+  // ---- ▲收（反轉）＋ 另外兩種釋放時機：離開按鈕、視窗失焦 ----
+  ev(ret, 'mousedown');
+  await waitFor(() => cr().middle_state === '2', 30);   // status is polled ~1 Hz — wait for it, don't sample once
+  chk('按住 ▲收 → middle=retract、狀態反轉', [/middle=retract/.test(await hs()), cr().middle_state], [true, '2']);
+  ev(ret, 'mouseleave'); await sleep(300);
+  chk('滑鼠移出按鈕 → 送 off', [/middle=none/.test(await hs()), ret.classList.contains('active')], [true, false]);
+  ev(pay, 'mousedown'); await sleep(300);
+  w.dispatchEvent(new w.Event('blur')); await sleep(300);
+  chk('視窗失焦 → 送 off', [/middle=none/.test(await hs()), pay.classList.contains('active')], [true, false]);
+
+  // ---- 租約：沒人續約，吊機 1.5 s 後自己停 + EVT；EVT 進來時按住狀態清掉 ----
+  await send('middle_hold pay on');                       // 直接送、沒有 GUI 的續約
+  await sleep(2200);
+  chk('吊機端租約：沒續約 → 1.5 s 後自己停（假吊機 middle=none）、EVT middle_lease_expired 進了紀錄', [/middle=none/.test(await hs()), logHas(/EVT middle_lease_expired age_ms=\d+/)], [true, true]);
+  ev(pay, 'mousedown'); await sleep(200);
+  w.__v3.wsRef().onmessage({ data: JSON.stringify({ src: 'crane', line: 'EVT middle_lease_expired age_ms=1600' }) });
+  chk('EVT middle_lease_expired → 按住狀態清除 + 🔴 log（中繩已自動停止）', [pay.classList.contains('active'), logHas(/middle_lease_expired.*中繩已自動停止/)], [false, true]);
+  await send('middle_stop');
+
+  // ---- 「停止」鈕：送 middle_stop、按住狀態清掉 ----
+  ev(pay, 'mousedown'); await sleep(300);
+  P.click('mid-stop'); await sleep(400);
+  chk('「停止」→ 送 middle_stop、吊機 hold 清掉、按鈕反白清除', [logHas(/→ \[crane\] middle_stop$/), /middle=none/.test(await hs()), pay.classList.contains('active')], [true, true, false]);
+
+  // ---- 被吊機拒絕：motion_active ----
+  await send('pay_out 20');
+  const rej = await send('middle_hold pay on');
+  chk('契約：鋼索運動中 middle_hold on → ERR motion_active', /^ERR motion_active/.test(rej), true);
+  ev(pay, 'mousedown');
+  await waitFor(() => logHas(/middle_hold pay on 被拒：ERR motion_active/), 20);
+  chk('GUI 按住被拒 → 按鈕不留反白、紅字紀錄', [pay.classList.contains('active'), logHas(/middle_hold pay on 被拒：ERR motion_active/)], [false, true]);
+  ev(pay, 'mouseup');
+  await send('stop');
+
+  // ---- dev_clv900=0：整張卡停用並寫原因（停止鈕例外）----
+  await send('fake_clv900 0');
+  await waitFor(() => pay.disabled, 30);
+  chk('dev_clv900=0：▼放／▲收／速度輸入／套用 全停用、紅字原因、狀態與故障碼顯示未知', [pay.disabled, ret.disabled, $('mid-hz-in').disabled, $('mid-hz-set').disabled, !$('mid-off').hidden && /dev_clv900=0/.test(txt('mid-off')), txt('mid-state'), txt('mid-fault')], [true, true, true, true, true, '—', '未知']);
+  chk('…「停止」鈕仍可按（通訊斷了而變頻器還在轉時是唯一出口）、中計米器讀不到顯示 —', [$('mid-stop').disabled, txt('mid-len')], [false, '—']);
+  ev(pay, 'mousedown'); await sleep(300);
+  chk('停用狀態下硬送按下事件也不送指令（吊機沒有 hold、按鈕沒反白）', [/middle=none/.test(await hs()), pay.classList.contains('active')], [true, false]);
+  chk('契約：dev_clv900=0 → middle_hold on 回 ERR clv900_unavailable', /^ERR clv900_unavailable/.test(await send('middle_hold pay on')), true);
+  await send('fake_clv900 1');
+  await waitFor(() => !pay.disabled, 30);
+  chk('dev_clv900 回 1 → 卡片恢復、說明收起', [pay.disabled, $('mid-hz-in').disabled, $('mid-off').hidden], [false, false, true]);
+
+  // ---- 按住中途裝置掉了：停用的當下補送 off ----
+  ev(pay, 'mousedown'); await sleep(300);
+  await send('fake_clv900 0');
+  await waitFor(() => pay.disabled && !pay.classList.contains('active'), 30);
+  chk('按住中 dev_clv900 掉到 0 → 按鈕停用並釋放（不留反白）', [pay.disabled, pay.classList.contains('active')], [true, false]);
+  await send('fake_clv900 1'); await waitFor(() => !pay.disabled, 30);
+
+  // ---- 速度 ----
+  w.document.getElementById('mid-hz-in').value = '40'; P.click('mid-hz-set');
+  await waitFor(() => txt('mid-hz') === '40 Hz', 30);
+  chk('set_middle_hz 40 → status middle_hz=40、畫面 40 Hz', [cr().middle_hz, txt('mid-hz')], ['40', '40 Hz']);
+  const al0 = w.__alerts.length;
+  w.document.getElementById('mid-hz-in').value = '60'; P.click('mid-hz-set');
+  w.document.getElementById('mid-hz-in').value = '0';  P.click('mid-hz-set');
+  await sleep(300);
+  chk('速度 60／0 → 前端擋掉（0 < Hz ≤ 50）、兩次彈窗、吊機值不變', [w.__alerts.length - al0, cr().middle_hz], [2, '40']);
+  chk('契約：set_middle_hz 51 → ERR', /^ERR/.test(await send('set_middle_hz 51')), true);
+  w.document.getElementById('mid-hz-in').value = '30'; P.click('mid-hz-set');
+  { // [2026-10-08 per user] 速度快選 10~50（同鋼索 data-hzq）
+    const q = Array.from(w.document.querySelectorAll('#mid-card [data-mhzq]'));
+    chk('中繩速度快選 = 10/20/30/40/50', q.map(b => b.dataset.mhzq).join(','), '10,20,30,40,50');
+    q.find(b => b.dataset.mhzq === '20').click();
+    await waitFor(() => txt('mid-hz') === '20 Hz', 30);
+    chk('點快選 20 → set_middle_hz 20、status 20、輸入框 20、只有 20 反白', [cr().middle_hz, $('mid-hz-in').value, q.filter(b => b.classList.contains('on')).map(b => b.dataset.mhzq).join(',')], ['20', '20', '20']);
+    await send('fake_clv900 0'); await waitFor(() => !$('mid-off').hidden, 30);
+    chk('dev_clv900=0：快選也停用', q.every(b => b.disabled), true);
+    await send('fake_clv900 1'); await waitFor(() => $('mid-off').hidden, 30);
+    q.find(b => b.dataset.mhzq === '30').click();
+    await waitFor(() => txt('mid-hz') === '30 Hz', 30);
+  }
+  { // [2026-10-08 per user] 連動勾選：兩側一起按住鋼索 ▲▼ 時中繩同收同放
+    const box = $('mid-link');
+    const kv = async () => Object.fromEntries((await send('status')).split(/\s+/).filter(x => x.includes('=')).map(x => x.split('=')));
+    chk('連動勾選框存在、預設不勾、顯示「不連動」', [!!box, box && box.checked, txt('mid-link-rd')], [true, false, '不連動']);
+    box.click();
+    await waitFor(() => txt('mid-link-rd') === '連動中', 30);
+    chk('勾選 → set_middle_link 1 → status middle_link=1、顯示「連動中」、標頭提示連動', [cr().middle_link, box.checked, /連動鋼索/.test(txt('mid-lock'))], ['1', true, true]);
+    await send('down on'); await sleep(400);
+    const m1 = await kv();
+    chk('連動中按住鋼索兩側 ▼（down）→ 中繩跟著放：middle_state=1 正轉、運轉 Hz = 選中速度', [m1.middle_state, m1.middle_run_hz], ['1', '30.0']);
+    await send('down off'); await send('up on'); await sleep(400);
+    const m2 = await kv();
+    chk('換按兩側 ▲（up）→ 中繩跟著收：middle_state=2 反轉', m2.middle_state, '2');
+    await send('up off'); await sleep(400);
+    chk('放開 → 中繩停（middle_state=3）', (await kv()).middle_state, '3');
+    await send('down_left on'); await sleep(400);
+    chk('只按單側（down_left）→ 中繩不動', (await kv()).middle_state, '3');
+    await send('down_left off');
+    box.click();
+    await waitFor(() => txt('mid-link-rd') === '不連動', 30);
+    await send('down on'); await sleep(400);
+    chk('取消勾選 → middle_link=0、再按兩側 ▼ 中繩不動', [cr().middle_link, (await kv()).middle_state], ['0', '3']);
+    await send('down off');
+    await send('fake_clv900 0'); await waitFor(() => !$('mid-off').hidden, 30);
+    chk('dev_clv900=0：連動勾選框停用；吊機也拒絕 set_middle_link 1', [box.disabled, /^ERR clv900_unavailable/.test(await send('set_middle_link 1'))], [true, true]);
+    await send('fake_clv900 1'); await waitFor(() => $('mid-off').hidden, 30);
+
+    // [2026-10-08 per user] 連動方式（長度跟隨／只照速度）＋ 放繩多放 %；中計米器失效時的獨立控制
+    const tq = Array.from(w.document.querySelectorAll('#mid-card [data-mtrack]'));
+    const pq = Array.from(w.document.querySelectorAll('#mid-card [data-mpx]'));
+    await waitFor(() => txt('mid-track-rd') === '長度跟隨', 30);
+    chk('連動方式預設「長度跟隨」（status middle_link_track=1、該鈕反白）；放繩多放 +0 %、快選 0/5/10/20/30',
+        [cr().middle_link_track, tq.filter(b => b.classList.contains('on')).map(b => b.dataset.mtrack).join(','), txt('mid-px'), pq.map(b => b.dataset.mpx).join(',')],
+        ['1', '1', '+0 %', '0,5,10,20,30']);
+    pq.find(b => b.dataset.mpx === '10').click();
+    await waitFor(() => txt('mid-px') === '+10 %', 30);
+    chk('點多放 10 → set_middle_pay_extra 10 → status 10、輸入框 10、只有 10 反白',
+        [cr().middle_pay_extra, $('mid-px-in').value, pq.filter(b => b.classList.contains('on')).map(b => b.dataset.mpx).join(',')], ['10', '10', '10']);
+    const al1 = w.__alerts.length;
+    $('mid-px-in').value = '150'; P.click('mid-px-set'); await sleep(200);
+    chk('多放 150 → 前端擋（0~100）、吊機值不變；契約 set_middle_pay_extra -1 → ERR',
+        [w.__alerts.length - al1, cr().middle_pay_extra, /^ERR/.test(await send('set_middle_pay_extra -1'))], [1, '10', true]);
+    box.click(); await waitFor(() => txt('mid-link-rd') === '連動中', 30);
+    await send('down on'); await sleep(400);
+    const mp = await kv();
+    chk('連動 + 多放 10 %：兩側 ▼ → 中繩以 30 × 1.1 = 33 Hz 放', [mp.middle_state, mp.middle_run_hz], ['1', '33.0']);
+    await send('down off'); await send('up on'); await sleep(400);
+    chk('兩側 ▲（收繩）不加多放 → 30 Hz', (await kv()).middle_run_hz, '30.0');
+    await send('up off');
+    await send('fake_meter_middle 0');
+    await waitFor(() => !$('mid-track-why').hidden, 30);
+    chk('連動 + 長度跟隨 + 中計米器讀不到 → 紅字提示出口（改只照速度／取消連動）', /只照速度/.test(txt('mid-track-why')), true);
+    const dn = w.document.querySelector('.btn.hold[data-hold="down"]');
+    dn.dispatchEvent(new w.MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+    await waitFor(() => logHas(/被中繩連動擋下：ERR middle_unavailable meter_middle/), 30);
+    chk('此時按兩側 ▼ → 吊機 ERR middle_unavailable meter_middle、按鈕不留按住、log 講出口',
+        [dn.classList.contains('active'), logHas(/連動方式」改「只照速度/)], [false, true]);
+    dn.dispatchEvent(new w.MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+    const c2 = nConf();
+    tq.find(b => b.dataset.mtrack === '0').click();
+    await waitFor(() => txt('mid-track-rd') === '只照速度', 30);
+    chk('改「只照速度」：一次 confirm（講沒有長度保護）→ status 0、紅字提示消失、標頭標「只照速度」',
+        [nConf() - c2, /沒有「中繩落後」保護/.test(w.__confirms[w.__confirms.length - 1] || ''), cr().middle_link_track, $('mid-track-why').hidden, /只照速度/.test(txt('mid-lock'))],
+        [1, true, '0', true, true]);
+    await send('down on'); await sleep(400);
+    chk('只照速度 + 中計米器壞：兩側 ▼ 照常、中繩照速度 × 1.1 跟著放', [(await kv()).middle_state, (await kv()).middle_run_hz], ['1', '33.0']);
+    await send('down off');
+    box.click(); await waitFor(() => txt('mid-link-rd') === '不連動', 30);
+    await send('fake_meter_middle 1');
+    tq.find(b => b.dataset.mtrack === '1').click(); pq.find(b => b.dataset.mpx === '0').click();
+    await waitFor(() => txt('mid-track-rd') === '長度跟隨' && txt('mid-px') === '+0 %', 30);
+  }
+  await waitFor(() => txt('mid-hz') === '30 Hz', 30);
+
+  // ---- EVT：故障、中止 ----
+  await send('fake_middle_fault 5');
+  await waitFor(() => logHas(/中繩變頻器故障：EVT middle_fault code=5/) && txt('mid-fault') === '故障碼 5', 30);
+  chk('EVT middle_fault code=5 → 🔴 log、故障碼欄 故障碼 5（紅）', [logHas(/中繩變頻器故障：EVT middle_fault code=5/), txt('mid-fault'), $('mid-fault').classList.contains('bad')], [true, '故障碼 5', true]);
+  await send('fake_middle_fault 0');
+  await waitFor(() => txt('mid-fault') === '0 · 無故障', 30);
+  await send('fake_middle_lag 12');
+  await waitFor(() => logHas(/動作中止（中繩跟不上）：EVT motion_abort reason=middle_lag lag_cm=12/), 20);
+  chk('EVT motion_abort reason=middle_lag → 🔴 log', logHas(/動作中止（中繩跟不上）：EVT motion_abort reason=middle_lag lag_cm=12/), true);
+
+  // ---- Setting：自動跟隨 / 方向反轉 / 比例 ----
+  await waitFor(() => txt('st-mauto') === '關', 30);
+  chk('Setting 現值照 status：自動跟隨 關、方向 正常、比例 × 1', [txt('st-mauto'), txt('st-minv'), txt('st-mratio'), cr().middle_auto, cr().middle_dir_invert, cr().middle_ratio], ['關', '正常', '× 1', '0', '0', '1']);
+  const c0 = nConf();
+  w.document.querySelector('[data-mauto="1"]').click();
+  await waitFor(() => cr().middle_auto === '1', 30);
+  chk('開啟自動跟隨：一次 confirm（提醒需先完成方向確認）→ set_middle_auto 1 → status middle_auto=1、按鈕反白、現值「開」', [nConf() - c0, /方向確認/.test(w.__confirms[w.__confirms.length - 1] || ''), logHas(/→ \[crane\] set_middle_auto 1$/), txt('st-mauto'), w.document.querySelector('[data-mauto="1"]').classList.contains('on')], [1, true, true, '開', true]);
+  const c1 = nConf();
+  w.document.querySelector('[data-mauto="0"]').click();
+  await waitFor(() => cr().middle_auto === '0', 30);
+  chk('關閉自動跟隨：不問、送 set_middle_auto 0', [nConf() - c1, logHas(/→ \[crane\] set_middle_auto 0$/), txt('st-mauto')], [0, true, '關']);
+  w.document.querySelector('[data-minv="1"]').click();
+  await waitFor(() => cr().middle_dir_invert === '1', 30);
+  chk('方向反轉：送 set_middle_dir_invert 1 → status 1、現值「反轉」、按鈕反白', [logHas(/→ \[crane\] set_middle_dir_invert 1$/), txt('st-minv'), w.document.querySelector('[data-minv="1"]').classList.contains('on')], [true, '反轉', true]);
+  ev(pay, 'mousedown'); await sleep(300);
+  await waitFor(() => txt('mid-state') === '反轉', 30);
+  chk('方向反轉開著：按 ▼放 → 變頻器走反轉（假吊機的映射）', [/middle=pay/.test(await hs()), txt('mid-state')], [true, '反轉']);
+  ev(pay, 'mouseup'); await sleep(300);
+  w.document.querySelector('[data-minv="0"]').click();
+  await waitFor(() => cr().middle_dir_invert === '0', 30);
+  w.document.getElementById('st-mratio-in').value = '2.5'; P.click('st-mratio-set');
+  await waitFor(() => cr().middle_ratio === '2.5', 30);
+  chk('比例 2.5 → set_middle_ratio 2.5 → status middle_ratio=2.5、現值 × 2.5', [logHas(/→ \[crane\] set_middle_ratio 2\.5$/), txt('st-mratio')], [true, '× 2.5']);
+  const al1 = w.__alerts.length;
+  w.document.getElementById('st-mratio-in').value = '9'; P.click('st-mratio-set');
+  w.document.getElementById('st-mratio-in').value = '0.05'; P.click('st-mratio-set');
+  await sleep(300);
+  chk('比例 9／0.05 → 前端擋掉（0.1 ~ 5.0）、吊機值不變', [w.__alerts.length - al1, cr().middle_ratio], [2, '2.5']);
+  chk('契約：set_middle_ratio 6 → ERR；set_middle_auto 2 → ERR', [/^ERR/.test(await send('set_middle_ratio 6')), /^ERR/.test(await send('set_middle_auto 2'))], [true, true]);
+  w.document.getElementById('st-mratio-in').value = '1'; P.click('st-mratio-set');
+  await waitFor(() => cr().middle_ratio === '1', 30);
+
+  // ---- 自動跟隨（假吊機）：中繩長度 = 左右平均位移 × k ----
+  await send('set_middle_auto 1'); await send('set_middle_ratio 2');
+  const lens = async () => { const st = await send('status'); const f = (k) => parseFloat(new RegExp(k + '=(-?[\\d.]+)').exec(st)[1]); return { l: f('length_left'), r: f('length_right'), m: f('length_middle') }; };
+  const a0 = await lens();
+  await send('pay_out 5'); await sleep(2500);
+  const a1 = await lens();
+  const want = 2 * ((a1.l - a0.l) + (a1.r - a0.r)) / 2;
+  chk('自動跟隨開、k=2：放繩 5 cm → 中繩 = 左右平均位移 × 2（假吊機模型；容許 ±1.5）', [Math.abs(want) > 3, Math.abs((a1.m - a0.m) - want) <= 1.5], [true, true]);
+  await send('set_middle_auto 0'); await send('set_middle_ratio 1'); await send('stop');
 }
 
 function secReport() {
@@ -830,6 +1077,7 @@ function secReport() {
     if (has('safe')) await secSafe(P);
     if (has('hold')) await secHold(P);
     if (has('stop')) await secStop(P);
+    if (has('middle')) await secMiddle(P);
     if (has('report')) secReport();
   } catch (e) {
     fail++; console.log('  🔴 harness error: ' + (e && e.stack || e));

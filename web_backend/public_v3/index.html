@@ -446,6 +446,13 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
   /* 腳本執行中：整頁變灰且不可點。STOP 由 JS 個別把 pointer-events 開回來。 */
   .btn.hold{min-width:62px}
   .btn.hold.active{background:var(--accent);border-color:var(--accent);color:#fff}
+  /* [2026-10-08] 中繩按住鈕：視覺同 .btn.hold，但**刻意不同 class**——.btn.hold 被一堆邏輯整組選取
+     （吸附鎖、張力保護紅框、harness 的 holdsEnabled），中繩有自己的停用條件（dev_clv900）。 */
+  .btn.mhold{min-width:62px}
+  #mid-card.mid-off .big,#mid-card.mid-off .ropegrid{opacity:.45}
+  .btn.mhold.active{background:var(--accent);border-color:var(--accent);color:#fff}
+  .ropegrid .btn.mhold{min-width:0;min-height:58px;font-size:16px;font-weight:700}
+  :root[data-density="tablet"] .btn.mhold{min-width:76px}
   /* [2026-09-11 per user] 上滑台卡片版面：**所有輸入框同寬、所有按鈕同尺寸**。
      先前每個 input 各自 inline width、按鈕有大有小，看起來凌亂。統一寫在這裡。 */
   /* 🔴 [2026-09-11] 容器 class 叫 `.railcard` 不叫 `.rail` —— `.rail` 是左側導覽列
@@ -569,7 +576,7 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
     .big{gap:12px}
     .big .bv{font-size:18px}
     .ctl .cl{min-width:0}
-    .ropegrid .btn.hold{min-height:50px;font-size:15px}
+    .ropegrid .btn.hold,.ropegrid .btn.mhold{min-height:50px;font-size:15px}
     .ebanner{padding:8px 10px;font-size:12px}
   }
   @media (prefers-reduced-motion:reduce){*{transition:none!important}}
@@ -1211,6 +1218,92 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
           </div>
         </div>
 
+        <!-- [2026-10-08] 中繩（CLV900 變頻器，slave 3）。介面規格見 .claude/work_log.md 10-08（吊機 :5002）：
+             middle_hold <pay|retract> <on|off>（按住才轉，1.5 s 租約，與鋼索 hold 共用 hold_renew）／middle_stop／set_middle_hz。
+             沒有 data-safe-keep：SAFE 上鎖時這張卡跟著 inert（救援收放繩只留鋼索那張）。
+             dev_clv900=0 ⇒ 整張卡停用並寫原因（paintMiddle）。 -->
+        <div class="grp" id="mid-card">
+          <header>中繩 —— CLV900 <span class="lock" id="mid-lock">按住才動</span></header>
+          <div>
+            <div class="big">
+              <div><span class="bk">狀態</span>
+                <span class="bv" id="mid-state">—</span></div>
+              <div><span class="bk">運轉</span>
+                <span class="bv" id="mid-runhz">—</span></div>
+              <div><span class="bk">中計米器</span>
+                <span class="bv" id="mid-len">—</span></div>
+            </div>
+            <div class="why" id="mid-off" hidden style="padding:6px 12px;white-space:normal;background:var(--bad-soft);color:var(--bad);font-weight:600"></div>
+            <div class="ctl">
+              <span class="cl">故障碼 / 目前按住<small><code>middle_fault</code> · <code>middle_hold</code> · 讀取連續失敗 <span id="mid-cf">—</span> 次</small></span>
+              <span class="rd" id="mid-fault">—</span>
+              <span class="rd" id="mid-hold" style="color:var(--ink3)">—</span>
+            </div>
+            <div class="ropegrid" style="grid-template-columns:repeat(2,1fr)">
+              <button class="btn mhold" data-mhold="pay">▼ 放</button>
+              <button class="btn mhold" data-mhold="retract">▲ 收</button>
+            </div>
+            <!-- [2026-10-08 per user] 連動：勾選後，鋼索卡「兩側一起」按住 ▲▼ 時中繩同收同放（吊機 hold_loop 跟隨，
+                 速度以下面選中的中繩速度為基準）。只影響手動 ▲▼，不影響 pay_out/retract/goto（那是 Setting 的自動跟隨）。
+                 吊機端不存檔：吊機重啟後一律回到不勾。 -->
+            <label class="ctl" style="cursor:pointer">
+              <span class="cl">連動鋼索 ▲▼<small>勾選＝鋼索<b>兩側一起</b>按住 ▲▼ 時中繩同收同放（速度＝下面選中的中繩速度）· <code>set_middle_link</code> · 吊機重啟會取消</small></span>
+              <span class="rd" id="mid-link-rd">—</span>
+              <input type="checkbox" id="mid-link" aria-label="中繩連動鋼索" style="width:20px;height:20px">
+            </label>
+            <!-- [2026-10-08 per user] 連動的兩個子設定（吊機端都持久化，畫面照 status 的 middle_link_track／middle_pay_extra）：
+                 長度跟隨＝照中計米器追「左右平均位移 × k ×（1＋放繩多放 %）」，有「中繩落後 15 cm」保護，要中計米器；
+                 只照速度＝中繩速度 ×（1＋多放 %）跟著兩側起停，不讀中計米器 —— 中計米器失效時用這個獨立控制。 -->
+            <div class="why" id="mid-track-why" hidden style="padding:6px 12px;white-space:normal;background:var(--bad-soft);color:var(--bad);font-weight:600"></div>
+            <div class="ctl stack">
+              <span class="cl">連動方式<small>長度跟隨＝照中計米器追長度（落後 15 cm 自動停）· 只照速度＝不讀中計米器，<b>中計米器失效時用</b>，沒有長度保護 · <code>set_middle_link_track</code></small></span>
+              <span class="ctlrow">
+                <span class="rd" id="mid-track-rd">—</span>
+                <span class="seg" role="group" aria-label="中繩連動方式">
+                  <button data-mtrack="1">長度跟隨</button>
+                  <button data-mtrack="0">只照速度</button>
+                </span>
+              </span>
+            </div>
+            <div class="ctl stack">
+              <span class="cl">放繩多放<small>放繩時中繩比鋼索多放幾 %（收繩不加，免得中繩被拉緊）· 0＝剛好跟上 · <code>set_middle_pay_extra</code></small></span>
+              <span class="ctlrow">
+                <span class="rd" id="mid-px">—</span>
+                <span class="seg" id="mid-pxq" role="group" aria-label="放繩多放快選">
+                  <button data-mpx="0">0</button>
+                  <button data-mpx="5">5</button>
+                  <button data-mpx="10">10</button>
+                  <button data-mpx="20">20</button>
+                  <button data-mpx="30">30</button>
+                </span>
+                <input id="mid-px-in" class="numin" type="number" value="0" min="0" max="100" step="1" aria-label="middle_pay_extra" style="width:5em">
+                <button class="btn" id="mid-px-set">套用</button>
+              </span>
+            </div>
+            <div class="ctl stack">
+              <span class="cl">速度<small>Hz（0 &lt; Hz ≤ 50）· <code>set_middle_hz</code> · 放開再按才生效</small></span>
+              <span class="ctlrow">
+                <span class="rd" id="mid-hz">—</span>
+                <!-- [2026-10-08 per user] 與鋼索速度同一組快選（10~50）；反白照 status 的 middle_hz，不照剛按了哪顆 -->
+                <span class="seg" id="mid-hzq" role="group" aria-label="中繩速度快選">
+                  <button data-mhzq="10">10</button>
+                  <button data-mhzq="20">20</button>
+                  <button data-mhzq="30">30</button>
+                  <button data-mhzq="40">40</button>
+                  <button data-mhzq="50">50</button>
+                </span>
+                <input id="mid-hz-in" class="numin" type="number" value="30" min="1" max="50" step="1" aria-label="middle_hz" style="width:5em">
+                <button class="btn" id="mid-hz-set">套用</button>
+              </span>
+            </div>
+            <div class="ctl" style="margin-top:6px">
+              <span class="cl">停止中繩<small>送 <code>middle_stop</code> · 減速停 + 清除中繩按住</small></span>
+              <span class="rd"></span>
+              <button class="btn" id="mid-stop" style="border-color:var(--bad);color:var(--bad);font-weight:700">停止</button>
+            </div>
+          </div>
+        </div>
+
         <!-- 張力保護（獨立一張，與繼電器／PWM 同尺寸） -->
         <div class="grp" data-safe-keep>
           <header>張力保護 <span class="lock" style="background:var(--ok-soft);color:var(--ok)">門檻會持久化</span></header>
@@ -1613,9 +1706,46 @@ try { var q = (location.search.match(/[?&]density=(tablet|desktop)/) || [])[1];
           </div>
         </div>
 
+        <!-- [2026-10-08] 中繩（CLV900）三項設定。吊機端三項都持久化；畫面照 status 的 middle_auto／middle_dir_invert／
+             middle_ratio 反白／預填；OK 回覆帶回的值先翻畫面、下一輪 status 校正（同 hold_guard 的做法）。 -->
+        <div class="grp">
+          <header><span>中繩 · CLV900</span>
+            <span class="lock" style="background:var(--ok-soft);color:var(--ok)">三項都會持久化</span></header>
+          <div>
+            <div class="ctl stack">
+              <span class="cl">自動跟隨<small>放繩／收繩時中繩自動跟著動 · <code>set_middle_auto</code> · 🔴 開啟前需先完成方向確認</small></span>
+              <span class="ctlrow">
+                <span class="rd" id="st-mauto">—</span>
+                <span class="seg" role="group" aria-label="中繩自動跟隨">
+                  <button data-mauto="1">開</button>
+                  <button data-mauto="0">關</button>
+                </span>
+              </span>
+            </div>
+            <div class="ctl stack">
+              <span class="cl">方向反轉<small>▼放／▲收 與變頻器正反轉相反時開 · <code>set_middle_dir_invert</code></small></span>
+              <span class="ctlrow">
+                <span class="rd" id="st-minv">—</span>
+                <span class="seg" role="group" aria-label="中繩方向反轉">
+                  <button data-minv="1">反轉</button>
+                  <button data-minv="0">正常</button>
+                </span>
+              </span>
+            </div>
+            <div class="ctl stack">
+              <span class="cl">比例 k<small>中繩長度 = 左右平均位移 × k（0.1 ~ 5.0）· <code>set_middle_ratio</code></small></span>
+              <span class="ctlrow">
+                <span class="rd" id="st-mratio">—</span>
+                <input id="st-mratio-in" class="numin" type="number" min="0.1" max="5" step="0.1" value="1" aria-label="middle_ratio" style="width:5.5em">
+                <button class="btn" id="st-mratio-set">套用</button>
+              </span>
+            </div>
+          </div>
+        </div>
+
         <div class="grp" style="grid-column:1/-1">
           <header><span>參數對照表</span>
-            <span class="lock" style="background:var(--idle-soft);color:var(--ink2)">唯讀 · 此頁無設定功能</span></header>
+            <span class="lock" style="background:var(--idle-soft);color:var(--ink2)">唯讀 · 此表無設定功能</span></header>
           <div>
             <!-- 🔴 [2026-09-10 per user「Setting 頁面好像沒有作用，可以先留空白」]
                  **查證結果：使用者是對的 —— 這一頁沒有任何控制項**（全頁 0 個 `fire`／`send`），
@@ -1920,6 +2050,18 @@ function connect(){
       window.__craneReleaseAll();
       log('🔴 ' + line + ' —— 按住續約中斷（連線不穩？），吊機已自動停止', 'e');
     }
+    // [2026-10-08] 中繩（CLV900）事件。租約是鋼索與中繩共用的（hold_renew 一次續兩邊）⇒ 逾時就全清。
+    if (/^EVT middle_lease_expired/.test(line) && window.__craneReleaseAll){
+      window.__craneReleaseAll();
+      log('🔴 ' + line + ' —— 按住續約中斷（連線不穩？），中繩已自動停止', 'e');
+    }
+    if (/^EVT middle_fault/.test(line)){
+      if (window.__midReleaseAll) window.__midReleaseAll();
+      log('🔴🔴 中繩變頻器故障：' + line + ' —— 看 Manual 中繩卡的故障碼', 'e');
+    }
+    if (/^EVT motion_abort\b.*reason=middle_lag/.test(line)){
+      log('🔴🔴 動作中止（中繩跟不上）：' + line + ' —— 檢查中繩方向／比例／變頻器', 'e');
+    }
     // [2026-09-15] hold 模式張力保護開關與「關閉時只警示」事件（吊機）
     if (/^EVT (hold_guard|manual_tension_)/.test(line) && typeof onHoldGuardEvt === 'function') onHoldGuardEvt(line);
     if (/^EVT pusher_rpm /.test(line) && typeof onPusherRpmEvt === 'function') onPusherRpmEvt(line);
@@ -2142,6 +2284,7 @@ function paint(){
   }
   if (typeof paintHoldGuard === 'function') paintHoldGuard(cr);
   if (typeof paintCupLock === 'function') paintCupLock();
+  if (typeof paintMiddle === 'function') paintMiddle(cr);
   if (typeof paintStopBanner === 'function') paintStopBanner();
   if (typeof paintPusherRpm === 'function') paintPusherRpm(wr);
   if (typeof waterFromStatus === 'function') waterFromStatus(wr);
@@ -2717,7 +2860,7 @@ function pollPwm(){
 // 🔴 **這顆與 Manual／Mission 的 STOP 不是同一件事。**
 //   那兩顆送的是吊機 `stop`（`craneStopAction`）—— 只停繩子，本體的吸盤推桿、
 //   進水閥、abort 旗標全都不受影響。本體 `emergency_stop`（`wash_robot_commands.cpp:3640`）
-//   做的是：停 9 顆 cup 的推桿 → 設 abort_flag → **經 estop 專用通道**停吊機
+//   做的是：停 4 顆 cup 的推桿 → 設 abort_flag → **經 estop 專用通道**停吊機
 //   （不是主通道，主通道會卡在 crane_mtx_ 上等）→ 作廢手臂校正 → 若進水閥開著就
 //   強制關 → 進 State::Error。
 //   ⇒ v1 一直有這顆（`STOP (robot)`），v2 在 2026-09-10 之前**沒有**。
@@ -2727,7 +2870,7 @@ function pollPwm(){
 //
 // 🔴 **必須連著出路一起給。** `emergency_stop` 會把本體鎖進 Error，之後所有動作
 //   指令都會被 state_violation_ 擋掉。只給入口不給出口＝做了一條死路。出口有兩條：
-//     · `recover` —— 重驗 9 顆 cup 都還吸著 → 直接回 Attached，**不會鬆真空**。
+//     · `recover` —— 重驗 4 顆 cup 都還吸著 → 直接回 Attached，**不會鬆真空**。
 //       貼牆時要用這條。驗不過會回 `ERR recover_vacuum_fail slaves=...`。
 //     · `reset`   —— 無條件回 Idle。之後要重跑 init/attach，**那會鬆真空**。
 //       ⚠️ 貼在牆上時按這條，等於把 anchor 放掉。
@@ -2793,11 +2936,11 @@ function paintEstopBanner(){
       '<button class="eb-btn" id="eb-recover">RECOVER（貼牆時用）</button>' +
       '<button class="eb-btn" id="eb-reset">RESET（會鬆真空）</button>' +
       '<span style="flex-basis:100%;font-size:12px">' +
-      '<strong>RECOVER</strong>：重驗 9 顆吸盤都還吸著，通過就回 Attached，<strong>不鬆真空</strong>；驗不過會列出哪幾顆。' +
+      '<strong>RECOVER</strong>：重驗 4 顆吸盤都還吸著，通過就回 Attached，<strong>不鬆真空</strong>；驗不過會列出哪幾顆。' +
       '　<strong>RESET</strong>：無條件回 Idle，之後要重跑 init/attach —— ⚠️ <strong>那會鬆真空，貼在牆上時等於放掉 anchor</strong>。</span>';
     document.getElementById('eb-recover').addEventListener('click', function(){
       fire(WR, 'recover', null, null).then(function(l){
-        if (/^OK/.test(l)) log('✅ recover 成功 —— 9 顆吸盤都還吸著，已回 Attached', 'g');
+        if (/^OK/.test(l)) log('✅ recover 成功 —— 4 顆吸盤都還吸著，已回 Attached', 'g');
         else log('🔴 recover 失敗：' + l + '（先處理沒吸住的那幾顆，或改用 RESET —— 但 RESET 會鬆真空）', 'e');
         if (typeof pollFast === 'function') setTimeout(pollFast, 200);
       });
@@ -4249,7 +4392,7 @@ function paintCupLock(){
   if (hint){
     hint.hidden = !lock;
     hint.textContent = lock
-      ? '🔴 吸附中（' + c.sealed + ' 顆密封' + (c.unreadable ? '、' + c.unreadable + ' 顆讀不到' : '') + '）：會移動吊機的按鈕已鎖住，含 ▲▼ 拉繩／放繩。要移動請先按「收腳」。'
+      ? '🔴 吸附中（' + c.sealed + ' 顆密封' + (c.unreadable ? '、' + c.unreadable + ' 顆讀不到' : '') + '）：會移動吊機的按鈕已鎖住，含 ▲▼ 拉繩／放繩與中繩 ▼放／▲收。要移動請先按「收腳」。'
       : '';
   }
 }
@@ -4424,6 +4567,14 @@ function setCraneLock(){
   }
   var lk = document.getElementById('crane-lock');
   if (lk) lk.textContent = locked ? '任務執行中 · 已鎖定' : '會移動機器';
+  var mlk = document.getElementById('mid-lock');
+  // [10-08] 連動中要看得到：任務鎖定的文字優先，否則照 status 的 middle_link
+  if (mlk) mlk.textContent = locked ? '任務執行中 · 已鎖定' : midLockText(last && last.cr);
+}
+// [10-08] 中繩卡標頭：連動中要看得到，「只照速度」也要看得到（沒有長度保護）
+function midLockText(cr){
+  if (!cr || cr.middle_link !== '1') return '按住才動';
+  return '按住才動 · 連動鋼索 ▲▼' + (cr.middle_link_track === '0' ? '（只照速度）' : '');
 }
 
 // ---- hold_hz：按住式收放繩的速度 ----
@@ -4556,23 +4707,47 @@ document.addEventListener('click', function(ev){
     try { ws.send(JSON.stringify({holdRenew: 1})); } catch(e){}
   }
   function startRenew(){ if (!renewTimer) renewTimer = setInterval(renewTick, 500); }
+  // [2026-10-08] 中繩（.btn.mhold，`middle_hold <pay|retract> on|off`）與鋼索共用這一份 held／續約計時器：
+  //   吊機端 `hold_renew` 同時續約鋼索 hold 與中繩 hold，所以 GUI 只要有任何一顆按住就續約，不另開第二條。
+  function holdLine(btn, onoff){
+    return btn.dataset.mhold ? 'middle_hold ' + btn.dataset.mhold + ' ' + onoff : btn.dataset.hold + ' ' + onoff;
+  }
   function release(btn, ev){
     if (ev) ev.preventDefault();
     if (!btn.classList.contains('active')) return;
     btn.classList.remove('active');
     held = held.filter(function(b){ return b !== btn; });
-    fire(CR, btn.dataset.hold + ' off', null, null);
+    fire(CR, holdLine(btn, 'off'), null, null);
   }
   function releaseAll(){ held.slice().forEach(function(b){ release(b, null); }); }
+  function releaseMid(){ held.slice().forEach(function(b){ if (b.dataset.mhold) release(b, null); }); }
 
-  [].forEach.call(document.querySelectorAll('.btn.hold'), function(btn){
+  [].forEach.call(document.querySelectorAll('.btn.hold, .btn.mhold'), function(btn){
     function press(ev){
       if (ev) ev.preventDefault();
       if (btn.classList.contains('active')) return;
+      // 中繩停用（dev_clv900=0／吸附中）時，合成事件也不送；.btn.hold 的行為維持原樣
+      if (btn.dataset.mhold && btn.disabled) return;
       btn.classList.add('active');
       held.push(btn);
       startRenew();
-      fire(CR, btn.dataset.hold + ' on', null, null);
+      var p = fire(CR, holdLine(btn, 'on'), null, null);
+      // [2026-10-08] 鋼索 ▲▼ 被「中繩連動」擋下（中繩不可用）⇒ 沒有在轉；畫面放開並講出口
+      if (!btn.dataset.mhold) p.then(function(l){
+        if (!/^ERR middle_unavailable/.test(l) || !btn.classList.contains('active')) return;
+        btn.classList.remove('active');
+        held = held.filter(function(b){ return b !== btn; });
+        log('🔴 ' + holdLine(btn, 'on') + ' 被中繩連動擋下：' + l +
+            (/meter_middle/.test(l) ? ' —— 中計米器讀不到：中繩卡「連動方式」改「只照速度」，或取消「連動」' : ' —— 中繩變頻器不可用：取消「連動」再動鋼索'), 'e');
+      });
+      if (btn.dataset.mhold) p.then(function(l){
+        // 吊機拒絕（ERR clv900_unavailable／ERR motion_active…）⇒ 沒有在轉，別讓畫面說還按著。
+        // 放開得比回覆還快時 btn 已不 active，release 已送過 off，這裡什麼都不做。
+        if (!/^ERR/.test(l) || !btn.classList.contains('active')) return;
+        btn.classList.remove('active');
+        held = held.filter(function(b){ return b !== btn; });
+        log('🔴 ' + holdLine(btn, 'on') + ' 被拒：' + l, 'e');
+      });
     }
     btn.addEventListener('mousedown',   press);
     btn.addEventListener('touchstart',  press, {passive:false});
@@ -4586,6 +4761,201 @@ document.addEventListener('click', function(ev){
   });
   // 伺服器自己停下來時（張力超標）把按鈕狀態清掉，否則畫面會說還在動
   window.__craneReleaseAll = releaseAll;
+  window.__midReleaseAll = releaseMid;
+})();
+
+//=========== 中繩（CLV900，2026-10-08）===========
+//
+// 吊機 :5002 介面（C++ 端同一份規格）：
+//   middle_hold <pay|retract> <on|off>   按住才轉；1.5 s 租約，續約與鋼索共用 `hold_renew`（上面那個 IIFE 的 held／計時器）
+//   middle_stop · set_middle_hz <hz> · set_middle_auto <0|1> · set_middle_dir_invert <0|1> · set_middle_ratio <k>
+//   set_middle_link <0|1>（不存檔）· set_middle_link_track <0|1>（1 長度跟隨／0 只照速度）· set_middle_pay_extra <0..100 %>
+//   status：middle_state(0未知/1正轉/2反轉/3停機) middle_fault(-1未知/0無) middle_run_hz middle_hold(none|pay|retract)
+//           middle_auto middle_link middle_ratio middle_pay_extra middle_link_track middle_dir_invert middle_comm_fail；既有 dev_clv900／middle_hz／length_middle
+//   EVT：middle_lease_expired age_ms= · middle_fault code= · motion_abort reason=middle_lag lag_cm=
+// 🔴 畫面一律照 status 畫（送出後不自己猜）；停用規則：dev_clv900≠1 或 吸附中。「停止」鈕不跟著停用——
+//    通訊斷了、變頻器卻還在轉時，它是唯一的出口（吊機若回 ERR 也會在紀錄裡看到）。
+var MID_STATE = {'0':'未知', '1':'正轉', '2':'反轉', '3':'停機'};
+var MID_HOLD  = {none:'無', pay:'放 ▼', retract:'收 ▲'};
+function paintMiddle(cr){
+  var card = document.getElementById('mid-card');
+  if (card){
+    var devOk = !!cr && cr.dev_clv900 === '1';
+    var why = '';
+    if (!cr)         why = '吊機 status 尚未收到（吊機未連線？）—— 中繩按鈕停用';
+    else if (!devOk) why = '吊機回報 dev_clv900=0：中繩變頻器（CLV900）未連線或啟動時沒初始化成功 —— 檢查它的 USR 網關與 485 接線，必要時重啟吊機程式（fcv-crane）。中繩按鈕停用';
+    else if (cupsState().attached) why = '吸附中不可移動吊機（含中繩）—— 先按「收腳」';
+    var dis = !!why;
+    card.classList.toggle('mid-off', dis);
+    // 速度欄只在「變頻器不在」時停用；吸附中只鎖會讓吊機動的按住鈕（改 Hz 不會動機器）
+    [].forEach.call(card.querySelectorAll('#mid-hz-set, #mid-hz-in, [data-mhzq], #mid-link, [data-mtrack], [data-mpx], #mid-px-in, #mid-px-set'),
+                    function(e){ e.disabled = !devOk; });
+    [].forEach.call(card.querySelectorAll('.btn.mhold'), function(e){ e.disabled = dis; e.title = dis ? why : ''; });
+    var off = document.getElementById('mid-off');
+    if (off){ off.hidden = !dis; off.textContent = dis ? '🔴 ' + why : ''; }
+    // 停用的當下若還按著（吸附了、通訊掉了）：disabled 的按鈕收不到 mouseup ⇒ 這裡補送 off
+    if (dis && window.__midReleaseAll) window.__midReleaseAll();
+
+    var st = devOk ? (MID_STATE[cr.middle_state] || '—') : '—';
+    txt('mid-state', st);
+    var runhz = devOk ? num(cr, 'middle_run_hz') : null;
+    var rEl = document.getElementById('mid-runhz');
+    if (rEl) rEl.innerHTML = runhz === null ? '—' : runhz.toFixed(1) + '<span class="bu">Hz</span>';
+    var ml = cr ? num(cr, 'length_middle') : null;          // ERR（計米器不在）⇒ null ⇒ —
+    var lEl = document.getElementById('mid-len');
+    if (lEl){
+      lEl.innerHTML = ml === null ? '—' : ml.toFixed(0) + '<span class="bu">cm</span>';
+      var sus = !!cr && typeof cr.meter_suspect === 'string' && cr.meter_suspect.indexOf('M') >= 0;
+      lEl.classList.toggle('bad', sus);
+      lEl.title = sus ? '中計米器讀值被防雜訊規則拒絕中（快取可能過期）' : '';
+    }
+    var fv = devOk ? num(cr, 'middle_fault') : null;
+    var fEl = document.getElementById('mid-fault');
+    if (fEl){
+      fEl.textContent = (fv === null || fv < 0) ? '未知' : (fv === 0 ? '0 · 無故障' : '故障碼 ' + fv);
+      fEl.className = 'rd ' + ((fv === null || fv < 0) ? 'unv' : (fv === 0 ? 'on' : 'bad'));
+    }
+    var mh = cr && cr.middle_hold ? cr.middle_hold : null;
+    txt('mid-hold', mh === null ? '—' : (MID_HOLD[mh] || mh));
+    var cf = cr ? num(cr, 'middle_comm_fail') : null;
+    var cfEl = document.getElementById('mid-cf');
+    if (cfEl){ cfEl.textContent = cf === null ? '—' : String(cf); cfEl.style.color = cf > 0 ? 'var(--bad)' : ''; }
+    var hz = cr ? num(cr, 'middle_hz') : null;
+    txt('mid-hz', hz === null ? '—' : hz + ' Hz');
+    var hzIn = document.getElementById('mid-hz-in');
+    if (hzIn && hz !== null && document.activeElement !== hzIn) hzIn.value = hz;
+    var lk = cr ? cr.middle_link : undefined;                                  // [10-08] 連動：照 status
+    var lkBox = document.getElementById('mid-link');
+    if (lkBox && lk !== undefined && document.activeElement !== lkBox) lkBox.checked = (lk === '1');
+    txt('mid-link-rd', lk === '1' ? '連動中' : (lk === '0' ? '不連動' : '—'));
+    var lkRd = document.getElementById('mid-link-rd'); if (lkRd) lkRd.style.color = lk === '1' ? 'var(--warn)' : '';
+    var lock = document.getElementById('mid-lock');
+    if (lock && !/已鎖定/.test(lock.textContent)) lock.textContent = midLockText(cr);
+    [].forEach.call(document.querySelectorAll('[data-mhzq]'), function(b){   // [10-08] 快選反白照實際值
+      b.classList.toggle('on', hz !== null && +b.dataset.mhzq === hz);
+    });
+    // [10-08] 連動方式 / 放繩多放：照 status
+    var tr = cr ? cr.middle_link_track : undefined;
+    txt('mid-track-rd', tr === '1' ? '長度跟隨' : (tr === '0' ? '只照速度' : '—'));
+    var trRd = document.getElementById('mid-track-rd'); if (trRd) trRd.style.color = tr === '0' ? 'var(--warn)' : '';
+    [].forEach.call(document.querySelectorAll('[data-mtrack]'), function(b){ b.classList.toggle('on', tr !== undefined && b.dataset.mtrack === tr); });
+    var px = cr ? num(cr, 'middle_pay_extra') : null;
+    txt('mid-px', px === null ? '—' : '+' + px + ' %');
+    [].forEach.call(document.querySelectorAll('[data-mpx]'), function(b){ b.classList.toggle('on', px !== null && +b.dataset.mpx === px); });
+    var pxIn = document.getElementById('mid-px-in');
+    if (pxIn && px !== null && document.activeElement !== pxIn) pxIn.value = px;
+    // 連動 + 長度跟隨 + 中計米器讀不到 ⇒ 吊機會擋下兩側 ▲▼（ERR middle_unavailable meter_middle）—— 先講出口
+    var mtw = document.getElementById('mid-track-why');
+    if (mtw){
+      var meterDead = devOk && ml === null;
+      var blockMsg = (lk === '1' && tr === '1' && meterDead)
+        ? '🔴 中計米器讀不到：「長度跟隨」會擋下鋼索兩側一起 ▲▼ —— 改「只照速度」，或取消「連動」用中繩自己的 ▼▲ 獨立控制' : '';
+      mtw.hidden = !blockMsg; mtw.textContent = blockMsg;
+    }
+  }
+
+  // ---- Setting 頁：三項設定的現值（照 status 反白／預填）----
+  var ma = cr ? cr.middle_auto : undefined, mi = cr ? cr.middle_dir_invert : undefined;
+  txt('st-mauto', ma === '1' ? '開' : (ma === '0' ? '關' : '—'));
+  txt('st-minv',  mi === '1' ? '反轉' : (mi === '0' ? '正常' : '—'));
+  var mrNum = cr ? num(cr, 'middle_ratio') : null;
+  txt('st-mratio', mrNum === null ? '—' : '× ' + mrNum);
+  [].forEach.call(document.querySelectorAll('[data-mauto]'), function(b){ b.classList.toggle('on', ma !== undefined && b.dataset.mauto === ma); });
+  [].forEach.call(document.querySelectorAll('[data-minv]'),  function(b){ b.classList.toggle('on', mi !== undefined && b.dataset.minv === mi); });
+  var mrIn = document.getElementById('st-mratio-in');
+  if (mrIn && mrNum !== null && document.activeElement !== mrIn) mrIn.value = mrNum;
+}
+
+// ---- 速度 ----
+function setMiddleHz(v){
+  if (!(v > 0 && v <= 50)) { alert('middle_hz 允許 0 < Hz ≤ 50（馬達額定 50 Hz）'); return; }
+  // 同 hold_hz：不加確認——只改下一次按住的頻率，不會讓機器動。
+  fire(CR, 'set_middle_hz ' + v, null, null).then(function(l){
+    if (/^ERR/.test(l)) log('🔴 set_middle_hz 被拒：' + l, 'e');
+  });
+}
+(function(){
+  var set = document.getElementById('mid-hz-set'), inp = document.getElementById('mid-hz-in');
+  if (set) set.addEventListener('click', function(){ setMiddleHz(parseFloat(inp.value)); });
+  if (inp) inp.addEventListener('keydown', function(e){ if (e.key === 'Enter') set.click(); });
+  // [2026-10-08 per user] 連動勾選 → set_middle_link；被拒（例如 clv900 不在）就退回原狀態並紅字。
+  var lkBox = document.getElementById('mid-link');
+  if (lkBox) lkBox.addEventListener('change', function(){
+    var want = lkBox.checked ? 1 : 0;
+    fire(CR, 'set_middle_link ' + want, null, null).then(function(l){
+      if (/^ERR/.test(l)) { lkBox.checked = !want; log('🔴 set_middle_link ' + want + ' 被拒：' + l, 'e'); }
+      else log(want ? '🔗 中繩連動鋼索 ▲▼：開（兩側一起按住時中繩同收同放）' : '中繩連動：關', want ? 'w' : 'g');
+    });
+  });
+  // [2026-10-08 per user] 連動方式：長度跟隨 / 只照速度（中計米器失效時的獨立控制）
+  document.addEventListener('click', function(ev){
+    var b = ev.target.closest('[data-mtrack]');
+    if (!b || b.disabled) return;
+    if (b.dataset.mtrack === '0' && !confirmOnce('改成「只照速度」？\n\n連動時中繩只照選定的速度跟著兩側起停，不讀中計米器。\n🔴 沒有「中繩落後」保護：放繩時中繩比鋼索慢，中繩就會吊住本體 —— 中繩速度要選得比鋼索快（或加「放繩多放」）。\n\n確定？')) return;
+    var cmd = 'set_middle_link_track ' + b.dataset.mtrack;
+    fire(CR, cmd, null, null).then(function(l){ midSetAck(l, cmd, 'middle_link_track', /^OK middle_link_track=([01])/); });
+  });
+  // [2026-10-08 per user] 放繩多放 %：快選 0/5/10/20/30 或自填 0~100
+  function setMiddlePayExtra(v){
+    if (!(v >= 0 && v <= 100)) { alert('放繩多放允許 0 ~ 100 %'); return; }
+    var cmd = 'set_middle_pay_extra ' + v;
+    fire(CR, cmd, null, null).then(function(l){ midSetAck(l, cmd, 'middle_pay_extra', /^OK middle_pay_extra=([\d.]+)/); });
+  }
+  var pxSet = document.getElementById('mid-px-set'), pxIn = document.getElementById('mid-px-in');
+  if (pxSet) pxSet.addEventListener('click', function(){ setMiddlePayExtra(parseFloat(pxIn.value)); });
+  if (pxIn) pxIn.addEventListener('keydown', function(e){ if (e.key === 'Enter') pxSet.click(); });
+  document.addEventListener('click', function(ev){
+    var b = ev.target.closest('[data-mpx]');
+    if (!b || b.disabled) return;
+    if (pxIn) pxIn.value = b.dataset.mpx;
+    setMiddlePayExtra(parseFloat(b.dataset.mpx));
+  });
+  // [2026-10-08 per user] 速度快選 10/20/30/40/50（同鋼索 data-hzq）：填入輸入框並套用
+  document.addEventListener('click', function(ev){
+    var b = ev.target.closest('[data-mhzq]');
+    if (!b || b.disabled) return;
+    if (inp) inp.value = b.dataset.mhzq;
+    setMiddleHz(parseFloat(b.dataset.mhzq));
+  });
+  var stop = document.getElementById('mid-stop');
+  if (stop) stop.addEventListener('click', function(){
+    fire(CR, 'middle_stop', null, null).then(function(l){
+      if (/^ERR/.test(l)) log('🔴 middle_stop → ' + l, 'e');
+    });
+    if (window.__midReleaseAll) window.__midReleaseAll();    // 畫面上的按住狀態一併清掉（它會再補送一個 off，無害）
+  });
+})();
+
+// ---- Setting：自動跟隨／方向反轉／比例 ----
+// 三者都是吊機持久化的設定；OK 回覆帶回機器上的值，先拿它翻畫面，下一輪 status 再校正。
+function midSetAck(l, cmd, key, re){
+  var mm = re.exec(l);
+  if (mm){ if (!last.cr) last.cr = {}; last.cr[key] = mm[1]; paintMiddle(last.cr); }
+  else log('🔴 ' + cmd + ' → ' + l, 'e');
+}
+document.addEventListener('click', function(ev){
+  var b = ev.target.closest('[data-mauto]');
+  if (!b) return;
+  if (b.dataset.mauto === '1' && !confirmOnce('開啟中繩自動跟隨？\n\n放繩／收繩時，中繩會自動跟著動。\n🔴 需先完成方向確認：用 Manual 的「▼ 放」「▲ 收」短暫點動，確認中繩真的是放出／收回；方向相反就先把「方向反轉」打開。\n\n方向已確認？')) return;
+  var cmd = 'set_middle_auto ' + b.dataset.mauto;
+  fire(CR, cmd, null, null).then(function(l){ midSetAck(l, cmd, 'middle_auto', /^OK middle_auto=([01])/); });
+});
+document.addEventListener('click', function(ev){
+  var b = ev.target.closest('[data-minv]');
+  if (!b) return;
+  var cmd = 'set_middle_dir_invert ' + b.dataset.minv;
+  fire(CR, cmd, null, null).then(function(l){ midSetAck(l, cmd, 'middle_dir_invert', /^OK middle_dir_invert=([01])/); });
+});
+(function(){
+  var set = document.getElementById('st-mratio-set'), inp = document.getElementById('st-mratio-in');
+  if (!set || !inp) return;
+  set.addEventListener('click', function(){
+    var v = parseFloat(inp.value);
+    if (!(v >= 0.1 && v <= 5)) { alert('middle_ratio 允許 0.1 ~ 5.0'); return; }
+    var cmd = 'set_middle_ratio ' + v;
+    fire(CR, cmd, null, null).then(function(l){ midSetAck(l, cmd, 'middle_ratio', /^OK middle_ratio=([\d.]+)/); });
+  });
+  inp.addEventListener('keydown', function(e){ if (e.key === 'Enter') set.click(); });
 })();
 
 // ---- 牆面高度建置（2026-09-11 per user；同日反轉為地面歸零慣例）----
@@ -6078,7 +6448,7 @@ setInterval(paint, 1000);
 // [2026-09-10] 版號寫在啟動那行，讓人一眼看得出瀏覽器拿到的是不是新版
 // （這個頁面是單一檔，改完不換檔名，快取沒清就會靜默停在舊版）。
 // ⚠️ 舊文案「server.js 未改動」已不成立 —— Mission 那批改過 server.js，拿掉。
-var CONSOLE_VER = 'v3-2026.10.07-2126';   // 唯一版號來源：scripts/deploy_web.sh 部署時 sed 這一行
+var CONSOLE_VER = 'v3-2026.10.08-2205';   // 唯一版號來源：scripts/deploy_web.sh 部署時 sed 這一行
 txt('ver-tag', CONSOLE_VER);   // 頂欄版號與這行同源，不再各寫各的
 log('console v3 啟動 —— 版本 ' + CONSOLE_VER + '（本體 mission 指令族 + SAFE + 作業流程頁；不 spawn 腳本）');
 // [v3] 無頭測試鉤（jsdom + fake_robot 端對端）。整支腳本包在 IIFE 裡，沒有這個鉤子測試碰不到 send()。

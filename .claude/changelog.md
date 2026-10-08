@@ -6,11 +6,16 @@
 > 保留「原因 / 決策(尤其被否決的)/ 驗證結論」。原則 ≤40 行,驗證表可超。
 > (原 2026-04 的「# 修改日誌」格式範本已由本說明取代。)
 
-## 索引(全部 163 條,新的在上)
+## 索引(全部 168 條,新的在上)
 
+- `[2026-10-08c]` **中繩連動:放繩多放 % + 連動方式開關**(`set_middle_pay_extra`、`set_middle_link_track`,皆持久化):放繩時中繩追 k×(1+%),收繩不加;「只照速度」不讀中計米器 ⇒ 中計米器失效時鋼索不再被連動擋死;harness 287(+9)(**未部署**,機器關機中)→ (本檔)
+- `[2026-10-08b]` **中繩 CLV900 程式支援**:config-driven 啟用(`FCV_CLV900_ENABLE`/`FCV_EP_USR_MW_HOST`/`FCV_CLV900_SLAVE`)、`middle_hold` 按住租約、自動跟隨(P 追蹤 + lag/反向/故障中止,含兩側 ▲▼)、GUI 中繩卡 + 速度快選 + Setting 三項;RECOVER 說明 9→4 顆;Manual「連動鋼索 ▲▼」勾選(`set_middle_link`,不存檔)(`v3-2026.10.08-2205`,兩台)→ (本檔)
+- `[2026-10-08a]` official 吊機半邊部署最新 main(新 `fcv-crane.service`/`crcmd.py`/GUI `cam.conf`)+ `deploy.sh` official 位址可覆蓋;USR 接線錯置以**改網關 IP**修正(`.30`↔`.34`)→ (本檔)
 - `[2026-10-07c]` 攝影機串流優化:**H.264 直通 fMP4 → `<video>`+MSE**(MJPEG 退為備援)、`cam_mjpeg.py`→`cam_relay.py`;攝影機多餘功能全關、GOP 1 s(`v3-2026.10.07-2126`)→ (本檔)
 - `[2026-10-07b]` 風扇 `duty_max` 10→9 部署(本體/腳本/GUI/server.js 四處一致);`deploy.sh` 測試機吊機位址可 `FCV_CRANE` 覆蓋(DHCP .25→.31)→ (本檔)
 - `[2026-10-07a]` **Dashboard 兩支攝影機**:本體 `fcv-cam`(`scripts/cam_mjpeg.py` :8091,RTSP→MJPEG、有人看才跑)+ GUI 攝影機卡 + `server.js` `{src:'cam'}` + `deploy.sh cam` + 機身 OSD 關閉(`scripts/xm_ipcam.py`)→ (本檔)
+- `[2026-10-06a]` 上下行照使用者選的速度跑:`PAY_OUT_MAX_HZ` 30→50、hold ▼ 不再夾、`set_hold_hz`/`set_motion_hz` 上限 120→50 + 10-03 文件校正(`v3-2026.10.06-1025`)→ (本檔)
+- `[2026-10-02a]` GUI:本體斷線時在途指令立即以 ERR 結束(`failInflight`,「拉到頂端」不再卡 5 分鐘)+ 風扇 EMI/電源觀察(`v3-2026.10.02-1647`)→ (本檔)
 - `[2026-10-01f]` 吊機 `set_pay_out_max_hz <1..50>`(放繩上限執行期覆寫,不持久化);30/40/50 Hz 上下行速度實測 → (本檔)
 - `[2026-10-01e]` 設定持久化只存與預設不同的值(本體 settings.json / 吊機 crane_settings.txt;全預設刪檔)→ (本檔)
 - `[2026-10-01d]` 本體繼電器換 `ZS_DIO_R_RLY`(實證是 ZS-DIO)+ ZS 驅動補強(原子交易 + 回覆驗證)→ (本檔)
@@ -176,6 +181,33 @@
 
 ## 當月全文(2026-09,98 條)
 
+## [2026-10-08c] 中繩連動:放繩多放 % + 連動方式(長度跟隨/只照速度)
+
+per user「左右放繩的時候中繩長度也要跟上,甚至更多,在連動鋼索這邊可以設定」「這個功能要可以開關,在中間計米器失效的時候做獨立控制」。
+- **放繩多放**(`set_middle_pay_extra <0..100>`,持久化,預設 0;status `middle_pay_extra`):**只在放繩**時中繩追 `k × (1+%) × 左右平均位移`、Hz 前饋 `middle_hz × (1+%)`(上限 50);收繩維持 k × 平均 —— 收得比鋼索多會讓中繩吊住機器。🔴 `middle_lag` 中止**仍以 k × 平均判**(追不上多放的那段 ≠ 拉緊)。兩側 ▲▼ 跟隨與 `set_middle_auto` 的 pay_out 都套用(同一個 `middle_track_gain()`)。
+- **連動方式**(`set_middle_link_track <0|1>`,持久化,預設 1 = 原行為;status `middle_link_track`):1 長度跟隨(需中計米器);0 **只照速度** —— ▲▼ 跟隨不讀中計米器,中繩以 `middle_hz × (1+%)` 跟著兩側起停,`cmd_hold` 不再因中計米器擋鋼索(clv900 不在/故障仍擋)。每次按下時鎖定模式。🔴 只照速度**沒有落後保護**(GUI 切換時 confirm 一次講明)。pay_out/retract/goto 的自動跟隨不受此開關影響(要靠中計米器決定停點)。
+- `cmd_hold` 拒絕改帶原因:`ERR middle_unavailable <clv900=0|clv900_fault|meter_middle>`;GUI 鋼索 ▲▼ 被擋時放開按鈕並在 log 給出口;連動 + 長度跟隨 + 中計米器讀不到 ⇒ 中繩卡紅字提示「改只照速度/取消連動」;標頭在只照速度時標「(只照速度)」。
+- Manual 中繩卡:連動勾選下新增「連動方式」兩鈕 + 「放繩多放」快選 0/5/10/20/30 + 自填。fake 加 `fake_meter_middle` 旋鈕(中計米器與 CLV900 分開)。harness **287 全過**(+9);吊機本機完整編譯連結 OK、`-Wall -Wextra` 零警告。
+- **未部署**(機器關機中);部署時 crane + GUI 兩台(GUI 版號要 bump)。
+
+## [2026-10-08b] 中繩(CLV900)程式支援:手動按住 + 自動跟隨
+
+per user「程式支援中繩 OK」「第二階段直接做完」。實體:official 中繩 clvdrives `900-0007M1`(迷你型 + 485 擴展卡)接**新 USR `.36`**、slave 3、115200 8N1。GUI/fake/harness 由另一 session(AI-2)依本 session 給的介面規格實作,本 session 驗收。
+- **啟用**(`main.cpp`):預設關 = 舊行為。`FCV_CLV900_ENABLE=1` + `FCV_EP_USR_MW_HOST`(新 `cli_MW`)+ `FCV_CLV900_SLAVE`(預設 3;`FCV_CLV900_GW=A` 可共用 cli_A)。開機探測 U0-00,讀 F0-00/F0-01 **只警告不寫**。keepalive 每秒讀 U0-00/01/03;新故障 → 停手動中繩 + `EVT middle_fault`(**不自動 reset**)。status +`middle_state/fault/run_hz/hold/auto/ratio/dir_invert/comm_fail`、`dev_gw_mw`。official drop-in `fcv-crane.service.d/middle.conf`。
+- **手動**:`middle_hold <pay|retract> <on|off>`(併入 1.5 s hold 租約、`any_hold_active`、`hold_all_off` ⇒ 租約到期/張力保護/watchdog/stop 都停中繩;`EVT middle_lease_expired`)、`middle_stop`;所有啟動走 `middle_run`(方向反轉一致)。
+- **自動跟隨**(`set_middle_auto`/`set_middle_dir_invert`/`set_middle_ratio`,持久化):motion_rope 與兩側同步 ▲▼ 都 P 追蹤 K × 左右平均位移(1 Hz/cm、下限 2 Hz),原本固定 10 Hz 跑到目標會在放繩時落後而吊住機器(無中繩張力計)。中止 `middle_lag`(放繩落後/收繩超前 >15 cm)、`middle_wrong_dir`(反向 ≥5 cm)、`middle_fault` → 歸類安全中止(緊急停 + `EVT motion_abort`、不做 fine_adjust)。auto 開但中繩不可用 ⇒ `ERR middle_unavailable`(motion 與 hold on 都拒)。
+- 🔴 修既有漏洞:motion_rope 以 **timeout / length_diff** 結束時中繩不會停(只在中繩從沒啟用過才沒出事)⇒ 迴圈出口一律停中繩。
+- GUI(AI-2):Manual `#mid-card`(狀態、運轉 Hz、中計米、故障、hold、▼放 ▲收 按住、停止;吸附中鎖按住鈕;`dev_clv900=0` 停用但「停止」可按)、**速度快選 10/20/30/40/50**(per user,同鋼索 `data-hzq`,反白照 status)、Setting「中繩 · CLV900」三項。harness 270(+39)。順手修 GUI 錯誤橫幅 RECOVER 說明「重驗 **9** 顆吸盤」→ 4 顆(v1 殘留,本體 `cmd_recover` 本來就驗 4 顆)。GUI `v3-2026.10.08-2148` 部署 official + 測試吊機(測試吊機無 CLV900 → 中繩卡自動停用)。
+- **連動勾選**(per user「打勾吊機同收同放跟著轉」「速度用當前選中的速度為主」):`set_middle_link <0|1>`(**runtime、不持久化**,重啟回不勾;`clv900` 不在時拒開)讓**兩側同步 ▲▼** 帶中繩(同 hold_loop 跟隨:基準 = 中繩選中速度 `middle_hz`,中計米跟不上時 P 補償、>15 cm 中止),**不影響 pay_out/retract/goto**(那仍是 `set_middle_auto`)。連動開著而中繩不可用 ⇒ 鋼索 hold on 也 `ERR middle_unavailable`。關掉時若正在跟隨立即停中繩。status +`middle_link`。**兩側同時放開時在 `cmd_hold` 直接停中繩**(不等 hold_loop);CLV900 F0-04/05 改 0.5 s(SE3 P.7/P.8 = 0.10/0.50 s @60 Hz,單位 P.21=0 → 0.01 s)⇒ 連動同時停。GUI Manual 中繩卡勾選框 + 標頭「連動鋼索 ▲▼」(任務鎖定文字優先);fake + harness +9 ⇒ **278 全過**。crane 部署 official、GUI `v3-2026.10.08-2205` 兩台。
+- 現場:CLV900 參數以 FC06 寫 F0-01 0→8、F0-04/05 20.0→2.0 s(原值備份 official `~/run/clv900_params_before_*.json`;原設定一轉就往 50 Hz、停機 20 s)。`middle_hold pay` 10 Hz 實轉兩次:正轉、放開 ~1 s 停。待:方向目視確認、中繩掛繩後才開自動跟隨。
+
+## [2026-10-08a] official 吊機半邊部署最新 main + USR 錯置以改 IP 修正
+
+- `deploy.sh`:official 的 `CRANE`/`BODY` 也可用 `FCV_CRANE`/`FCV_BODY` 覆蓋(倉庫裡只能走 WiFi `.5.15`);檔頭註記 official nexuni 已全開 NOPASSWD(per user 保留)。
+- official 換新 `fcv-crane.service`(xargs 回放、`StartLimit*` 回 `[Unit]`)+ 新 `crcmd.py`;crane 9f50192f → 中繩版 f385ccf9;GUI + server.js;`cam.conf` drop-in(`CAM_BASE=http://192.168.5.26:8091`)。
+- 電箱整理後 RS485 錯接:逐顆 USR 單獨上電 + FC03 掃 slave 1–16 判定 `…a5:2c`=左 SE3、`…a5:23`=左計米(8N1 設備接 8N2 網關回亂碼)⇒ **不動線路,兩顆網關 IP/停止位元互換**(`usr_reconf.py`:比對 MAC、備份、原值帶回、`reset=1&rup=0&rfp=0`)。🔴 坑:`network.shtml` 有兩個 `staticip`(字面值 + JS),取錯 ⇒ 送非數字 ⇒ 設備當 DHCP。
+- 其他查證:X518 只收一條 TCP、異常斷線卡死到斷電(手冊無逾時設定);device 旗標只在開機設定(晚到設備要 restart);左計米站號被改成 3(面板改回 1);新 USR `.36` 原 IP 10.0.0.147(AF_PACKET 嗅探 + UDP 廣播找到)。
+
 ## [2026-10-07c] 攝影機串流優化(H.264 直通)+ 攝影機多餘功能關閉
 
 per user「兩隻的速度有點慢,都關閉不該啟用的功能,串流可以再優化」。查:攝影機子碼流本身 ~20–25 fps,**慢的是我們 MJPEG 5 fps**。
@@ -198,6 +230,24 @@ per user。**推翻 09-01「攝影機不列入本版架構」與 08-27 移除攝
 - GUI:Dashboard 第一張卡、整列寬、兩路並排(≤520px 上下);**只在 Dashboard 分頁開著 + 視窗可見 + 沒按暫停時拉串流**(本體 WiFi 同時承載吊機連線與 IMU 推送);狀態輪詢 2 s(即時 n fps/畫面停 n s/離線/服務離線);fcv-cam 回報 0 人但頁面以為開著 ⇒ 自動重連。`deploy.sh cam` 安裝/更新 unit。
 - 驗證:harness 新 `[cam]` 段 13 項(假 fcv-cam 狀態服務)全過,總 229;真機兩支 jpg/mjpg 皆 800×448;開兩路 30 s:ffmpeg 各 ~5% CPU、WiFi 1.46 + 0.98 Mbps,`body_link_age_ms` avg 127→144 / max 253→256(推送週期 ~250 ms 內,無明顯劣化)。
 - **OSD 關掉**(per user「兩隻 OSD 幫我移除」):XM 34567 `AVEnc.VideoWidget` 的時間/標題 `EncodeBlend`+`PreviewBlend` → false(原因:鐘沒對時停在 09-14/09-10、兩支標題都 `CAM01`)。Ret=100、讀回 false、快照確認畫面已無字。工具由 git 歷史救回並擴充為 `scripts/xm_ipcam.py`(`get`/`osd on|off`/`time`);改前整段備份 `config/ipcam/`。
+
+## [2026-10-06a] 上下行照使用者選的速度跑(放繩上限 30→50)+ hz 上限收到 50 + 10-03 文件校正
+
+commit `c069c84`(10-06 提交;程式改動為 10-02 per user「GUI manual 吊機更改速度上下不一致 → 上下行照使用者選的去跑」「兩件事都做」)。
+原因:09-30 的 `dir_hz()` 對所有 pay_out 路徑套 `pay_out_max_hz`=30,hold ▼ 也在內;GUI 沒標示 ⇒ 看起來上下不一致。
+- `Crane_control_PI/main.cpp`:① hold ▼(`vfdStartRopeHold`、`dual_vfd_hold_start`、hold-sync 平衡 base 與結束 reset)改用 `g_vfd_hold_hz`、不再夾 `pay_out_max_hz`;② `PAY_OUT_MAX_HZ` 30 → 50(goto / Mission / side_measured 下行照 `motion_hz`;`set_pay_out_max_hz` 仍可執行期壓低、不持久化);③ `set_hold_hz` / `set_motion_hz` 上限 `VFD_MAX_HZ`(120)→ `ROPE_USER_HZ_MAX`=50(馬達額定),超出回 `ERR hz_out_of_range (1..50)`。
+- `index.html`:Manual hz 輸入 max 50(`v3-2026.10.06-1025`)。
+- 10-03 文件校正:`CLAUDE.md` 硬體權威改指 `HARDWARE.md` / v2 規格、新增「動機器前必知」(測試移動 ≤5 cm、兩套環境共用一份程式、本體 official drop-in 停用中);`common/log_utils.h` 檔頭「所有 level 受 `debug_mode` 管」更正為 `LOG_ERR` 無條件輸出(08-31 起);`engineering_pitfalls.md` +1 條(`nc -q` 半關閉吃掉慢速指令 ⇒ 判「壞了」前先在已知正常對象上驗探測方式)。
+- 決策:hold 路徑不夾 = `hold_hz` 是操作員明示選擇、人在看;`cycle_test.py` 仍自設 `DOWN_HZ=30`,Mission 實際下行仍 30(要改走腳本,另案)。
+- 驗證(測試機):hold 50/30/40 上下一致(HOLD-TRACE `hz=`);`set_hold_hz 60` / `set_motion_hz 51` → ERR,`set_hold_hz 50` OK;status `pay_out_max_hz=50`。10-01 留存數據:`pay_out` 50 Hz → roll 6.26°、L−R 10 cm(後續 `length_diff_max_cm` 餘裕疑慮見 work_log 待辦 A)。
+- 同 commit 的 work_log(無程式改動):離牆 IMU 擺盪錄製 —— `balance_imu_kp` 0.2 → 0.1(上行 max|roll| 4.78° → 1.63°,吊機 `crane_settings.txt` 持久化 0.1);風扇推力 / 電流估測表。
+
+## [2026-10-02a] GUI:本體斷線時在途指令立即以 ERR 結束 + 風扇 EMI / 電源觀察(`v3-2026.10.02-1647`)
+
+commit `0f61823`。起因:12:05 換電源本體重開,user 按「拉到頂端」無反應。`crane_goto` 走本體代轉(逾時 300 s);`server.js` 對斷線 bridge 回 `{src:'error', line:'washrobot_not_connected'}`,但前端回覆比對只認 `src===target` ⇒ 佇列那道指令不會結束,按鈕卡「移動中…」、再按跳「已經有一次 crane_goto 在進行中」。
+- `index.html`:新增 `failInflight(target, why)`;① `src:'error'` + `<t>_not_connected` ② `status` 連線 up→down(`ERR <t>_disconnected`)都會把該 target 的在途指令以 ERR 結束(washrobot / crane / arm 皆適用)。
+- 驗證:真機(本體 `fcv-body` stop → Ctrl+F5 → 按「拉到頂端」)立即 🔴 `ERR washrobot_not_connected`、再按仍立即回、不再跳「進行中」(per user「正確」)。案例 ②(送出後才斷線)只有離線,真機未測。離線 harness 215 項:改後 11 輪中 4 輪有 1~2 項失敗,都在「手臂卡工具 seg」(等非同步 `[M2]` 行的時序),改前 4 輪全過;⚠️ 與本修正的關聯未證實。
+- 同 commit 的 work_log(無程式改動):風扇 × 匯流排錯誤 A/B —— 5V 隔離電源 vs 原電源,風扇轉時 12~23 / 30 s、停 0~3 同量級 ⇒ **USR 閘道電源不是干擾路徑**(下一步查 RS-485 線屏蔽 / 終端 / 與電調線並行 / 接地);風扇電流實測(雙顆 9% 45 A,10% 僅 49 A);NPP-1700-48 銘牌 25 A ×2 並聯 ≈ 50 A ⇒ 10% 是**電源到頂**、14S ESC 58.8 V 上限擋住升壓 ⇒ 導出 `duty_max` 10 → 9 的決策(10-06 per user、10-07 部署,見 `[2026-10-07b]`)。
 
 ## [2026-10-01f] `set_pay_out_max_hz`(測試用執行期覆寫)+ 上下行速度實測
 

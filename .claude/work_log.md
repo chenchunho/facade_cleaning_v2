@@ -16,15 +16,17 @@
 ### B. 要上機
 | | 項目 | 出處 |
 |---|---|---|
+| 🟡 | **部署 `[2026-10-08c]` 中繩放繩多放 % + 連動方式**(離線完成、harness 287 全過):crane → official、GUI → 兩台(bump 版號);實測 ① 多放 10 % 放繩時中繩 Hz ×1.1、收繩不加 ② 拔中計米器 → 長度跟隨擋鋼索 + 紅字、改只照速度後 ▲▼ 照常 ③ 兩項重啟後還在 | 10-08 |
 | 🔴 | **抗風 / 低樓層貼牆的現場量測**(9/19 實測兩大問題的前置):① 吊點離牆水平距離 d、吸盤面到掛點深度 ② 測試牆面朝向 ③ 風扇全速推力 ④ 拉 9/19 log:橫移/失敗時的 roll、張力、風扇占空比、每次吸附的 `p5..p8`(吸到哪幾顆、是否同側、高度)⇒ 算「各高度 × 風速」可作業範圍(⚪ 10-01 per user:**9/19 報告 v2 不做**,DJI 空拍不再補看;報告維持 v1) | 報告 3.3/3.5 |
-| 🔴 | **official 部署到最新 main 並驗**(含 09-21/23/30 三批 + 10-01 本體 ZS-DIO 驅動 / 設定只存差異 / crcmd + 手臂 `DEPLOY_F` 預設 3 ⇒ **手臂也要部署**;official 本體繼電器型號也要先唯讀確認):`prep-official` → `FCV_TARGET=official deploy.sh crane/body/web/script`;驗計米器標紅、goto 軟停文字、`rail -300` 回 reason、`ntp_probe.sh`、**風扇新順序**;🆕 **09-30 A 組**:①② ✅ **10-01 測試機已驗**(租約/30 Hz/hold_active/吊機設定持久化),official 部署後只需抽驗;🔴 **official 的 `fcv-crane.service` 要換新版**(否則 19 行回放 82 s 逼近 90 s 啟動逾時);🔴 **本體 drop-in 改回 official**(`fcv-body.service.d/endpoints.conf.official-disabled` → `endpoints.conf` + `systemctl --user daemon-reload`,10-01 為接測試吊機而停用);✅ 本體半邊 10-01 測試機已驗(vacuum 分組、settings 持久、gw 重連 selfcheck、鏈路年齡);✅ 風扇順序 10-01 真機通過(no_arm);剩**手臂部署**(手臂維修中,裝回後:`systemctl --user start fcv-arm` + `arm_attached on` + `deploy.sh arm`);③ `body_link_age_ms` 平常 ≤300、斷 WiFi 發 `body_link_stale` ④ 本體 `.21` 晚上電 → 自動 `selfcheck_auto` ⑤ `set_setting` 後重啟值還在、`crane_settings.txt` 19 行 ⑥ `crane_idle_ms` 閒置不再無限長大 | 09-21/23/30 |
+| 🔴 | **official 收尾**(🆕 **10-08 吊機半邊已部署最新 main**:crane binary `9f50192f`、新 `fcv-crane.service`(xargs 回放、StartLimit 在 [Unit])+ `crcmd.py`、GUI `v3-2026.10.08-1957` + `server.js`(+ `cam.conf` `CAM_BASE`)、`cycle_test.py`;啟動全 `[OK]`、`pay_out_max_hz=50`;本體同一台已是最新):剩 🔴 **本體切 official**(鋼索還在測試吊機,per user 先不改;切時刪 `crane-ip.conf` + `endpoints.conf.official-disabled` → `endpoints.conf`)、**手臂部署**(裝回後 `start fcv-arm` + `arm_attached on` + `deploy.sh arm`)、抽驗:hold 租約(新 GUI 續約)、`body_link_age_ms` ≤300、`set_setting` 重啟後還在、`crane_idle_ms`、計米器標紅、goto 軟停文字、`ntp_probe.sh` | 09-21/23/30、10-08 |
 | 🟡 | **WiFi 橋 RF**:9/19 實測全程連線正常、IMU 平衡經 WiFi 表現良好;但 RSSI −70、Tx PER 83% 仍偏弱(前一晚曾斷 285 s)。主路由改 20 MHz、拉近/對準;長期 5 GHz 或有線 | 09-19、報告 2.2 |
 | 🔴 | **`.22` 匯流排實體層沒修**(終端電阻/線長/接地未查);風扇開 15× 錯誤;official 也偶發 JC100:5 TIMEOUT;**JC-100 slave 8 換表頭**(單日 67 錯)。👁 10-01 觀察:風扇不轉時近乎乾淨;風扇轉時 `.20`/`.21`/`.22` **三條同時**出錯;**對照測試**:停 0 錯 / 7% ~7 / 8% ~15 每 30 s(劑量相關、兩輪重現),8% 時繼電器回讀約半數失敗 ⇒ 見 10-01 日誌;**10-02 重測**:停 0~3 / 7% 20~21 / 8% 12~14 ⇒ 轉就錯第三次重現,但劑量關係沒重現(見 10-02) | 舊#26/#27、09-15、10-01 |
 | 🔴 | **official 計米器捲尺校正**(9/19 實測確認左右需重校;同指令左 +8 cm 時右 +18 cm)、中錶 DP=0→2(面板)、漂移累積 | 09-19、報告 3.4 |
 | 🟡 | MH300 中繩:official `.32` 站號/baud 未測;程式仍寫 CLV900 slave 3 @ USR_A;MH300 必驗清單(方向/電流 scale/run bit/fault code);`0x2002` 開機無條件清已寫、未上機 | 舊#21/#76 |
 | 🟡 | official 兩台 Pi 無 NTP(先跑 `ntp_probe.sh`) | 09-21 |
 | 🟡 | 真機驗 09-16 中止五步(`[web] STOP ⑤` + 四顆回大氣)。✅ 吸附中 `crane_goto` → `ERR cups_attached` **10-01 真機已驗**。⏸ 10-07 per user「暫時不修、保持待辦」:環境已備好(吊機 `fcv-web-v3` drop-in `no-arm.conf` = `FCV_NO_ARM=1`、本體 `fcv-arm` 停 + `arm_attached off`);**卡在起點須在頂端**(當時計米器 4/3 = 底部)。測法:機器頂端貼玻璃 → Mission 1/1/5 cm、fan `move:5`、rail off → 推桿伸出時按中止(無手臂時吸住只有幾秒)→ 看 ①②③(④)⑤ 順序、⑤ 在 proc 結束後、p5..p8 回大氣、橫幅「停止中 → 已脫離牆面」、吊機沒動 | 09-16、10-01、10-07 |
-| 🟡 | **手臂裝回後**(10-01 拆修中;本體 `arm_attached off`、`fcv-arm` 已停):`start fcv-arm` + `arm_attached on` + `deploy.sh arm`;**繼電器 CH4 噴水泵 / CH5 滾刷**在新 ZS 驅動下開關回讀(10-01 沒測)。手臂:`DEPLOY_F` WARN 分支從未在硬體觸發、`theta_max=1.10` 無上界實測、四個樞軸→玻璃幾何常數未實體量、臂長 490 vs 編碼器尺度 1.53× 無法分辨(量角器量一次)、M1 passive 根因(08-17 起)、**M2 掃動被摩擦帶走 26~28°** | 舊#105/#106、附錄 手臂/滑台群 |
+| 🔴 | **手臂 M2 滾筒位(RIGHT)到不了**(10-08 M2 修好後):停 0.797→0.790→0.783、目標 0.8558、頂住 tau≈3.4 Nm,LEFT 0.2 正常;user 手轉後致能 M2 在 **1.6161**(未說明是什麼位置)⇒ 下次:失能 + `M2 MIT 0 0 0 0 0` 刷新、逐位置重量(滾筒/刮刀/正向停點),判斷零點偏移或機構卡住,必要時更新 `M2_SLOT_*` | 10-08 |
+| 🟡 | **手臂裝回後**(10-08 已裝回:`fcv-arm` 跑、`arm_attached on`、`dev_arm=1`;測試吊機 `no-arm.conf` 仍在):`deploy.sh arm`(確認 binary 是否最新)、刪 `no-arm.conf`;**繼電器 CH4 噴水泵 / CH5 滾刷**在新 ZS 驅動下開關回讀(10-01 沒測)。手臂:`DEPLOY_F` WARN 分支從未在硬體觸發、`theta_max=1.10` 無上界實測、四個樞軸→玻璃幾何常數未實體量、臂長 490 vs 編碼器尺度 1.53× 無法分辨(量角器量一次)、M1 passive 根因(08-17 起)、**M2 掃動被摩擦帶走 26~28°** | 舊#105/#106、附錄 手臂/滑台群 |
 | 🟡 | `status` 的 `p_err=` 與 attach 的 `partial_seal=` 兩條「讓失敗看得見」路徑從沒被執行到(非缺陷,只是未觸發)。👁 10-01:`attach` 四顆全吸 → 未走到 `partial_seal`;風扇轉時 slave 8 讀不到 → `p_err=` 應會出現,下次跑風扇時抓一次 status 即可驗 | 舊#69、10-01 |
 | 🟢 | SE3 `readFaultCode`:**10-01 測試機重驗** `vfd_fault left/right` ×3 → 成功 4/6,失敗是 `0x1008` 偶發 comm fail(不再是「連續」);兩側履歷 4 筆皆 `160/OPT`(推定為程式重啟時 keepalive 中斷,當天重啟多次)。剩:偶發失敗要不要加重試、OPT 是否只在重啟時累加 | 舊#100/#141、10-01 |
 | 🟢 | 右腳推桿阻力 1.4~1.6× 左腳(假說:右側離牆較近);四顆推桿接觸力不均 2.1×。👁 10-01 小樣本(每支 4 次、400 rpm、頂端)**未重現**,左略高 —— 要結論需整趟多步(下次跑 full 時統計 `wait_many` 行) | 舊#25/#107、10-01 |
@@ -65,6 +67,106 @@
 ---
 
 
+## 2026-10-08:正式吊機上線(倉庫 WiFi)—— 唯讀初查
+
+- 倉庫路由器 ARP:**`official-crane` = `192.168.5.15`**(WiFi S5,MAC `2C-CF-67-12-3F-47`);同網段機器人只有它與 `raspberry-cran` .31,**測試本體 .26 不在**。本機 `~/.ssh/config` claudeuser 清單加 `.15`。
+- SSH:key 與預設金鑰都 `Permission denied`(official 從沒裝 key;09-19 用密碼,**密碼出處沒記、Claude 密碼簿也沒有**)⇒ 請 user `ssh-copy-id -i ~/.ssh/claudeuser.pub nexuni@192.168.5.15`。
+- 不登入可看的(`status` :5002、GUI :8080):GUI **`v3-2026.09.18-2326`**、吊機 binary 為 09-19 版(無 `body_link_age_ms`/`pay_out_max_hz`)。
+  設備:`dev_gw_a=1` 但 **`dev_vfd_left=0`**、**`dev_gw_b=0`/`dev_vfd_right=0`**、**`dev_gw_c=0`(X518)/張力 ERR**、計米 左=1(讀 0、`zeroed=0`)右=0 中=0、`dev_gw_m=1`、`dev_gw_w=1`;`imu_roll_age_ms=-1`(本體沒連)。設定:牆高 257、hold 10、`balance_imu_kp_ratio=0.2`。
+  ⇒ 推定動力/設備未全上電或有線網段問題,待 user 確認;部署最新 main 仍是總表 B 🔴 大項(先給計畫)。
+- ✅ user 裝好 key(`nexuni@192.168.5.15` 金鑰登入 OK)。user:「吊機箱有電、有整理過電箱 ⇒ 逐項檢查」。
+  - Pi:eth0 `192.168.1.10` 1000M carrier=1、wlan0 `.5.15`;🔴 **時鐘停在 09-19**(開機 35 min,`date` = 2026-09-19 03:26)⇒ 無 NTP/RTC;🔴 `sudo` 要密碼(部署需 sudoers 一行)。服務 fcv-crane/fcv-web-v3 active,binary md5 `b755b403`(09-19 版)。
+  - **網路層**:`192.168.1.0/24` 全段掃描**只有 `.30`/`.34`/`.35`**;**`.31`(SE3 右網關)、`.32`(計米右/中+MH300 網關)、`.33`(X518 張力)、`.1`(主路由)、`.100`(本體)全不在**;log `仍未連上 … 離線 2127s`(= 開機起從沒連上)⇒ 疑同一台交換器/上聯線/電源(5 台同時缺)。
+  - **`.30` 通但 SE3 左不回**:`init Mode B probe failed after 3 attempts — device not on bus (slave 1)` ⇒ 左繩停用、keepalive ok=0 fail=0(沒初始化就不打)。網關 `.30` 設定 115200 8N2 = 文件 ⇒ 問題在 RS485 線 / SE3 電源 / SE3 P.32·P.36。
+  - `.34` SD76 左 OK(讀 0、`readScale: DP read failed` 一次);`.35` ZS-DIO OK(9600 8N1 = 文件)。開機回放 `set_home_ground 0`/`set_motion_hz 30`/`set_roll_correct_hz 30`/`set_wall_height 257`。
+  - user 處理後重掃:**`.31`/`.32`/`.33` 回到 eth0**(X518 MAC `00:08:dc:11:11:21` 與測試機那顆相同 = WIZnet 預設,兩網段不衝突)。log `.31 reconnect success`,但 status `dev_gw_b/dev_gw_c/dev_vfd_*` 仍 0 —— **device 旗標/SE3 init 只在開機做,晚到的設備要重啟 fcv-crane 才會初始化**(sudo 要密碼 ⇒ user 或 reboot)。主路由 `.1` 仍不在。
+- **本體恢復(WiFi `.26`)**:per user「正式吊機還在維修」⇒ **本體維持接測試吊機 `.31`**(`crane-ip.conf` 不動);測試吊機 `body_link_age_ms=145`、`imu_roll_fresh=1`。
+  ⚠️ 本體 :5001 同時有 **official GUI(來源 `192.168.1.10`,經 QWRT 橋 MAT,MAC `be:6a:80:e1:7c:30`)** 連著 ⇒ 正式吊機 GUI 能操作本體,但本體的吊機指令會送測試吊機 —— **official 修好、切換前不要從 `.15:8080` 操作本體**。
+  本體重開後 `fcv-arm` 又在重啟迴圈(enabled、手臂未裝)⇒ 照 10-02/10-07 `stop` + `arm_attached off`(未 disable)。
+- **official 單獨除錯 —— USR 層**(per user「先看 USR 有沒有起來」):`.30/.31/.32/.34/.35` 全部 ping ✅、TCP 4001 ✅、序列埠設定 = 文件 ✅(.30/.31 115200 8N2、.32/.34 115200 8N1、.35 9600 8N1)。
+  - **X518 `.33`**:ping ✅ 但 502 **Connection refused**(RST)×3;吊機端沒有任何 socket 到 .33 ⇒ X518 唯一連線槽被**舊連線卡住**(03:30:44 連上 → 03:32:57 斷,正值 user 接線、`.31/.34/.35` 同時段都有斷線重連)⇒ **X518 要斷電重開**。
+  - `.32`:03:30:15 reconnect success 後無錯,但 init 時 `USR_M2 connect failed — gw2 meters disabled` ⇒ 右/中計米、MH300 停用到重啟。
+  - ⇒ 設備晚到/卡住都要 **重啟 fcv-crane**;sudo 要密碼 ⇒ 請 user 放 deploy.sh 檔頭那行 sudoers(只放行 restart 兩支服務)或自己重開。左 SE3(.30 後)不回應仍待查。
+- **user 重開 official Pi** → `.31` 右 SE3 ✅、`.32` 右/中計米 ✅(-5144/-5489)、左計米 ✅;**X518 又被卡**(全埠 RST、吊機無 socket)⇒ 重開前那條舊連線沒送 FIN(推定非正常關機;無持久 journal 無法證實)。
+  **device 旗標只在 `main()` 啟動時設**(`main.cpp:5990` vfd_right、`:6106` dsz_left),最新程式也一樣 ⇒ 🟡 待辦:網關重連時自動重新初始化該設備。
+- **X518 手冊查證**(`doc/張力sensor/x518…v1.1.pdf` 15 頁,摘要已補 `summaries/DSZL_107_X518_MODBUS_SUMMARY.md` 新節):網路參數只有 IP/port/協定/遠端 IP·port/機碼,**沒有連線數/逾時/keepalive** ⇒ 異常斷線只能斷電復原;RS485 可同時讀(替代路徑)。
+  🟡 根治候選(硬體,待討論):① ZS-DIO 空通道接 X518 電源,吊機偵測「ping 通但 502 拒」自動斷電重開 ② 改走 X518 RS485 → USR 網關。
+- ✅ **X518 修復 + 假設驗證**:user 斷電 X518 → 03:52:58 吊機連上 → 監看自動 `sudo -n systemctl restart fcv-crane` → **舊程式正常關閉、X518 有放、新程式 init `[OK] DSZL-107 right/left`**,`tension_valid=1`(左 2.15 / 右 1.63 kg,空載)。⇒ **只有異常斷線會卡,正常 restart 不會**。
+  重啟後 device:`vfd_right=1`(keepalive 50/30 s ok)、`meter_middle=1`(-5489)、`dsz=1/1`、`gw_*` 全 1;🔴 **`vfd_left=0`**(.30 後 SE3 `device not on bus`,同前)、🔴 **`meter_right=0`**(.32 slave 2 `init Mode B probe failed`,同 bus 的 slave 1 中計米 OK,Pi 重開那次右計米卻 OK ⇒ **時好時壞,疑 RS485 接觸/終端**,沒另外探測以免干擾吊機輪詢)。
+  ⚠️ **左計米讀 0、device scale `0.142857`**(文件 official 左右 `SCAL=000200`;中計米 0.5)⇒ 左錶疑被重設/換過,待查。
+- 🔎 **RS485 匯流排逐台掃描**(per user「USR 重接線打亂,一個一個確認」;停 fcv-crane → 各網關 slave 1–16 只送 FC03 → 啟回;腳本在 scratchpad,識別讀 SE3 `0x1001`、SD76 `0x0000`/`0x0001-2`、ZS `0x0032`、Delta `0x2101`):
+  - `.31` slave 1 = SE3 右 ✅;`.35` slave 1 = ZS-DIO(`0x0032`=1)✅;`.32` slave 1 = SD76 中 ✅,**slave 2(右計米)無回應**、**MH300 slave 1–16 都沒有**。
+  - 🔴 **`.30` ↔ `.34` 對調**:`.34`(8N1)slave 1 回應與 `.31` 的 SE3 **完全相同**(`0x0000`=8、`0x1001`=128、`0x0001`=5000)⇒ **左繩 SE3 接在 `.34`**;`.30`(8N2)slave 1 回**亂碼**(`01 20 00 b8 f4`…)⇒ 8N1 設備(推定左計米器)接在 8N2 網關,連續位元組被判框架錯誤。吊機因此把 SE3 當左計米器(讀 0、scale `0.142857`)。
+  - ⚠️ 錯接風險:SD76 驅動每次開機 `resumeMeter` 寫 `0x0000=8` ⇒ 寫到左 SE3 **P.0**(現值本來就 8,兩台 SE3 相同 ⇒ 未改值);但「計米器歸零/暫停」會寫 3/4 進 P.0 ⇒ **對調修好前 official 不要按計米器歸零**。
+  - 建議:實體把 `.30`/`.34` 兩條 RS485 換回(與 drop-in/網關序列設定一致),換完重掃 + restart。
+- 🔎 **逐顆 USR 確認**(user 一次只留一顆上電;fcv-crane 全程停):`…a5:2c`(.34 8N1)= 左 SE3、`…a5:54`(.31 8N2)= 右 SE3 ✅、`…a5:23`(.30 8N2)= 左計米(亂碼)、`…a5:33`(.32)= 中計米 s1 ✅ + 右計米 s2 **0/20 無回應**(站號 1–32 全掃)、`…a5:40`(.35 9600)= ZS-DIO ✅。
+  ✅ **per user「修改 USR、不動線路」⇒ 兩顆網關 IP 互換 + 改停止位元**(`usr_reconf.py`:先比對 MAC、備份兩頁到 `~/run/usr_backup_*.json`、原值帶回只改 IP/stop、`manage.cgi?reset=1&rup=0&rfp=0`):
+  `…a5:2c` → **`.30` 8N2**、`…a5:23` → **`.34` 8N1**(經暫時位址)。🔴 **踩坑**:`network.shtml` 有兩個 `staticip`(`var staticip = 1` 與 JS `staticip=document.ip.staticip.value`),取到後者 ⇒ 送出非數字 ⇒ **設備當 0 = DHCP**,`a5:23` 跑到主路由發的 `.12`(用 MAC 掃回來);已改成只取第一個字面值 + 固定送 `staticip=1`。
+  重掃:5 顆全部固定 IP、設定對、設備在對的位置。`fcv-crane` 啟動:**`vfd_left=1`(今天第一次)**、`vfd_right=1`、`meter_left=1`(-50)、`meter_middle=1`(0)、`dsz=1/1`(X518 經 stop/start 正常重連,第二次驗證)、`gw_*`/`pqw_water` 全 1;🔴 **`meter_right=0`**(`.32` slave 2 `not on bus`;user 稱面板站號 1/2 OK)。
+  ⚠️ `.35` 網關的 gw 設成 `192.168.0.1`(其他是 `.1.1`),同網段通訊不受影響,沒動。
+  - 右計米:user 轉右計米繩 → 左/中/右讀值都不變(⇒ `.32` slave 1 確為中計米、右計米沒在通訊);user 現場處理後「再偵測」:停 crane → `.32` slave 2 **20/20**、站號 1–32 = {1, 2} → 啟 crane `[OK] SD76 right USR_M2 slave 2`,`length_right=127`。
+  - ✅ **official 設備全到齊**:`vfd_left/right=1`、`meter_left/right/middle=1`(-50/127/0)、`dsz=1/1`、`pqw_water=1`、6 網關 1。user 接著開 GUI `http://192.168.5.15:8080` 測功能(⚠️ 只測吊機側:本體仍接測試吊機;GUI/binary 仍 09-18/19 舊版)。
+  - ⚠️ 左計米 device scale `0.005`、中 `0.5`(差 100 倍,疑小數點設定)⇒ 併入「official 計米器捲尺校正」待辦。
+- ✅ **本體 eth0 ↔ official eth0(WiFi 橋)**:本體→`.1.10` 0/20 掉包、avg 3.0 ms,對方 MAC `2c:cf:67:12:3f:46`(official 本機)、`:5002` 讀到牆高 257/中計米 ⇒ 確為 official;反向 0/10、2.4 ms(本體 MAC 經橋 MAT = `5c:23:bc:00:33:19`);official GUI 已 ESTAB 到本體 :5001。
+  per user **「鋼索還在測試吊機這邊,先不改」** ⇒ 本體**維持接測試吊機 `.31`**(`crane-ip.conf` 不動)。日後切 official:刪 `crane-ip.conf` + `endpoints.conf.official-disabled` → `endpoints.conf`(`192.168.1.10`,走這條橋)+ restart fcv-body。
+- 🔐 **official sudo**:user 開了**全開 NOPASSWD**(`/etc/sudoers.d/010_nexuni-nopasswd`)並指示 **「留著不移除」** ⇒ 收尾不要提醒關閉(memory `project_fcv_official_crane_nopasswd`);`deploy.sh` 檔頭已更新。
+- ✅ **official 部署最新 main(吊機半邊)**(per user「OK」):
+  ① `deploy.sh` official 位址可覆蓋(`FCV_CRANE`/`FCV_BODY`,倉庫用 `nexuni@192.168.5.15`)② 新 `fcv-crane.service`(repo 版換 `/home/nexuni`、`User=nexuni`;舊檔 `.bak-<MMDD-HHMM>`)+ 新 `crcmd.py`(舊 `.bak`),`systemd-analyze verify` 無警告
+  ③ crane `deploy.sh crane` → md5 `9f50192f…`(舊 `crane_control_PI.out.prev-1008-1954`),啟動**全部 `[OK]`**、`pay_out_max_hz=50`、dev 全 1、計米 -50/146/0 與部署前一致、回放 home_ground/wall 257 OK
+  ④ GUI `v3-2026.10.08-1957` + `server.js`(與舊版同模組);新 drop-in **`fcv-web-v3.service.d/cam.conf` `CAM_BASE=http://192.168.5.26:8091`**(預設會指 `.1.100`,倉庫 WiFi 瀏覽器連不到;repo 副本 `scripts/systemd/official/…/cam.conf`)⑤ `cycle_test.py` 三方 md5 一致。
+  🔴 **右張力 -99.846054 kg 固定值、零雜訊**(部署前 ~1.6;左 2.35 正常跳動);DSZL 驅動與 main.cpp 張力碼自 09-19 未改 ⇒ **推定 X518 CH1 輸入飽和(右感測器線鬆/斷)**,時間上與 user 修計米器重疊,待 user 確認。
+  ⚪ log 小 bug:`[OK] USR_W (ZS-DIO water) @ 192.168.1.32` 印的是預設值,實際連 override 的 `.35`。
+  ✅ 右張力:user「張力我測好了,是對的」⇒ 回到 左 2.41 / 右 2.44 kg(-99.85 是修計米器期間的暫態)。
+- 🆕 **新 USR(中繩 MH300 專用)**(per user 新增):`192.168.1.x` 掃不到、出廠 `192.168.0.7` 也沒有 → Pi 上沒 tcpdump,改 **Python AF_PACKET 嗅探** `d4:ad:20:*` + UDP 1500/1901 廣播搜尋 ⇒ **MAC `d4:ad:20:a2:a5:2a`、`10.0.0.147`**(固定、gw `10.0.0.1`、115200 8N1;以前用過別網段)。
+  暫掛 `10.0.0.250` 讀設定 → per user「OK」改成 **`192.168.1.36` 固定、gw `.1.1`**(`usr_reconf.py` 加 gw 參數;備份 `~/run/usr_backup_a52a_*.json`)。暫掛 IP 已移除。
+  USR 校驗代碼:**0=NONE 1=EVEN 2=ODD**(偶是 1);資料位元/停止位元填數字本身。
+  per user「用 B」⇒ 背景掃序列格式找 MH300(RTU 22 組 + ASCII 8 組 × slave 1–16,讀 `0x2101`;user:「MH300 跟 CLV900 一樣的東西」= 程式 CLV900 那個中繩位置)。
+  - 第一輪 MH300 **未上電**(user 後補)⇒ 作廢;有電後 115200 8N2/8N1 無回應;全掃 RTU 20 組無回應 → user 中途「改通訊模式」⇒ 重掃;user「**115200 N81 我確定**」⇒ 網關固定 115200 8N1:**RTU slave 1–247、ASCII 1–32 全部無回應**。
+  - 🔴 USR `.36` status 頁:**序列埠 TX 2520 / RX 0 bytes**(= 本次探測送出量)⇒ MH300 **一個位元組都沒回** ⇒ 不是站號/格式,是**接線(A/B 反、端子錯)或參數未生效(需斷電重開)**。待 user 現場:斷電重開 MH300、A/B 對調、確認 SG+/SG− 端子、`09-04` 為 RTU(非 ASCII)、`09-00` 站號。網關停在 115200 8N1。
+  - 🔴 我的探測漏洞:一直只讀 Delta `0x2101`、有回才讀 `0x1000` ⇒ CLV900 若對不支援位址**不回**就會被漏掉;改讀 CLV900 合法位址 `0x1000`/`0xF700`/`0x0001`(per user 看 CLV900 doc):站號 1–247、**站號 3(user 確認)30 次** ⇒ 仍 0 回應(TX 4736 / RX 0)。
+  - 🔴 **手冊查到根因(推定)**:`900-0007M1` = **900M 迷你型**,p.17 迷你型接線圖註「**`*S+/S-` 是非標配功能,需依外加 485 擴展卡**」⇒ 沒卡就不會有任何回應;程式裡 CLV900 一直 `[SKIP] hardware not installed`,以前推定從沒真的通訊過。已補 `summaries/CLV900_INVERTER_MODBUS_SUMMARY.md`。待 user 確認機身銘牌與有無 485 擴展卡(若實體其實是台達 MH300,則它有內建 RS-485,要再查接線)。
+  - user:「擴展卡有」;再測仍 0 回應(TX 6952 / RX 0)⇒ 建議交叉測試(變頻器借接 `.32` 或新 USR 借接計米器線)隔離是 USR 端還是變頻器端;user 未回,轉去計米器。
+- 🔎 **計米器修好後三顆參數比對**(停 crane 讀 → 啟回;`agent_ai/.tmp/fcv_mh300/sd76cfg.py`):SCAL 000200 ×3 ✅、DP 2/2 ×3 ✅(之前左 scale 0.005 的差異已消失)、mode 0 ×3、PRE 0、AL1 5 ×3;
+  🔴 **左計米器站號變成 3**(程式 `FCV_METER_LEFT_SLAVE=1` ⇒ 重啟後 `SD76 left init failed`);⚠️ AL2 左 5 / 右中 10(程式不用警報);⚠️ 右計米對「讀 1 個暫存器」固定回 2 個暫存器的 0、首筆偶爾亂碼(完整讀 + 重試正常,驅動讀得到)。待 user 選:面板改回 1(推薦)或 drop-in 改 3。
+  - ✅ user 左計米站號改回 1 → 重啟 crane:`meter_left/right/middle=1`、scale 0.5 ×3。三顆設定唯一差異 **AL2 左 5 / 右中 10**(程式不用)。
+- ✅ **中繩 CLV900 通了**(user 現場處理後,做了什麼待問):`.36` 115200 8N1 **slave 3** 30/30;U0-00=3(停機)、U0-01=0(無故障)、**F7-00=3、F7-01=4(115200)、F7-02=3(8N1)**、F7-03=0;讀 `0x0001` 回 exc 02(寫專用,正常)。⚠️ **slave 172(0xAC)也回同樣內容**(同一台應兩個位址;匯流排上別用 172)。USR `.36` RX 284 bytes。
+  🟡 待辦:程式支援中繩 CLV900 —— 現在 `[SKIP] CLV900 hardware not installed`、寫死 `USR_A` slave 3 ⇒ 改 config-driven(網關 `.36`、slave、啟用旗標),先給計畫。
+- ✅ **中繩程式支援(第一 + 第二階段)**(per user「OK 照這樣做,第二階段直接做完」;GUI/fake/harness/changelog 補漏/NTP 探測**交給 AI-2**,`main.cpp` 由本 session):
+  - **啟用**:`FCV_CLV900_ENABLE=1` + `FCV_EP_USR_MW_HOST` + `FCV_CLV900_SLAVE`(預設 0 = 舊行為);開機探測 + 讀 F0-00/F0-01 只警告不寫;keepalive 每秒讀 U0-00/01/03(新故障 → 停手動中繩 + `EVT middle_fault`,**不自動 reset**);status +`middle_state/fault/run_hz/hold/auto/ratio/dir_invert/comm_fail`、`dev_gw_mw`。
+  - **手動**:`middle_hold <pay|retract> <on|off>`(併入 hold 租約 1.5 s / `any_hold_active` / `hold_all_off`;`ERR motion_active`)、`middle_stop`;`middle_set` 也改走 `middle_run`(方向反轉一致)。
+  - **自動跟隨**:`set_middle_auto`/`set_middle_dir_invert`/`set_middle_ratio`(持久化)。motion_rope 與**兩側同步 ▲▼ hold** 都用 **P 追蹤** K×左右平均位移(KP 1 Hz/cm、下限 2 Hz),中止:`middle_lag`(放繩落後/收繩超前 >15 cm = 中繩會吊住機器,無中繩張力計)、`middle_wrong_dir`(反向 ≥5 cm)、`middle_fault`;中止歸類安全中止(緊急停 + EVT、不做 fine_adjust)。auto 開但中繩不可用 ⇒ motion `ERR middle_unavailable`、hold on 也拒。🔴 修既有漏洞:motion_rope **逾時/length_diff 中止時中繩不會停** ⇒ 迴圈出口一律停中繩。
+  - 本機 `g++ -std=c++17 -fsyntax-only` 0 錯;**official 已部署**(md5 `f385ccf9`,drop-in `fcv-crane.service.d/middle.conf`,repo 副本同名):`[OK] CLV900 middle winch USR_MW 192.168.1.36 slave 3 (state=3 fault=0)`、status 新欄位齊。
+  - 🔴 **開機警告抓到**:`F0-01=0`(頻率源=面板,F0-16 預置 **50.0 Hz**)、**F0-04/F0-05 加減速 20.0 s** ⇒ 照現設定一轉就往 50 Hz、停機要 20 s ⇒ **先不轉**;建議 F0-01=8、F0-04/05=2.0 s(面板或 FC06 寫,待 user 選)。單位:頻率 0.1 Hz、時間 0.1 s(F0-09 / F8-03 = 50.0 Hz)。
+  - ✅ per user「通訊寫」:停 crane → 確認 U0-00=3 → 備份(`~/run/clv900_params_before_*.json`:F0-01=0、F0-04=200、F0-05=200)→ FC06 寫 **F0-01=8、F0-04=20、F0-05=20**,echo + 讀回一致 → 啟 crane,開機警告消失。⚠️ 手冊沒寫通訊寫入是否進 EEPROM ⇒ 下次斷電重開要再讀一次。
+  - ✅ **轉動測試**(`middle_hold pay` 約 1 s @10 Hz,脫離鋼索):state 3→**1(正轉)**、run_hz **10.0**;off 後 ~1 s 回 3/0.0;fault 0。中計米 3 不變(捲筒沒掛繩)。🟡 待 user 目視確認「pay = 放繩方向」,反了就 `set_middle_dir_invert 1`;自動跟隨要等中繩掛上、中計米跟著動再開。
+  - user 要求再轉一次放繩方向:同上(state 1、10.0 Hz、放開 ~1 s 停)。🟡 待 user 回報實際轉向。
+- ✅ **AI-2 交付**(另一 session,本 session 驗收):GUI Manual `#mid-card`(狀態/運轉 Hz/中計米/故障/hold/讀失敗、速度、▼放 ▲收 按住 `.btn.mhold` 共用 hold 續約、停止)+ Setting「中繩 · CLV900」(自動跟隨 confirm、方向反轉、比例)+ EVT 處理;fake_robot 全指令與租約;harness **267 全過**(+36,本 session 重跑確認)、check_console 過。
+  AI-2 自加:吸附中鎖中繩按住鈕、`dev_clv900=0` 時「停止」仍可按(唯一出口)。**GUI `v3-2026.10.08-2133` 已部署 official**。
+  - **NTP(AI-2 唯讀)**:official timesyncd 開但從未同步;**兩條 default route,eth0(→ 192.168.1.1,倉庫裡沒有對外)metric 100 贏過 wlan0 600** ⇒ 公網流量走錯;綁 wlan0 時 NTP/DNS 都通。RTC 讀 1970(無電池)。chrony 未裝。
+    建議(未執行,待 user):倉庫讓 wlan0 優先(`nmcli … ipv4.route-metric 50` 或 eth0 `never-default`);現場無公網:裝 Pi5 RTC 電池 + 對時後 `hwclock -w`,可選 chrony(吊機當 local stratum、本體指吊機)。
+- ✅ **中繩速度快選**(per user「跟吊機一樣給 10 20 30 40 50」):`#mid-hzq`(`data-mhzq`,反白照 status、dev=0 停用)+ harness 3 項 ⇒ **270 全過**(第一輪 1 項失敗 = 已知的手臂工具 seg 時序不穩,重跑全過)。GUI `v3-2026.10.08-2148` **部署 official + 測試吊機**。
+- ✅ **中繩連動勾選**(per user「manual 新增連動打勾,吊機同收同放跟著轉」「速度用當前選中的速度為主」):`set_middle_link`(不存檔)= 兩側同步 ▲▼ 帶中繩(基準 middle_hz + 計米 P 補償 + lag 中止),不影響自動動作;GUI 勾選框 + 標頭提示;harness 278 全過;crane + GUI `v3-2026.10.08-2205` 已部署(official 驗 `OK middle_link=1/0`)。⚠️ 「當前選中的速度」我解讀為**中繩卡選的速度**(若 user 指鋼索那組要再改)。
+- ✅ **連動停止不同步**(per user「連動不會同時停止」):log 顯示 `cmd_hold off` 與 `[middle] hold follow stop` 同一週期 ⇒ 軟體沒延遲;主因是**減速斜坡**:SE3 讀值 **P.21=0(0.01 s)、P.7=0.10 s、P.8=0.50 s @ P.20=60 Hz**(兩台一致),CLV900 F0-04/05 = 2.0 s @50 Hz ⇒ 25 Hz 停車 SE3 ~0.2 s vs 中繩 ~1.0 s。
+  修:① `cmd_hold` combined OFF 直接停跟隨中的中繩(先於 SE3,省 hold_loop ≤200 ms)② CLV900 **F0-04/F0-05 2.0→0.5 s**(停 crane、備份 `clv900_params_before_*`、FC06、讀回)。實轉 10 Hz:啟動 <0.25 s、放開 <0.4 s 停、fault 0。⚠️ 掛繩後減速回灌可能 Err06 → 調回 ~1.0 s。crane 已部署 official。
+- ✅ `.21` 風扇網關(per user「應該修復了」):本體 21:16:35 reconnect success、`dev_qx=1`、`pwm status` 正常(duty_max 9、ch1 5%)。本體 state 已回 idle(user 按 RESET)。
+- 🔎 **本體 Error 原因**(per user「本體 ERROR 為什麼」):本體開機 20:23 盤點正常 Idle;**`emergency_detach` 跑了 2 輪(~20:34、~21:22)**⇒ 依設計進 Error。觸發來源本體 log 沒記、兩台吊機 log 都無 estop ⇒ 推定 GUI「🔴 緊急脫離」被按(待 user 確認)。兩輪皆 PARTIAL:`arm_retract` 失敗(手臂服務重啟迴圈)、`fan_stop` 失敗(**`.21` PWM 網關開機起就連不上**);推桿收回/破真空/幫浦關都 OK。現況 p5–p8≈0 ⇒ RECOVER(要 4 顆都吸著)必失敗,**應按 RESET**。
+  - GUI 錯誤橫幅 RECOVER 說明寫「重驗 9 顆吸盤」(v1 殘留)→ 改 4 顆(含 2 處註解),已部署。
+- 🔎 **手臂(user:手臂裝回可測了,有錯誤)**:`motor_api` 每 ~3 s 重啟 —— `M1 init OK`,**M2 `switchControlMode FINAL failed … power cycle may be needed`** ⇒ `DamiaoAPI init failed` exit 1。同條 CAN 上 M1 正常 ⇒ 轉接器/匯流排 OK,問題在 M2:電源(48V)/ M1→M2 CAN 接頭 / 故障鎖存(斷電才解,09-03 踩過)/ 換過馬達(ID 非 0x02/0x22)。`damiao.cfg` 08-27 起沒改。之前一段是 M1、M2 都不回(手臂未接)。待 user 處理;是否先停 `fcv-arm` 重啟迴圈待 user 決定。
+  - 🔴 踩坑:ssh 遠端指令 `cat > f && … & …` 的 `&` 讓整串進背景 ⇒ stdin 變 /dev/null ⇒ 檔案 0 bytes;要先 `scp` 再 `setsid nohup`。掃描腳本 `agent_ai/.tmp/fcv_mh300/hunt.py`(Pi `~/run/mh300_hunt.py`)。
+- 🔎 **本體 Error 第 3 次**(per user「看一下本體 ERROR 為什麼」):**22:13:51 `emergency_stop`**(時間由測試吊機 `[dispatch] cmd='stop' t=21325089` 換算;前一輪 `t=18224054` = 21:22:10 對得上)。當時本體→吊機 `set_imu_roll` 每 5 s 照常 ⇒ **不是 GUI「吊機失聯自動急停」**,是 STOP 按鈕(哪個 GUI 無 log 可分)。detach 這輪只剩 **`arm_retract` 失敗**(`arm_slot RIGHT: ERR arm_no_reply`),`fan_stop` 已 OK(.21 修好)⇒ PARTIAL ⇒ 依設計留 Error;22:18 查時已 idle(有人按了 RESET)。
+- 🔎 **手臂(user:手臂修好了)**:`fcv-arm` 仍重啟迴圈(NRestarts 459),M2 照樣 `switchControlMode FINAL failed`。停服務做**唯讀 CAN 掃描**(`agent_ai/.tmp/fcv_arm/dm_scan.py`,Pi `~/run/dm_scan.py`:對 ID 1~0x7F 送 0x7FF 讀參數 RID 7/8/10 + 0xCC 刷新):**只有 M1 回**(ESC_ID 1、MST_ID 0x11、模式 1=MIT、err=0);**M2 在任何 ID 都零回應**,也沒有 canId 0x000(= 出廠預設的新馬達)⇒ 不是 ID 改掉,是 M2 沒上電 / CAN 沒接到 / M2 本身。服務已重新 start;M2 一有回應,下次自動重啟就會 init 成功,不需我動作。
+- ✅ **M2 修好**(user):`fcv-arm` 22:41:24 自動起來 ——`M2 init OK (slave=0x2 master=0x22)` → STARTUP(M1 回零、M2 到 RIGHT 滾筒)→ `INIT: OK`。沒有停服務重掃(會打斷已使能的手臂),改用本體 `arm_status`:M1 `pos≈0 en=1 init_done=1`、M2 `pos=0.862 en=1 tool=roller`,兩顆 `err=0x1`(達妙狀態碼 1 = 已使能,非故障);本體 `dev_arm=1 arm_ready=1 state=idle`。測試吊機 GUI 仍掛 `no-arm.conf`(`FCV_NO_ARM=1`)。
+- ⏸ user:「手臂先做維修,電腦都先關機」⇒ 機器全關,以下離線做、**未部署**。
+- ✅ **中繩連動:放繩多放 % + 連動方式開關**(per user「左右放繩時中繩長度也要跟上,甚至更多,在連動鋼索這邊可以設定」「這個功能要可以開關,在中間計米器失效的時候做獨立控制」)。詳 changelog `[2026-10-08c]`:
+  - `set_middle_pay_extra <0..100>`(持久化):**只放繩**時中繩追 k×(1+%)、Hz 前饋 ×(1+%);收繩不加;`middle_lag` 仍以 k×平均判。
+  - `set_middle_link_track <0|1>`(持久化,預設 1):0 = **只照速度**,▲▼ 跟隨不讀中計米器 ⇒ 中計米器壞時鋼索不再被連動擋死(🔴 無落後保護)。`ERR middle_unavailable` 帶原因。
+  - GUI 中繩卡加兩組控制 + 紅字出口提示;harness **287 全過**(+9);吊機本機完整編譯連結 OK、零警告。
+  - ⚠️ 解讀待 user 確認:①「更多」= 放繩多放 %(收繩不加)②「獨立控制」= 只照速度的連動(取消連動則中繩完全靠自己的 ▼▲)。
+  - 部署待開機:crane(official)+ GUI 兩台(bump 版號)。
+- 🔎 **手臂(user:本體開機,手臂看一下什麼問題)**:開機 STARTUP/INIT 都 OK(M1/M2 init OK、`dev_arm=1 arm_ready=1`)。問題在 **M2 轉滾筒位(RIGHT)到不了**:`lr_move_to_slot FAIL pos≈0.797→0.790→0.783 target=0.8558`(誤差 0.053~0.072 rad ≈ 3~4°,逐次變差),停住時 M2 tau ≈ 3.4 Nm(像頂到東西);LEFT 0.2 每次都到位。目標 0.8558 = 09-10 手轉量的絕對值(`lr_stop_valid=false` ⇒ 用 `M2_SLOT_RIGHT_RAD`),M2 修過後零點/機構若有變就會失準。
+  - user:「M2 先失能,我手轉看看」「M1 也失能」⇒ 經 TCP 9527 送 `M2 DISABLE`、`M1 DISABLE`,回讀兩顆 `en=0 hold=0`,3 s 後仍 0。📌 寫 `~/run/arm.in` fifo **沒有效果**(motor_api 不讀 stdin),要走 TCP 9527。
+  - user:「M1 M2 致能」⇒ `M1 ENABLE`/`M2 ENABLE`(`enable_slot` 以當下位置為 hold_pos,不跳動)→ 兩顆 `en=1 hold=1`:**M1 −0.012、M2 1.6161**(tool=between)。🔴 **失能期間 STATUS 的 pos 是凍結的舊值**(失能前 M2 0.8803,致能後才讀到真值 1.6161)⇒ 手轉量位置要在失能狀態送 `M2 MIT 0 0 0 0 0` 刷新回授再讀(`SET_HALF_RANGE` 註解記載的做法),這次手轉的過程值沒量到。
+
 ## 2026-10-07:測試吊機 DHCP 換 IP(.25 → .31)→ 本體連不到吊機(IMU 推送斷)
 
 - 兩台開機後 `.25` 不通。倉庫路由器 ARP(`drayops.py 5.1 arp`):`raspberry-cran` = **192.168.5.31**(MAC `DC-A6-32-75-8A-AA`,WiFi S5)、`washrobot` 仍 .26。
@@ -89,7 +191,7 @@
   ✅ **OSD 移除**(per user「兩隻 OSD 幫我移除」):原因是鐘沒對時(停 09-14 / 09-10)、兩支標題都 `CAM01`。XM 34567 `AVEnc.VideoWidget` 時間/標題的 `EncodeBlend`+`PreviewBlend` → false,兩支 Ret=100、讀回 false、快照確認無字。
     工具由 git 歷史救回擴充成 **`scripts/xm_ipcam.py`**(`get`/`osd on|off`/`time`,在本體跑);**原設定備份**(per user 問)`config/ipcam/videowidget_{112,113}_before_osd_off_20261007.json`(本體 `~/run/cam_osd_backup_*` 另有一份)。GUI 註解同步 `v3-2026.10.07-2106`。
   📌 決策:**推翻 09-01「攝影機不列入本版架構」**(CLAUDE.md / HARDWARE.md 已改);畫面**不經吊機轉送**(省一倍 WiFi)。
-  ⚠️ changelog 漏記 10-02(`0f61823`)、10-06(`c069c84`)兩次 commit 的條目(待補)。
+  ✅ changelog 漏記的 10-02(`0f61823`)、10-06(`c069c84`)已由 AI-2 補上(`[2026-10-02a]`、`[2026-10-06a]`,索引 165)。
 - ✅ **攝影機優化**(per user「速度有點慢、關閉不該啟用的功能、串流再優化」;細節 changelog `[2026-10-07c]`、`summaries/IPCAM_XIONGMAI_SUMMARY.md`):
   - 查因:攝影機本身 20~25 fps,**慢的是我們 MJPEG 5 fps**。
   - 攝影機端關掉:音訊、移動/人形偵測、雲端 P2P、推播、線上自動升級、每週自動重開、錄影;子碼流 GOP 2→1 s;慢快門 2→0。改前整份備份 `config/ipcam/features_*`;重開機後全數保留。⚠️ 重開後兩支 **20.0 fps**(重開前 25,原因未明、已排除慢快門)。

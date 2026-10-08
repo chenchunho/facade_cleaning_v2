@@ -254,8 +254,21 @@ static constexpr int    MOTION_TIMEOUT_MS    = 120000;
 static constexpr int    START_VERIFY_WINDOW_MS = 500;
 static constexpr int    START_VERIFY_POLL_MS   = 25;
 static constexpr int    POLL_INTERVAL_MS     = 20;   // 50→20 (2026-05-15): motion_rope main loop tick. atomic cache load only, no extra bus traffic. Reduces stop-trigger lag at 30Hz/30cm-s motion: was ~50ms tick + 150ms cache lag = ~6cm worst, now ~20+100ms = ~3.6cm.
-static constexpr double MIDDLE_WINCH_RATIO_K = 1.00;
+static constexpr double MIDDLE_WINCH_RATIO_K = 1.00;   // default of g_middle_ratio (runtime: set_middle_ratio, persisted)
 static constexpr double CLV900_MAX_HZ        = 50.0;  // F8-03 default
+// [2026-10-08] Middle winch auto-follow (motion_rope with set_middle_auto 1). The middle rope runs a P loop
+// toward K × (mean L/R displacement) instead of a fixed Hz: the ropes run 30–50 Hz, the old fixed 10 Hz
+// would let the middle lag on pay_out and end up carrying the robot — and there is no middle tension sensor.
+static constexpr double MIDDLE_TRACK_KP_HZ_PER_CM = 1.0;   // Hz added per cm the middle is behind its target
+static constexpr double MIDDLE_TRACK_HZ_MIN       = 2.0;   // floor while it is ahead (keep turning, just slower)
+static constexpr int    MIDDLE_LAG_ABORT_CM       = 15;    // middle getting SHORTER than it should by this much → abort
+static constexpr int    MIDDLE_WRONG_DIR_CM       = 5;     // middle moved this far the wrong way → abort (dir/sign config wrong)
+// [2026-10-08 per user] "左右放繩的時候中繩長度也要跟上，甚至更多": on PAY_OUT only the middle tracks
+// K × (1 + extra%) × mean(L,R) — it runs ahead and the surplus is deliberate slack. Retract stays at K × mean
+// (taking in MORE than the side ropes would make the middle carry the robot). The middle_lag abort keeps
+// judging against plain K × mean: falling behind the extra target is not "taut", only falling behind K is.
+static constexpr double MIDDLE_PAY_EXTRA_PCT_DEFAULT = 0.0;   // runtime: set_middle_pay_extra, persisted
+static constexpr double MIDDLE_PAY_EXTRA_PCT_MAX     = 100.0;
 // [2026-07-23 per user] 50.0 → 120.0: SE3-210 manual (P.1, 01-00 上限頻率)
 // factory default is 120.00Hz — that's the VFD's own ceiling, not 50. 50Hz is
 // actually the MOTOR's base/rated frequency (01-03), a different parameter;
@@ -348,6 +361,35 @@ static inline double approach_scale() {
 static inline int approach_half_cm()  { return (int)std::lround(CMD_HALF_SPEED_APPROACH_CM * approach_scale()); }
 static inline int approach_fine_cm()  { return (int)std::lround(CMD_MEASURED_APPROACH_CM   * approach_scale()); }
 static std::atomic<double> g_middle_winch_hz {MIDDLE_WINCH_HZ_DEFAULT};
+// [2026-10-08] Middle winch (CLV900) runtime state. All persisted via crane_settings.txt (set_middle_*);
+// defaults = feature off, so a crane without FCV_CLV900_ENABLE behaves exactly as before.
+static std::atomic<bool>   g_middle_auto        {false};   // motion_rope drives the middle too (set_middle_auto)
+static std::atomic<bool>   g_middle_dir_invert  {false};   // pay_out = runForward unless inverted (wiring-dependent)
+static std::atomic<double> g_middle_ratio       {MIDDLE_WINCH_RATIO_K};
+static std::atomic<double> g_middle_pay_extra_pct {MIDDLE_PAY_EXTRA_PCT_DEFAULT};   // [2026-10-08] pay_out-only surplus
+// Multiplier on the middle's tracking target and feed-forward Hz: 1 + extra% on pay_out, exactly 1 on retract.
+static inline double middle_track_gain(bool pay_out) {
+    return pay_out ? 1.0 + g_middle_pay_extra_pct.load() / 100.0 : 1.0;
+}
+static std::atomic<int>    g_middle_hold_dir    {0};       // manual hold: 0 none / +1 pay / -1 retract (shares HOLD lease)
+static std::atomic<bool>   g_middle_hold_follow {false};   // auto-follow running under a two-side rope ▲▼ hold (hold_loop)
+// [2026-10-08 per user] Manual-page "連動" checkbox: two-side rope ▲▼ also drives the middle (same tracking as
+// auto-follow) WITHOUT enabling it for pay_out/retract/goto. Runtime only — a restart always comes back unlinked.
+static std::atomic<bool>   g_middle_link        {false};
+static inline bool middle_follows_holds() { return g_middle_auto.load() || g_middle_link.load(); }
+// [2026-10-08 per user] "這個功能要可以開關，在中間計米器失效的時候做獨立控制". How a ▲▼ hold drives the middle:
+//   1 (default) length follow — P-track K × (1+extra%) × mean(L,R) on the middle meter, middle_lag abort;
+//                               needs a live middle meter (cmd_hold refuses / the follow aborts without it)
+//   0           speed only    — the middle just runs at middle_hz × (1+extra% on pay) and starts/stops with
+//                               the side ropes; the middle meter is NOT read, so a dead meter does not block
+//                               the ropes. 🔴 No length protection: a middle slower than the ropes on pay_out
+//                               ends up carrying the robot — the operator owns the speed choice.
+// Persisted. pay_out/retract/goto with set_middle_auto 1 always use the meter (they stop on its target).
+static std::atomic<bool>   g_middle_link_track  {true};
+static std::atomic<int>    g_middle_state       {0};       // U0-00 via keepalive: 1 fwd / 2 rev / 3 stop / 0 unknown
+static std::atomic<int>    g_middle_fault       {-1};      // U0-01, -1 = never read
+static std::atomic<double> g_middle_run_hz      {0.0};     // U0-03
+static std::atomic<int>    g_middle_comm_fail   {0};       // consecutive keepalive read failures
 
 // [2026-07-23 per user] roll_correct (differential IMU leveling — called by
 // WASH_ROBOT.cpp's do_sync_imu_roll_correct_ for the "sync" gait) used to
@@ -667,6 +709,7 @@ static TCP_client         cli_B;       // .31 — SE3 right only
 static TCP_client         cli_M;       // .34 — SD76 meters (sensing bus, both meters share)
 static TCP_client         cli_M2;      // [2026-09-18] 第二條計米器匯流排(config-driven;FCV_EP_USR_M2_HOST 沒設就不連 → 測試機不受影響)
 static TCP_client         cli_W;       // .32 — ZS-DIO water relay (獨佔，見 USR_W_IP 的說明)
+static TCP_client         cli_MW;      // [2026-10-08] middle-winch CLV900 bus (config-driven: FCV_CLV900_ENABLE + FCV_EP_USR_MW_HOST)
 static TCP_client         cli_C;       // .32 — X518 left tension  (direct TCP :502)
 // 🔴 [2026-09-01] cli_D 已無使用者：X518 從兩台（.32/.33）改為一台（.33 兩通道），
 // 兩側都走 cli_C。刻意**保留這個物件**不刪除 —— 它是 TCP_client，建構即啟動一條
@@ -677,7 +720,7 @@ static TCP_client         cli_D;       // [2026-09-01] 已退役，見上方說�
 static SD76_length_meters meter_left;     // on cli_M slave 1
 static SD76_length_meters meter_right;    // on cli_M slave 2
 static SD76_length_meters meter_middle;   // on cli_M slave 4 (future install)
-static CLV900_inverter    inverter;       // middle winch (cli_A slave 3, future install)
+static CLV900_inverter    inverter;       // middle winch — cli_MW (official .36 slave 3) or cli_A; see FCV_CLV900_* in main()
 static CraneVFD       vfd_left;       // left rope  (cli_A slave 1)
 static CraneVFD       vfd_right;      // right rope (cli_B slave 2)
 static DSZL_107           dsz_left;       // left tension (cli_C slave 1, CH2)
@@ -1229,6 +1272,7 @@ static std::atomic<bool> g_gw_a_ok           {false};   // USR_A .30 — SE3 lef
 static std::atomic<bool> g_gw_b_ok           {false};   // USR_B .31 — SE3 right
 static std::atomic<bool> g_gw_m_ok           {false};   // USR_M .34 — SD76 meters
 static std::atomic<bool> g_gw_m2_ok          {false};   // [2026-09-18] USR_M2 — 第二條計米器匯流排(config-driven,預設不連)
+static std::atomic<bool> g_gw_mw_ok          {false};   // [2026-10-08] USR_MW — middle-winch CLV900 bus (config-driven,預設不連)
 static std::atomic<bool> g_gw_c_ok           {false};   // 🔴 註解過期修正 [2026-09-10]：
                                                         //   實際連的是 .33（2026-09-01 兩台 X518 併成一台後
                                                         //   由 cli_C 服務兩個通道），不是 .32
@@ -1726,11 +1770,16 @@ static bool vfdStartRopeHold(CraneVFD& inv, bool pay_out) {
     return reliable_start_one(inv, g_vfd_hold_hz.load(), pay_out);   // hold: no pay_out ceiling (10-02)
 }
 
-// Direction convention (wiring-dependent — flip fwd/rev if inverted on site):
-//   pay_out = runForward, retract = runReverse.
+// Direction convention (wiring-dependent): pay_out = runForward, retract = runReverse, unless
+// set_middle_dir_invert 1. [2026-10-08] Every middle start (auto-follow, middle_hold, middle_set)
+// goes through middle_run so that one setting covers all of them.
+static bool middle_run(bool pay_out, double hz) {
+    if (inverter.setFreqHz(hz, CLV900_MAX_HZ)) return true;
+    const bool fwd = (pay_out != g_middle_dir_invert.load());
+    return fwd ? inverter.runForward() : inverter.runReverse();
+}
 static bool middleStart(bool pay_out) {
-    if (inverter.setFreqHz(g_middle_winch_hz.load(), CLV900_MAX_HZ)) return true;
-    return pay_out ? inverter.runForward() : inverter.runReverse();
+    return middle_run(pay_out, std::min(CLV900_MAX_HZ, g_middle_winch_hz.load() * middle_track_gain(pay_out)));
 }
 
 // Apply one balance trim step. Caller passes base_hz (current setpoint),
@@ -2107,7 +2156,8 @@ static void broadcast_tension_alarm(const std::string& kind, double l_kg, double
 // Atomic helper: any hold flag set?
 static inline bool any_hold_active() {
     return hold_up_left.load()   || hold_up_right.load() ||
-           hold_down_left.load() || hold_down_right.load();
+           hold_down_left.load() || hold_down_right.load() ||
+           g_middle_hold_dir.load() != 0;   // [2026-10-08] middle_hold shares the lease / busy semantics
 }
 
 // Turn off ALL hold motion + flags. "All stop together" per spec — even if
@@ -2120,6 +2170,11 @@ static void hold_all_off() {
     hold_up_right.store(false);
     hold_down_left.store(false);
     hold_down_right.store(false);
+    // [2026-10-08] Middle manual hold rides the same "all stop together": lease expiry, the hold
+    // tension guard and cmd_stop all come through here.
+    const bool middle_manual = g_middle_hold_dir.exchange(0) != 0;
+    const bool middle_follow = g_middle_hold_follow.exchange(false);   // ▲▼ auto-follow (hold_loop)
+    if ((middle_manual || middle_follow) && g_dev_clv900.load()) inverter.stopDecel();
     dual_vfd_sync_retry([](CraneVFD& inv){ return inv.stopDecel(); },
                         8, 100, "hold_all_off");
     motion_active.store(false);
@@ -2572,6 +2627,28 @@ static void vfd_keepalive_loop() {
 
         // First 10 ticks: log each immediately so bench can see early activity
         // before OPT alarm triggers. After that, batch every ~30s.
+        // [2026-10-08] Middle winch (CLV900, own bus): state / fault / running Hz for status + GUI.
+        // Unlike the SE3s there is NO auto fault-reset: a new fault stops a manual middle hold and is
+        // reported (EVT middle_fault); motion_rope's auto-follow aborts on it. A human decides the reset.
+        if (g_dev_clv900.load()) {
+            uint16_t st = 0, fc = 0;
+            double   hz = 0.0;
+            const bool err = inverter.readRunStatus(st) || inverter.readFaultCode(fc) || inverter.readRunFreq(hz);
+            if (err) {
+                g_middle_comm_fail.fetch_add(1);
+            } else {
+                g_middle_comm_fail.store(0);
+                g_middle_state.store((int)st);
+                g_middle_run_hz.store(hz);
+                const int prev = g_middle_fault.exchange((int)fc);
+                if (fc != 0 && prev != (int)fc) {
+                    std::cout << "[middle] CLV900 fault code=" << fc << " — manual middle hold stopped\n";
+                    broadcast_evt("EVT middle_fault code=" + std::to_string(fc) + "\n");
+                    if (g_middle_hold_dir.exchange(0) != 0) inverter.stopDecel();
+                }
+            }
+        }
+
         ticks++;
         if (ticks <= 10) {
             const bool l_fault = (last_l_status & 0x00FF) != 0;   // MH300 0x2100 error code
@@ -2591,7 +2668,11 @@ static void vfd_keepalive_loop() {
                       << " clears=" << l_clear_count
                       << " | R: ok=" << r_ok << " fail=" << r_fail
                       << " status=0x" << std::hex << last_r_status << std::dec
-                      << " clears=" << r_clear_count << "\n";
+                      << " clears=" << r_clear_count;
+            if (g_dev_clv900.load())
+                std::cout << " | M: state=" << g_middle_state.load() << " fault=" << g_middle_fault.load()
+                          << " run_hz=" << g_middle_run_hz.load() << " comm_fail=" << g_middle_comm_fail.load();
+            std::cout << "\n";
             std::cout.flush();
             ticks = 10;   // reset to "first 10 done" state, keep batching
             l_ok = l_fail = r_ok = r_fail = 0;
@@ -2602,6 +2683,14 @@ static void vfd_keepalive_loop() {
 
 static void hold_loop() {
     int     prev_sync_dir       = 0;       // 0=none, +1=down (pay_out both), -1=up (retract both)
+    int32_t hold_middle_base    = 0;       // [2026-10-08] middle meter at sync-hold start (auto-follow)
+    double  hold_middle_hz_cmd  = 0.0;     //              last Hz written to the CLV900 while following
+    bool    hold_middle_track   = true;    //              latched set_middle_link_track for this press
+    auto middle_follow_abort = [](const std::string& why) {   // stop L/R + the following middle together
+        hold_all_off();
+        std::cout << "[middle] hold follow abort: " << why << "\n";
+        broadcast_evt("EVT motion_abort reason=" + why + "\n");
+    };
     int32_t balance_base_left   = 0;
     int32_t balance_base_right  = 0;
     bool    was_trimmed         = false;
@@ -2615,7 +2704,10 @@ static void hold_loop() {
             const uint64_t lease = g_hold_lease_ms.load();
             const uint64_t age   = (lease == 0) ? 0 : now_ms() - lease;
             if (lease != 0 && age > (uint64_t)HOLD_LEASE_MS) {
+                const bool middle_was_held = g_middle_hold_dir.load() != 0;   // [2026-10-08]
                 hold_all_off();
+                if (middle_was_held)
+                    broadcast_evt("EVT middle_lease_expired age_ms=" + std::to_string(age) + "\n");
                 std::cout << "[hold] lease expired (" << age << " ms > " << HOLD_LEASE_MS
                           << " ms without hold_renew) — all holds off\n";
                 broadcast_evt("EVT hold_lease_expired age_ms=" + std::to_string(age) + "\n");
@@ -2724,6 +2816,28 @@ static void hold_loop() {
                 std::cout << "[BAL] hold sync entered dir=" << cur_sync_dir
                           << " base L=" << balance_base_left
                           << " R=" << balance_base_right << "\n";
+                // [2026-10-08] Auto-follow: a two-side ▲▼ drives the middle too (cmd_hold already refused
+                // the hold if auto is on and the middle is unusable). Skipped while a manual middle_hold
+                // is active — then the operator is driving the middle directly.
+                const bool follow_wanted = middle_follows_holds() && g_middle_hold_dir.load() == 0;
+                hold_middle_track = g_middle_link_track.load();   // speed-only mode never reads the middle meter
+                if (follow_wanted && !(g_dev_clv900.load() && (!hold_middle_track || g_length_middle_valid.load()))) {
+                    middle_follow_abort("middle_unavailable");   // became unusable after cmd_hold's check
+                } else if (follow_wanted) {
+                    if (g_middle_hold_follow.exchange(false)) inverter.stopDecel();   // direction flip
+                    hold_middle_base   = hold_middle_track ? g_length_middle.load() : 0;
+                    hold_middle_hz_cmd = std::min(CLV900_MAX_HZ,
+                                                  g_middle_winch_hz.load() * middle_track_gain(cur_sync_dir > 0));
+                    if (middle_run(cur_sync_dir > 0, hold_middle_hz_cmd)) {
+                        inverter.stopDecel();
+                        middle_follow_abort("middle_start_fail");
+                    } else {
+                        g_middle_hold_follow.store(true);
+                        std::cout << "[middle] hold follow start dir=" << cur_sync_dir
+                                  << (hold_middle_track ? " mode=length base M=" : " mode=speed_only (meter unused) M=")
+                                  << hold_middle_base << " hz=" << hold_middle_hz_cmd << "\n";
+                    }
+                }
             } else if (cur_sync_dir == 0 && prev_sync_dir != 0) {
                 // Sync just ended → if we'd been trimming, reset still-held
                 // sides back to base_hz so they don't keep last-trim Hz after
@@ -2738,6 +2852,10 @@ static void hold_loop() {
                     was_trimmed = false;
                     std::cout << "[BAL] hold sync ended — reset to base " << base << " Hz\n";
                 }
+                if (g_middle_hold_follow.exchange(false)) {   // [2026-10-08] follow ends with the sync
+                    inverter.stopDecel();
+                    std::cout << "[middle] hold follow stop\n";
+                }
                 prev_sync_dir = 0;
             }
             // else: cur != 0 but cache invalid — skip; retry next iter when cache is fresh.
@@ -2751,6 +2869,37 @@ static void hold_loop() {
                 // hold 模式兩側同速，無三段式煞車 → 兩側 base 相同。
                 apply_balance_trim(g_vfd_hold_hz.load(), g_vfd_hold_hz.load(), cur_sync_dir,
                                    balance_base_left, balance_base_right, was_trimmed);
+
+                // [2026-10-08] Middle auto-follow under ▲▼: same P-tracking and aborts as motion_rope.
+                if (g_middle_hold_follow.load()) {
+                    if (g_middle_fault.load() > 0) {
+                        middle_follow_abort("middle_fault code=" + std::to_string(g_middle_fault.load()));
+                    } else if (!hold_middle_track) {
+                        // speed-only: nothing to track — the CLV900 keeps the Hz written at sync start
+                    } else if (!g_length_middle_valid.load()) {
+                        middle_follow_abort("meter_middle_read_fail");
+                    } else {
+                        const int     d    = cur_sync_dir;
+                        const int32_t mv_m = d * (g_length_middle.load() - hold_middle_base);
+                        const int32_t mv_l = d * (g_length_left  .load() - balance_base_left);
+                        const int32_t mv_r = d * (g_length_right .load() - balance_base_right);
+                        const double  gain = middle_track_gain(d > 0);
+                        const double  want = g_middle_ratio.load() * 0.5 * (mv_l + mv_r);
+                        const double  lag  = want - mv_m;            // vs plain K × mean: the taut test
+                        const double  taut = (d > 0) ? lag : -lag;
+                        if (mv_m <= -MIDDLE_WRONG_DIR_CM) {
+                            middle_follow_abort("middle_wrong_dir moved_cm=" + std::to_string(mv_m));
+                        } else if (taut > MIDDLE_LAG_ABORT_CM) {
+                            middle_follow_abort("middle_lag lag_cm=" + std::to_string((int)std::lround(lag)));
+                        } else {
+                            const double track_lag = want * gain - mv_m;   // vs the pay_out surplus target
+                            const double hz = std::max(MIDDLE_TRACK_HZ_MIN, std::min(CLV900_MAX_HZ,
+                                                  g_middle_winch_hz.load() * gain + MIDDLE_TRACK_KP_HZ_PER_CM * track_lag));
+                            if (std::fabs(hz - hold_middle_hz_cmd) >= 0.5 && !inverter.setFreqHz(hz, CLV900_MAX_HZ))
+                                hold_middle_hz_cmd = hz;
+                        }
+                    }
+                }
             }
         }
 
@@ -3257,17 +3406,25 @@ static std::string motion_rope(int cm, bool is_retract) {
     const int32_t base_left   = g_length_left  .load();
     const int32_t base_right  = g_length_right .load();
 
-    // Middle pipeline (SD76 middle + CLV900) is currently DISABLED at init
-    // (2026-05-14, hardware not installed). g_dev_meter_middle / g_dev_clv900
-    // always false → use_middle = false → all middle branches skip silently.
-    // When middle hardware is installed, restore init() calls in the USR_A
-    // init block and this logic re-engages automatically.
-    const bool use_middle = g_dev_meter_middle.load() && g_dev_clv900.load()
-                          && g_length_middle_valid.load();
+    // Middle pipeline (SD76 middle + CLV900). [2026-10-08] Opt-in via set_middle_auto 1 (persisted) on top
+    // of both devices being up — FCV_CLV900_ENABLE alone only gives manual middle_hold. With auto on, the
+    // middle rope is assumed to be rigged: moving L/R without it would leave it slack or taut, so refuse.
+    const bool middle_ready = g_dev_meter_middle.load() && g_dev_clv900.load()
+                            && g_length_middle_valid.load() && g_middle_fault.load() <= 0;
+    if (g_middle_auto.load() && !middle_ready) {
+        return std::string("ERR middle_unavailable") +
+               (!g_dev_clv900.load()           ? " clv900=0"     :
+                !g_dev_meter_middle.load()     ? " meter_middle=0" :
+                !g_length_middle_valid.load()  ? " meter_middle_read_fail" :
+                                                 " clv900_fault=" + std::to_string(g_middle_fault.load())) + "\n";
+    }
+    const bool use_middle = g_middle_auto.load() && middle_ready;
     const int32_t base_middle = use_middle ? g_length_middle.load() : 0;
 
     const bool pay_out = !is_retract;
-    const int  middle_target_cm = (int)std::lround(cm * MIDDLE_WINCH_RATIO_K);
+    const double mratio = g_middle_ratio.load();
+    const double mgain  = middle_track_gain(pay_out);   // [2026-10-08] pay_out surplus, snapshot for this motion
+    const int  middle_target_cm = (int)std::lround(cm * mratio * mgain);
 
     // Two-phase sync start: setFreq with retry first (Phase A absorbs variable
     // latency), then run command on both sides at near-same wall time (Phase B,
@@ -3297,6 +3454,8 @@ static std::string motion_rope(int cm, bool is_retract) {
     // Now: stop on target reach. fine_adjust always starts from stationary +
     // already has kick start (20Hz × 500ms) to break cold-start static friction.
     bool left_frozen = false, right_frozen = false, middle_done = !use_middle;
+    double middle_hz_cmd    = std::min(CLV900_MAX_HZ, g_middle_winch_hz.load() * mgain);   // [2026-10-08] last Hz written to the CLV900
+    auto   last_middle_tick = start;
     bool left_half_slowed = false, right_half_slowed = false;   // stage 2: half motion_hz at CMD_HALF_SPEED_APPROACH_CM out
     bool left_slowed = false, right_slowed = false;   // stage 3: fine_adjust_hz at CMD_MEASURED_APPROACH_CM out
     bool retract_tension_stopped = false;   // retract finished early on soft tension
@@ -3473,11 +3632,50 @@ static std::string motion_rope(int cm, bool is_retract) {
                 right_frozen = true;
             }
         }
-        // Middle still uses stopDecel (no cold-start concern for middle winch).
-        if (use_middle && !middle_done && g_length_middle_valid.load() &&
-            std::abs(g_length_middle.load() - base_middle) >= middle_target_cm) {
-            inverter.stopDecel();
-            middle_done = true;
+        // [2026-10-08] Middle auto-follow. The middle P-tracks K × mean(L,R) displacement (capped at the
+        // target) instead of running a fixed Hz to its own target: the ropes run 30–50 Hz and a slow
+        // middle on pay_out would end up CARRYING the robot (no middle tension sensor). Aborts:
+        //   middle_lag       — middle shorter than it should be by > MIDDLE_LAG_ABORT_CM
+        //                      (pay_out: behind; retract: ahead) → it is pulling on the robot
+        //   middle_wrong_dir — it moved the wrong way (set_middle_dir_invert / meter sign wrong)
+        //   middle_fault     — CLV900 reports a fault (keepalive)
+        // Stops with stopDecel on reaching its own target (no cold-start concern for the middle).
+        if (use_middle && !middle_done) {
+            if (g_middle_fault.load() > 0) {
+                abort_reason = "middle_fault code=" + std::to_string(g_middle_fault.load());
+                break;
+            }
+            if (g_length_middle_valid.load()) {
+                const int32_t mv_m = balance_dir * (g_length_middle.load() - base_middle);
+                const int32_t mv_l = balance_dir * (g_length_left .load() - base_left);
+                const int32_t mv_r = balance_dir * (g_length_right.load() - base_right);
+                const double  want = mratio * std::min((double)cm, 0.5 * (mv_l + mv_r));
+                const double  lag  = want - mv_m;                 // + = middle behind where it should be (taut test)
+                const double  track_lag = want * mgain - mv_m;    // vs the pay_out surplus target (speed only)
+                if (mv_m <= -MIDDLE_WRONG_DIR_CM) {
+                    abort_reason = "middle_wrong_dir moved_cm=" + std::to_string(mv_m);
+                    break;
+                }
+                const double taut = pay_out ? lag : -lag;          // + = middle rope getting shorter than the robot path
+                if (taut > MIDDLE_LAG_ABORT_CM) {
+                    abort_reason = "middle_lag lag_cm=" + std::to_string((int)std::lround(lag));
+                    break;
+                }
+                if (mv_m >= middle_target_cm) {
+                    inverter.stopDecel();
+                    middle_done = true;
+                } else {
+                    const auto now_pt = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now_pt - last_middle_tick).count() >= BALANCE_TICK_MS) {
+                        last_middle_tick = now_pt;
+                        const double hz = std::max(MIDDLE_TRACK_HZ_MIN, std::min(CLV900_MAX_HZ,
+                                              g_middle_winch_hz.load() * mgain + MIDDLE_TRACK_KP_HZ_PER_CM * track_lag));
+                        if (std::fabs(hz - middle_hz_cmd) >= 0.5 && !inverter.setFreqHz(hz, CLV900_MAX_HZ))
+                            middle_hz_cmd = hz;
+                    }
+                }
+            }
         }
 
         // Balance trim: tick every BALANCE_TICK_MS while NEITHER side is frozen.
@@ -3530,6 +3728,10 @@ static std::string motion_rope(int cm, bool is_retract) {
         std::this_thread::sleep_for(std::chrono::milliseconds(POLL_INTERVAL_MS));
     }
 
+    // [2026-10-08] Every exit (success, timeout, length_diff, user abort, tension…) leaves the middle
+    // stopped: the paths below only look after L/R, and timeout / length_diff go on to fine_adjust.
+    if (use_middle && !middle_done) inverter.stopDecel();
+
     // Soft tension stop (retract only): rope went taut = slack collected = goal
     // reached. No emergency stop, no fine_adjust (it would just re-build
     // tension by retracting toward the cm target) — return OK so the caller
@@ -3546,8 +3748,10 @@ static std::string motion_rope(int cm, bool is_retract) {
     const bool tension_aborted = (abort_reason.compare(0, 8, "tension_") == 0);
     const bool meter_aborted   = (abort_reason.compare(0, 6, "meter_") == 0);
     const bool vfd_aborted     = (abort_reason.compare(0, 4, "vfd_") == 0);
+    // [2026-10-08] middle_lag / middle_wrong_dir / middle_fault: same class as the three above.
+    const bool middle_aborted  = (abort_reason.compare(0, 7, "middle_") == 0);
 
-    if (tension_aborted || meter_aborted || vfd_aborted) {
+    if (tension_aborted || meter_aborted || vfd_aborted || middle_aborted) {
         // EMERGENCY hard stop — switched from allMotionOff() (decel ramp via
         // reliable_stop_one, ~800ms + P.8 ramp) to allMotionEmergencyStop()
         // for safety critical aborts (2026-05-14). When one side comm-dead
@@ -3561,7 +3765,7 @@ static std::string motion_rope(int cm, bool is_retract) {
     }
 
     // Broadcast EVT for hard-abort reasons so washrobot/GUI sees specific cause
-    if (meter_aborted || vfd_aborted) {
+    if (meter_aborted || vfd_aborted || middle_aborted) {
         std::ostringstream evt;
         evt << "EVT motion_abort reason=" << abort_reason << "\n";
         broadcast_evt(evt.str());
@@ -3576,7 +3780,7 @@ static std::string motion_rope(int cm, bool is_retract) {
     //
     // For user-abort: reset abort_flag so fine_adjust loop's own abort check
     // doesn't immediately fire. User can press stop again to interrupt.
-    if (!tension_aborted && !meter_aborted && !vfd_aborted) {
+    if (!tension_aborted && !meter_aborted && !vfd_aborted && !middle_aborted) {
         if (abort_reason == "aborted") {
             abort_flag.exchange(false);
             std::cout << "[fine_adjust] post-abort cleanup attempt (abort_flag reset; "
@@ -4075,14 +4279,10 @@ static std::string cmd_middle_set(int rpm, const std::string& dir) {
     // 50 Hz → 1500 rpm synchronous. Recalibrate on site.
     const double hz = rpm * 50.0 / 1500.0;
 
-    if (inverter.setFreqHz(hz, CLV900_MAX_HZ)) return "ERR inverter_freq_fail\n";
-    if (dir == "pay") {
-        if (inverter.runForward()) return "ERR inverter_run_fail\n";
-    } else if (dir == "retract") {
-        if (inverter.runReverse()) return "ERR inverter_run_fail\n";
-    } else {
-        return "ERR expected_pay_retract_stop\n";
-    }
+    // [2026-10-08] via middle_run so set_middle_dir_invert applies here too.
+    // ⚠️ No lease: it runs until `middle_set 0 stop` / stop — the GUI uses middle_hold instead.
+    if (dir != "pay" && dir != "retract") return "ERR expected_pay_retract_stop\n";
+    if (middle_run(dir == "pay", hz)) return "ERR inverter_run_fail\n";
     return "OK\n";
 }
 
@@ -4414,6 +4614,23 @@ static std::string cmd_status() {
     oss << " hold_hz="         << g_vfd_hold_hz.load();
     oss << " motion_hz="       << g_vfd_motion_hz.load();
     oss << " middle_hz="       << g_middle_winch_hz.load();
+    // [2026-10-08] middle winch (CLV900): live state from the keepalive + the three middle settings
+    {
+        const int md = g_middle_hold_dir.load();
+        char rh[16];
+        std::snprintf(rh, sizeof(rh), "%.1f", g_middle_run_hz.load());
+        oss << " middle_state="      << g_middle_state.load()
+            << " middle_fault="      << g_middle_fault.load()
+            << " middle_run_hz="     << rh
+            << " middle_hold="       << (md > 0 ? "pay" : md < 0 ? "retract" : "none")
+            << " middle_auto="       << (g_middle_auto.load() ? 1 : 0)
+            << " middle_link="       << (g_middle_link.load() ? 1 : 0)
+            << " middle_ratio="      << g_middle_ratio.load()
+            << " middle_pay_extra="  << g_middle_pay_extra_pct.load()
+            << " middle_link_track=" << (g_middle_link_track.load() ? 1 : 0)
+            << " middle_dir_invert=" << (g_middle_dir_invert.load() ? 1 : 0)
+            << " middle_comm_fail="  << g_middle_comm_fail.load();
+    }
     oss << " balance_enabled=" << (g_balance_enabled.load() ? 1 : 0);
     oss << " balance_kp="       << g_balance_kp.load();
     oss << " balance_cap_ratio=" << g_balance_trim_cap_ratio.load();
@@ -4465,6 +4682,7 @@ static std::string cmd_status() {
     // whether the crane water relay was on the bus at all. Wire token
     // `dev_pqw_water=` deliberately mirrors the EVT spelling (see below).
     oss << " dev_gw_w="        << (g_gw_w_ok.load()         ? 1 : 0);
+    oss << " dev_gw_mw="       << (g_gw_mw_ok.load()        ? 1 : 0);   // [2026-10-08] middle-winch bus
     oss << " dev_pqw_water="   << (g_dev_zs_water.load()    ? 1 : 0);
     // [2026-09-14 plan §4] see g_zeroed_at_s for the restart caveat.
     {
@@ -4635,6 +4853,21 @@ static std::string cmd_hold(const std::string& dir, const std::string& onoff) {
         return "ERR expected_on_or_off\n";
     }
 
+    // [2026-10-08] Middle auto-follow on ⇒ the middle rope is rigged: L/R must not move without it
+    // (same rule as motion_rope). Only "on" is gated — releasing is never blocked.
+    // [2026-10-08] The middle meter is only required in length-follow mode (set_middle_link_track 1).
+    if (on && middle_follows_holds() && g_middle_hold_dir.load() == 0) {
+        const char* why = !g_dev_clv900.load()          ? "clv900=0"
+                        : g_middle_fault.load() > 0     ? "clv900_fault"
+                        : (g_middle_link_track.load() &&
+                           !(g_dev_meter_middle.load() && g_length_middle_valid.load())) ? "meter_middle"
+                        : nullptr;
+        if (why) {
+            std::cout << "[cmd_hold] EXIT dir=" << dir << " result=ERR_MIDDLE_UNAVAILABLE " << why << " total=0ms\n";
+            return std::string("ERR middle_unavailable ") + why + "\n";
+        }
+    }
+
     // 🔴 [2026-08-31] motion 互斥（ONBOARDING 安全盤點列為未修 —— ONBOARDING 已歸檔，見上方說明）。
     // 稽核六支會驅動 VFD 的指令：motion_rope / cmd_roll_correct / cmd_align_lengths /
     // cmd_manual / cmd_side_measured **全部都有** try_lock(motion_mtx)，
@@ -4769,6 +5002,10 @@ static std::string cmd_hold(const std::string& dir, const std::string& onoff) {
             // catches up, bounds drift to ~150ms (vs 300-700ms for the old
             // independent reliable_stop_one threads). Flags clear regardless of
             // stop result.
+            // [2026-10-08 per user「連動不會同時停止」] Stop a following middle in the same breath as L/R
+            // instead of waiting for hold_loop's next tick (≤200 ms). It is on its own bus, so first.
+            // (The bigger part of the lag is the CLV900 decel ramp F0-05 vs SE3 P.8 — a drive setting.)
+            if (g_middle_hold_follow.exchange(false)) inverter.stopDecel();
             HOLD_TRACE("combined OFF -> dual_vfd_sync_retry(stopDecel)");
             const bool stop_err = dual_vfd_sync_retry(
                 [](CraneVFD& inv){ return inv.stopDecel(); },
@@ -4890,6 +5127,11 @@ static void persist_crane_settings() {
     w("set_length_diff_max_cm",      g_length_diff_max_cm.load(),      LENGTH_DIFF_MAX_CM_DEFAULT);
     w("set_hold_hz",                 g_vfd_hold_hz.load(),             VFD_HOLD_HZ_DEFAULT);
     w("set_middle_hz",               g_middle_winch_hz.load(),         MIDDLE_WINCH_HZ_DEFAULT);
+    w("set_middle_auto",             g_middle_auto.load() ? 1.0 : 0.0, 0.0);                    // [2026-10-08]
+    w("set_middle_dir_invert",       g_middle_dir_invert.load() ? 1.0 : 0.0, 0.0);
+    w("set_middle_ratio",            g_middle_ratio.load(),            MIDDLE_WINCH_RATIO_K);
+    w("set_middle_pay_extra",        g_middle_pay_extra_pct.load(),    MIDDLE_PAY_EXTRA_PCT_DEFAULT);
+    w("set_middle_link_track",       g_middle_link_track.load() ? 1.0 : 0.0, 1.0);
     w("set_fine_adjust_hz",          g_fine_adjust_hz.load(),          FINE_ADJUST_HZ_DEFAULT);
     w("set_roll_finish_hz",          g_roll_finish_hz.load(),          ROLL_FINISH_HZ_DEFAULT);
     w("set_freeze_hz",               g_freeze_hz.load(),               FREEZE_HZ_DEFAULT);
@@ -5147,6 +5389,100 @@ static std::string cmd_set_middle_hz(double hz) {
     persist_crane_settings();
     std::cout << "[crane] middle_winch_hz = " << hz << "\n";
     return "OK\n";
+}
+
+// ============ middle winch (CLV900) — manual hold + settings [2026-10-08] ============
+// middle_hold <pay|retract> <on|off>: press-and-hold from the GUI. It is one more hold: same 1.5 s
+// lease (hold_renew), counts in any_hold_active (so motion_rope answers ERR hold_active), and
+// hold_all_off (lease expiry / tension guard / watchdog / stop) stops it. Runs at middle_hz.
+static std::string cmd_middle_hold(const std::string& dir, const std::string& onoff) {
+    if (!g_dev_clv900.load()) return "ERR clv900_unavailable\n";
+    if (dir != "pay" && dir != "retract") return "ERR expected_pay_or_retract\n";
+    const int want = (dir == "pay") ? 1 : -1;
+    if (onoff == "off") {
+        int cur = want;   // only release the direction that is actually held
+        if (g_middle_hold_dir.compare_exchange_strong(cur, 0)) inverter.stopDecel();
+        return "OK middle_hold " + dir + " off\n";
+    }
+    if (onoff != "on") return "ERR expected_on_or_off\n";
+    std::unique_lock<std::mutex> lk(motion_mtx, std::try_to_lock);
+    if (!lk.owns_lock()) return "ERR motion_active\n";
+    if (g_middle_fault.load() > 0)
+        return "ERR clv900_fault code=" + std::to_string(g_middle_fault.load()) + "\n";
+    g_hold_lease_ms.store(now_ms());
+    if (middle_run(want > 0, g_middle_winch_hz.load())) {
+        inverter.stopDecel();
+        return "ERR inverter_start_fail\n";
+    }
+    g_middle_hold_dir.store(want);
+    return "OK middle_hold " + dir + " on\n";
+}
+
+static std::string cmd_middle_stop() {
+    g_middle_hold_dir.store(0);
+    if (!g_dev_clv900.load()) return "ERR clv900_unavailable\n";
+    if (inverter.stopDecel()) return "ERR inverter_stop_fail\n";
+    return "OK\n";
+}
+
+// The three below are persisted (crane_settings.txt). Turning auto-follow on is only safe after the
+// direction was checked on site (a ≤5 cm middle_hold) — motion_rope also aborts on a wrong-way move.
+static std::string cmd_set_middle_auto(int v) {
+    if (v != 0 && v != 1) return "ERR expected_0_or_1\n";
+    g_middle_auto.store(v == 1);
+    persist_crane_settings();
+    std::cout << "[crane] middle_auto = " << v << "\n";
+    return "OK middle_auto=" + std::to_string(v) + "\n";
+}
+
+// [2026-10-08 per user] Manual "連動" checkbox (runtime, not persisted). Turning it off while a ▲▼ is
+// following stops the middle right away (unless auto-follow keeps it on); turning it on applies to the next ▲▼.
+static std::string cmd_set_middle_link(int v) {
+    if (v != 0 && v != 1) return "ERR expected_0_or_1\n";
+    if (v == 1 && !g_dev_clv900.load()) return "ERR clv900_unavailable\n";
+    g_middle_link.store(v == 1);
+    if (v == 0 && !g_middle_auto.load() && g_middle_hold_follow.exchange(false)) inverter.stopDecel();
+    std::cout << "[crane] middle_link = " << v << "\n";
+    return "OK middle_link=" + std::to_string(v) + "\n";
+}
+
+static std::string cmd_set_middle_dir_invert(int v) {
+    if (v != 0 && v != 1) return "ERR expected_0_or_1\n";
+    if (g_middle_hold_dir.load() != 0 || motion_active.load()) return "ERR busy\n";   // never flip mid-run
+    g_middle_dir_invert.store(v == 1);
+    persist_crane_settings();
+    std::cout << "[crane] middle_dir_invert = " << v << "\n";
+    return "OK middle_dir_invert=" + std::to_string(v) + "\n";
+}
+
+static std::string cmd_set_middle_ratio(double k) {
+    if (!(k >= 0.1 && k <= 5.0)) return "ERR out_of_range (0.1..5.0)\n";
+    g_middle_ratio.store(k);
+    persist_crane_settings();
+    std::cout << "[crane] middle_ratio = " << k << "\n";
+    std::ostringstream o; o << "OK middle_ratio=" << k << "\n";
+    return o.str();
+}
+
+// [2026-10-08 per user] ▲▼ middle follow mode: 1 length follow (meter) / 0 speed only (meter unused).
+// Latched at each two-side sync start, so flipping it mid-press only affects the next press.
+static std::string cmd_set_middle_link_track(int v) {
+    if (v != 0 && v != 1) return "ERR expected_0_or_1\n";
+    g_middle_link_track.store(v == 1);
+    persist_crane_settings();
+    std::cout << "[crane] middle_link_track = " << v << (v ? " (length follow)" : " (speed only)") << "\n";
+    return "OK middle_link_track=" + std::to_string(v) + "\n";
+}
+
+// [2026-10-08 per user] Pay_out surplus for the middle (%, 0 = follow exactly). Applies to the next ▲▼ sync
+// start and the next pay_out; a follow already running keeps reading it each tick (only the Hz shifts).
+static std::string cmd_set_middle_pay_extra(double pct) {
+    if (!(pct >= 0.0 && pct <= MIDDLE_PAY_EXTRA_PCT_MAX)) return "ERR out_of_range (0..100)\n";
+    g_middle_pay_extra_pct.store(pct);
+    persist_crane_settings();
+    std::cout << "[crane] middle_pay_extra = " << pct << " %\n";
+    std::ostringstream o; o << "OK middle_pay_extra=" << pct << "\n";
+    return o.str();
 }
 
 // Runtime balance tuning. Effective on next BALANCE_TICK_MS (1000ms-ish later).
@@ -5657,6 +5993,43 @@ static std::string dispatch(const std::string& line) {
         if (iss.fail()) return "ERR usage:set_middle_hz_<hz>\n";
         return cmd_set_middle_hz(hz);
     }
+    // [2026-10-08] middle winch (CLV900)
+    if (cmd == "middle_hold") {
+        std::string d, o; iss >> d >> o;
+        if (iss.fail()) return "ERR usage:middle_hold_<pay|retract>_<on|off>\n";
+        return cmd_middle_hold(d, o);
+    }
+    if (cmd == "middle_stop") return cmd_middle_stop();
+    if (cmd == "set_middle_auto") {
+        int v = -1; iss >> v;
+        if (iss.fail()) return "ERR usage:set_middle_auto_<0|1>\n";
+        return cmd_set_middle_auto(v);
+    }
+    if (cmd == "set_middle_link") {
+        int v = -1; iss >> v;
+        if (iss.fail()) return "ERR usage:set_middle_link_<0|1>\n";
+        return cmd_set_middle_link(v);
+    }
+    if (cmd == "set_middle_dir_invert") {
+        int v = -1; iss >> v;
+        if (iss.fail()) return "ERR usage:set_middle_dir_invert_<0|1>\n";
+        return cmd_set_middle_dir_invert(v);
+    }
+    if (cmd == "set_middle_ratio") {
+        double k = 0; iss >> k;
+        if (iss.fail()) return "ERR usage:set_middle_ratio_<k>\n";
+        return cmd_set_middle_ratio(k);
+    }
+    if (cmd == "set_middle_link_track") {
+        int v = -1; iss >> v;
+        if (iss.fail()) return "ERR usage:set_middle_link_track_<0|1>\n";
+        return cmd_set_middle_link_track(v);
+    }
+    if (cmd == "set_middle_pay_extra") {
+        double pct = -1; iss >> pct;
+        if (iss.fail()) return "ERR usage:set_middle_pay_extra_<pct>\n";
+        return cmd_set_middle_pay_extra(pct);
+    }
     if (cmd == "set_balance_enabled") {
         std::string onoff; iss >> onoff;
         if (onoff.empty()) return "ERR usage:set_balance_enabled_<on|off>\n";
@@ -5970,15 +6343,10 @@ int main() {
         } else {
             std::cerr << "[WARN] VFD left (" << CRANE_VFD_NAME << ") init failed — left rope motion disabled" << std::endl;
         }
-        // CLV900 middle winch intentionally NOT initialized (2026-05-14):
-        // hardware not yet installed. When re-enabled it shares cli_A with
-        // SE3 left (mutex-serialized; CLV900 write rate is low so impact is small).
-        std::cout << "[SKIP] CLV900         — hardware not installed (init skipped)" << std::endl;
-        // if (!inverter.init(cli_A, INVERTER_SLAVE, false)) {
-        //     g_dev_clv900 = true;
-        // }
+        // [2026-10-08] CLV900 middle winch is no longer hard-wired here — see the config-driven
+        // block after USR_B (FCV_CLV900_ENABLE / FCV_CLV900_GW / FCV_CLV900_SLAVE).
     } else {
-        std::cerr << "[WARN] USR_A down — skipping SE3 left + CLV900 init" << std::endl;
+        std::cerr << "[WARN] USR_A down — skipping SE3 left init" << std::endl;
     }
 
     // ---- USR_B (.31) — SE3 right ----
@@ -5994,6 +6362,56 @@ int main() {
         }
     } else {
         std::cerr << "[WARN] USR_B down — skipping SE3 right init" << std::endl;
+    }
+
+    // ---- Middle winch CLV900 (config-driven) — [2026-10-08] -----------------------------------
+    //   FCV_CLV900_ENABLE = 1 to bring it up (default 0 = not installed → exactly the old behaviour)
+    //   FCV_CLV900_GW     = "MW" (default: its own bus, host from FCV_EP_USR_MW_HOST) | "A" (share cli_A)
+    //   FCV_CLV900_SLAVE  = its F7-00 (default INVERTER_SLAVE = 3)
+    // Official: clvdrives 900-0007M1 (mini + 485 expansion card) on its own USR .36, slave 3, 115200 8N1.
+    // Nothing is written to the drive here: F0-00 / F0-01 must already be 2 / 8 (keypad) — we only warn.
+    if (cfgmap::i("FCV_CLV900_ENABLE", 0) != 0) {
+        const bool on_a  = (cfgmap::s("FCV_CLV900_GW", "MW") == "A");
+        const int  slave = cfgmap::i("FCV_CLV900_SLAVE", INVERTER_SLAVE);
+        bool gw_up = false;
+        std::string where;
+        if (on_a) {
+            gw_up = g_gw_a_ok.load();
+            where = "USR_A";
+        } else if (ep::has_host_override("USR_MW")) {
+            const std::string h = ep::host("USR_MW", "");
+            where = "USR_MW " + h;
+            if (cli_MW.connectToServer(h, ep::port("USR_MW", USR_PORT))) {
+                g_gw_mw_ok = true;
+                gw_up = true;
+            } else {
+                std::cerr << "[WARN] USR_MW " << h << " connect failed — middle winch disabled" << std::endl;
+            }
+        } else {
+            std::cerr << "[WARN] CLV900 enabled but FCV_EP_USR_MW_HOST not set — middle winch disabled" << std::endl;
+        }
+        if (gw_up) {
+            inverter.init(on_a ? cli_A : cli_MW, slave, drv_dbg);   // no bus traffic — the probe is below
+            uint16_t st = 0, fc = 0, f0 = 0, f1 = 0;
+            bool probe_err = true;
+            for (int i = 0; i < 3 && probe_err; ++i) probe_err = inverter.readRunStatus(st);
+            if (!probe_err) {
+                g_dev_clv900   = true;
+                g_middle_state = (int)st;
+                if (!inverter.readFaultCode(fc)) g_middle_fault = (int)fc;
+                std::cout << "[OK]   CLV900 middle winch " << where << " slave " << slave
+                          << " (state=" << st << " fault=" << g_middle_fault.load() << ")" << std::endl;
+                if (!inverter.readParam(0xF000, f0) && !inverter.readParam(0xF001, f1) && (f0 != 2 || f1 != 8))
+                    std::cerr << "[WARN] CLV900 F0-00=" << f0 << " F0-01=" << f1
+                              << " — not Modbus-controlled (keypad must set 2 / 8); run/freq writes will be ignored"
+                              << std::endl;
+            } else {
+                std::cerr << "[WARN] CLV900 " << where << " slave " << slave
+                          << " no reply — middle winch disabled" << std::endl;
+            }
+        }
+    } else {
+        std::cout << "[SKIP] CLV900         — disabled (FCV_CLV900_ENABLE=0)" << std::endl;
     }
 
     // ---- SD76 meters (config-driven client + slave) ----------------------

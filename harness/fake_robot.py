@@ -69,6 +69,17 @@ class Sim:
         self.pause_reason = 'none'    # [2026-09-16] none|user|error|balance_ask
         self.flow = 'none'            # [2026-09-16] none|return_home
         self.holds = set(); self.hold_lease = 0.0; self.hold_renews = 0   # [2026-09-30] hold lease
+        # [2026-10-08] middle rope (CLV900, slave 3). Interface frozen with the crane's main.cpp session:
+        #   middle_hold <pay|retract> <on|off> / hold_renew (renews wire + middle) / middle_stop
+        #   set_middle_{hz,auto,dir_invert,ratio,link,link_track,pay_extra}
+        self.dev_clv900 = 1           # harness knob `fake_clv900 <0|1>`; real: 0 on the test crane, 1 on official
+        self.mid_hold = 'none'; self.mid_lease = 0.0   # none|pay|retract; 1.5 s lease, own clock (renewed by hold_renew)
+        self.mid_run_hz = 0.0; self.mid_fault = 0; self.mid_comm_fail = 0
+        self.middle_hz = 30; self.mid_auto = 0; self.mid_ratio = 1.0; self.mid_dir_invert = 0
+        self.mid_link = 0; self.mid_follow = None   # [2026-10-08] Manual 連動: two-side rope hold drives the middle
+        # [2026-10-08] 連動方式 1 length follow (needs the middle meter) / 0 speed only; pay_out surplus %;
+        # middle meter alive (harness knob `fake_meter_middle <0|1>`, independent of the CLV900)
+        self.mid_link_track = 1; self.mid_pay_extra = 0.0; self.meter_m_ok = 1
         self.hold_guard = 1           # [2026-09-15] set_hold_guard on|off (hold-mode tension protection)
         self.meter_suspect = ''       # [2026-09-21] L/R/M subset — meter_loop rejecting coherent reads (cache stale)
         self.goto_short_cm = 0        # [2026-09-21] harness knob: next retract goto stops this many cm early on tension (0 = off)
@@ -127,6 +138,22 @@ class Sim:
                 if self.holds and time.time() - self.hold_lease > 1.5:   # mirrors crane HOLD_LEASE_MS
                     age = int((time.time() - self.hold_lease) * 1000); self.holds.clear()
                     _bcast('crane', f'EVT hold_lease_expired age_ms={age}')
+                if self.mid_hold != 'none' and time.time() - self.mid_lease > 1.5:   # [2026-10-08] middle lease, same 1.5 s
+                    age = int((time.time() - self.mid_lease) * 1000); self.mid_hold = 'none'
+                    _bcast('crane', f'EVT middle_lease_expired age_ms={age}')
+                # [2026-10-08] 連動 / auto-follow: a two-side rope hold (up/down) drives the middle (crane: hold_loop)
+                self.mid_follow = None
+                if (self.mid_link or self.mid_auto) and self.dev_clv900 and self.mid_hold == 'none':
+                    self.mid_follow = 'pay' if 'down' in self.holds else ('retract' if 'up' in self.holds else None)
+                # middle rope motion: pay lengthens (ground-zero convention: less negative), retract shortens
+                mdir = self.mid_hold if self.mid_hold != 'none' else self.mid_follow
+                if mdir and self.dev_clv900:
+                    gain = 1.0 + self.mid_pay_extra / 100.0 if (self.mid_follow == 'pay' and mdir == 'pay') else 1.0
+                    self.mid_run_hz = min(50.0, float(self.middle_hz) * gain)
+                    self.len_m += (1 if mdir == 'pay' else -1) * self.mid_run_hz * 0.04
+                else:
+                    self.mid_run_hz = 0.0
+                prev_l, prev_r = self.len_l, self.len_r
                 if self.moving:
                     side, tgt, _ = self.moving
                     cur = self.len_l if side in ('left', 'both') else self.len_r
@@ -143,6 +170,9 @@ class Sim:
                         else: self.len_r = v
                     if done:
                         self.moving = None
+                    # auto-follow: middle length = mean(L, R) displacement x k (set_middle_auto 1)
+                    if self.mid_auto and self.dev_clv900:
+                        self.len_m += self.mid_ratio * ((self.len_l - prev_l) + (self.len_r - prev_r)) / 2.0
                 # vacuum: sealed cups pull toward -66 kPa when valve (ch1) on
                 for k in self.pres:
                     tgt = -66.0 if (self.relay[0] and self.zdt[k]['pos'] > 0 and not self.noseal) else -2.0
@@ -162,25 +192,41 @@ class Sim:
     # ---- reply builders (formats copied from the C++ side) ----
     def crane_status(self):
         s = self
-        return (f'OK length_left={s.len_l:.1f} length_right={s.len_r:.1f} length_middle=ERR meter_suspect={s.meter_suspect}'
+        len_mid = f'{s.len_m:.1f}' if (s.dev_clv900 and s.meter_m_ok) else 'ERR'   # ERR = middle meter not readable
+        return (f'OK length_left={s.len_l:.1f} length_right={s.len_r:.1f} length_middle={len_mid} meter_suspect={s.meter_suspect}'
                 f' tension_left={s.ten_l:.1f} tension_right={s.ten_r:.1f} tension_valid=1'
                 f' body_link_age_ms=250 pay_out_max_hz=30'
                 f' up_left=0 up_right=0 down_left=0 down_right=0'
                 f' hold_guard={s.hold_guard} tension_max_kg={s.tension_max_kg:g} tension_diff_max_kg={s.tension_diff_max_kg:g} length_diff_max_cm={s.length_diff_max_cm:g}'
                 f' retract_tension_stop_kg={s.retract_tension_stop_kg:g} dsz_left_scale=-0.0205816 dsz_right_scale=-0.0236364'
                 f' meter_left_scale=1 meter_right_scale=1 meter_middle_scale=1'
-                f' home_ground_cm={s.home_ground} wall_height_cm={s.wall_height} hold_hz=20 motion_hz={s.motion_hz} middle_hz=30'
+                f' home_ground_cm={s.home_ground} wall_height_cm={s.wall_height} hold_hz=20 motion_hz={s.motion_hz} middle_hz={s.middle_hz:g}'
                 f' balance_enabled=1 balance_kp=2.0 balance_cap_ratio=0.5 balance_deadband=0.5'
                 f' balance_hz_min=5 balance_hz_max_offset=10 fine_adjust_hz=10 freeze_hz=0 kick_hz=0'
                 f' roll_correct_hz=5 roll_finish_hz=3 fine_adjust_diff_tol_cm=2 fine_adjust_level_diff_cm={s.level_diff}'
                 f' level_auto={s.level_auto} level_deg_per_cm=0.85 level_learned_age_s=-1'
                 f' balance_source={s.balance_source} balance_imu_kp_ratio=1.0 balance_imu_deadband=0.5'
                 f' imu_roll={s.imu_roll:.2f} imu_roll_age_ms=120 imu_roll_fresh=1'
-                f' dev_vfd_left=1 dev_vfd_right=1 dev_meter_left=1 dev_meter_right=1 dev_meter_middle=0'
-                f' dev_clv900=0 dev_dsz_left=1 dev_dsz_right=1 dev_gw_a=1 dev_gw_b=1 dev_gw_m=1 dev_gw_c=1 dev_gw_d=0'
+                f' dev_vfd_left=1 dev_vfd_right=1 dev_meter_left=1 dev_meter_right=1 dev_meter_middle={s.dev_clv900 and s.meter_m_ok}'
+                f' dev_clv900={s.dev_clv900} {s.middle_kv()} dev_dsz_left=1 dev_dsz_right=1 dev_gw_a=1 dev_gw_b=1 dev_gw_m=1 dev_gw_c=1 dev_gw_d=0'
                 f' dev_gw_w=1 dev_pqw_water=1 water_inlet={s.water_inlet}'
                 f' zeroed={s.crane_zeroed} zeroed_at={s.crane_zeroed_at}'
                 f' safe={s.crane_safe_locked} safe_src={s.safe_src or "-"}\n')
+
+    def middle_kv(self):
+        # [2026-10-08] status fields of the middle rope. state: 0 unknown / 1 fwd / 2 rev / 3 stopped.
+        # dir_invert swaps which inverter direction a pay/retract maps to (rope motion itself is unchanged).
+        s = self
+        mdir = s.mid_hold if s.mid_hold != 'none' else s.mid_follow
+        if not s.dev_clv900: st, fault = 0, -1
+        elif not mdir: st, fault = 3, s.mid_fault
+        else:
+            fwd = (mdir == 'pay') != bool(s.mid_dir_invert)
+            st, fault = (1 if fwd else 2), s.mid_fault
+        return (f'middle_state={st} middle_fault={fault} middle_run_hz={s.mid_run_hz:.1f} middle_hold={s.mid_hold}'
+                f' middle_auto={s.mid_auto} middle_link={s.mid_link} middle_ratio={s.mid_ratio:g}'
+                f' middle_pay_extra={s.mid_pay_extra:g} middle_link_track={s.mid_link_track} middle_dir_invert={s.mid_dir_invert}'
+                f' middle_comm_fail={s.mid_comm_fail}')
 
     def body_status(self):
         s = self
@@ -690,15 +736,80 @@ def cr_dispatch(line, bcast):
         # [2026-09-30] ▲▼ hold + lease (crane HOLD_LEASE_MS=1500, renewed by `hold_renew`)
         if c in ('up', 'down', 'up_left', 'up_right', 'down_left', 'down_right'):
             if not a or a[0] not in ('on', 'off'): return 'ERR expected_on_or_off\n', True
+            if a[0] == 'on' and (s.mid_link or s.mid_auto) and s.mid_hold == 'none':   # [2026-10-08] crane cmd_hold gate
+                if not s.dev_clv900: return 'ERR middle_unavailable clv900=0\n', True
+                if s.mid_link_track and not s.meter_m_ok: return 'ERR middle_unavailable meter_middle\n', True
             if a[0] == 'on': s.holds.add(c); s.hold_lease = time.time()
             else: s.holds.discard(c)
             return 'OK\n', True
         if c == 'hold_renew':
-            if not s.holds: return 'OK hold_renew idle\n', True
-            s.hold_lease = time.time(); s.hold_renews += 1
+            # [2026-10-08] one renew keeps the wire holds AND the middle hold alive
+            if not s.holds and s.mid_hold == 'none': return 'OK hold_renew idle\n', True
+            if s.holds: s.hold_lease = time.time()
+            if s.mid_hold != 'none': s.mid_lease = time.time()
+            s.hold_renews += 1
             return 'OK hold_renew\n', True
         if c == 'fake_hold_state':   # harness-only
-            return f'OK holds={",".join(sorted(s.holds)) or "-"} renews={s.hold_renews}\n', True
+            return f'OK holds={",".join(sorted(s.holds)) or "-"} renews={s.hold_renews} middle={s.mid_hold}\n', True
+        # [2026-10-08] middle rope (CLV900) — formats per the interface agreed with the crane's main.cpp
+        if c == 'middle_hold':
+            if len(a) != 2 or a[0] not in ('pay', 'retract'): return 'ERR usage:middle_hold_<pay|retract>_<on|off>\n', True
+            if a[1] not in ('on', 'off'): return 'ERR expected_on_or_off\n', True
+            if a[1] == 'on':
+                if not s.dev_clv900: return 'ERR clv900_unavailable\n', True
+                if s.moving: return 'ERR motion_active\n', True
+                s.mid_hold = a[0]; s.mid_lease = time.time()
+            elif s.mid_hold == a[0]:
+                s.mid_hold = 'none'
+            return f'OK middle_hold {a[0]} {a[1]}\n', True
+        if c == 'middle_stop':
+            s.mid_hold = 'none'; s.mid_run_hz = 0.0
+            return 'OK\n', True
+        if c == 'set_middle_hz':
+            try: v = float(a[0]) if a else None
+            except ValueError: v = None
+            if v is None: return 'ERR usage:set_middle_hz_<hz>\n', True
+            if not (0 < v <= 50): return 'ERR range:>0..50\n', True
+            s.middle_hz = v; return 'OK\n', True
+        if c == 'set_middle_link':   # [2026-10-08] Manual 連動 (runtime only on the crane)
+            if not a or a[0] not in ('0', '1'): return 'ERR usage:set_middle_link_<0|1>\n', True
+            if a[0] == '1' and not s.dev_clv900: return 'ERR clv900_unavailable\n', True
+            s.mid_link = int(a[0]); return f'OK middle_link={a[0]}\n', True
+        if c in ('set_middle_auto', 'set_middle_dir_invert'):
+            if not a or a[0] not in ('0', '1'): return f'ERR usage:{c}_<0|1>\n', True
+            attr = 'mid_auto' if c == 'set_middle_auto' else 'mid_dir_invert'
+            setattr(s, attr, int(a[0])); return f'OK {c[4:]}={a[0]}\n', True
+        if c == 'set_middle_ratio':
+            try: v = float(a[0]) if a else None
+            except ValueError: v = None
+            if v is None: return 'ERR usage:set_middle_ratio_<k>\n', True
+            if not (0.1 <= v <= 5.0): return 'ERR range:0.1..5.0\n', True
+            s.mid_ratio = v; return f'OK middle_ratio={v:g}\n', True
+        if c == 'set_middle_link_track':   # [2026-10-08] 1 length follow / 0 speed only (persisted on the crane)
+            if not a or a[0] not in ('0', '1'): return 'ERR usage:set_middle_link_track_<0|1>\n', True
+            s.mid_link_track = int(a[0]); return f'OK middle_link_track={a[0]}\n', True
+        if c == 'set_middle_pay_extra':   # [2026-10-08] pay_out surplus % (persisted on the crane)
+            try: v = float(a[0]) if a else None
+            except ValueError: v = None
+            if v is None: return 'ERR usage:set_middle_pay_extra_<pct>\n', True
+            if not (0.0 <= v <= 100.0): return 'ERR out_of_range (0..100)\n', True
+            s.mid_pay_extra = v; return f'OK middle_pay_extra={v:g}\n', True
+        if c == 'fake_meter_middle':   # harness-only: middle meter readable or not (CLV900 unaffected)
+            if not a or a[0] not in ('0', '1'): return 'ERR usage\n', True
+            s.meter_m_ok = int(a[0]); return f'OK meter_middle={s.meter_m_ok}\n', True
+        if c == 'fake_clv900':   # harness-only: fake_clv900 <0|1> — device gone / back (a gone device drops the hold)
+            if not a or a[0] not in ('0', '1'): return 'ERR usage\n', True
+            s.dev_clv900 = int(a[0])
+            if not s.dev_clv900: s.mid_hold = 'none'; s.mid_run_hz = 0.0
+            return f'OK dev_clv900={s.dev_clv900}\n', True
+        if c == 'fake_middle_fault' and a:   # harness-only: inverter fault code + EVT, hold dropped
+            try: s.mid_fault = int(a[0])
+            except ValueError: return 'ERR usage\n', True
+            if s.mid_fault: s.mid_hold = 'none'; s.mid_run_hz = 0.0; bcast(f'EVT middle_fault code={s.mid_fault}\n')
+            return f'OK middle_fault={s.mid_fault}\n', True
+        if c == 'fake_middle_lag' and a:     # harness-only: a motion aborted because the middle rope could not keep up
+            s.moving = None; bcast(f'EVT motion_abort reason=middle_lag lag_cm={a[0]}\n')
+            return 'OK\n', True
         if c == 'zero_meters':
             s.len_l = s.len_r = 0.0; s.home_ground = 0; s.crane_zeroed = 1; s.crane_zeroed_at = int(time.time()); s.top_cm = 0.0
             return 'OK zeroed\n', True
